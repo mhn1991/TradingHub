@@ -15,6 +15,10 @@ public class Tests
     {
         _list.Add(10);
         _list.Add(20);
-        Assert.That(2, Is.EqualTo(_list.Count)); 
+        Assert.That(2, Is.EqualTo(_list.Size)); 
+        Assert.That(10, Is.EqualTo(_list.GetCurrent().Data));
+        Assert.That(20, Is.EqualTo(_list.GetNext().Data));
+        _list.MoveNext();
+        Assert.That(20, Is.EqualTo(_list.GetCurrent().Data));
     }
 }
