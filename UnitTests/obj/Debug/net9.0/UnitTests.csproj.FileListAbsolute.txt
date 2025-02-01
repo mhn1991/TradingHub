@@ -101,3 +101,7 @@
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.pdb
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.genruntimeconfig.cache
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/ref/UnitTests.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/API.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/API.pdb
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.pdb

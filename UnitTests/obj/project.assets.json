@@ -347,6 +347,26 @@
           }
         }
       },
+      "API/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v9.0",
+        "compile": {
+          "bin/placeholder/API.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/API.dll": {}
+        }
+      },
+      "Brokers/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v9.0",
+        "compile": {
+          "bin/placeholder/Brokers.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/Brokers.dll": {}
+        }
+      },
       "Utility/1.0.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v9.0",
@@ -804,6 +824,16 @@
         "version.txt"
       ]
     },
+    "API/1.0.0": {
+      "type": "project",
+      "path": "../API/API.csproj",
+      "msbuildProject": "../API/API.csproj"
+    },
+    "Brokers/1.0.0": {
+      "type": "project",
+      "path": "../Brokers/Brokers.csproj",
+      "msbuildProject": "../Brokers/Brokers.csproj"
+    },
     "Utility/1.0.0": {
       "type": "project",
       "path": "../Utility/Utility.csproj",
@@ -812,6 +842,8 @@
   },
   "projectFileDependencyGroups": {
     "net9.0": [
+      "API >= 1.0.0",
+      "Brokers >= 1.0.0",
       "Microsoft.NET.Test.Sdk >= 17.11.1",
       "NUnit >= 4.2.2",
       "NUnit.Analyzers >= 4.3.0",
@@ -845,6 +877,12 @@
         "net9.0": {
           "targetAlias": "net9.0",
           "projectReferences": {
+            "/home/mhn/Projects/TradingHub/API/API.csproj": {
+              "projectPath": "/home/mhn/Projects/TradingHub/API/API.csproj"
+            },
+            "/home/mhn/Projects/TradingHub/Brokers/Brokers.csproj": {
+              "projectPath": "/home/mhn/Projects/TradingHub/Brokers/Brokers.csproj"
+            },
             "/home/mhn/Projects/TradingHub/Utility/Utility.csproj": {
               "projectPath": "/home/mhn/Projects/TradingHub/Utility/Utility.csproj"
             }

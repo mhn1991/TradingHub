@@ -54,10 +54,12 @@ public class CircularLinkedList<T>
     {
         return head;
     }
+    
     public Node GetCurrent()
     {
         return current;
     }
+    
     public Node GetNext()
     {
         return current.Next;
