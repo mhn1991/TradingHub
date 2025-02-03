@@ -105,3 +105,5 @@
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.dll
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/API.pdb
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.pdb
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Agent.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Agent.pdb

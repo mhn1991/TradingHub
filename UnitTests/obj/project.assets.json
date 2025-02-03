@@ -347,6 +347,19 @@
           }
         }
       },
+      "Agent/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v9.0",
+        "dependencies": {
+          "API": "1.0.0"
+        },
+        "compile": {
+          "bin/placeholder/Agent.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/Agent.dll": {}
+        }
+      },
       "API/1.0.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v9.0",
@@ -827,6 +840,11 @@
         "version.txt"
       ]
     },
+    "Agent/1.0.0": {
+      "type": "project",
+      "path": "../Agent/Agent.csproj",
+      "msbuildProject": "../Agent/Agent.csproj"
+    },
     "API/1.0.0": {
       "type": "project",
       "path": "../API/API.csproj",
@@ -846,6 +864,7 @@
   "projectFileDependencyGroups": {
     "net9.0": [
       "API >= 1.0.0",
+      "Agent >= 1.0.0",
       "Brokers >= 1.0.0",
       "Microsoft.NET.Test.Sdk >= 17.11.1",
       "NUnit >= 4.2.2",
@@ -882,6 +901,9 @@
           "projectReferences": {
             "/home/mhn/Projects/TradingHub/API/API.csproj": {
               "projectPath": "/home/mhn/Projects/TradingHub/API/API.csproj"
+            },
+            "/home/mhn/Projects/TradingHub/Agent/Agent.csproj": {
+              "projectPath": "/home/mhn/Projects/TradingHub/Agent/Agent.csproj"
             },
             "/home/mhn/Projects/TradingHub/Brokers/Brokers.csproj": {
               "projectPath": "/home/mhn/Projects/TradingHub/Brokers/Brokers.csproj"
