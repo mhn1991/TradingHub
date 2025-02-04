@@ -91,6 +91,9 @@
             "projectReferences": {
               "/home/mhn/Projects/TradingHub/API/API.csproj": {
                 "projectPath": "/home/mhn/Projects/TradingHub/API/API.csproj"
+              },
+              "/home/mhn/Projects/TradingHub/Utility/Utility.csproj": {
+                "projectPath": "/home/mhn/Projects/TradingHub/Utility/Utility.csproj"
               }
             }
           }

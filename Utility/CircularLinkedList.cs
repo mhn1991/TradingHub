@@ -2,6 +2,17 @@
 
 public class CircularLinkedList<T>
 {
+    public CircularLinkedList()
+    {
+        
+    }
+    public CircularLinkedList(int capacity, T defaultValue)
+    {
+        for (var i = 0; i < capacity; i++)
+        {
+            Add(defaultValue);
+        }
+    }
     public class Node
     {
         public T Data;

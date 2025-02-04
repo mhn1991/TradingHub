@@ -351,7 +351,8 @@
         "type": "project",
         "framework": ".NETCoreApp,Version=v9.0",
         "dependencies": {
-          "API": "1.0.0"
+          "API": "1.0.0",
+          "Utility": "1.0.0"
         },
         "compile": {
           "bin/placeholder/Agent.dll": {}

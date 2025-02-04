@@ -308,7 +308,8 @@
       "System.Reflection.Metadata/1.6.0": {},
       "Agent/1.0.0": {
         "dependencies": {
-          "API": "1.0.0"
+          "API": "1.0.0",
+          "Utility": "1.0.0"
         },
         "runtime": {
           "Agent.dll": {
