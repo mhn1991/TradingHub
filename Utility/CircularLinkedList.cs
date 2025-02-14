@@ -80,4 +80,9 @@ public class CircularLinkedList<T>
     {
         current = current.Next;
     }
+
+    public Node GetPrevious()
+    {
+        return current.Previous;
+    }
 }

@@ -13,6 +13,5 @@ public class Rest
     {
         List<List<object>>? rawData = await _httpClient.GetFromJsonAsync<List<List<object>>>(url);
         return rawData ?? new List<List<object>>(); // Ensure it never returns null
-    
     }
 }

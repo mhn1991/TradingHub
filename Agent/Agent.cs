@@ -14,7 +14,7 @@ public class Agent
     public Agent()
     {
         _rest = new Rest();
-        _instrument = new Instrument("BTCUSDT", "5m", "500");
+        _instrument = new Instrument("BTCUSDT", "5m", "5000");
         _candles = new CircularLinkedList<CandleData>(20, new CandleData());
     }
 
@@ -30,6 +30,7 @@ public class Agent
                 return;
             }
 
+            int index = 0;
             foreach (var item in data)
             {
                 if (item is List<object> list && list.Count >= 12)
@@ -38,19 +39,30 @@ public class Agent
                     // this part should move to the Broker 
                     // each broker should be able to convert its own response to the candle date
                     candle.OpenTime = ConvertToInt64(list[0]);
-                    candle.CloseTime = ConvertToInt64(list[6]);
                     candle.High = ConvertToDecimal(list[2]);
                     candle.Low = ConvertToDecimal(list[3]);
                     candle.Close = ConvertToDecimal(list[4]);
                     candle.Volume = ConvertToDecimal(list[5]);
-                    candle.QuoteAssetVolume = ConvertToDecimal(list[7]);
-                    candle.NumberOfTrades = ConvertToInt32(list[8]);
-                    candle.TakerBuyBaseAssetVolume = ConvertToDecimal(list[9]);
-                    candle.TakerBuyQuoteAssetVolume = ConvertToDecimal(list[10]);
-                    candle.Ignore = ConvertToString(list[11]);
+                    if (index == 0)
+                    {
+                        candle.Gain = 0m;
+                        candle.Loss = 0m;
+                    }
+                    else
+                    {
+                        candle.Gain = CalculateGain(candle.Close, _candles.GetPrevious().Data.Close);
+                        candle.Loss = CalculateLoss(candle.Close, _candles.GetPrevious().Data.Close);
+                    }
 
+                    if (index == 15)
+                    {
+                        
+                    }
+                    
                     _candles.MoveNext();
                 }
+
+                index += 1;
             }
             Console.WriteLine("last data received time: "+data[data.Count-1][0]);
             Console.WriteLine("last data on the data structure: "+_candles.GetCurrent().Data.OpenTime);
@@ -103,5 +115,18 @@ public class Agent
             string str => str,
             _ => ""
         };
+    }
+
+    private static decimal CalculateGain(decimal currentPrice, decimal previousPrice)
+    {
+        decimal deltaP = currentPrice - previousPrice;
+        return deltaP > 0 ? deltaP : 0m;   
+    }
+    
+    private static decimal CalculateLoss(decimal currentPrice, decimal previousPrice)
+    {
+        // with this we don't need more operation 
+        decimal deltaP = previousPrice - currentPrice;
+        return deltaP > 0 ? deltaP : 0m;   
     }
 }

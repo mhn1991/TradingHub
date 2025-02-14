@@ -8,10 +8,7 @@ public class CandleData
     public decimal Low { get; set; }
     public decimal Close { get; set; }
     public decimal Volume { get; set; }
-    public long CloseTime { get; set; }
-    public decimal QuoteAssetVolume { get; set; }
-    public int NumberOfTrades { get; set; }
-    public decimal TakerBuyBaseAssetVolume { get; set; }
-    public decimal TakerBuyQuoteAssetVolume { get; set; }
-    public string Ignore { get; set; }
+    public decimal Gain { get; set; }
+    public decimal Loss { get; set; }
+    public decimal RSI { get; set; }
 }
