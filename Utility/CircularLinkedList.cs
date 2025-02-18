@@ -12,6 +12,8 @@ public class CircularLinkedList<T>
         {
             Add(defaultValue);
         }
+
+        this.current = this.head;
     }
     public class Node
     {

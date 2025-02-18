@@ -2,6 +2,8 @@
 using API;
 using Brokers.Brokers;
 using Utility;
+using Utility.Indicators;
+using Utility.Indicators.Objects;
 
 namespace Agent;
 
@@ -10,12 +12,15 @@ public class Agent
     private readonly Rest _rest;
     private readonly Instrument _instrument;
     private CircularLinkedList<CandleData> _candles;
+    private Dictionary<IndicatorNames, Indicator> _indicators;
 
     public Agent()
     {
         _rest = new Rest();
         _instrument = new Instrument("BTCUSDT", "5m", "5000");
         _candles = new CircularLinkedList<CandleData>(20, new CandleData());
+        _indicators = new Dictionary<IndicatorNames, Indicator>();
+        _indicators.Add(IndicatorNames.RSI, new RSI());
     }
 
     public async Task InitAsync()
@@ -53,12 +58,12 @@ public class Agent
                         candle.Gain = CalculateGain(candle.Close, _candles.GetPrevious().Data.Close);
                         candle.Loss = CalculateLoss(candle.Close, _candles.GetPrevious().Data.Close);
                     }
-
-                    if (index == 15)
+                    var tmp = _indicators[IndicatorNames.RSI] as RSI;
+                    if (tmp != null)
                     {
-                        
+                        candle.RSI = tmp.calculate(index, candle.Gain, candle.Loss);
                     }
-                    
+
                     _candles.MoveNext();
                 }
 
