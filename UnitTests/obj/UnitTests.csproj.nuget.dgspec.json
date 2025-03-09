@@ -307,7 +307,11 @@
         "frameworks": {
           "net9.0": {
             "targetAlias": "net9.0",
-            "projectReferences": {}
+            "projectReferences": {
+              "/home/mhn/Projects/TradingHub/Brokers/Brokers.csproj": {
+                "projectPath": "/home/mhn/Projects/TradingHub/Brokers/Brokers.csproj"
+              }
+            }
           }
         },
         "warningProperties": {

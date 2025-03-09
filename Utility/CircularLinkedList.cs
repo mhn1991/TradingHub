@@ -6,14 +6,12 @@ public class CircularLinkedList<T>
     {
         
     }
-    public CircularLinkedList(int capacity, T defaultValue)
+    public CircularLinkedList(int capacity, Func<T> defaultValue)
     {
         for (var i = 0; i < capacity; i++)
         {
-            Add(defaultValue);
+            Add(defaultValue());
         }
-
-        this.current = this.head;
     }
     public class Node
     {

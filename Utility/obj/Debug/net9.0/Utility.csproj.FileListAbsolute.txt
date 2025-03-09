@@ -10,3 +10,7 @@
 /home/mhn/Projects/TradingHub/Utility/obj/Debug/net9.0/refint/Utility.dll
 /home/mhn/Projects/TradingHub/Utility/obj/Debug/net9.0/Utility.pdb
 /home/mhn/Projects/TradingHub/Utility/obj/Debug/net9.0/ref/Utility.dll
+/home/mhn/Projects/TradingHub/Utility/bin/Debug/net9.0/Brokers.dll
+/home/mhn/Projects/TradingHub/Utility/bin/Debug/net9.0/Brokers.pdb
+/home/mhn/Projects/TradingHub/Utility/obj/Debug/net9.0/Utility.csproj.AssemblyReference.cache
+/home/mhn/Projects/TradingHub/Utility/obj/Debug/net9.0/Utility.csproj.Up2Date

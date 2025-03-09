@@ -17,10 +17,12 @@ public class Agent
     public Agent()
     {
         _rest = new Rest();
-        _instrument = new Instrument("BTCUSDT", "5m", "5000");
-        _candles = new CircularLinkedList<CandleData>(20, new CandleData());
+        _instrument = new Instrument("BTCUSDT", "5m", "2000");
+        _candles = new CircularLinkedList<CandleData>(21, () => new CandleData());
         _indicators = new Dictionary<IndicatorNames, Indicator>();
         _indicators.Add(IndicatorNames.RSI, new RSI());
+        _indicators.Add(IndicatorNames.StochRSI, new StochRSI());
+        _indicators.Add(IndicatorNames.BullingerBand, new BollingerBand());
     }
 
     public async Task InitAsync()
@@ -34,8 +36,10 @@ public class Agent
                 Console.WriteLine("No data received.");
                 return;
             }
-
-            int index = 0;
+            var rsi = _indicators[IndicatorNames.RSI] as RSI;
+            var stochRSI = _indicators[IndicatorNames.StochRSI] as StochRSI;
+            var bollingerBand = _indicators[IndicatorNames.BullingerBand] as BollingerBand;
+            int index = 1;
             foreach (var item in data)
             {
                 if (item is List<object> list && list.Count >= 12)
@@ -48,7 +52,7 @@ public class Agent
                     candle.Low = ConvertToDecimal(list[3]);
                     candle.Close = ConvertToDecimal(list[4]);
                     candle.Volume = ConvertToDecimal(list[5]);
-                    if (index == 0)
+                    if (index == 1)
                     {
                         candle.Gain = 0m;
                         candle.Loss = 0m;
@@ -58,10 +62,21 @@ public class Agent
                         candle.Gain = CalculateGain(candle.Close, _candles.GetPrevious().Data.Close);
                         candle.Loss = CalculateLoss(candle.Close, _candles.GetPrevious().Data.Close);
                     }
-                    var tmp = _indicators[IndicatorNames.RSI] as RSI;
-                    if (tmp != null)
+                   
+                    if (rsi != null)
                     {
-                        candle.RSI = tmp.calculate(index, candle.Gain, candle.Loss);
+                        candle.RSI = rsi.calculate(index, _candles.GetCurrent());
+                    }
+                    if (stochRSI != null && rsi.getObject().WindowSize + 1 == index)
+                    {
+                        candle.StochRSI = stochRSI.calculate(_candles.GetCurrent());
+                    }
+
+                    if (bollingerBand != null && bollingerBand.windowSize+1 == index)
+                    {
+                        candle.BollingerBandLowerband = bollingerBand.LowerBand;
+                        candle.BollingerBandUpperband = bollingerBand.UpperBand;
+                        candle.BollingerBandMiddleband = bollingerBand.MiddleBand;
                     }
 
                     _candles.MoveNext();
@@ -69,8 +84,6 @@ public class Agent
 
                 index += 1;
             }
-            Console.WriteLine("last data received time: "+data[data.Count-1][0]);
-            Console.WriteLine("last data on the data structure: "+_candles.GetCurrent().Data.OpenTime);
         }
         catch (Exception ex)
         {
