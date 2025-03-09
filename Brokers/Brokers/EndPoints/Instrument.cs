@@ -4,6 +4,8 @@ public class Instrument : Binance
 {
     private string _coinName;
     private string _endPoint = "klines";
+    public string CoinName => _coinName;
+    
     public Instrument(string coinName, string interval, string limit)
     {
         this._coinName = coinName;

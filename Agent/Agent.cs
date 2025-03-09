@@ -3,7 +3,6 @@ using API;
 using Brokers.Brokers;
 using Utility;
 using Utility.Indicators;
-using Utility.Indicators.Objects;
 
 namespace Agent;
 
@@ -12,17 +11,34 @@ public class Agent
     private readonly Rest _rest;
     private readonly Instrument _instrument;
     private CircularLinkedList<CandleData> _candles;
-    private Dictionary<IndicatorNames, Indicator> _indicators;
+    private RSI _rsi;
+    private StochRSI _stochRSI;
+    private BollingerBand _bollingerBand;
+    private String filePath;
 
     public Agent()
     {
         _rest = new Rest();
         _instrument = new Instrument("BTCUSDT", "5m", "2000");
         _candles = new CircularLinkedList<CandleData>(21, () => new CandleData());
-        _indicators = new Dictionary<IndicatorNames, Indicator>();
-        _indicators.Add(IndicatorNames.RSI, new RSI());
-        _indicators.Add(IndicatorNames.StochRSI, new StochRSI());
-        _indicators.Add(IndicatorNames.BullingerBand, new BollingerBand());
+        _rsi = new RSI();
+        _stochRSI = new StochRSI();
+        _bollingerBand = new BollingerBand();
+        filePath = "Logs/"+_instrument.BrokerName +"-"+ _instrument.CoinName+".log";
+        try
+        {
+            // Get the directory path from the file path
+            string directoryPath = Path.GetDirectoryName(filePath);
+            if (!Directory.Exists(directoryPath))
+            {
+                Directory.CreateDirectory(directoryPath);
+                Console.WriteLine($"Created directory: {directoryPath}");
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"Error: {e.Message}");
+        }
     }
 
     public async Task InitAsync()
@@ -36,9 +52,6 @@ public class Agent
                 Console.WriteLine("No data received.");
                 return;
             }
-            var rsi = _indicators[IndicatorNames.RSI] as RSI;
-            var stochRSI = _indicators[IndicatorNames.StochRSI] as StochRSI;
-            var bollingerBand = _indicators[IndicatorNames.BullingerBand] as BollingerBand;
             int index = 1;
             foreach (var item in data)
             {
@@ -63,25 +76,25 @@ public class Agent
                         candle.Loss = CalculateLoss(candle.Close, _candles.GetPrevious().Data.Close);
                     }
                    
-                    if (rsi != null)
+                    if (_rsi != null)
                     {
-                        candle.RSI = rsi.calculate(index, _candles.GetCurrent());
+                        candle.RSI = _rsi.calculate(index, _candles.GetCurrent());
                     }
-                    if (stochRSI != null && rsi.getObject().WindowSize + 1 == index)
+                    
+                    if (_stochRSI != null && _rsi.WindowSize + 1 <= index)
                     {
-                        candle.StochRSI = stochRSI.calculate(_candles.GetCurrent());
-                    }
-
-                    if (bollingerBand != null && bollingerBand.windowSize+1 == index)
-                    {
-                        candle.BollingerBandLowerband = bollingerBand.LowerBand;
-                        candle.BollingerBandUpperband = bollingerBand.UpperBand;
-                        candle.BollingerBandMiddleband = bollingerBand.MiddleBand;
+                        _stochRSI.Calculate(_candles.GetCurrent());
                     }
 
+                    if (_bollingerBand != null && _bollingerBand.windowSize+1 <= index)
+                    {
+                        candle.BollingerBandLowerband = _bollingerBand.LowerBand;
+                        candle.BollingerBandUpperband = _bollingerBand.UpperBand;
+                        candle.BollingerBandMiddleband = _bollingerBand.MiddleBand;
+                    }
+                    File.AppendAllText(filePath,candle.ToString());
                     _candles.MoveNext();
                 }
-
                 index += 1;
             }
         }

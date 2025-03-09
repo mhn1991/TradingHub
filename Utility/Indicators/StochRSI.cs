@@ -1,75 +1,86 @@
-using System.Security.Cryptography.X509Certificates;
 using Brokers.Brokers;
-using Utility.Indicators.Objects;
 
-namespace Utility.Indicators;
-
-public class StochRSI: Indicator
+namespace Utility.Indicators
 {
-    private StochRSIObject _obj;
-    private CircularLinkedList<CandleData>.Node _currentCandel;
-    
-    public StochRSI()
+    public class StochRSI : Indicator
     {
-        _obj = makeObject();
-    }
-    public StochRSIObject makeObject()
-    {
-        return new StochRSIObject();
-    }
-    
-    public decimal calculate(CircularLinkedList<CandleData>.Node candle)
-    {
-        decimal rsi = candle.Data.RSI;
-        decimal minRSI = getMinRSI(rsi);
-        decimal maxRSI = getMaxRSI(rsi);
-        decimal stochRSI = 0m;
-        if (_obj.numberOfRSI >= _obj.widowSize || _obj.calcStochRsi)
+        private CircularLinkedList<CandleData>.Node _currentCandle;
+        public decimal WindowSize { get; set; } = 14; // Lookback period for StochRSI
+        public long NumberOfCandles { get; set; } = 0; // Renamed for clarity
+        public bool CalcStochRsi { get; set; } = false;
+        public int KPeriod { get; set; } = 3; // Smoothing period for %K
+        public int DPeriod { get; set; } = 3; // For %D (not implemented yet)
+
+        public void Calculate(CircularLinkedList<CandleData>.Node candle)
         {
-            stochRSI = (rsi - minRSI) / (maxRSI - minRSI);
-            _currentCandel = candle;
-            if (!_obj.calcStochRsi)
+            _currentCandle = candle;
+            NumberOfCandles++;
+
+            // Wait until we have enough candles for StochRSI
+            if (NumberOfCandles < WindowSize)
             {
-                _obj.calcStochRsi = true;
+                return;
+            }
+
+            // Calculate StochRSI for the current candle
+            decimal rsi = candle.Data.RSI;
+            decimal minRSI = GetMinRSI();
+            decimal maxRSI = GetMaxRSI();
+            decimal stochRSI = (maxRSI == minRSI) ? 0m : (rsi - minRSI) / (maxRSI - minRSI);
+            candle.Data.StochRSI = stochRSI;
+
+            // Calculate %K only when we have enough StochRSI values
+            if (NumberOfCandles >= WindowSize + KPeriod - 1)
+            {
+                CalcStochRsi = true;
+                candle.Data.StochRSIK = GetKline();
             }
         }
 
-        if (!_obj.calcStochRsi)
+        private decimal GetMinRSI()
         {
-            _obj.numberOfRSI += 1;
+            var candle = _currentCandle;
+            if (candle == null) return 0m; // Safety check
+            decimal minRSI = candle.Data.RSI;
+            for (int i = 0; i < WindowSize - 1 && candle.Previous != null; i++)
+            {
+                candle = candle.Previous;
+                if (candle.Data.RSI < minRSI)
+                {
+                    minRSI = candle.Data.RSI;
+                }
+            }
+            return minRSI;
         }
 
-        return  stochRSI;
-    }
-
-    private decimal getMinRSI(decimal rsi)
-    {
-        if (_obj.minRSI > rsi)
+        private decimal GetMaxRSI()
         {
-            _obj.minRSI = rsi;
+            var candle = _currentCandle;
+            if (candle == null) return 0m; // Safety check
+            decimal maxRSI = candle.Data.RSI;
+            for (int i = 0; i < WindowSize - 1 && candle.Previous != null; i++)
+            {
+                candle = candle.Previous;
+                if (candle.Data.RSI > maxRSI)
+                {
+                    maxRSI = candle.Data.RSI;
+                }
+            }
+            return maxRSI;
         }
-        return _obj.minRSI;
-    }
 
-    private decimal getMaxRSI(decimal rsi)
-    {
-        if (_obj.maxRSI < rsi)
+        public decimal GetKline()
         {
-            _obj.maxRSI = rsi;
+            decimal sum = 0m;
+            int count = 0;
+            var candle = _currentCandle;
+            for (int i = 0; i < KPeriod && candle != null; i++)
+            {
+                sum += candle.Data.StochRSI;
+                candle = candle.Previous;
+                count++;
+            }
+            return count == 0 ? 0m : sum / count; // Avoid division by zero
         }
-        return _obj.maxRSI;
     }
-
-    public decimal getKline()
-    {
-        decimal sum = 0m;
-        CircularLinkedList<CandleData>.Node candle = _currentCandel;
-        for (int i = 0; i < _obj.kPeriod; i++)
-        {
-            sum += candle.Data.StochRSI;
-            candle = candle.Previous;
-        }
-        return sum/_obj.kPeriod;
-    }
-
 }

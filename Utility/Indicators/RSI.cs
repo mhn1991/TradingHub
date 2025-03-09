@@ -1,41 +1,50 @@
-using System.Security.Cryptography.X509Certificates;
 using Brokers.Brokers;
-using Utility.Indicators.Objects;
 
 namespace Utility.Indicators;
 
 public class RSI: Indicator
 {
-    private RSIObject _obj;
+    private int _windowSize;
+    private int _startIndex;
+    private int _endIndex;
+    private CircularLinkedList<CandleData>.Node _startCandle;
+    private CircularLinkedList<CandleData>.Node _endCandle;
+    private decimal _sigmaGain;
+    private decimal _sigmaLoss;
+    private decimal _averageGain;
+    private decimal _averageLoss;
+    private bool RSIFirstCalc;
+    
+    public int WindowSize { get { return _windowSize; } set { _windowSize = value; } }
     public RSI()
     {
-        _obj = makeObject();
-    }
-    public RSIObject makeObject()
-    {
-        return new RSIObject();
-    }
-
-    public RSIObject getObject()
-    {
-        return _obj;
+        _windowSize = 14;
+        _startIndex = 1;
+        _endIndex = 1;
+        _startCandle = new CircularLinkedList<CandleData>.Node(new CandleData());
+        _endCandle = new CircularLinkedList<CandleData>.Node(new CandleData());
+        _sigmaGain = 0m;
+        _sigmaLoss = 0m;
+        _averageGain = 0m;
+        _averageLoss = 0m;
+        RSIFirstCalc = true;
     }
 
     public decimal calculate(int currentIndex, CircularLinkedList<CandleData>.Node candle)
     {
         decimal RSI = 0m;
-        if (currentIndex - _obj._startIndex < _obj._windowSize - 1 )
+        if (currentIndex - _startIndex < _windowSize - 1 )
         {
-            decimal sigmaGain = _obj._sigmaGain + candle.Data.Gain;
-            decimal SigmaLoss = _obj._sigmaLoss + candle.Data.Loss;
+            decimal sigmaGain = _sigmaGain + candle.Data.Gain;
+            decimal SigmaLoss = _sigmaLoss + candle.Data.Loss;
             if (currentIndex == 1)
             {
-                _obj.updateObject(_obj._startIndex,currentIndex, candle, candle,sigmaGain, SigmaLoss);
+                updateObject(_startIndex,currentIndex, candle, candle,sigmaGain, SigmaLoss);
             }
-            _obj.updateObject(_obj._startIndex,currentIndex, _obj._startCandle, candle,sigmaGain, SigmaLoss);
+            updateObject(_startIndex,currentIndex, _startCandle, candle,sigmaGain, SigmaLoss);
         }
 
-        if (currentIndex - _obj._startIndex >= _obj._windowSize - 1 )
+        if (currentIndex - _startIndex >= _windowSize - 1 )
         {
             RSI = getRSI(candle.Data.Gain, candle.Data.Loss);
         }
@@ -44,20 +53,20 @@ public class RSI: Indicator
 
     private decimal getEMARSI(decimal gain, decimal loss)
     {
-        decimal k = 2 / (_obj._windowSize + 1);
-        if (_obj.RSIFirstCalc)
+        decimal k = 2 / (_windowSize + 1);
+        if (RSIFirstCalc)
         {
-            _obj._averageGain = (_obj._sigmaGain + gain)/ _obj._windowSize;
-            _obj._averageLoss = (_obj._sigmaLoss + loss)/ _obj._windowSize;
-            _obj.RSIFirstCalc = false;
+            _averageGain = (_sigmaGain + gain)/ _windowSize;
+            _averageLoss = (_sigmaLoss + loss)/ _windowSize;
+            RSIFirstCalc = false;
         }
         else
         {
-            _obj._averageGain = (gain * k) + (_obj._averageGain * (1 - k));
-            _obj._averageLoss = (loss * k) + (_obj._averageLoss * (1 - k));
+            _averageGain = (gain * k) + (_averageGain * (1 - k));
+            _averageLoss = (loss * k) + (_averageLoss * (1 - k));
         }
   
-        decimal RS = (_obj._averageLoss == 0) ? 100 : _obj._averageGain / _obj._averageLoss;
+        decimal RS = (_averageLoss == 0) ? 100 : _averageGain / _averageLoss;
         decimal RSI = 100 - (100 / (1 +RS));
         return RSI;
     }
@@ -65,19 +74,19 @@ public class RSI: Indicator
     private decimal getRSI(decimal gain, decimal loss)
     {
         decimal RSI = 0m;
-        if (_obj.RSIFirstCalc)
+        if (RSIFirstCalc)
         {
-            _obj._averageGain = (_obj._sigmaGain + gain) / _obj._windowSize;
-            _obj._averageLoss = (_obj._sigmaLoss + loss) / _obj._windowSize;
-            decimal RS = _obj._averageGain / _obj._averageLoss; 
+            _averageGain = (_sigmaGain + gain) / _windowSize;
+            _averageLoss = (_sigmaLoss + loss) / _windowSize;
+            decimal RS = _averageGain / _averageLoss; 
             RSI = 100m - (100m / (1m + RS));
-            _obj.RSIFirstCalc = false;
+            RSIFirstCalc = false;
         }
         else
         {
-            _obj._averageGain = (((_obj._windowSize - 1 ) * _obj._averageGain) + gain) / _obj._windowSize;
-            _obj._averageLoss = (((_obj._windowSize - 1 ) * _obj._averageLoss) + loss) / _obj._windowSize;
-            decimal RS = (_obj._averageLoss == 0) ? 100m : (_obj._averageGain / _obj._averageLoss);
+            _averageGain = (((_windowSize - 1 ) * _averageGain) + gain) / _windowSize;
+            _averageLoss = (((_windowSize - 1 ) * _averageLoss) + loss) / _windowSize;
+            decimal RS = (_averageLoss == 0) ? 100m : (_averageGain / _averageLoss);
             RSI = 100m - (100m / (1m + RS));
         }
         return Math.Round(RSI, 2);
@@ -150,6 +159,17 @@ public class RSI: Indicator
         }
 
         return ema;
+    }
+    
+    private void updateObject(int startIndex,int endIndex, CircularLinkedList<CandleData>.Node startCandle,
+        CircularLinkedList<CandleData>.Node endCandle,decimal sigmaGain, decimal sigmaLoss)
+    {
+        _startIndex = startIndex;
+        _endIndex = endIndex;
+        _startCandle = startCandle;
+        _endCandle = endCandle;
+        _sigmaGain = sigmaGain;
+        _sigmaLoss = sigmaLoss;
     }
     
 }
