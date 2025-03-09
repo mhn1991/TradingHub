@@ -20,7 +20,7 @@ public class Agent
     {
         _rest = new Rest();
         _instrument = new Instrument("BTCUSDT", "5m", "2000");
-        _candles = new CircularLinkedList<CandleData>(21, () => new CandleData());
+        _candles = new CircularLinkedList<CandleData>(25, () => new CandleData());
         _rsi = new RSI();
         _stochRSI = new StochRSI();
         _bollingerBand = new BollingerBand();
@@ -86,11 +86,9 @@ public class Agent
                         _stochRSI.Calculate(_candles.GetCurrent());
                     }
 
-                    if (_bollingerBand != null && _bollingerBand.windowSize+1 <= index)
+                    if (_bollingerBand != null && _bollingerBand.WindowSize+1 <= index)
                     {
-                        candle.BollingerBandLowerband = _bollingerBand.LowerBand;
-                        candle.BollingerBandUpperband = _bollingerBand.UpperBand;
-                        candle.BollingerBandMiddleband = _bollingerBand.MiddleBand;
+                        _bollingerBand.Calculate(_candles.GetCurrent());
                     }
                     File.AppendAllText(filePath,candle.ToString());
                     _candles.MoveNext();
