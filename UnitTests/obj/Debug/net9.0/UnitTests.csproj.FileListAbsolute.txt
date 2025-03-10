@@ -87,7 +87,13 @@
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/zh-Hant/Microsoft.TestPlatform.CommunicationUtilities.resources.dll
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/zh-Hant/Microsoft.TestPlatform.CrossPlatEngine.resources.dll
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/zh-Hant/Microsoft.VisualStudio.TestPlatform.Common.resources.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Agent.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/API.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.dll
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Utility.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Agent.pdb
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/API.pdb
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.pdb
 /home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Utility.pdb
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.csproj.AssemblyReference.cache
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.GeneratedMSBuildEditorConfig.editorconfig
@@ -101,9 +107,3 @@
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.pdb
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.genruntimeconfig.cache
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/ref/UnitTests.dll
-/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/API.dll
-/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.dll
-/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/API.pdb
-/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Brokers.pdb
-/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Agent.dll
-/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Agent.pdb

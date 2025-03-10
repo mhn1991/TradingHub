@@ -19,7 +19,7 @@ public class Agent
     public Agent()
     {
         _rest = new Rest();
-        _instrument = new Instrument("BTCUSDT", "5m", "2000");
+        _instrument = new Instrument("BTCUSDT", "1m", "1000");
         _candles = new CircularLinkedList<CandleData>(25, () => new CandleData());
         _rsi = new RSI();
         _stochRSI = new StochRSI();
@@ -99,6 +99,39 @@ public class Agent
         catch (Exception ex)
         {
             Console.WriteLine($"Error fetching data: {ex.Message}");
+        }
+    }
+
+    public async Task run()
+    {
+        await InitAsync();
+        _candles.MovePrevious();
+        while (true)
+        {
+            
+            long currentCanleTime = _candles.GetCurrent().Data.OpenTime;
+            DateTimeOffset currentCandleTime = DateTimeOffset.FromUnixTimeMilliseconds(currentCanleTime);
+            long nextCandleTime = currentCandleTime.AddMinutes(1).ToUnixTimeMilliseconds();
+            long currentUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            // we have to update the current candle 
+            if (currentUnixMs >= currentCanleTime && currentUnixMs < nextCandleTime)
+            {
+                Console.WriteLine("we are updating the current candle");
+                Console.WriteLine($"Current candle: {currentCanleTime}");
+                Console.WriteLine($"{currentCandleTime:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine($"{DateTime.UnixEpoch.AddMilliseconds(nextCandleTime):yyyy-MM-dd HH:mm:ss}");
+            }
+            // we have to move to the next candle 
+            if (currentUnixMs >= nextCandleTime)
+            {
+                Console.WriteLine("we are updating the current candle");
+                Console.WriteLine($"Current candle: {currentCanleTime}");
+                Console.WriteLine("we move to the next candle");
+                Console.WriteLine($"{currentCandleTime:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine($"{DateTime.UnixEpoch.AddMilliseconds(nextCandleTime):yyyy-MM-dd HH:mm:ss}");
+                break;
+            }
+            await Task.Delay(500);
         }
     }
     

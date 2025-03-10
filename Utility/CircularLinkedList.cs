@@ -76,6 +76,10 @@ public class CircularLinkedList<T>
         return current.Next;
     }
 
+    public void MovePrevious()
+    {
+        current = current.Previous;
+    }
     public void MoveNext()
     {
         current = current.Next;

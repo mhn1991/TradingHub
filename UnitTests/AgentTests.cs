@@ -14,7 +14,8 @@ public class AgentTests
     [Test]
     public async Task TestAgent()
     {
-        await _agent.InitAsync();
+        //await _agent.InitAsync();
+        await _agent.run();
     }
     
 }

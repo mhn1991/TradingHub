@@ -11,6 +11,11 @@ public class Rest
     }
     public async Task<List<List<object>>> Get(string url)
     {
+        /*var response = await _httpClient.GetAsync(url);
+        foreach (var header in response.Headers)
+        {
+            Console.WriteLine($"{header.Key}: {string.Join(", ", header.Value)}");
+        }*/
         List<List<object>>? rawData = await _httpClient.GetFromJsonAsync<List<List<object>>>(url);
         return rawData ?? new List<List<object>>(); // Ensure it never returns null
     }
