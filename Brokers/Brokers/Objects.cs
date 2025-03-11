@@ -1,4 +1,16 @@
+using System.Text.Json.Serialization;
+
 namespace Brokers.Brokers;
+
+public class BinanceKline
+{
+    [JsonPropertyName("0")] public long OpenTime { get; set; }
+    [JsonPropertyName("1")] public string Open { get; set; }
+    [JsonPropertyName("2")] public string High { get; set; }
+    [JsonPropertyName("3")] public string Low { get; set; }
+    [JsonPropertyName("4")] public string Close { get; set; }
+    [JsonPropertyName("5")] public string Volume { get; set; }
+}
 
 public class CandleData
 {
@@ -16,6 +28,29 @@ public class CandleData
     public decimal BollingerBandUpperband  { get; set; }
     public decimal BollingerBandLowerband  { get; set; }
     public decimal BollingerBandMiddleband  { get; set; }
+    public bool isComplete { get; set; }
+    
+    public interface ICandleMapper<T>
+    {
+        CandleData Map(T dto);
+    }
+
+    public class BinanceCandleMapper : ICandleMapper<BinanceKline>
+    {
+        public CandleData Map(BinanceKline kline)
+        {
+            return new CandleData
+            {
+                OpenTime = kline.OpenTime,
+                Open = decimal.Parse(kline.Open),
+                High = decimal.Parse(kline.High),
+                Low = decimal.Parse(kline.Low),
+                Close = decimal.Parse(kline.Close),
+                Volume = decimal.Parse(kline.Volume),
+                isComplete = false // REST API candles are closed
+            };
+        }
+    }
     
     public override string ToString()
     {

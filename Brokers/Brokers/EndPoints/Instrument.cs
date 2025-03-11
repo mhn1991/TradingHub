@@ -16,7 +16,12 @@ public class Instrument : Binance
     {
         this._coinName = coinName;
         this._endPoint = $"klines?symbol={this._coinName}&interval={interval}&limit={limit}&endTime={endTime}";
-    } 
+    }
+
+    public string GetTheLastKlines(string interval,int limit)
+    {
+        return $"{this._baseUrl}klines?symbol={this._coinName}&interval={interval}&limit={limit}";
+    }
 
     public string GetFinalUrl()
     {
