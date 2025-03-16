@@ -3,6 +3,7 @@ using API;
 using Brokers.Brokers;
 using Utility;
 using Utility.Indicators;
+using System.IO;
 
 namespace Agent;
 
@@ -14,7 +15,7 @@ public class Agent
     private RSI _rsi;
     private StochRSI _stochRSI;
     private BollingerBand _bollingerBand;
-    private String filePath;
+    private string _filePath;
 
     public Agent()
     {
@@ -24,11 +25,16 @@ public class Agent
         _rsi = new RSI();
         _stochRSI = new StochRSI();
         _bollingerBand = new BollingerBand();
-        filePath = "Logs/"+_instrument.BrokerName +"-"+ _instrument.CoinName+".log";
+        _filePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + ".log";
+        EnsureLogDirectoryExists();
+        DeleteLogFileIfExists();
+    }
+
+    private void EnsureLogDirectoryExists()
+    {
         try
         {
-            // Get the directory path from the file path
-            string directoryPath = Path.GetDirectoryName(filePath);
+            string directoryPath = Path.GetDirectoryName(_filePath);
             if (!Directory.Exists(directoryPath))
             {
                 Directory.CreateDirectory(directoryPath);
@@ -40,66 +46,54 @@ public class Agent
             Console.WriteLine($"Error: {e.Message}");
         }
     }
+    
+    private void EnsureLiveLogFileExists()
+    {
+        string liveLogFilePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + "-live" + ".log";
+    
+        if (File.Exists(liveLogFilePath))
+        {
+            File.Delete(liveLogFilePath);
+            Console.WriteLine($"Deleted existing log file: {liveLogFilePath}");
+        }
+        
+        // Check if live log file exists, if not, create it
+        if (!File.Exists(liveLogFilePath))
+        {
+            // Create an empty log file if it doesn't exist
+            File.Create(liveLogFilePath).Close();
+            Console.WriteLine($"Created live log file: {liveLogFilePath}");
+        }
+    }
+
+    private void DeleteLogFileIfExists()
+    {
+        try
+        {
+            if (File.Exists(_filePath))
+            {
+                File.Delete(_filePath);
+                Console.WriteLine($"Deleted existing log file: {_filePath}");
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"Error deleting log file: {e.Message}");
+        }
+    }
 
     public async Task InitAsync()
     {
         try
         {
             List<List<object>> data = await _rest.Get(_instrument.GetFinalUrl());
-
             if (data.Count == 0)
             {
                 Console.WriteLine("No data received.");
                 return;
             }
-            int index = 1;
-            foreach (var item in data)
-            {
-                if (index < data.Count)
-                {
-                    if (item is List<object> list && list.Count >= 12)
-                    {
-                        CandleData candle = _candles.GetCurrent().Data;
-                        // this part should move to the Broker 
-                        // each broker should be able to convert its own response to the candle date
-                        candle.OpenTime = ConvertToInt64(list[0]);
-                        candle.High = ConvertToDecimal(list[2]);
-                        candle.Low = ConvertToDecimal(list[3]);
-                        candle.Close = ConvertToDecimal(list[4]);
-                        candle.Volume = ConvertToDecimal(list[5]);
-                        if (index == 1)
-                        {
-                            candle.Gain = 0m;
-                            candle.Loss = 0m;
-                        }
-                        else
-                        {
-                            candle.Gain = CalculateGain(candle.Close, _candles.GetPrevious().Data.Close);
-                            candle.Loss = CalculateLoss(candle.Close, _candles.GetPrevious().Data.Close);
-                        }
 
-                        if (_rsi != null)
-                        {
-                            candle.RSI = _rsi.Calculate(index, _candles.GetCurrent());
-                        }
-
-                        if (_stochRSI != null && _rsi.WindowSize + 1 <= index)
-                        {
-                            _stochRSI.Calculate(_candles.GetCurrent());
-                        }
-
-                        if (_bollingerBand != null && _bollingerBand.WindowSize + 1 <= index)
-                        {
-                            _bollingerBand.Calculate(_candles.GetCurrent());
-                        }
-
-                        candle.isComplete = true;
-                        File.AppendAllText(filePath, candle.ToString());
-                        _candles.MoveNext();
-                    }
-                }
-                index += 1;
-            }
+            ProcessInitialData(data);
         }
         catch (Exception ex)
         {
@@ -107,105 +101,137 @@ public class Agent
         }
     }
 
-    public async Task run()
+    private void ProcessInitialData(List<List<object>> data)
+    {
+        int index = 1;
+        foreach (var item in data)
+        {
+            if (index < data.Count)
+            {
+                if (item is List<object> list && list.Count >= 12)
+                {
+                    CandleData candle = _candles.GetCurrent().Data;
+                    UpdateCandleData(candle, list, index);
+                    File.AppendAllText(_filePath, candle.ToString());
+                    _candles.MoveNext();
+                }
+            }
+            index += 1;
+        }
+    }
+
+    private void UpdateCandleData(CandleData candle, List<object> list, int index)
+    {
+        candle.OpenTime = ConvertToInt64(list[0]);
+        candle.High = ConvertToDecimal(list[2]);
+        candle.Low = ConvertToDecimal(list[3]);
+        candle.Close = ConvertToDecimal(list[4]);
+        candle.Volume = ConvertToDecimal(list[5]);
+
+        if (index == 1)
+        {
+            candle.Gain = 0m;
+            candle.Loss = 0m;
+        }
+        else
+        {
+            candle.Gain = CalculateGain(candle.Close, _candles.GetPrevious().Data.Close);
+            candle.Loss = CalculateLoss(candle.Close, _candles.GetPrevious().Data.Close);
+        }
+
+        UpdateIndicators(candle, index);
+        candle.isComplete = true;
+    }
+
+    private void UpdateIndicators(CandleData candle, int index, bool isLive = false)
+    {
+        if (_rsi != null)
+        {
+            candle.RSI = _rsi.Calculate(index, _candles.GetCurrent(), isLive);
+        }
+
+        if (_stochRSI != null && _rsi.WindowSize + 1 <= index)
+        {
+            _stochRSI.Calculate(_candles.GetCurrent());
+        }
+
+        if (_bollingerBand != null && _bollingerBand.WindowSize + 1 <= index)
+        {
+            _bollingerBand.Calculate(_candles.GetCurrent());
+        }
+    }
+
+    public async Task Run()
     {
         await InitAsync();
         int index = 28;
         while (true)
         {
-            List<BinanceKline> data = await _rest.Get<BinanceKline>(_instrument.GetTheLastKlines("1m",2));
-
+            List<BinanceKline> data = await _rest.Get<BinanceKline>(_instrument.GetTheLastKlines("1m", 2));
             if (data.Count == 0)
             {
                 Console.WriteLine("No data received.");
                 return;
             }
-            
-            long prevCanleTime = _candles.GetPrevious().Data.OpenTime;
-            DateTimeOffset prevCanleTimeOffset = DateTimeOffset.FromUnixTimeMilliseconds(prevCanleTime);
-            long currentCandleTime = prevCanleTimeOffset.AddMinutes(1).ToUnixTimeMilliseconds();
-            long nextCandleTime = prevCanleTimeOffset.AddMinutes(2).ToUnixTimeMilliseconds();
-            // we have to update the current candle 
-            if (data[1].OpenTime >= currentCandleTime && data[1].OpenTime < nextCandleTime)
-            {
 
-                    _candles.GetCurrent().Data.Close = ConvertToDecimal(data.Last().Close);
-                    _candles.GetCurrent().Data.Open = ConvertToDecimal(data.Last().Open);
-                    _candles.GetCurrent().Data.High = ConvertToDecimal(data.Last().High);
-                    _candles.GetCurrent().Data.Low = ConvertToDecimal(data.Last().Low);
-                    _candles.GetCurrent().Data.Volume = ConvertToDecimal(data.Last().Volume);
-                    _candles.GetCurrent().Data.Gain = CalculateGain(_candles.GetCurrent().Data.Close, _candles.GetPrevious().Data.Close);
-                    _candles.GetCurrent().Data.Loss = CalculateLoss(_candles.GetCurrent().Data.Close, _candles.GetPrevious().Data.Close);
-                    if (_rsi != null)
-                    {
-                        _candles.GetCurrent().Data.RSI = _rsi.Calculate(index, _candles.GetCurrent(), true);
-                    }
-                    
-                    if (_stochRSI != null && _rsi.WindowSize + 1 <= index)
-                    {
-                        _stochRSI.Calculate(_candles.GetCurrent());
-                    }
-
-                    if (_bollingerBand != null && _bollingerBand.WindowSize+1 <= index)
-                    {
-                        _bollingerBand.Calculate(_candles.GetCurrent());
-                    }
-                    File.AppendAllText("Logs/"+_instrument.BrokerName +"-"+ _instrument.CoinName+"-live"+".log",_candles.GetCurrent().Data.ToString());
-                
-            }
-            // we have to move to the next candle 
-            if (data[0].OpenTime == currentCandleTime &&data[1].OpenTime >= nextCandleTime)
-            {
-                   _candles.GetCurrent().Data.OpenTime = data.First().OpenTime;
-                    _candles.GetCurrent().Data.Close = ConvertToDecimal(data.First().Close);
-                    _candles.GetCurrent().Data.Open = ConvertToDecimal(data.First().Open);
-                    _candles.GetCurrent().Data.High = ConvertToDecimal(data.First().High);
-                    _candles.GetCurrent().Data.Low = ConvertToDecimal(data.First().Low);
-                    _candles.GetCurrent().Data.Volume = ConvertToDecimal(data.First().Volume);
-                    _candles.GetCurrent().Data.Gain = CalculateGain(_candles.GetCurrent().Data.Close, _candles.GetPrevious().Data.Close);
-                    _candles.GetCurrent().Data.Loss = CalculateLoss(_candles.GetCurrent().Data.Close, _candles.GetPrevious().Data.Close);
-                    if (_rsi != null)
-                    {
-                        _candles.GetCurrent().Data.RSI = _rsi.Calculate(index, _candles.GetCurrent());
-                    }
-                    
-                    if (_stochRSI != null && _rsi.WindowSize + 1 <= index)
-                    {
-                        _stochRSI.Calculate(_candles.GetCurrent());
-                    }
-
-                    if (_bollingerBand != null && _bollingerBand.WindowSize+1 <= index)
-                    {
-                        _bollingerBand.Calculate(_candles.GetCurrent());
-                    }
-                    Console.WriteLine(_candles.GetCurrent().Data.ToString());
-                    File.AppendAllText(filePath,_candles.GetCurrent().Data.ToString());
-                    _candles.MoveNext();
+            if(ProcessLiveData(data, index))
                 break;
-            }
             await Task.Delay(500);
         }
     }
-    
+
+    private bool ProcessLiveData(List<BinanceKline> data, int index)
+    {
+        string liveLogFilePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + "-live" + ".log";
+
+        long prevCandleTime = _candles.GetPrevious().Data.OpenTime;
+        DateTimeOffset prevCandleTimeOffset = DateTimeOffset.FromUnixTimeMilliseconds(prevCandleTime);
+        long currentCandleTime = prevCandleTimeOffset.AddMinutes(1).ToUnixTimeMilliseconds();
+        long nextCandleTime = prevCandleTimeOffset.AddMinutes(2).ToUnixTimeMilliseconds();
+
+        if (data[1].OpenTime >= currentCandleTime && data[1].OpenTime < nextCandleTime)
+        {
+            UpdateCurrentCandle(data.Last(), index, true);
+            File.AppendAllText(liveLogFilePath, _candles.GetCurrent().Data.ToString());
+
+        }
+
+        if (data[0].OpenTime == currentCandleTime && data[1].OpenTime >= nextCandleTime)
+        {
+            UpdateCurrentCandle(data.First(), index, false);
+            Console.WriteLine(_candles.GetCurrent().Data.ToString());
+            File.AppendAllText(_filePath, _candles.GetCurrent().Data.ToString());
+            _candles.MoveNext();
+            return true;
+        }
+
+        return false;
+    }
+
+    private void UpdateCurrentCandle(BinanceKline kline, int index, bool isLive = false)
+    {
+        var currentCandle = _candles.GetCurrent().Data;
+        currentCandle.OpenTime = kline.OpenTime;
+        currentCandle.Close = ConvertToDecimal(kline.Close);
+        currentCandle.Open = ConvertToDecimal(kline.Open);
+        currentCandle.High = ConvertToDecimal(kline.High);
+        currentCandle.Low = ConvertToDecimal(kline.Low);
+        currentCandle.Volume = ConvertToDecimal(kline.Volume);
+        currentCandle.Gain = CalculateGain(currentCandle.Close, _candles.GetPrevious().Data.Close);
+        currentCandle.Loss = CalculateLoss(currentCandle.Close, _candles.GetPrevious().Data.Close);
+
+        UpdateIndicators(currentCandle, index, isLive);
+    }
+
     // Safe conversion functions
     private static long ConvertToInt64(object value)
     {
         return value switch
         {
             JsonElement json when json.ValueKind == JsonValueKind.Number => json.GetInt64(),
-            JsonElement json when json.ValueKind == JsonValueKind.String && long.TryParse(json.GetString(), out var result) => result,
+            JsonElement json when json.ValueKind == JsonValueKind.String &&
+                                  long.TryParse(json.GetString(), out var result) => result,
             string str when long.TryParse(str, out var result) => result,
-            _ => 0 // Default fallback
-        };
-    }
-
-    private static int ConvertToInt32(object value)
-    {
-        return value switch
-        {
-            JsonElement json when json.ValueKind == JsonValueKind.Number => json.GetInt32(),
-            JsonElement json when json.ValueKind == JsonValueKind.String && int.TryParse(json.GetString(), out var result) => result,
-            string str when int.TryParse(str, out var result) => result,
             _ => 0
         };
     }
@@ -215,32 +241,24 @@ public class Agent
         return value switch
         {
             JsonElement json when json.ValueKind == JsonValueKind.Number => json.GetDecimal(),
-            JsonElement json when json.ValueKind == JsonValueKind.String && decimal.TryParse(json.GetString(), out var result) => result,
+            JsonElement json when json.ValueKind == JsonValueKind.String &&
+                                  decimal.TryParse(json.GetString(), out var result) => result,
             string str when decimal.TryParse(str, out var result) => result,
             _ => 0m
-        };
-    }
-
-    private static string ConvertToString(object value)
-    {
-        return value switch
-        {
-            JsonElement json when json.ValueKind == JsonValueKind.String => json.GetString() ?? "",
-            string str => str,
-            _ => ""
         };
     }
 
     private static decimal CalculateGain(decimal currentPrice, decimal previousPrice)
     {
         decimal deltaP = currentPrice - previousPrice;
-        return deltaP > 0 ? deltaP : 0m;   
+        return deltaP > 0 ? deltaP : 0m;
     }
-    
+
     private static decimal CalculateLoss(decimal currentPrice, decimal previousPrice)
     {
-        // with this we don't need more operation 
         decimal deltaP = previousPrice - currentPrice;
-        return deltaP > 0 ? deltaP : 0m;   
+        return deltaP > 0 ? deltaP : 0m;
     }
+    
+    
 }
