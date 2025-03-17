@@ -107,3 +107,5 @@
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.pdb
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/UnitTests.genruntimeconfig.cache
 /home/mhn/Projects/TradingHub/UnitTests/obj/Debug/net9.0/ref/UnitTests.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Strategy.dll
+/home/mhn/Projects/TradingHub/UnitTests/bin/Debug/net9.0/Strategy.pdb

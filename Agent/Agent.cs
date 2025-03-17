@@ -4,6 +4,7 @@ using Brokers.Brokers;
 using Utility;
 using Utility.Indicators;
 using System.IO;
+using System.Text.RegularExpressions;
 
 namespace Agent;
 
@@ -11,6 +12,8 @@ public class Agent
 {
     private readonly Rest _rest;
     private readonly Instrument _instrument;
+    private readonly Dictionary<string, string> _timeFrames;
+    private Dictionary<string, CircularLinkedList<CandleData>> _charts;
     private CircularLinkedList<CandleData> _candles;
     private RSI _rsi;
     private StochRSI _stochRSI;
@@ -28,6 +31,26 @@ public class Agent
         _filePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + ".log";
         EnsureLogDirectoryExists();
         DeleteLogFileIfExists();
+        // this is just for the binance we have to get it from the config later
+        _timeFrames = new Dictionary<string, string>(){{"1h","15"},{"15m", "5m"},{"5m","1m"},{"1m","1s"}};
+        _charts = new Dictionary<string, CircularLinkedList<CandleData>>()
+        {
+            {
+                "1h", new CircularLinkedList<CandleData>(25, () => new CandleData())
+            },
+            {
+                "15m", new CircularLinkedList<CandleData>(25, () => new CandleData())
+            },
+            {
+                "5m", new CircularLinkedList<CandleData>(25, () => new CandleData())
+            },
+            { 
+                "1m", new CircularLinkedList<CandleData>(25, () => new CandleData())
+            },
+            { 
+                "1s", new CircularLinkedList<CandleData>(25, () => new CandleData())
+            }
+        };
     }
 
     private void EnsureLogDirectoryExists()
@@ -167,7 +190,7 @@ public class Agent
         int index = 28;
         while (true)
         {
-            List<BinanceKline> data = await _rest.Get<BinanceKline>(_instrument.GetTheLastKlines("1m", 2));
+            List<BinanceKline> data = await _rest.Get<BinanceKline>(_instrument.GetTheLastKlines("1s", 2));
             if (data.Count == 0)
             {
                 Console.WriteLine("No data received.");
@@ -184,33 +207,76 @@ public class Agent
     {
         string liveLogFilePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + "-live" + ".log";
 
-        long prevCandleTime = _candles.GetPrevious().Data.OpenTime;
-        DateTimeOffset prevCandleTimeOffset = DateTimeOffset.FromUnixTimeMilliseconds(prevCandleTime);
-        long currentCandleTime = prevCandleTimeOffset.AddMinutes(1).ToUnixTimeMilliseconds();
-        long nextCandleTime = prevCandleTimeOffset.AddMinutes(2).ToUnixTimeMilliseconds();
+        foreach (var timeFrame in _timeFrames.Keys)
+        { 
+            _charts.TryGetValue(timeFrame, out var chart);
+            long prevCandleTime = chart.GetPrevious().Data.OpenTime;
+            DateTimeOffset prevCandleTimeOffset = DateTimeOffset.FromUnixTimeMilliseconds(prevCandleTime);
+            long currentCandleTime = getNextCandleTime(timeFrame, prevCandleTimeOffset);
+            long nextCandleTime = getNextCandleTime(timeFrame, prevCandleTimeOffset,2);
+            if (data[1].OpenTime >= currentCandleTime && data[1].OpenTime < nextCandleTime)
+            {
+                UpdateCurrentCandle(chart.GetCurrent().Data,data.Last(), index, true);
+                File.AppendAllText(liveLogFilePath, chart.GetCurrent().Data.ToString());
+                Console.WriteLine("we are on the first if");
+                Console.WriteLine("we updated the candle on time frame"+timeFrame);
 
-        if (data[1].OpenTime >= currentCandleTime && data[1].OpenTime < nextCandleTime)
-        {
-            UpdateCurrentCandle(data.Last(), index, true);
-            File.AppendAllText(liveLogFilePath, _candles.GetCurrent().Data.ToString());
+            }
 
+            if (data[0].OpenTime == currentCandleTime && data[1].OpenTime >= nextCandleTime)
+            {
+                UpdateCurrentCandle(chart.GetCurrent().Data,data.First(), index, false);
+                Console.WriteLine("we are on the second if");
+                Console.WriteLine("we updated the candle on time frame"+timeFrame);
+                File.AppendAllText(_filePath, chart.GetCurrent().Data.ToString());
+                chart.MoveNext();
+                //return true;
+            }
         }
-
-        if (data[0].OpenTime == currentCandleTime && data[1].OpenTime >= nextCandleTime)
-        {
-            UpdateCurrentCandle(data.First(), index, false);
-            Console.WriteLine(_candles.GetCurrent().Data.ToString());
-            File.AppendAllText(_filePath, _candles.GetCurrent().Data.ToString());
-            _candles.MoveNext();
-            return true;
-        }
-
         return false;
     }
 
-    private void UpdateCurrentCandle(BinanceKline kline, int index, bool isLive = false)
+    private long getNextCandleTime(string timeFrame, DateTimeOffset time, int offset = 1)
     {
-        var currentCandle = _candles.GetCurrent().Data;
+        var pattern = @"(\d+)([a-zA-Z])"; // Pattern to match numbers followed by a letter (e.g., 5m, 1y, 2m)
+        var matches = Regex.Matches(timeFrame, pattern);
+        string numberString = "";
+        string unit = "";
+        long newTime = 0;
+        foreach (Match match in matches)
+        {
+            numberString = match.Groups[1].Value; // The number (e.g., 5, 1, 2)
+            unit = match.Groups[2].Value; // The time unit (e.g., m, y)
+        }
+        if (int.TryParse(numberString, out int number))
+        {
+            Console.WriteLine($"Number: {number}, Unit: {unit}");
+        }
+        else
+        {
+            Console.WriteLine($"Failed to convert {numberString} to an integer.");
+        }
+        switch (unit)
+        {
+            case "h":
+                newTime = time.AddHours(number*offset).ToUnixTimeMilliseconds();
+                break;
+            case "m":
+                newTime = time.AddMinutes(number*offset).ToUnixTimeMilliseconds();
+                break;
+            case "s":
+                newTime = time.AddSeconds(number*offset).ToUnixTimeMilliseconds();
+                break;
+            default:
+                // we didn't have a correct time frame
+                break;
+        }
+        return newTime;
+    }
+
+    private void UpdateCurrentCandle(CandleData candle,BinanceKline kline, int index, bool isLive = false)
+    {
+        var currentCandle = candle;
         currentCandle.OpenTime = kline.OpenTime;
         currentCandle.Close = ConvertToDecimal(kline.Close);
         currentCandle.Open = ConvertToDecimal(kline.Open);
