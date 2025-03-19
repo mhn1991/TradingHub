@@ -2,7 +2,7 @@
 
 namespace Strategy;
 
-public class Indicators
+public class Indicators : IStrategy
 {
     public SignalType AnaliseCandle(CandleData candle)
     {

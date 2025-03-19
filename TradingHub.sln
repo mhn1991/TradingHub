@@ -20,6 +20,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DBManager", "DBManager\DBMa
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TradeManager", "TradeManager\TradeManager.csproj", "{7B3109CB-0ED9-4DC0-B6C1-13A023144FA3}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TradingCore", "TradingCore\TradingCore.csproj", "{676A84B1-958B-441D-B645-AC4221DE5173}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -66,5 +68,9 @@ Global
 		{7B3109CB-0ED9-4DC0-B6C1-13A023144FA3}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7B3109CB-0ED9-4DC0-B6C1-13A023144FA3}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7B3109CB-0ED9-4DC0-B6C1-13A023144FA3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{676A84B1-958B-441D-B645-AC4221DE5173}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{676A84B1-958B-441D-B645-AC4221DE5173}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{676A84B1-958B-441D-B645-AC4221DE5173}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{676A84B1-958B-441D-B645-AC4221DE5173}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

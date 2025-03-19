@@ -5,29 +5,55 @@ using Utility;
 using Utility.Indicators;
 using System.IO;
 using System.Text.RegularExpressions;
+using DBManager;
+using DBManager.Repositories;
+using DBManager.Services;
+using Strategy;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 
 namespace Agent;
 
 public class Agent
 {
+    private readonly BrokerService _brokerService;
+    private readonly TradeService _tradeService;
     private readonly Rest _rest;
     private readonly Instrument _instrument;
     private readonly Dictionary<string, string> _timeFrames;
     private Dictionary<string, CircularLinkedList<CandleData>> _charts;
     private string _filePath;
     private Dictionary<string, List<Indicator>> _indicators;
+    private List<IStrategy> _strategies;
 
-    public Agent()
+    public Agent(BrokerService brokerService, TradeService tradeService)
     {
+        _brokerService = brokerService;
+        _tradeService = tradeService;
         _rest = new Rest();
         _instrument = new Instrument("BTCUSDT", "1m", "1000");
         _filePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + ".log";
         EnsureLogDirectoryExists();
         DeleteLogFileIfExists();
+
         EnsureLiveLogFileExists();
+
         // this is just for the binance we have to get it from the config later
         _timeFrames = new Dictionary<string, string>()
-            { { "1h", "15" }, { "15m", "5m" }, { "5m", "1m" }, { "1m", "1s" } };
+        {
+            {
+                "1h", "15"
+            },
+            {
+                "15m", "5m"
+            },
+            {
+                "5m", "1m"
+            },
+            {
+                "1m", "1s"
+            }
+        };
         _charts = new Dictionary<string, CircularLinkedList<CandleData>>()
         {
             {
@@ -89,6 +115,38 @@ public class Agent
                 }
             }
         };
+        _strategies = new List<IStrategy>()
+        {
+            new Indicators(),
+        };
+    }
+
+    public void checkDB()
+    {
+        var serviceProvider = new ServiceCollection()
+            .AddDbContext<ApplicationDbContext>(options =>
+                options.UseNpgsql(
+                    "Server=localhost;Port=54320;User Id=db;Password=mysecretpassword;Database=tradinghub;")) // Replace with your actual connection string
+            .AddScoped<DbConnectionChecker>() // Ensure DbConnectionChecker is registered here
+            .AddScoped<ITradeRepository, TradeRepository>()
+            .AddScoped<IBrokerRepository, BrokerRepository>()
+            .BuildServiceProvider();
+
+        // Resolve the DbConnectionChecker from DbManager
+        var dbConnectionChecker = serviceProvider.GetService<DbConnectionChecker>();
+
+        if (dbConnectionChecker.CheckConnection())
+        {
+            Console.WriteLine("Database connection is successful!");
+        }
+        else
+        {
+            Console.WriteLine("Failed to connect to the database.");
+        }
+
+        // Optionally, you can use the repositories after this
+        var tradeRepo = serviceProvider.GetService<ITradeRepository>();
+        // Use tradeRepo to interact with the DB...
     }
 
     private void EnsureLogDirectoryExists()
@@ -261,7 +319,7 @@ public class Agent
             long nextCandleTime = getNextCandleTime(timeFrame, prevCandleTimeOffset, 2);
             if (data[1].OpenTime >= currentCandleTime && data[1].OpenTime < nextCandleTime)
             {
-                UpdateCurrentCandle(chart.GetCurrent().Data, data.Last(), index, timeFrame,true);
+                UpdateCurrentCandle(chart.GetCurrent().Data, data.Last(), index, timeFrame, true);
                 File.AppendAllText(liveLogFilePath, chart.GetCurrent().Data.ToString());
                 Console.WriteLine("we are on the first if");
                 Console.WriteLine("we updated the candle on time frame" + timeFrame);
@@ -269,10 +327,10 @@ public class Agent
 
             if (data[0].OpenTime >= currentCandleTime && data[1].OpenTime >= nextCandleTime)
             {
-                UpdateCurrentCandle(chart.GetCurrent().Data, data.First(), index, timeFrame,false);
+                UpdateCurrentCandle(chart.GetCurrent().Data, data.First(), index, timeFrame, false);
                 Console.WriteLine("we are on the second if");
                 Console.WriteLine("we updated the candle on time frame" + timeFrame);
-                File.AppendAllText(_filePath, "=============================================\n"+timeFrame+"\n");
+                File.AppendAllText(_filePath, "=============================================\n" + timeFrame + "\n");
                 File.AppendAllText(_filePath, chart.GetCurrent().Data.ToString());
                 chart.MoveNext();
                 //return true;
@@ -323,7 +381,8 @@ public class Agent
         return newTime;
     }
 
-    private void UpdateCurrentCandle(CandleData candle, BinanceKline kline, int index, string timeFrame,bool isLive = false)
+    private void UpdateCurrentCandle(CandleData candle, BinanceKline kline, int index, string timeFrame,
+        bool isLive = false)
     {
         var currentCandle = candle;
         currentCandle.OpenTime = candle.OpenTime;
@@ -335,10 +394,10 @@ public class Agent
         currentCandle.Gain = CalculateGain(currentCandle.Close, _charts[timeFrame].GetPrevious().Data.Close);
         currentCandle.Loss = CalculateLoss(currentCandle.Close, _charts[timeFrame].GetPrevious().Data.Close);
 
-        UpdateIndicators(currentCandle, index,timeFrame,isLive);
+        UpdateIndicators(currentCandle, index, timeFrame, isLive);
     }
 
-    // Safe conversion functions
+// Safe conversion functions
     private static long ConvertToInt64(object value)
     {
         return value switch
