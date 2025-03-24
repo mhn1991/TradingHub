@@ -2,6 +2,8 @@ using DBManager;
 using DBManager.Repositories;
 using DBManager.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using TradeManager;
 
 namespace UnitTests;
 using Agent;
@@ -12,19 +14,29 @@ public class AgentTests
     [SetUp]
     public void Setup()
     {
-        var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseNpgsql("Your_Connection_String")
-            .Options;
+        var services = new ServiceCollection();
 
-        var dbContext = new ApplicationDbContext(options);
-        var tradeRepository = new TradeRepository(dbContext);
-        var brokerRepository = new BrokerRepository(dbContext);
+        // Add DbContext
+        services.AddDbContext<ApplicationDbContext>(options =>
+            options.UseNpgsql("Server=localhost;Port=54320;User Id=db;Password=mysecretpassword;Database=tradinghub;"));
 
-        var tradeService = new TradeService(tradeRepository);
-        var brokerService = new BrokerService(brokerRepository);
+        // Register repositories (MISSING in your code)
+        services.AddScoped<ITradeRepository, TradeRepository>();
+        services.AddScoped<IBrokerRepository, BrokerRepository>();
 
-        var agent = new Agent(brokerService, tradeService);
-        _agent = agent;
+        // Register DBManager services
+        services.AddScoped<TradeService>();
+        services.AddScoped<BrokerService>();
+
+        // Register TradeManager service
+        services.AddScoped<TradeManagerService>();
+
+        // Build the service provider
+        var serviceProvider = services.BuildServiceProvider();
+
+        // Create an agent with injected dependencies
+        var tradeManagerService = serviceProvider.GetRequiredService<TradeManagerService>();
+        _agent = new Agent(tradeManagerService); // Save for later use in tests
 
     }
 

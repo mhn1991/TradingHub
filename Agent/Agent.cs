@@ -6,18 +6,18 @@ using Utility.Indicators;
 using System.IO;
 using System.Text.RegularExpressions;
 using DBManager;
+using DBManager.Models;
 using DBManager.Repositories;
 using DBManager.Services;
 using Strategy;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
+using TradeManager;
 
 namespace Agent;
 
 public class Agent
 {
-    private readonly BrokerService _brokerService;
-    private readonly TradeService _tradeService;
     private readonly Rest _rest;
     private readonly Instrument _instrument;
     private readonly Dictionary<string, string> _timeFrames;
@@ -25,11 +25,14 @@ public class Agent
     private string _filePath;
     private Dictionary<string, List<Indicator>> _indicators;
     private List<IStrategy> _strategies;
+    private readonly TradeManagerService _tradeManagerService;
+    private Dictionary<string, long> _signalsTimeFrames;
+    private List<string> _tradeableTimeFrames;
 
-    public Agent(BrokerService brokerService, TradeService tradeService)
+    public Agent(TradeManagerService tradeManagerService)
     {
-        _brokerService = brokerService;
-        _tradeService = tradeService;
+        _signalsTimeFrames = new Dictionary<string, long>();
+        _tradeManagerService = tradeManagerService;
         _rest = new Rest();
         _instrument = new Instrument("BTCUSDT", "1m", "1000");
         _filePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + ".log";
@@ -37,7 +40,7 @@ public class Agent
         DeleteLogFileIfExists();
 
         EnsureLiveLogFileExists();
-
+        _tradeableTimeFrames = new List<string>() { "1h", "15m", "5m" };
         // this is just for the binance we have to get it from the config later
         _timeFrames = new Dictionary<string, string>()
         {
@@ -93,7 +96,7 @@ public class Agent
             {
                 "5m", new List<Indicator>()
                 {
-                    new RSI(),
+                    new RSI(21),
                     new StochRSI(),
                     new BollingerBand(),
                 }
@@ -101,7 +104,7 @@ public class Agent
             {
                 "1m", new List<Indicator>()
                 {
-                    new RSI(),
+                    new RSI(21),
                     new StochRSI(),
                     new BollingerBand(),
                 }
@@ -223,6 +226,102 @@ public class Agent
         }
     }
 
+    private async Task Strategy(CandleData candle, string timeFrame)
+    {
+        // we have to check if the candle's time is bigger than any of the records that record
+        // should get removed
+        _signalsTimeFrames = _signalsTimeFrames
+            .Where(pair => candle.OpenTime < pair.Value) // Keep only items that don't match the condition
+            .ToDictionary(pair => pair.Key, pair => pair.Value);
+
+        foreach (var strategy in _strategies)
+        {
+            if (strategy is Indicators indicators)
+            {
+                if (_tradeableTimeFrames.Contains(timeFrame) || _signalsTimeFrames.ContainsKey(timeFrame))
+                {
+                    if (!_signalsTimeFrames.Any() || _signalsTimeFrames.Last().Key.Equals(timeFrame))
+                    {
+                        SignalType signal = indicators.AnaliseCandle(candle);
+                        // if the signal was partial we have to keep checking until the next candle of
+                        // the bigger timeframe
+                        if (signal == SignalType.Partial)
+                        {
+                            _signalsTimeFrames.Add(_timeFrames[timeFrame],
+                                getNextCandleTime(timeFrame,
+                                    DateTimeOffset.FromUnixTimeMilliseconds(candle.OpenTime).UtcDateTime));
+                        }
+
+                        if (signal == SignalType.Buy)
+                        {
+                            Trade trade = new Trade()
+                            {
+                                BrokerId = 1,
+                                Symbol = _instrument.CoinName,
+                                Quantity = 1,
+                                EntryPrice = candle.Close,
+                                ExitPrice = 0m,
+                                StopPrice = 0m,
+                                TakeProfit = 0m, // Ensure this has a value
+                                Fee = 0m, // Ensure this has a value
+                                OrderId = "", // Ensure this has a value (or make it nullable in DB)
+                                TradeType = TradeType.BUY,
+                                Timestamp = DateTime.UnixEpoch.AddMilliseconds(candle.OpenTime),
+                                Status = TradeStatus.Open,
+                                TimeFrame = (_signalsTimeFrames.Any() ? _timeFrames.FirstOrDefault( pair => pair.Value ==  _signalsTimeFrames.ElementAt(0).Key).Key : timeFrame),
+                            };
+                            try
+                            {
+                                await _tradeManagerService.CreateTradeAsync(trade);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Error saving trade: {ex.Message}");
+                                if (ex.InnerException != null)
+                                {
+                                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                                }
+                            }
+                        }
+
+                        if (signal == SignalType.Sell)
+                        {
+                            Trade trade = new Trade()
+                            {
+                                BrokerId = 1,
+                                Symbol = _instrument.CoinName,
+                                Quantity = 1,
+                                EntryPrice = candle.Close,
+                                ExitPrice = 0m,
+                                StopPrice = 0m,
+                                TakeProfit = 0m, // Ensure this has a value
+                                Fee = 0m, // Ensure this has a value
+                                OrderId = "", // Ensure this has a value (or make it nullable in DB)
+                                TradeType = TradeType.SELL,
+                                Timestamp = DateTime.UnixEpoch.AddMilliseconds(candle.OpenTime),
+                                Status = TradeStatus.Open,
+                                TimeFrame =
+                                    (_signalsTimeFrames.Any() ? _timeFrames.FirstOrDefault( pair => pair.Value ==  _signalsTimeFrames.ElementAt(0).Key).Key : timeFrame),
+                            };
+                            try
+                            {
+                                await _tradeManagerService.CreateTradeAsync(trade);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"Error saving trade: {ex.Message}");
+                                if (ex.InnerException != null)
+                                {
+                                    Console.WriteLine($"Inner Exception: {ex.InnerException.Message}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private void ProcessInitialData(List<List<object>> data, string timeFrame)
     {
         CircularLinkedList<CandleData> chart = _charts[timeFrame];
@@ -300,19 +399,22 @@ public class Agent
                 return;
             }
 
-            if (ProcessLiveData(data, index))
+            if (await ProcessLiveData(data, index))
                 break;
             await Task.Delay(500);
         }
     }
 
-    private bool ProcessLiveData(List<BinanceKline> data, int index)
+    private async Task<bool> ProcessLiveData(List<BinanceKline> data, int index)
     {
         string liveLogFilePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + "-live" + ".log";
 
         foreach (var timeFrame in _timeFrames.Keys)
         {
             _charts.TryGetValue(timeFrame, out var chart);
+            // here we are on the current candle as on the init function last iteration it will move to the
+            // next candle
+            chart.MovePrevious();// we are on the current candle now 
             long prevCandleTime = chart.GetPrevious().Data.OpenTime;
             DateTimeOffset prevCandleTimeOffset = DateTimeOffset.FromUnixTimeMilliseconds(prevCandleTime);
             long currentCandleTime = getNextCandleTime(timeFrame, prevCandleTimeOffset);
@@ -320,18 +422,19 @@ public class Agent
             if (data[1].OpenTime >= currentCandleTime && data[1].OpenTime < nextCandleTime)
             {
                 UpdateCurrentCandle(chart.GetCurrent().Data, data.Last(), index, timeFrame, true);
-                File.AppendAllText(liveLogFilePath, chart.GetCurrent().Data.ToString());
+                /*File.AppendAllText(liveLogFilePath, chart.GetCurrent().Data.ToString());
                 Console.WriteLine("we are on the first if");
-                Console.WriteLine("we updated the candle on time frame" + timeFrame);
+                Console.WriteLine("we updated the candle on time frame" + timeFrame);*/
             }
 
             if (data[0].OpenTime >= currentCandleTime && data[1].OpenTime >= nextCandleTime)
             {
                 UpdateCurrentCandle(chart.GetCurrent().Data, data.First(), index, timeFrame, false);
-                Console.WriteLine("we are on the second if");
+                await Strategy(chart.GetCurrent().Data, timeFrame);
+                /*Console.WriteLine("we are on the second if");
                 Console.WriteLine("we updated the candle on time frame" + timeFrame);
                 File.AppendAllText(_filePath, "=============================================\n" + timeFrame + "\n");
-                File.AppendAllText(_filePath, chart.GetCurrent().Data.ToString());
+                File.AppendAllText(_filePath, chart.GetCurrent().Data.ToString());*/
                 chart.MoveNext();
                 //return true;
             }

@@ -12,6 +12,7 @@
       <ProjectReference Include="..\LedgerCore\LedgerCore.csproj" />
       <ProjectReference Include="..\OrderManager\OrderManager.csproj" />
       <ProjectReference Include="..\Strategy\Strategy.csproj" />
+      <ProjectReference Include="..\TradeManager\TradeManager.csproj" />
       <ProjectReference Include="..\Utility\Utility.csproj" />
     </ItemGroup>
 

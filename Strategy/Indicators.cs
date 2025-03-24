@@ -6,7 +6,7 @@ public class Indicators : IStrategy
 {
     public SignalType AnaliseCandle(CandleData candle)
     {
-        if (candle.Close >= candle.BollingerBandUpperband && candle.StochRSIK == 100m && candle.RSI > 75)
+        if (candle.Close >= candle.BollingerBandUpperband && candle.StochRSIK == 1m && candle.RSI > 75)
         {
             return SignalType.Sell;
         }
@@ -16,8 +16,8 @@ public class Indicators : IStrategy
             return SignalType.Buy;
         }
         
-        if (candle.High >= candle.BollingerBandUpperband || candle.StochRSIK > 85 || 
-            candle.Low <= candle.BollingerBandLowerband || candle.StochRSIK < 15)
+        if (candle.High >= candle.BollingerBandUpperband || candle.StochRSIK > 0.85m || 
+            candle.Low <= candle.BollingerBandLowerband || candle.StochRSIK < 0.15m)
         {
             return SignalType.Partial;
         }

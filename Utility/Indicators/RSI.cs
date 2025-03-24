@@ -16,9 +16,9 @@ public class RSI: Indicator
     private bool RSIFirstCalc;
     
     public int WindowSize { get { return _windowSize; } set { _windowSize = value; } }
-    public RSI()
+    public RSI(int windowSize = 14)
     {
-        _windowSize = 14;
+        _windowSize = windowSize;
         _startIndex = 1;
         _endIndex = 1;
         _startCandle = new CircularLinkedList<CandleData>.Node(new CandleData());
@@ -60,7 +60,7 @@ public class RSI: Indicator
         {
             _averageGain = (_sigmaGain + gain) / _windowSize;
             _averageLoss = (_sigmaLoss + loss) / _windowSize;
-            decimal RS = _averageGain / _averageLoss; 
+            decimal RS = (_averageLoss == 0) ? 100m : _averageGain / _averageLoss; 
             RSI = 100m - (100m / (1m + RS));
             RSIFirstCalc = false;
         }
