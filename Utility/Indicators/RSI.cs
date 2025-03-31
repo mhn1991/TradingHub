@@ -70,14 +70,14 @@ public class RSI: Indicator
             {
                 averageGain = (((_windowSize - 1 ) * averageGain) + gain) / _windowSize;
                 averageLoss = (((_windowSize - 1 ) * averageLoss) + loss) / _windowSize;
-                decimal RS = (averageLoss == 0) ? 100m : (averageGain / averageLoss);
+                decimal RS = (Math.Round(averageLoss, 6) == 0) ? 100m : (averageGain / averageLoss);
                 RSI = 100m - (100m / (1m + RS));
             }
             else
             {
                 _averageGain = (((_windowSize - 1 ) * _averageGain) + gain) / _windowSize;
                 _averageLoss = (((_windowSize - 1 ) * _averageLoss) + loss) / _windowSize;
-                decimal RS = (_averageLoss == 0) ? 100m : (_averageGain / _averageLoss);
+                decimal RS = (Math.Round(_averageLoss, 6) == 0) ? 100m : (_averageGain / _averageLoss);
                 RSI = 100m - (100m / (1m + RS));
             }
            

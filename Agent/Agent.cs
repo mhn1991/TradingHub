@@ -28,7 +28,7 @@ public class Agent
     private readonly TradeManagerService _tradeManagerService;
     private Dictionary<string, long> _signalsTimeFrames;
     private List<string> _tradeableTimeFrames;
-
+    private CircularLinkedList<CandleData> _HighsLows;
     public Agent(TradeManagerService tradeManagerService)
     {
         _signalsTimeFrames = new Dictionary<string, long>();
@@ -96,7 +96,7 @@ public class Agent
             {
                 "5m", new List<Indicator>()
                 {
-                    new RSI(21),
+                    new RSI(),
                     new StochRSI(),
                     new BollingerBand(),
                 }
@@ -104,7 +104,7 @@ public class Agent
             {
                 "1m", new List<Indicator>()
                 {
-                    new RSI(21),
+                    new RSI(),
                     new StochRSI(),
                     new BollingerBand(),
                 }
@@ -122,6 +122,7 @@ public class Agent
         {
             new Indicators(),
         };
+        _HighsLows = new CircularLinkedList<CandleData>(100, () => new CandleData());
     }
 
     public void checkDB()
@@ -233,15 +234,29 @@ public class Agent
         _signalsTimeFrames = _signalsTimeFrames
             .Where(pair => candle.OpenTime < pair.Value) // Keep only items that don't match the condition
             .ToDictionary(pair => pair.Key, pair => pair.Value);
-
+        File.AppendAllText("Logs/Strategy.log", "==============================\n");
+        File.AppendAllText("Logs/Strategy.log",_signalsTimeFrames.LastOrDefault().Value+"\n");
+        File.AppendAllText("Logs/Strategy.log", "timeframe is: "+ timeFrame+"\n");
+        File.AppendAllText("Logs/Strategy.log", "==============================\n");
         foreach (var strategy in _strategies)
         {
             if (strategy is Indicators indicators)
             {
                 if (_tradeableTimeFrames.Contains(timeFrame) || _signalsTimeFrames.ContainsKey(timeFrame))
                 {
-                    if (!_signalsTimeFrames.Any() || _signalsTimeFrames.Last().Key.Equals(timeFrame))
+                    File.AppendAllText("Logs/Strategy.log", "we are inside first if\n");
+                    File.AppendAllText("Logs/Strategy.log", _tradeableTimeFrames.Contains(timeFrame)+"\n");
+                    File.AppendAllText("Logs/Strategy.log", _signalsTimeFrames.ContainsKey(timeFrame)+"\n");
+                    if ((!_signalsTimeFrames.Any() && _tradeableTimeFrames.Contains(timeFrame)) 
+                        || _signalsTimeFrames.Last().Key.Equals(timeFrame))
                     {
+                        File.AppendAllText("Logs/Strategy.log", "we are inside second if\n");
+                        File.AppendAllText("Logs/Strategy.log", (!_signalsTimeFrames.Any() && _tradeableTimeFrames.Contains(timeFrame))+"\n");
+                        if (_signalsTimeFrames.Any())  
+                        {
+                            File.AppendAllText("Logs/Strategy.log", _signalsTimeFrames.LastOrDefault().Key.Equals(timeFrame)+"\n");
+                        }
+                        
                         SignalType signal = indicators.AnaliseCandle(candle);
                         // if the signal was partial we have to keep checking until the next candle of
                         // the bigger timeframe
@@ -250,6 +265,12 @@ public class Agent
                             _signalsTimeFrames.Add(_timeFrames[timeFrame],
                                 getNextCandleTime(timeFrame,
                                     DateTimeOffset.FromUnixTimeMilliseconds(candle.OpenTime).UtcDateTime));
+                            File.AppendAllText("Logs/Strategy.log", "we have a partial signal\n");
+                            File.AppendAllText("Logs/Strategy.log", timeFrame+"\n");
+                            File.AppendAllText("Logs/Strategy.log", candle.ToString()+"\n");
+                            File.AppendAllText("Logs/Strategy.log", "time limit is:"+
+                                                                    DateTimeOffset.FromUnixTimeMilliseconds(getNextCandleTime(timeFrame,
+                                                                        DateTimeOffset.FromUnixTimeMilliseconds(candle.OpenTime).UtcDateTime)).DateTime.ToString("yyyy-MM-dd HH:mm:ss")+"\n");
                         }
 
                         if (signal == SignalType.Buy)
