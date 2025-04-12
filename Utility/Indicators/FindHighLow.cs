@@ -1,6 +1,8 @@
+using Utility.Indicators;
+
 namespace Utility.Services;
 
-public class FindHighLow
+public class FindHighLow: Indicator
 {
     public void Find(decimal first , decimal second, decimal third)
     {

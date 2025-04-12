@@ -13,6 +13,7 @@ using Strategy;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 using TradeManager;
+using Utility.Services;
 
 namespace Agent;
 
@@ -29,8 +30,10 @@ public class Agent
     private Dictionary<string, long> _signalsTimeFrames;
     private List<string> _tradeableTimeFrames;
     private CircularLinkedList<CandleData> _HighsLows;
+    
     public Agent(TradeManagerService tradeManagerService)
     {
+        _HighsLows = new CircularLinkedList<CandleData>(100, () => new CandleData());
         _signalsTimeFrames = new Dictionary<string, long>();
         _tradeManagerService = tradeManagerService;
         _rest = new Rest();
@@ -403,6 +406,10 @@ public class Agent
             else if (indicator is BollingerBand bollingerBand && bollingerBand.WindowSize + 1 <= index)
             {
                 bollingerBand.Calculate(_charts[timeFrame].GetCurrent());
+            }
+            else if (indicator is FindHighLow findHighLow)
+            {
+                
             }
         }
     }
