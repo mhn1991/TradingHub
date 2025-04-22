@@ -5,6 +5,7 @@ using Utility;
 using Utility.Indicators;
 using System.IO;
 using System.Text.RegularExpressions;
+using Brokers.Interfaces;
 using DBManager;
 using DBManager.Models;
 using DBManager.Repositories;
@@ -20,7 +21,7 @@ namespace Agent;
 public class Agent
 {
     private readonly Rest _rest;
-    private readonly Instrument _instrument;
+    private readonly Iinstrument _instrument;
     private readonly Dictionary<string, string> _timeFrames;
     private Dictionary<string, CircularLinkedList<CandleData>> _charts;
     private string _filePath;
@@ -31,13 +32,14 @@ public class Agent
     private List<string> _tradeableTimeFrames;
     private CircularLinkedList<CandleData> _HighsLows;
     
-    public Agent(TradeManagerService tradeManagerService)
+    public Agent(TradeManagerService tradeManagerService, Iinstrument instrument)
     {
         _HighsLows = new CircularLinkedList<CandleData>(100, () => new CandleData());
         _signalsTimeFrames = new Dictionary<string, long>();
         _tradeManagerService = tradeManagerService;
         _rest = new Rest();
-        _instrument = new Instrument("BTCUSDT", "1m", "1000");
+        //_instrument = new Instrument("BTCUSDT", "1m", "1000");
+        _instrument = instrument;
         _filePath = "Logs/" + _instrument.BrokerName + "-" + _instrument.CoinName + ".log";
         EnsureLogDirectoryExists();
         DeleteLogFileIfExists();
