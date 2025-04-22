@@ -28,6 +28,7 @@ public class CandleData
     public decimal BollingerBandUpperband  { get; set; }
     public decimal BollingerBandLowerband  { get; set; }
     public decimal BollingerBandMiddleband  { get; set; }
+    public decimal ATR {get;set;}
     public bool isComplete { get; set; }
     
     public interface ICandleMapper<T>
@@ -57,7 +58,7 @@ public class CandleData
         DateTime openDateTime = DateTime.UnixEpoch.AddMilliseconds(OpenTime);
         return $"CandleData [OpenTime: {openDateTime:yyyy-MM-dd HH:mm:ss}, StampedTime: {OpenTime}, Open: {Open:F2}, High: {High:F2}, " +
                $"Low: {Low:F2}, Close: {Close:F2}, Volume: {Volume:F2}, " +
-               $"Gain: {Gain:F2}, Loss: {Loss:F2}, RSI: {RSI:F2}, " +
+               $"Gain: {Gain:F2}, Loss: {Loss:F2}, RSI: {RSI:F2}, ATR: {ATR:F2}, " +
                $"StochRSIK: {StochRSIK:F4}, BB Upper: {BollingerBandUpperband:F2}, " +
                $"BB Lower: {BollingerBandLowerband:F2}, BB Middle: {BollingerBandMiddleband:F2}]\n";
     }

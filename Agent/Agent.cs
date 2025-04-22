@@ -86,6 +86,7 @@ public class Agent
                     new RSI(),
                     new StochRSI(),
                     new BollingerBand(),
+                    new AverageTrueRange(),
                 }
             },
             {
@@ -94,6 +95,7 @@ public class Agent
                     new RSI(),
                     new StochRSI(),
                     new BollingerBand(),
+                    new AverageTrueRange(),
                 }
             },
             {
@@ -102,6 +104,7 @@ public class Agent
                     new RSI(),
                     new StochRSI(),
                     new BollingerBand(),
+                    new AverageTrueRange(),
                 }
             },
             {
@@ -110,6 +113,7 @@ public class Agent
                     new RSI(),
                     new StochRSI(),
                     new BollingerBand(),
+                    new AverageTrueRange(),
                 }
             },
             {
@@ -118,6 +122,7 @@ public class Agent
                     new RSI(),
                     new StochRSI(),
                     new BollingerBand(),
+                    new AverageTrueRange(),
                 }
             }
         };
@@ -407,9 +412,9 @@ public class Agent
             {
                 bollingerBand.Calculate(_charts[timeFrame].GetCurrent());
             }
-            else if (indicator is FindHighLow findHighLow)
+            else if (indicator is AverageTrueRange averageTrueRange && averageTrueRange.GetWindow() +1 <= index)
             {
-                
+                candle.ATR = averageTrueRange.Calculate(_charts[timeFrame].GetCurrent(), isLive);
             }
         }
     }
