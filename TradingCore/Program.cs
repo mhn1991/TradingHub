@@ -34,6 +34,6 @@ public class TradingCore
 
         // Create an agent with injected dependencies
         var tradeManagerService = serviceProvider.GetRequiredService<TradeManagerService>();
-        Agent oandAgent = new Agent(tradeManagerService); // Save for later use in tests
+        Agent oandAgent = new Agent(tradeManagerService, ); // Save for later use in tests
     }
 }
