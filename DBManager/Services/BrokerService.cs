@@ -1,5 +1,6 @@
 using DBManager.Models;
 using DBManager.Repositories;
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -20,10 +21,13 @@ namespace DBManager.Services
             return await _brokerRepository.GetAllBrokersAsync();
         }
 
-        // Get a broker by ID
-        public async Task<Broker> GetBrokerByIdAsync(int id)
+        // Get a broker by Name (string)
+        public async Task<Broker?> GetBrokerByNameAsync(string name)
         {
-            return await _brokerRepository.GetBrokerByIdAsync(id);
+            if (string.IsNullOrWhiteSpace(name))
+                throw new ArgumentException("Broker name cannot be null or empty.", nameof(name));
+
+            return await _brokerRepository.GetBrokerByNameAsync(name);
         }
 
         // Create a new broker
@@ -44,14 +48,17 @@ namespace DBManager.Services
             await _brokerRepository.UpdateBrokerAsync(broker);
         }
 
-        // Delete a broker by ID
-        public async Task DeleteBrokerAsync(int id)
+        // Delete a broker by Name (string)
+        public async Task DeleteBrokerAsync(string name)
         {
-            var broker = await _brokerRepository.GetBrokerByIdAsync(id);
-            if (broker == null)
-                throw new ArgumentException($"Broker with id {id} not found.");
+            if (string.IsNullOrWhiteSpace(name))
+                throw new ArgumentException("Broker name cannot be null or empty.", nameof(name));
 
-            await _brokerRepository.DeleteBrokerAsync(id);
+            var broker = await _brokerRepository.GetBrokerByNameAsync(name);
+            if (broker == null)
+                throw new ArgumentException($"Broker with name '{name}' not found.");
+
+            await _brokerRepository.DeleteBrokerAsync(name);
         }
     }
 }

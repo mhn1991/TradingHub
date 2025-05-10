@@ -20,9 +20,9 @@ namespace DBManager.Repositories
             return await _context.Brokers.ToListAsync();
         }
 
-        public async Task<Broker> GetBrokerByIdAsync(int id)
+        public async Task<Broker?> GetBrokerByNameAsync(string name)
         {
-            return await _context.Brokers.FirstOrDefaultAsync(b => b.Id == id);
+            return await _context.Brokers.FirstOrDefaultAsync(b => b.Name == name);
         }
 
         public async Task CreateBrokerAsync(Broker broker)
@@ -37,9 +37,9 @@ namespace DBManager.Repositories
             await _context.SaveChangesAsync();
         }
 
-        public async Task DeleteBrokerAsync(int id)
+        public async Task DeleteBrokerAsync(string name)
         {
-            var broker = await _context.Brokers.FindAsync(id);
+            var broker = await _context.Brokers.FindAsync(name);
             if (broker != null)
             {
                 _context.Brokers.Remove(broker);

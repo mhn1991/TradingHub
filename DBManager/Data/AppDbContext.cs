@@ -1,0 +1,38 @@
+using DBManager.Models;
+using Microsoft.EntityFrameworkCore;
+
+namespace DBManager.Data;
+
+public class AppDbContext:DbContext
+{
+    public DbSet<Broker> Brokers { get; set; }
+    public DbSet<Endpoint> Endpoints { get; set; }
+    public DbSet<Parameter> Parameters { get; set; }
+
+    public AppDbContext(DbContextOptions<AppDbContext> options)
+        : base(options)
+    {
+    }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        // Apply model constraints
+        modelBuilder.Entity<Broker>()
+            .HasKey(b => b.Name);
+
+        modelBuilder.Entity<Endpoint>()
+            .HasOne(e => e.Broker)
+            .WithMany(b => b.Endpoints)
+            .HasForeignKey(e => e.BrokerName)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Parameter>()
+            .HasOne(p => p.Broker)
+            .WithMany()
+            .HasForeignKey(p => p.BrokerName);
+
+        modelBuilder.Entity<Parameter>()
+            .HasIndex(p => new { p.BrokerName, p.Path, p.Name })
+            .IsUnique();
+    }
+}
