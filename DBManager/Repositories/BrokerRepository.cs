@@ -3,14 +3,15 @@ using Microsoft.EntityFrameworkCore;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using DBManager.Data;
 
 namespace DBManager.Repositories
 {
     public class BrokerRepository : IBrokerRepository
     {
-        private readonly ApplicationDbContext _context;
+        private readonly AppDbContext _context;
 
-        public BrokerRepository(ApplicationDbContext context)
+        public BrokerRepository(AppDbContext context)
         {
             _context = context;
         }

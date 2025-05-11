@@ -1,3 +1,4 @@
+using DBManager.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 
@@ -44,19 +45,19 @@ public class DbManager
         return await command.ExecuteReaderAsync();
     }
     
-    public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<ApplicationDbContext>
+    public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
     {
-        public ApplicationDbContext CreateDbContext(string[] args)
+        public AppDbContext CreateDbContext(string[] args)
         {
             // You can replace this with your actual connection string or configuration
-            var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>();
+            var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
 
             // Read the connection string from the appsettings.json or environment variables
             var connectionString = "Host=localhost;Port=54320;Username=db;Password=mysecretpassword;Database=tradinghub";
 
             optionsBuilder.UseNpgsql(connectionString);  // Or UseSqlServer() depending on your DB type
 
-            return new ApplicationDbContext(optionsBuilder.Options);
+            return new AppDbContext(optionsBuilder.Options);
         }
     }
 }

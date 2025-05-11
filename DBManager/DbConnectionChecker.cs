@@ -1,13 +1,14 @@
 using Microsoft.EntityFrameworkCore;
 using System;
+using DBManager.Data;
 
 namespace DBManager
 {
     public class DbConnectionChecker
     {
-        private readonly ApplicationDbContext _context;
+        private readonly AppDbContext _context;
 
-        public DbConnectionChecker(ApplicationDbContext context)
+        public DbConnectionChecker(AppDbContext context)
         {
             _context = context;
         }
