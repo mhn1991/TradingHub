@@ -35,4 +35,33 @@ public class AppDbContext:DbContext
             .HasIndex(p => new { p.BrokerName, p.Path, p.Name })
             .IsUnique();
     }
+
+    private void SetUpBrokers(ModelBuilder modelBuilder)
+    {
+        Broker Binance = new Broker()
+        {
+            Name = "BINANCE",
+            APIKey = null,
+            SecretKey = null,
+            BaseURL = "https://api.binance.com/api/v3/",
+        };
+        Endpoint BinanceEnd = new Endpoint()
+        {
+            Id = 1,
+            BrokerName = "BINANCE",
+            Path = "klines",
+            ProtocolType = "REST",
+            ActionType = "GET",
+        };
+        Parameter BinanceParam = new Parameter()
+        {
+            Id = 1,
+            BrokerName = "BINANCE",
+            Path = "klines",
+            Name = "symbol",
+            LocatedIn = "query",
+            Type = "string",
+            Value = null
+        };
+    }
 }

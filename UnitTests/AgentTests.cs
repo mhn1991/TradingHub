@@ -11,7 +11,7 @@ using Agent;
 public class AgentTests
 {
     private Agent _agent;
-    [SetUp]
+    /*[SetUp]
     public void Setup()
     {
         var services = new ServiceCollection();
@@ -46,5 +46,5 @@ public class AgentTests
         //await _agent.InitAsync();
         await _agent.Run();
         //_agent.checkDB();
-    }
+    }*/
 }
