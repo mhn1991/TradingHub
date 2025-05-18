@@ -1,19 +1,17 @@
+using DBManager.Services;
+
 namespace Brokers;
 
-public abstract class Broker
+public class Broker
 {
-    protected string _brokerName;
-    protected string _apiType;
-    protected string _baseUrl;
-
-    protected void Init(string brokerName, string apiType, string baseUrl)
+    BrokerService _brokerService;
+    public Broker(string brokerName, IBrokerRepository brokerRepository)
     {
-        _brokerName = brokerName;
-        _apiType = apiType;
-        _baseUrl = baseUrl;
+        _brokerService = new BrokerService(brokerRepository);
     }
     
-    public string BrokerName => _brokerName;
-    public string ApiType => _apiType;
-    public string BaseUrl => _baseUrl;
+    public void GetChartCandles()
+    {
+        
+    } 
 }

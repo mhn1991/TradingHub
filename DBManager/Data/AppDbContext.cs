@@ -34,26 +34,32 @@ public class AppDbContext:DbContext
         modelBuilder.Entity<Parameter>()
             .HasIndex(p => new { p.BrokerName, p.Path, p.Name })
             .IsUnique();
+        SetUpBaseBrokers(modelBuilder);
     }
 
-    private void SetUpBrokers(ModelBuilder modelBuilder)
+    private void SetUpBaseBrokers(ModelBuilder modelBuilder)
     {
-        Broker Binance = new Broker()
+        // Seed Broker
+        modelBuilder.Entity<Broker>().HasData(new Broker
         {
             Name = "BINANCE",
             APIKey = null,
             SecretKey = null,
-            BaseURL = "https://api.binance.com/api/v3/",
-        };
-        Endpoint BinanceEnd = new Endpoint()
+            BaseURL = "https://api.binance.com/api/v3/"
+        });
+
+        // Seed Endpoint
+        modelBuilder.Entity<Endpoint>().HasData(new Endpoint
         {
             Id = 1,
             BrokerName = "BINANCE",
             Path = "klines",
             ProtocolType = "REST",
-            ActionType = "GET",
-        };
-        Parameter BinanceParam = new Parameter()
+            ActionType = "GET"
+        });
+
+        // Seed Parameter
+        modelBuilder.Entity<Parameter>().HasData(new Parameter
         {
             Id = 1,
             BrokerName = "BINANCE",
@@ -62,6 +68,6 @@ public class AppDbContext:DbContext
             LocatedIn = "query",
             Type = "string",
             Value = null
-        };
+        });
     }
 }

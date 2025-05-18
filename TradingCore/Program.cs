@@ -1,8 +1,10 @@
-﻿using DBManager;
+﻿using Brokers;
+using DBManager;
 using DBManager.Data;
 using DBManager.Repositories;
 using DBManager.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using TradeManager;
 
@@ -13,26 +15,22 @@ public class TradingCore
 {
     static void Main(string[] args)
     {
+        var configuration = new ConfigurationBuilder()
+            .SetBasePath(Directory.GetCurrentDirectory())
+            .AddJsonFile("appsettings.json")
+            .Build();
+
         var services = new ServiceCollection();
 
-        // Add DbContext
         services.AddDbContext<AppDbContext>(options =>
-            options.UseNpgsql("Server=localhost;Port=54320;User Id=db;Password=mysecretpassword;Database=tradinghub;"));
+            options.UseNpgsql(configuration.GetConnectionString("DefaultConnection")));
 
-        // Register repositories (MISSING in your code)
+        // Register your repository
         services.AddScoped<IBrokerRepository, BrokerRepository>();
 
-        // Register DBManager services
-        services.AddScoped<BrokerService>();
+        ServiceProvider serviceProvider = services.BuildServiceProvider();
+        IBrokerRepository brokerRepo = serviceProvider.GetRequiredService<IBrokerRepository>();
+        Broker broker = new Broker("Binance",brokerRepo);
 
-        // Register TradeManager service
-        services.AddScoped<TradeManagerService>();
-
-        // Build the service provider
-        var serviceProvider = services.BuildServiceProvider();
-
-        // Create an agent with injected dependencies
-        var tradeManagerService = serviceProvider.GetRequiredService<TradeManagerService>();
-        //Agent oandAgent = new Agent(tradeManagerService, ); // Save for later use in tests
     }
 }

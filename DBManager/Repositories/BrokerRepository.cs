@@ -10,7 +10,6 @@ namespace DBManager.Repositories
     public class BrokerRepository : IBrokerRepository
     {
         private readonly AppDbContext _context;
-
         public BrokerRepository(AppDbContext context)
         {
             _context = context;

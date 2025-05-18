@@ -9,7 +9,6 @@ namespace DBManager.Services
     public class BrokerService
     {
         private readonly IBrokerRepository _brokerRepository;
-
         public BrokerService(IBrokerRepository brokerRepository)
         {
             _brokerRepository = brokerRepository;
