@@ -46,5 +46,12 @@ namespace DBManager.Repositories
                 await _context.SaveChangesAsync();
             }
         }
+        
+        public async Task<Broker?> GetEndpoint(string brokerName)
+        {
+            return await _context.Brokers.Include(x => x.Endpoints)
+                .ThenInclude(y => y.Parameters)
+                .FirstOrDefaultAsync(z => z.Name == brokerName);
+        }
     }
 }
