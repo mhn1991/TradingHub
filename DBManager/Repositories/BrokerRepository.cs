@@ -47,11 +47,13 @@ namespace DBManager.Repositories
             }
         }
         
-        public async Task<Broker?> GetEndpoint(string brokerName)
+        public async Task<Broker?> GetBrokerWithEndpointsByTypeAsync(string brokerName, EndpointType endpointType)
         {
-            return await _context.Brokers.Include(x => x.Endpoints)
-                .ThenInclude(y => y.Parameters)
-                .FirstOrDefaultAsync(z => z.Name == brokerName);
+            return await _context.Brokers
+                .Where(b => b.Name == brokerName)
+                .Include(b => b.Endpoints.Where(e => e.EndpointType == endpointType))
+                .ThenInclude(e => e.Parameters)
+                .FirstOrDefaultAsync();
         }
     }
 }

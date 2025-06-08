@@ -34,6 +34,10 @@ public class AppDbContext:DbContext
         modelBuilder.Entity<Parameter>()
             .HasIndex(p => new { p.BrokerName, p.Path, p.Name })
             .IsUnique();
+        modelBuilder.Entity<Endpoint>()
+            .Property(e => e.EndpointType)
+            .HasConversion<string>();
+
         SetUpBaseBrokers(modelBuilder);
     }
 
@@ -55,7 +59,8 @@ public class AppDbContext:DbContext
             BrokerName = "BINANCE",
             Path = "klines",
             ProtocolType = "REST",
-            ActionType = "GET"
+            ActionType = "GET",
+            EndpointType = EndpointType.GetCandles
         });
 
         // Seed Parameter

@@ -7,4 +7,6 @@ public interface IBrokerRepository
     Task CreateBrokerAsync(Broker broker);
     Task UpdateBrokerAsync(Broker broker);
     Task DeleteBrokerAsync(string name);
+    Task<Broker?> GetBrokerWithEndpointsByTypeAsync(string brokerName, EndpointType endpointType);
+
 }

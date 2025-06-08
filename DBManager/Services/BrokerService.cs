@@ -59,5 +59,11 @@ namespace DBManager.Services
 
             await _brokerRepository.DeleteBrokerAsync(name);
         }
+        
+        public async Task<Broker?> GetBrokerWithEndpointsByTypeAsync(string brokerName, EndpointType endpointType)
+        {
+            return await _brokerRepository.GetBrokerWithEndpointsByTypeAsync(brokerName, endpointType);
+        }
+
     }
 }

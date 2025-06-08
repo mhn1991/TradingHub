@@ -19,9 +19,13 @@ public class Endpoint
     public string Path { get; set; } = default!;
 
     [Required]
-    public string ProtocolType { get; set; } = default!;  // e.g., Rest, WebSocket, Fix
+    public string ProtocolType { get; set; } = default!;
 
-    public string? ActionType { get; set; }  // e.g., GET, SUBSCRIBE, D
+    public string? ActionType { get; set; }
+
+    [Required]
+    public EndpointType EndpointType { get; set; }
 
     public ICollection<Parameter> Parameters { get; set; } = new List<Parameter>();
 }
+
