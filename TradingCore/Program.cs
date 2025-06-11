@@ -1,19 +1,15 @@
 ﻿using Brokers;
-using DBManager;
 using DBManager.Data;
 using DBManager.Repositories;
-using DBManager.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using TradeManager;
 
 namespace TradingCore;
-using Agent;
 
 public class TradingCore
 {
-    static void Main(string[] args)
+    static async Task Main(string[] args)
     {
         var configuration = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
@@ -30,7 +26,8 @@ public class TradingCore
 
         ServiceProvider serviceProvider = services.BuildServiceProvider();
         IBrokerRepository brokerRepo = serviceProvider.GetRequiredService<IBrokerRepository>();
-        Broker broker = new Broker("Binance",brokerRepo);
+        Broker broker = new Broker("BINANCE",brokerRepo);
+        await broker.GetChart();
 
     }
 }

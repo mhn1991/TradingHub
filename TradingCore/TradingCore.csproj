@@ -8,7 +8,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\Agent\Agent.csproj" />
+      <ProjectReference Include="..\Brokers\Brokers.csproj" />
       <ProjectReference Include="..\DBManager\DBManager.csproj" />
     </ItemGroup>
 
