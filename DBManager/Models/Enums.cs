@@ -1,5 +1,11 @@
 namespace DBManager.Models;
 
+public enum FormulaType
+{
+    Factor,       // Factor only (time, length)
+    FactorOffset  // Factor + offset (temperature, etc.)
+}
+
 public enum TradeType
 {
     BUY,

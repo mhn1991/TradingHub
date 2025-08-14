@@ -40,7 +40,7 @@ public class AppDbContext:DbContext
 
         SetUpBaseBrokers(modelBuilder);
     }
-
+    
     private void SetUpBaseBrokers(ModelBuilder modelBuilder)
     {
         // Seed Broker
