@@ -146,6 +146,218 @@ namespace DBManager.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DBManager.Models.Unit", b =>
+                {
+                    b.Property<int>("UnitId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("UnitId"));
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Symbol")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("UnitType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.HasKey("UnitId");
+
+                    b.HasIndex("Symbol")
+                        .IsUnique();
+
+                    b.ToTable("Units");
+
+                    b.HasData(
+                        new
+                        {
+                            UnitId = 1,
+                            Description = "Calendar Year (365 days)",
+                            Symbol = "Year",
+                            UnitType = "Time"
+                        },
+                        new
+                        {
+                            UnitId = 2,
+                            Description = "Calendar Month (30 days approx)",
+                            Symbol = "Month",
+                            UnitType = "Time"
+                        },
+                        new
+                        {
+                            UnitId = 3,
+                            Description = "7 Days",
+                            Symbol = "Week",
+                            UnitType = "Time"
+                        },
+                        new
+                        {
+                            UnitId = 4,
+                            Description = "24 Hours",
+                            Symbol = "Day",
+                            UnitType = "Time"
+                        },
+                        new
+                        {
+                            UnitId = 5,
+                            Description = "60 Minutes",
+                            Symbol = "Hour",
+                            UnitType = "Time"
+                        },
+                        new
+                        {
+                            UnitId = 6,
+                            Description = "60 Seconds",
+                            Symbol = "Minute",
+                            UnitType = "Time"
+                        },
+                        new
+                        {
+                            UnitId = 7,
+                            Description = "Base Time Unit",
+                            Symbol = "Second",
+                            UnitType = "Time"
+                        });
+                });
+
+            modelBuilder.Entity("DBManager.Models.UnitConversion", b =>
+                {
+                    b.Property<int>("ConversionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("ConversionId"));
+
+                    b.Property<decimal?>("FormulaOffset")
+                        .HasColumnType("numeric");
+
+                    b.Property<int>("FormulaType")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("FormulaValue")
+                        .HasColumnType("numeric");
+
+                    b.Property<int>("FromUnitId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ToUnitId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("ConversionId");
+
+                    b.HasIndex("FromUnitId");
+
+                    b.HasIndex("ToUnitId");
+
+                    b.ToTable("UnitConversions");
+
+                    b.HasData(
+                        new
+                        {
+                            ConversionId = 1,
+                            FormulaType = 0,
+                            FormulaValue = 12m,
+                            FromUnitId = 1,
+                            ToUnitId = 2
+                        },
+                        new
+                        {
+                            ConversionId = 2,
+                            FormulaType = 0,
+                            FormulaValue = 4.345m,
+                            FromUnitId = 2,
+                            ToUnitId = 3
+                        },
+                        new
+                        {
+                            ConversionId = 3,
+                            FormulaType = 0,
+                            FormulaValue = 7m,
+                            FromUnitId = 3,
+                            ToUnitId = 4
+                        },
+                        new
+                        {
+                            ConversionId = 4,
+                            FormulaType = 0,
+                            FormulaValue = 24m,
+                            FromUnitId = 4,
+                            ToUnitId = 5
+                        },
+                        new
+                        {
+                            ConversionId = 5,
+                            FormulaType = 0,
+                            FormulaValue = 60m,
+                            FromUnitId = 5,
+                            ToUnitId = 6
+                        },
+                        new
+                        {
+                            ConversionId = 6,
+                            FormulaType = 0,
+                            FormulaValue = 60m,
+                            FromUnitId = 6,
+                            ToUnitId = 7
+                        },
+                        new
+                        {
+                            ConversionId = 100,
+                            FormulaType = 0,
+                            FormulaValue = 0.0833333333333333333333333333m,
+                            FromUnitId = 2,
+                            ToUnitId = 1
+                        },
+                        new
+                        {
+                            ConversionId = 101,
+                            FormulaType = 0,
+                            FormulaValue = 0.2301495972382048331415420023m,
+                            FromUnitId = 3,
+                            ToUnitId = 2
+                        },
+                        new
+                        {
+                            ConversionId = 102,
+                            FormulaType = 0,
+                            FormulaValue = 0.1428571428571428571428571429m,
+                            FromUnitId = 4,
+                            ToUnitId = 3
+                        },
+                        new
+                        {
+                            ConversionId = 103,
+                            FormulaType = 0,
+                            FormulaValue = 0.0416666666666666666666666667m,
+                            FromUnitId = 5,
+                            ToUnitId = 4
+                        },
+                        new
+                        {
+                            ConversionId = 104,
+                            FormulaType = 0,
+                            FormulaValue = 0.0166666666666666666666666667m,
+                            FromUnitId = 6,
+                            ToUnitId = 5
+                        },
+                        new
+                        {
+                            ConversionId = 105,
+                            FormulaType = 0,
+                            FormulaValue = 0.0166666666666666666666666667m,
+                            FromUnitId = 7,
+                            ToUnitId = 6
+                        });
+                });
+
             modelBuilder.Entity("DBManager.Models.Endpoint", b =>
                 {
                     b.HasOne("DBManager.Models.Broker", "Broker")
@@ -170,6 +382,25 @@ namespace DBManager.Migrations
                         .HasForeignKey("EndpointId");
 
                     b.Navigation("Broker");
+                });
+
+            modelBuilder.Entity("DBManager.Models.UnitConversion", b =>
+                {
+                    b.HasOne("DBManager.Models.Unit", "FromUnit")
+                        .WithMany()
+                        .HasForeignKey("FromUnitId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("DBManager.Models.Unit", "ToUnit")
+                        .WithMany()
+                        .HasForeignKey("ToUnitId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("FromUnit");
+
+                    b.Navigation("ToUnit");
                 });
 
             modelBuilder.Entity("DBManager.Models.Broker", b =>

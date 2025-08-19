@@ -10,4 +10,8 @@
       <ProjectReference Include="..\Brokers\Brokers.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Folder Include="Converter\" />
+    </ItemGroup>
+
 </Project>

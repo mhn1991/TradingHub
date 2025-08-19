@@ -11,11 +11,11 @@ public class UnitConversion
 
     [Required]
     public int FromUnitId { get; set; }
-    public Unit FromUnit { get; set; }
+    public Unit FromUnit { get; set; } = null!;
 
     [Required]
     public int ToUnitId { get; set; }
-    public Unit ToUnit { get; set; }
+    public Unit ToUnit { get; set; } = null!;
 
     [Required]
     public FormulaType FormulaType { get; set; }
@@ -23,5 +23,5 @@ public class UnitConversion
     [Required]
     public decimal FormulaValue { get; set; }
 
-    public decimal? FormulaOffset { get; set; } // Optional for FactorOffset conversions
+    public decimal? FormulaOffset { get; set; } 
 }
