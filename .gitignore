@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.idea/
+*.user
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+secrets.json
+results/
+samples/results/
