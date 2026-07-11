@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Brokers/Brokers.csproj" />
+  <Project Path="Brokers.Tests/Brokers.Tests.csproj" />
+  <Project Path="Networking/Networking.csproj" />
+  <Project Path="Networking.Tests/Networking.Tests.csproj" />
+</Solution>
