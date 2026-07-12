@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore TradingHub.slnx
+      - run: dotnet build TradingHub.slnx --no-restore --configuration Release
+      - run: dotnet test TradingHub.slnx --no-build --no-restore --configuration Release

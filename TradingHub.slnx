@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Brokers.IntegrationTests/Brokers.IntegrationTests.csproj" />
+  <Project Path="Brokers/Brokers.csproj" />
+  <Project Path="Networking/Networking.csproj" />
+  <Project Path="TradingHub.UnitTests/TradingHub.UnitTests.csproj" />
+</Solution>
