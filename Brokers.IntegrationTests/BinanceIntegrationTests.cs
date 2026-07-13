@@ -11,6 +11,7 @@ namespace Brokers.IntegrationTests;
 [NonParallelizable]
 public sealed class BinanceIntegrationTests
 {
+    private const int CandleLimit = 20;
     private IBrokerClient _broker = null!;
     private InstrumentKey _instrument;
 
@@ -19,13 +20,17 @@ public sealed class BinanceIntegrationTests
     {
         _instrument = new InstrumentKey(
             IntegrationTestEnvironment.Optional("BINANCE_TEST_INSTRUMENT") ?? "CRYPTO:BTC/USDT");
+        string? apiKey = IntegrationTestEnvironment.Optional("BINANCE_API_KEY");
+        string? secretKey = IntegrationTestEnvironment.Optional("BINANCE_SECRET_KEY");
+        bool hasCredentials = apiKey is not null && secretKey is not null;
 
         _broker = BrokerClientFactory.CreateBinance(new BinanceOptions
         {
             Environment = IntegrationTestEnvironment.ParseBrokerEnvironment("BINANCE_ENVIRONMENT"),
-            ApiKey = IntegrationTestEnvironment.Required("BINANCE_API_KEY"),
-            SecretKey = IntegrationTestEnvironment.Required("BINANCE_SECRET_KEY"),
-            BaseAddress = IntegrationTestEnvironment.OptionalUri("BINANCE_BASE_URL")
+            ApiKey = apiKey ?? "not-used-by-public-market-data-tests",
+            SecretKey = secretKey ?? "not-used-by-public-market-data-tests",
+            BaseAddress = IntegrationTestEnvironment.OptionalUri("BINANCE_BASE_URL") ??
+                (hasCredentials ? null : new Uri("https://data-api.binance.vision/"))
         });
     }
 
@@ -33,6 +38,7 @@ public sealed class BinanceIntegrationTests
     [Explicit("Calls a real signed Binance account endpoint.")]
     public async Task AccountInformation_UsesSignedNetworkingRequest()
     {
+        RequireCredentials();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         IReadOnlyList<AccountSnapshot> accounts =
@@ -47,29 +53,56 @@ public sealed class BinanceIntegrationTests
         });
     }
 
-    [Test]
-    [Explicit("Calls the real Binance kline endpoint.")]
-    public async Task FiveMinuteCandles_AreReturnedAsStandardCandles()
+    [TestCase(1, BarUnit.Minute)]
+    [TestCase(5, BarUnit.Minute)]
+    [TestCase(15, BarUnit.Minute)]
+    [TestCase(1, BarUnit.Hour)]
+    [TestCase(4, BarUnit.Hour)]
+    [TestCase(1, BarUnit.Day)]
+    [Explicit("Calls the real Binance kline endpoint for multiple timeframes.")]
+    public async Task Candles_AreReturnedForMultipleTimeframes(
+        int intervalValue,
+        BarUnit intervalUnit)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var interval = new BarInterval(intervalValue, intervalUnit);
 
         IReadOnlyList<Candle> candles = await _broker.MarketData.GetCandlesAsync(
-            new CandleQuery(_instrument, BarInterval.Minutes(5), Limit: 20),
+            new CandleQuery(_instrument, interval, Limit: CandleLimit),
             timeout.Token);
 
-        Assert.That(candles, Has.Count.EqualTo(20));
+        Assert.That(candles, Has.Count.EqualTo(CandleLimit));
         Assert.Multiple(() =>
         {
             Assert.That(candles.All(candle => candle.Instrument == _instrument), Is.True);
-            Assert.That(candles.All(candle => candle.Prices.High >= candle.Prices.Low), Is.True);
-            Assert.That(candles.All(candle => candle.Volume?.Kind == VolumeKind.BaseAssetQuantity), Is.True);
+            Assert.That(candles.All(candle => candle.Interval == interval), Is.True);
+            Assert.That(candles.Select(candle => candle.OpenTime), Is.Ordered.Ascending);
+            Assert.That(
+                candles.Select(candle => candle.OpenTime).Distinct().Count(),
+                Is.EqualTo(candles.Count));
+            Assert.That(candles.All(HasConsistentPrices), Is.True);
+            Assert.That(
+                candles.All(candle =>
+                    candle.CloseTime.HasValue && candle.CloseTime.Value > candle.OpenTime),
+                Is.True);
+            Assert.That(
+                candles.All(candle =>
+                    candle.Volume is { Kind: VolumeKind.BaseAssetQuantity, Value: >= 0m }),
+                Is.True);
         });
     }
+
+    private static bool HasConsistentPrices(Candle candle) =>
+        candle.Prices.High >= candle.Prices.Open &&
+        candle.Prices.High >= candle.Prices.Close &&
+        candle.Prices.Low <= candle.Prices.Open &&
+        candle.Prices.Low <= candle.Prices.Close;
 
     [Test]
     [Explicit("Calls real signed Binance open-order and commission endpoints.")]
     public async Task OpenOrdersAndCommission_AreReadWithoutPlacingAnOrder()
     {
+        RequireCredentials();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         IReadOnlyList<BrokerOrder> orders = await _broker.Orders.GetOpenOrdersAsync(
@@ -95,5 +128,11 @@ public sealed class BinanceIntegrationTests
         {
             await _broker.DisposeAsync();
         }
+    }
+
+    private static void RequireCredentials()
+    {
+        _ = IntegrationTestEnvironment.Required("BINANCE_API_KEY");
+        _ = IntegrationTestEnvironment.Required("BINANCE_SECRET_KEY");
     }
 }

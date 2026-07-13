@@ -40,15 +40,17 @@ internal static class OandaMappings
     {
         OandaPrice price = source.Mid ?? source.Bid ?? source.Ask
             ?? throw new InvalidOperationException("OANDA candle did not contain a price component.");
+        DateTimeOffset openTime = DateTimeOffset.Parse(
+            source.Time,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
 
         return new Candle
         {
             Instrument = query.Instrument,
             Interval = query.Interval,
-            OpenTime = DateTimeOffset.Parse(
-                source.Time,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal),
+            OpenTime = openTime,
+            CloseTime = query.Interval.AddTo(openTime),
             Prices = new Ohlc(
                 BrokerJson.ParseDecimal(price.Open),
                 BrokerJson.ParseDecimal(price.High),
@@ -70,7 +72,7 @@ internal static class OandaMappings
         return new BrokerOrder
         {
             BrokerOrderId = source.Id,
-            ClientOrderId = source.ClientExtensions?.Id,
+            ClientOrderId = source.ClientExtensions?.Id ?? source.ClientOrderId,
             Instrument = InstrumentMappers.FromNative(nativeInstrument, instrumentMappings),
             NativeInstrument = nativeInstrument,
             Side = units switch
@@ -126,6 +128,204 @@ internal static class OandaMappings
             UnrealizedProfitLoss = BrokerJson.ParseNullableDecimal(side.UnrealizedPl)
         });
     }
+
+    public static OandaCreateOrderEnvelope ToOrderRequest(
+        PlaceOrderRequest request,
+        string nativeInstrument,
+        string clientOrderId)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(nativeInstrument);
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientOrderId);
+        if (request.Quantity.Unit != QuantityUnit.Units)
+        {
+            throw new BrokerFeatureNotSupportedException(
+                BrokerKind.Oanda,
+                $"Order quantity unit {request.Quantity.Unit}");
+        }
+
+        string type = request.Type switch
+        {
+            StandardOrderType.Market => "MARKET",
+            StandardOrderType.Limit => "LIMIT",
+            StandardOrderType.Stop => "STOP",
+            StandardOrderType.StopLimit => throw new BrokerFeatureNotSupportedException(
+                BrokerKind.Oanda,
+                "Stop-limit orders"),
+            _ => throw new ArgumentOutOfRangeException(nameof(request.Type))
+        };
+        decimal? orderPrice = request.Type switch
+        {
+            StandardOrderType.Limit => request.LimitPrice,
+            StandardOrderType.Stop => request.StopPrice,
+            _ => null
+        };
+        if ((request.Type is StandardOrderType.Limit or StandardOrderType.Stop) &&
+            orderPrice is null or <= 0m)
+        {
+            throw new ArgumentException("A positive order price is required for pending OANDA orders.", nameof(request));
+        }
+
+        string timeInForce = request.Type == StandardOrderType.Market
+            ? request.TimeInForce == StandardTimeInForce.ImmediateOrCancel ? "IOC" : "FOK"
+            : request.TimeInForce switch
+            {
+                StandardTimeInForce.GoodTillDate when request.ExpireAt is not null => "GTD",
+                StandardTimeInForce.Day => "GFD",
+                StandardTimeInForce.GoodTillCancelled => "GTC",
+                _ => throw new BrokerFeatureNotSupportedException(
+                    BrokerKind.Oanda,
+                    $"{request.TimeInForce} for {request.Type} orders")
+            };
+        decimal signedUnits = request.Side switch
+        {
+            OrderSide.Buy => request.Quantity.Value,
+            OrderSide.Sell => -request.Quantity.Value,
+            _ => throw new ArgumentException("The OANDA order side must be Buy or Sell.", nameof(request))
+        };
+
+        return new OandaCreateOrderEnvelope
+        {
+            Order = new OandaCreateOrderRequest
+            {
+                Type = type,
+                Instrument = nativeInstrument,
+                Units = Format(signedUnits),
+                TimeInForce = timeInForce,
+                Price = orderPrice is null ? null : Format(orderPrice.Value),
+                GtdTime = timeInForce == "GTD"
+                    ? request.ExpireAt!.Value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)
+                    : null,
+                ClientExtensions = new OandaClientExtensions { Id = clientOrderId },
+                StopLossOnFill = DependentOrder(request.StopLoss?.Price),
+                TakeProfitOnFill = DependentOrder(request.TakeProfit?.Price)
+            }
+        };
+    }
+
+    public static OrderSubmission ToSubmission(
+        OandaOrderMutationResponse response,
+        string clientOrderId)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        if (response.OrderRejectTransaction is { } rejected)
+        {
+            return new OrderSubmission
+            {
+                ClientOrderId = clientOrderId,
+                BrokerOrderId = rejected.OrderId ?? rejected.Id,
+                Status = SubmissionStatus.Rejected,
+                Certainty = ExecutionCertainty.Rejected,
+                RejectionReason = response.ErrorMessage ?? rejected.Reason ?? "OANDA rejected the order."
+            };
+        }
+
+        OandaTransaction? created = response.OrderCreateTransaction;
+        OandaTransaction? filled = response.OrderFillTransaction;
+        if (created is null && filled is null)
+        {
+            throw new InvalidOperationException("OANDA did not return an order creation or fill transaction.");
+        }
+
+        return new OrderSubmission
+        {
+            ClientOrderId = clientOrderId,
+            BrokerOrderId = filled?.OrderId ?? created?.OrderId ?? created?.Id,
+            Status = filled is null ? SubmissionStatus.Accepted : SubmissionStatus.Filled,
+            Certainty = ExecutionCertainty.Accepted
+        };
+    }
+
+    public static OrderEvent? ToOrderEvent(
+        OandaTransaction transaction,
+        IReadOnlyDictionary<string, string> instrumentMappings)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+        string type = transaction.Type?.ToUpperInvariant() ?? string.Empty;
+        OrderEventType? eventType = type switch
+        {
+            "MARKET_ORDER" or "LIMIT_ORDER" or "STOP_ORDER" or "MARKET_IF_TOUCHED_ORDER" =>
+                OrderEventType.Accepted,
+            "ORDER_FILL" => OrderEventType.Filled,
+            "ORDER_CANCEL" => OrderEventType.Cancelled,
+            _ when type.EndsWith("_REJECT", StringComparison.Ordinal) => OrderEventType.Rejected,
+            _ => null
+        };
+        if (eventType is null || string.IsNullOrWhiteSpace(transaction.OrderId ?? transaction.Id))
+        {
+            return null;
+        }
+
+        decimal? units = BrokerJson.ParseNullableDecimal(transaction.Units);
+        return new OrderEvent
+        {
+            BrokerOrderId = transaction.OrderId ?? transaction.Id!,
+            ClientOrderId = transaction.ClientExtensions?.Id ?? transaction.ClientOrderId,
+            Instrument = string.IsNullOrWhiteSpace(transaction.Instrument)
+                ? new InstrumentKey("OANDA:UNKNOWN")
+                : InstrumentMappers.FromNative(transaction.Instrument, instrumentMappings),
+            Type = eventType.Value,
+            Timestamp = ParseDate(transaction.Time) ?? DateTimeOffset.UtcNow,
+            FillPrice = eventType == OrderEventType.Filled
+                ? BrokerJson.ParseNullableDecimal(transaction.Price)
+                : null,
+            FillQuantity = eventType == OrderEventType.Filled && units is not null
+                ? Math.Abs(units.Value)
+                : null,
+            Message = transaction.Reason
+        };
+    }
+
+    public static OandaPriceTick? ToPriceTick(OandaPricingStreamMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (!string.Equals(message.Type, "PRICE", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(message.Instrument) ||
+            string.IsNullOrWhiteSpace(message.Time) ||
+            message.Bids.Count == 0 ||
+            message.Asks.Count == 0)
+        {
+            return null;
+        }
+
+        decimal bid = message.Bids
+            .Select(bucket => BrokerJson.ParseDecimal(bucket.Price))
+            .Max();
+        decimal ask = message.Asks
+            .Select(bucket => BrokerJson.ParseDecimal(bucket.Price))
+            .Min();
+        if (bid <= 0m || ask <= 0m || ask < bid)
+        {
+            throw new InvalidOperationException("OANDA returned an invalid bid/ask price.");
+        }
+
+        return new OandaPriceTick(
+            message.Instrument,
+            DateTimeOffset.Parse(
+                message.Time,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal),
+            bid,
+            ask,
+            message.Tradeable);
+    }
+
+    private static OandaDependentOrderRequest? DependentOrder(decimal? price)
+    {
+        if (price is null)
+        {
+            return null;
+        }
+        if (price <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(price));
+        }
+
+        return new OandaDependentOrderRequest { Price = Format(price.Value) };
+    }
+
+    private static string Format(decimal value) =>
+        value.ToString("0.############################", CultureInfo.InvariantCulture);
 
     private static DateTimeOffset? ParseDate(string? value)
     {

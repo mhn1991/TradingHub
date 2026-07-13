@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Brokers.Abstractions;
 using Brokers.Infrastructure;
 using Brokers.Models;
@@ -68,7 +70,8 @@ internal sealed class OandaOrderClient(
     INetworkGateway gateway,
     TransportId transportId,
     string accountId,
-    IReadOnlyDictionary<string, string> instrumentMappings) : IOrderClient
+    IReadOnlyDictionary<string, string> instrumentMappings,
+    HttpClient streamingClient) : ITradingOrderClient
 {
     public async Task<IReadOnlyList<BrokerOrder>> GetOpenOrdersAsync(
         InstrumentKey? instrument = null,
@@ -87,6 +90,84 @@ internal sealed class OandaOrderClient(
                 string.Equals(order.Instrument, nativeFilter, StringComparison.OrdinalIgnoreCase))
             .Select(order => OandaMappings.ToOrder(order, instrumentMappings))
             .ToArray();
+    }
+
+    public async Task<OrderSubmission> PlaceOrderAsync(
+        PlaceOrderRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        string clientOrderId = string.IsNullOrWhiteSpace(request.ClientOrderId)
+            ? $"th-{Guid.NewGuid():N}"
+            : request.ClientOrderId;
+        if (clientOrderId.Length > 128)
+        {
+            throw new ArgumentException("The OANDA client order ID cannot exceed 128 characters.", nameof(request));
+        }
+
+        string nativeInstrument = InstrumentMappers.ToOanda(request.Instrument, instrumentMappings);
+        OandaCreateOrderEnvelope payload = OandaMappings.ToOrderRequest(
+            request,
+            nativeInstrument,
+            clientOrderId);
+        OandaOrderMutationResponse response = await gateway.SendAsync(
+            new OandaPlaceOrderCommand(transportId, accountId, payload),
+            cancellationToken).ConfigureAwait(false);
+        return OandaMappings.ToSubmission(response, clientOrderId);
+    }
+
+    public async Task CancelOrderAsync(
+        string brokerOrderId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(brokerOrderId);
+        OandaOrderMutationResponse response = await gateway.SendAsync(
+            new OandaCancelOrderCommand(transportId, accountId, brokerOrderId),
+            cancellationToken).ConfigureAwait(false);
+        if (response.OrderCancelTransaction is null)
+        {
+            throw new InvalidOperationException(
+                response.ErrorMessage ?? "OANDA did not confirm the order cancellation.");
+        }
+    }
+
+    public async IAsyncEnumerable<OrderEvent> StreamOrderEventsAsync(
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"v3/accounts/{Uri.EscapeDataString(accountId)}/transactions/stream");
+        using HttpResponseMessage response = await streamingClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var reader = new StreamReader(stream);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            string? line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (line is null)
+            {
+                yield break;
+            }
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            OandaTransaction? transaction = JsonSerializer.Deserialize(
+                line,
+                BrokerJsonSerializerContext.Default.OandaTransaction);
+            OrderEvent? orderEvent = transaction is null
+                ? null
+                : OandaMappings.ToOrderEvent(transaction, instrumentMappings);
+            if (orderEvent is not null)
+            {
+                yield return orderEvent;
+            }
+        }
     }
 }
 

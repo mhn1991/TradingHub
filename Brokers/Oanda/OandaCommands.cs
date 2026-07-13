@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Http.Json;
 using Brokers.Abstractions;
 using Brokers.Infrastructure;
 using Networking.Abstractions;
@@ -12,8 +13,8 @@ internal abstract class OandaHttpCommand<TResponse>(TransportId transportId)
     public TransportId TransportId { get; } = transportId;
     public TimeSpan? Timeout => null;
     public bool EnsureSuccessStatusCode => false;
-    public bool IsIdempotent => true;
-    public int MaxTransientRetries => 2;
+    public virtual bool IsIdempotent => true;
+    public virtual int MaxTransientRetries => 2;
     public abstract HttpRequestMessage CreateRequest();
 
     public ValueTask<TResponse> ReadResponseAsync(
@@ -36,7 +37,10 @@ internal sealed class OandaGetCandlesCommand(
         {
             $"granularity={Uri.EscapeDataString(granularity)}",
             $"count={limit.ToString(CultureInfo.InvariantCulture)}",
-            "price=M"
+            "price=M",
+            "dailyAlignment=0",
+            "alignmentTimezone=UTC",
+            "weeklyAlignment=Monday"
         };
 
         if (from is not null)
@@ -79,4 +83,45 @@ internal sealed class OandaGetOpenPositionsCommand(
     public override HttpRequestMessage CreateRequest() => new(
         HttpMethod.Get,
         $"v3/accounts/{Uri.EscapeDataString(accountId)}/openPositions");
+}
+
+internal sealed class OandaGetInstrumentsCommand(
+    TransportId transportId,
+    string accountId) : OandaHttpCommand<OandaInstrumentsResponse>(transportId)
+{
+    public override HttpRequestMessage CreateRequest() => new(
+        HttpMethod.Get,
+        $"v3/accounts/{Uri.EscapeDataString(accountId)}/instruments");
+}
+
+internal sealed class OandaPlaceOrderCommand(
+    TransportId transportId,
+    string accountId,
+    OandaCreateOrderEnvelope payload) : OandaHttpCommand<OandaOrderMutationResponse>(transportId)
+{
+    public override bool IsIdempotent => false;
+    public override int MaxTransientRetries => 0;
+
+    public override HttpRequestMessage CreateRequest() => new(
+        HttpMethod.Post,
+        $"v3/accounts/{Uri.EscapeDataString(accountId)}/orders")
+    {
+        Content = JsonContent.Create(
+            payload,
+            BrokerJsonSerializerContext.Default.OandaCreateOrderEnvelope)
+    };
+}
+
+internal sealed class OandaCancelOrderCommand(
+    TransportId transportId,
+    string accountId,
+    string orderId) : OandaHttpCommand<OandaOrderMutationResponse>(transportId)
+{
+    public override bool IsIdempotent => false;
+    public override int MaxTransientRetries => 0;
+
+    public override HttpRequestMessage CreateRequest() => new(
+        HttpMethod.Put,
+        $"v3/accounts/{Uri.EscapeDataString(accountId)}/orders/" +
+        $"{Uri.EscapeDataString(orderId)}/cancel");
 }

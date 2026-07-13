@@ -20,8 +20,9 @@ public sealed class BinanceBrokerClient : IBrokerClient
 
         Uri baseAddress = options.BaseAddress ?? options.Environment switch
         {
-            BrokerEnvironment.Demo => new Uri("https://demo-api.binance.com/"),
-            BrokerEnvironment.Live => new Uri("https://api.binance.com/"),
+            BrokerEnvironment.Demo =>    new Uri("https://demo-api.binance.com/"),
+            BrokerEnvironment.Live =>    new Uri("https://api.binance.com/"),
+            BrokerEnvironment.Testnet => new Uri("https://testnet.binance.vision/"),
             _ => throw new ArgumentOutOfRangeException(nameof(options.Environment))
         };
 

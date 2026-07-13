@@ -9,6 +9,7 @@ namespace Networking.WebSockets;
 /// <summary>
 /// A single long-lived WebSocket connection with exactly one send loop and one receive loop.
 /// Outbound and inbound channels are bounded to prevent unlimited memory growth.
+/// A session is intentionally one-shot; create a new instance after it terminates.
 /// </summary>
 public sealed class WebSocketDuplexSession : IDuplexSession
 {
@@ -21,6 +22,7 @@ public sealed class WebSocketDuplexSession : IDuplexSession
     private ClientWebSocket? _socket;
     private Task _completion = Task.CompletedTask;
     private int _started;
+    private int _terminated;
     private int _disposed;
 
     public WebSocketDuplexSession(WebSocketSessionOptions options)
@@ -53,6 +55,22 @@ public sealed class WebSocketDuplexSession : IDuplexSession
             throw new ArgumentOutOfRangeException(nameof(options), "CloseTimeout must be positive.");
         }
 
+        if (options.KeepAliveInterval < TimeSpan.Zero &&
+            options.KeepAliveInterval != Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "KeepAliveInterval must be non-negative or Timeout.InfiniteTimeSpan.");
+        }
+
+        if (options.OutboundMessageType is not (
+                WebSocketMessageType.Text or WebSocketMessageType.Binary))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "Outbound messages must be text or binary.");
+        }
+
         _options = options;
 
         _outbound = Channel.CreateBounded<ReadOnlyMemory<byte>>(
@@ -81,6 +99,11 @@ public sealed class WebSocketDuplexSession : IDuplexSession
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        if (Volatile.Read(ref _terminated) == 1)
+        {
+            throw new InvalidOperationException(
+                "A terminated WebSocket session cannot be restarted; create a new session.");
+        }
 
         if (IsStarted)
         {
@@ -313,6 +336,7 @@ public sealed class WebSocketDuplexSession : IDuplexSession
             }
 
             Volatile.Write(ref _started, 0);
+            Volatile.Write(ref _terminated, 1);
         }
 
         if (terminalError is not null)

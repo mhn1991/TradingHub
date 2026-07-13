@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.Json;
 using Brokers.Abstractions;
 using Brokers.Infrastructure;
 using Networking.Abstractions;
@@ -37,9 +36,8 @@ internal sealed class IgLoginCommand(
 {
     public override HttpRequestMessage CreateRequest()
     {
-        string json = JsonSerializer.Serialize(
-            new IgLoginRequest(identifier, password, EncryptedPassword: false),
-            BrokerJson.Options);
+        string json = BrokerJson.Serialize(
+            new IgLoginRequest(identifier, password, EncryptedPassword: false));
 
         var request = new HttpRequestMessage(HttpMethod.Post, "session")
         {
@@ -109,9 +107,8 @@ internal sealed class IgSwitchAccountCommand(
 
     public override HttpRequestMessage CreateRequest()
     {
-        string json = JsonSerializer.Serialize(
-            new IgSwitchAccountRequest(accountId, DefaultAccount: false),
-            BrokerJson.Options);
+        string json = BrokerJson.Serialize(
+            new IgSwitchAccountRequest(accountId, DefaultAccount: false));
 
         return Authenticate(new HttpRequestMessage(HttpMethod.Put, "session")
         {

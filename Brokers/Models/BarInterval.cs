@@ -36,5 +36,24 @@ public readonly record struct BarInterval
     public static BarInterval Weeks(int value) => new(value, BarUnit.Week);
     public static BarInterval Months(int value) => new(value, BarUnit.Month);
 
+    public DateTimeOffset AddTo(DateTimeOffset value)
+    {
+        if (!IsValid)
+        {
+            throw new InvalidOperationException("A valid interval is required to calculate a timestamp.");
+        }
+
+        return Unit switch
+        {
+            BarUnit.Second => value.AddSeconds(Value),
+            BarUnit.Minute => value.AddMinutes(Value),
+            BarUnit.Hour => value.AddHours(Value),
+            BarUnit.Day => value.AddDays(Value),
+            BarUnit.Week => value.AddDays(checked(Value * 7)),
+            BarUnit.Month => value.AddMonths(Value),
+            _ => throw new ArgumentOutOfRangeException(nameof(Unit))
+        };
+    }
+
     public override string ToString() => $"{Value} {Unit}";
 }

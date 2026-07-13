@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <ProjectReference Include="../DashboardLive/DashboardLive.csproj" />
     <ProjectReference Include="../Networking/Networking.csproj" />
   </ItemGroup>
 </Project>

@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Brokers.Abstractions;
 using Brokers.Exceptions;
 
@@ -16,6 +17,7 @@ internal static class BrokerJson
         PropertyNameCaseInsensitive = true,
         NumberHandling = JsonNumberHandling.AllowReadingFromString
     };
+    private static readonly BrokerJsonSerializerContext SerializerContext = new(Options);
 
     public static async ValueTask<T> ReadAsync<T>(
         BrokerKind broker,
@@ -32,7 +34,7 @@ internal static class BrokerJson
 
         try
         {
-            T? result = JsonSerializer.Deserialize<T>(body, Options);
+            T? result = JsonSerializer.Deserialize(body, GetTypeInfo<T>());
             return result ?? throw new JsonException("The broker returned an empty JSON document.");
         }
         catch (JsonException exception)
@@ -45,6 +47,9 @@ internal static class BrokerJson
                 exception);
         }
     }
+
+    public static string Serialize<T>(T value) =>
+        JsonSerializer.Serialize(value, GetTypeInfo<T>());
 
     public static decimal ParseDecimal(string? value)
     {
@@ -65,6 +70,11 @@ internal static class BrokerJson
 
         return decimal.Parse(value, NumberStyles.Float, CultureInfo.InvariantCulture);
     }
+
+    private static JsonTypeInfo<T> GetTypeInfo<T>() =>
+        SerializerContext.GetTypeInfo(typeof(T)) as JsonTypeInfo<T>
+        ?? throw new NotSupportedException(
+            $"No source-generated broker JSON metadata is registered for {typeof(T).FullName}.");
 
     private static async Task<string> ReadBoundedBodyAsync(
         HttpContent content,

@@ -35,7 +35,7 @@ internal static class IgMappings
         TimeProvider timeProvider)
     {
         DateTimeOffset openTime = ParseSnapshotTime(source.SnapshotTimeUtc ?? source.SnapshotTime);
-        DateTimeOffset closeTime = AddInterval(openTime, query.Interval);
+        DateTimeOffset closeTime = query.Interval.AddTo(openTime);
 
         return new Candle
         {
@@ -166,15 +166,4 @@ internal static class IgMappings
             DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
     }
 
-    private static DateTimeOffset AddInterval(DateTimeOffset value, BarInterval interval) =>
-        interval.Unit switch
-        {
-            BarUnit.Second => value.AddSeconds(interval.Value),
-            BarUnit.Minute => value.AddMinutes(interval.Value),
-            BarUnit.Hour => value.AddHours(interval.Value),
-            BarUnit.Day => value.AddDays(interval.Value),
-            BarUnit.Week => value.AddDays(interval.Value * 7d),
-            BarUnit.Month => value.AddMonths(interval.Value),
-            _ => throw new ArgumentOutOfRangeException(nameof(interval))
-        };
 }

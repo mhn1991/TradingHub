@@ -105,6 +105,9 @@ internal sealed record OandaOrder
 
     [JsonPropertyName("clientExtensions")]
     public OandaClientExtensions? ClientExtensions { get; init; }
+
+    [JsonPropertyName("clientOrderID")]
+    public string? ClientOrderId { get; init; }
 }
 
 internal sealed record OandaClientExtensions
@@ -141,4 +144,153 @@ internal sealed record OandaPositionSide
 
     [JsonPropertyName("unrealizedPL")]
     public string? UnrealizedPl { get; init; }
+}
+
+internal sealed record OandaInstrumentsResponse
+{
+    [JsonPropertyName("instruments")]
+    public IReadOnlyList<OandaInstrument> Instruments { get; init; } = [];
+}
+
+internal sealed record OandaInstrument
+{
+    [JsonPropertyName("name")]
+    public required string Name { get; init; }
+
+    [JsonPropertyName("displayName")]
+    public string? DisplayName { get; init; }
+
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+}
+
+internal sealed record OandaCreateOrderEnvelope
+{
+    [JsonPropertyName("order")]
+    public required OandaCreateOrderRequest Order { get; init; }
+}
+
+internal sealed record OandaCreateOrderRequest
+{
+    [JsonPropertyName("type")]
+    public required string Type { get; init; }
+
+    [JsonPropertyName("instrument")]
+    public required string Instrument { get; init; }
+
+    [JsonPropertyName("units")]
+    public required string Units { get; init; }
+
+    [JsonPropertyName("timeInForce")]
+    public required string TimeInForce { get; init; }
+
+    [JsonPropertyName("positionFill")]
+    public string PositionFill { get; init; } = "DEFAULT";
+
+    [JsonPropertyName("price")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Price { get; init; }
+
+    [JsonPropertyName("gtdTime")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? GtdTime { get; init; }
+
+    [JsonPropertyName("clientExtensions")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OandaClientExtensions? ClientExtensions { get; init; }
+
+    [JsonPropertyName("stopLossOnFill")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OandaDependentOrderRequest? StopLossOnFill { get; init; }
+
+    [JsonPropertyName("takeProfitOnFill")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OandaDependentOrderRequest? TakeProfitOnFill { get; init; }
+}
+
+internal sealed record OandaDependentOrderRequest
+{
+    [JsonPropertyName("price")]
+    public required string Price { get; init; }
+
+    [JsonPropertyName("timeInForce")]
+    public string TimeInForce { get; init; } = "GTC";
+}
+
+internal sealed record OandaOrderMutationResponse
+{
+    [JsonPropertyName("orderCreateTransaction")]
+    public OandaTransaction? OrderCreateTransaction { get; init; }
+
+    [JsonPropertyName("orderFillTransaction")]
+    public OandaTransaction? OrderFillTransaction { get; init; }
+
+    [JsonPropertyName("orderCancelTransaction")]
+    public OandaTransaction? OrderCancelTransaction { get; init; }
+
+    [JsonPropertyName("orderRejectTransaction")]
+    public OandaTransaction? OrderRejectTransaction { get; init; }
+
+    [JsonPropertyName("errorMessage")]
+    public string? ErrorMessage { get; init; }
+}
+
+internal sealed record OandaTransaction
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("orderID")]
+    public string? OrderId { get; init; }
+
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    [JsonPropertyName("reason")]
+    public string? Reason { get; init; }
+
+    [JsonPropertyName("time")]
+    public string? Time { get; init; }
+
+    [JsonPropertyName("instrument")]
+    public string? Instrument { get; init; }
+
+    [JsonPropertyName("units")]
+    public string? Units { get; init; }
+
+    [JsonPropertyName("price")]
+    public string? Price { get; init; }
+
+    [JsonPropertyName("clientExtensions")]
+    public OandaClientExtensions? ClientExtensions { get; init; }
+
+    [JsonPropertyName("clientOrderID")]
+    public string? ClientOrderId { get; init; }
+}
+
+internal sealed record OandaPricingStreamMessage
+{
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    [JsonPropertyName("instrument")]
+    public string? Instrument { get; init; }
+
+    [JsonPropertyName("time")]
+    public string? Time { get; init; }
+
+    [JsonPropertyName("tradeable")]
+    public bool Tradeable { get; init; }
+
+    [JsonPropertyName("bids")]
+    public IReadOnlyList<OandaPriceBucket> Bids { get; init; } = [];
+
+    [JsonPropertyName("asks")]
+    public IReadOnlyList<OandaPriceBucket> Asks { get; init; } = [];
+}
+
+internal sealed record OandaPriceBucket
+{
+    [JsonPropertyName("price")]
+    public string? Price { get; init; }
 }

@@ -1,6 +1,14 @@
 <Solution>
+  <Project Path="Agent/Agent.csproj" />
   <Project Path="Brokers.IntegrationTests/Brokers.IntegrationTests.csproj" />
   <Project Path="Brokers/Brokers.csproj" />
+  <Project Path="ChartAnnotator/ChartAnnotator.csproj" />
+  <Project Path="DashboardContracts/DashboardContracts.csproj" />
+  <Project Path="DashboardExporter/DashboardExporter.csproj" />
+  <Project Path="DashboardLive/DashboardLive.csproj" />
   <Project Path="Networking/Networking.csproj" />
+  <Project Path="Simulator.AotSmoke/Simulator.AotSmoke.csproj" />
+  <Project Path="Simulator.Tests/Simulator.Tests.csproj" />
+  <Project Path="Simulator/Simulator.csproj" />
   <Project Path="TradingHub.UnitTests/TradingHub.UnitTests.csproj" />
 </Solution>

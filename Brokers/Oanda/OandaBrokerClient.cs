@@ -1,14 +1,21 @@
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Brokers.Abstractions;
 using Brokers.Infrastructure;
+using Brokers.Models;
 using Networking.Abstractions;
 using Networking.Http;
 
 namespace Brokers.Oanda;
 
-public sealed class OandaBrokerClient : IBrokerClient
+public sealed class OandaBrokerClient : ITradingBrokerClient
 {
     private static readonly TransportId RestTransportId = new("oanda.rest");
     private readonly BrokerHttpRuntime _runtime;
+    private readonly HttpClient _streamingClient;
+    private readonly ConcurrentDictionary<string, string> _instrumentMappings;
+    private readonly string _accountId;
 
     public OandaBrokerClient(OandaOptions options)
     {
@@ -21,6 +28,12 @@ public sealed class OandaBrokerClient : IBrokerClient
         {
             BrokerEnvironment.Demo => new Uri("https://api-fxpractice.oanda.com/"),
             BrokerEnvironment.Live => new Uri("https://api-fxtrade.oanda.com/"),
+            _ => throw new ArgumentOutOfRangeException(nameof(options.Environment))
+        };
+        Uri streamBaseAddress = options.StreamBaseAddress ?? options.Environment switch
+        {
+            BrokerEnvironment.Demo => new Uri("https://stream-fxpractice.oanda.com/"),
+            BrokerEnvironment.Live => new Uri("https://stream-fxtrade.oanda.com/"),
             _ => throw new ArgumentOutOfRangeException(nameof(options.Environment))
         };
 
@@ -40,9 +53,12 @@ public sealed class OandaBrokerClient : IBrokerClient
             });
 
         _runtime = new BrokerHttpRuntime(RestTransportId, httpClient, options.RequestTimeout);
-        var instrumentMappings = new Dictionary<string, string>(
+        var instrumentMappings = new ConcurrentDictionary<string, string>(
             options.InstrumentMappings,
             StringComparer.OrdinalIgnoreCase);
+        _instrumentMappings = instrumentMappings;
+        _accountId = options.AccountId;
+        _streamingClient = CreateClient(streamBaseAddress, options.AccessToken);
 
         Descriptor = new BrokerDescriptor(
             BrokerKind.Oanda,
@@ -58,7 +74,8 @@ public sealed class OandaBrokerClient : IBrokerClient
             _runtime.Gateway,
             RestTransportId,
             options.AccountId,
-            instrumentMappings);
+            instrumentMappings,
+            _streamingClient);
         Positions = new OandaPositionClient(
             _runtime.Gateway,
             RestTransportId,
@@ -71,9 +88,113 @@ public sealed class OandaBrokerClient : IBrokerClient
     public BrokerCapabilities Capabilities { get; } = new(true, true, true, true, false);
     public IMarketDataClient MarketData { get; }
     public IAccountClient Accounts { get; }
-    public IOrderClient Orders { get; }
+    public ITradingOrderClient Orders { get; }
+    IOrderClient IBrokerClient.Orders => Orders;
     public IPositionClient Positions { get; }
     public ICostClient Costs { get; }
 
-    public ValueTask DisposeAsync() => _runtime.DisposeAsync();
+    public async Task<IReadOnlyList<OandaInstrumentInfo>> GetInstrumentsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        OandaInstrumentsResponse response = await _runtime.Gateway.SendAsync(
+            new OandaGetInstrumentsCommand(RestTransportId, _accountId),
+            cancellationToken).ConfigureAwait(false);
+        foreach (OandaInstrument instrument in response.Instruments)
+        {
+            string prefix = string.Equals(instrument.Type, "CURRENCY", StringComparison.OrdinalIgnoreCase)
+                ? "FX"
+                : string.Equals(instrument.Type, "METAL", StringComparison.OrdinalIgnoreCase)
+                    ? "METAL"
+                    : string.Equals(instrument.Type, "CFD", StringComparison.OrdinalIgnoreCase)
+                        ? "CFD"
+                        : "OANDA";
+            _instrumentMappings.TryAdd(
+                $"{prefix}:{instrument.Name.Replace('_', '/')}",
+                instrument.Name);
+        }
+
+        return response.Instruments
+            .Where(instrument => !string.IsNullOrWhiteSpace(instrument.Name))
+            .Select(instrument => new OandaInstrumentInfo(
+                instrument.Name,
+                instrument.DisplayName ?? instrument.Name.Replace('_', '/'),
+                instrument.Type ?? "UNKNOWN"))
+            .OrderBy(instrument => instrument.DisplayName, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    public async IAsyncEnumerable<OandaPriceTick> StreamPricesAsync(
+        IReadOnlyCollection<string> instruments,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(instruments);
+        string[] nativeInstruments = instruments
+            .Where(instrument => !string.IsNullOrWhiteSpace(instrument))
+            .Select(instrument => InstrumentMappers.ToOanda(new InstrumentKey(instrument), _instrumentMappings))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (nativeInstruments.Length is < 1 or > 50)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(instruments),
+                "OANDA pricing streams require between one and fifty instruments.");
+        }
+
+        string list = string.Join(',', nativeInstruments.Select(Uri.EscapeDataString));
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"v3/accounts/{Uri.EscapeDataString(_accountId)}/pricing/stream" +
+            $"?snapshot=true&instruments={list}");
+        using HttpResponseMessage response = await _streamingClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using var reader = new StreamReader(stream);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            string? line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (line is null)
+            {
+                yield break;
+            }
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            OandaPricingStreamMessage? message = JsonSerializer.Deserialize(
+                line,
+                BrokerJsonSerializerContext.Default.OandaPricingStreamMessage);
+            OandaPriceTick? tick = message is null ? null : OandaMappings.ToPriceTick(message);
+            if (tick is not null)
+            {
+                yield return tick;
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _streamingClient.Dispose();
+        await _runtime.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private static HttpClient CreateClient(Uri baseAddress, string accessToken) =>
+        PooledHttpClient.Create(
+            new PooledHttpClientOptions
+            {
+                BaseAddress = baseAddress,
+                ConnectTimeout = TimeSpan.FromSeconds(10),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
+                MaxConnectionsPerServer = 16,
+                DefaultHeaders = new Dictionary<string, string>
+                {
+                    ["Authorization"] = $"Bearer {accessToken}",
+                    ["Accept"] = "application/json"
+                }
+            });
 }

@@ -6,8 +6,11 @@ obj/
 *.suo
 TestResults/
 coverage/
+node_modules/
+dist/
 *.trx
 *.binlog
+*.log
 .env
 .env.*
 !.env.example
