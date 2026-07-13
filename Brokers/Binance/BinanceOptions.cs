@@ -4,7 +4,7 @@ namespace Brokers.Binance;
 
 public sealed class BinanceOptions
 {
-    public required BrokerEnvironment Environment { get; init; } =  BrokerEnvironment.Demo;
+    public required BrokerEnvironment Environment { get; init; } = BrokerEnvironment.Demo;
     public required string ApiKey { get; init; }
     public required string SecretKey { get; init; }
     public Uri? BaseAddress { get; init; }

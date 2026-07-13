@@ -12,6 +12,9 @@ for (const series of replay.series) {
   assert(Array.isArray(series.frames) && series.frames.length > 0, `${series.interval}: frames are missing.`)
   let readyFrames = 0
   let channelFrames = 0
+  let atrContextFrames = 0
+  let bollingerContextFrames = 0
+  let rsiRelationshipFrames = 0
 
   series.frames.forEach((frame, index) => {
     assert(frame.index === index, `${series.interval}: frame index ${frame.index} is out of sequence.`)
@@ -33,14 +36,20 @@ for (const series of replay.series) {
       )
     }
     if (frame.indicators.rsi != null && frame.indicators.bollingerMiddle != null) readyFrames++
+    if (frame.indicators.atrAnalysis?.normalizedPercent != null) atrContextFrames++
+    if (frame.indicators.bollingerAnalysis?.bandwidthPercent != null) bollingerContextFrames++
+    if (frame.indicators.rsiAnalysis?.latestRelationship != null) rsiRelationshipFrames++
     if (frame.channels.length > 0) channelFrames++
   })
 
   assert(readyFrames > 0, `${series.interval}: indicators never completed warm-up.`)
+  assert(atrContextFrames > 0, `${series.interval}: ATR context was never produced.`)
+  assert(bollingerContextFrames > 0, `${series.interval}: Bollinger context was never produced.`)
+  assert(rsiRelationshipFrames > 0, `${series.interval}: RSI swing relationships were never produced.`)
   totalFrames += series.frames.length
   console.log(
     `${series.interval}: ${series.frames.length} frames, ${readyFrames} ready, ` +
-    `${channelFrames} with channels.`,
+    `${channelFrames} with channels, ${rsiRelationshipFrames} with RSI relationships.`,
   )
 }
 

@@ -54,19 +54,21 @@ internal sealed class BinanceWorkspaceMarketData
 
     public async Task<WorkspaceCatalog> GetCatalogAsync(CancellationToken cancellationToken)
     {
-        IReadOnlyList<WorkspaceAsset> assets = await GetAssetsAsync(cancellationToken)
-            .ConfigureAwait(false);
-        WorkspaceBroker oanda = _oanda is null
-            ? new WorkspaceBroker(
+        Task<IReadOnlyList<WorkspaceAsset>> assetsTask = GetAssetsAsync(cancellationToken);
+        Task<WorkspaceBroker> oandaTask = _oanda is null
+            ? Task.FromResult(new WorkspaceBroker(
                 "oanda",
                 "OANDA",
                 WorkspaceEnvironment.Demo,
                 WorkspaceDataKind.Market,
                 IsConfigured: false,
                 IsReadOnly: true,
-                "OANDA is available but not connected. Configure its practice account token and account ID on the backend.",
-                [])
-            : await _oanda.GetBrokerAsync(cancellationToken).ConfigureAwait(false);
+                "OANDA is disabled on the backend. Set Oanda__Enabled, Oanda__AccountId, and Oanda__AccessToken before starting DashboardLive.",
+                []))
+            : _oanda.GetBrokerAsync(cancellationToken);
+        await Task.WhenAll(assetsTask, oandaTask).ConfigureAwait(false);
+        IReadOnlyList<WorkspaceAsset> assets = await assetsTask.ConfigureAwait(false);
+        WorkspaceBroker oanda = await oandaTask.ConfigureAwait(false);
         DateTimeOffset now = _timeProvider.GetUtcNow();
         return new WorkspaceCatalog(
             now,
@@ -391,22 +393,11 @@ internal sealed class BinanceWorkspaceMarketData
     private static async Task<byte[]> ReadBoundedAsync(
         HttpResponseMessage response,
         int maximumBytes,
-        CancellationToken cancellationToken)
-    {
-        if (response.Content.Headers.ContentLength > maximumBytes)
-        {
-            throw new InvalidDataException($"The Binance response exceeded {maximumBytes} bytes.");
-        }
-
-        byte[] body = await response.Content.ReadAsByteArrayAsync(cancellationToken)
-            .ConfigureAwait(false);
-        if (body.Length > maximumBytes)
-        {
-            throw new InvalidDataException($"The Binance response exceeded {maximumBytes} bytes.");
-        }
-
-        return body;
-    }
+        CancellationToken cancellationToken) =>
+        await BoundedHttpContent.ReadAsync(
+            response.Content,
+            maximumBytes,
+            cancellationToken).ConfigureAwait(false);
 
     private sealed class SnapshotEntry
     {

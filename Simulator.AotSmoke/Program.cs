@@ -97,6 +97,8 @@ internal static class Program
         public IReadOnlySet<BarInterval> RequiredIntervals { get; } =
             new HashSet<BarInterval> { interval };
         public BarInterval TriggerInterval => interval;
+        public AgentExitManagementMode ExitManagementMode =>
+            AgentExitManagementMode.ProtectiveStopAndStrategyExit;
 
         public Task<AgentDecision> EvaluateAsync(
             AgentMarketContext context,

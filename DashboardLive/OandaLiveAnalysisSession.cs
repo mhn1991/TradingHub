@@ -186,7 +186,7 @@ internal sealed class OandaLiveAnalysisSession
             new CandleQuery(_instrument, _interval, Limit: limit),
             cancellationToken).ConfigureAwait(false);
         DateTimeOffset? latestClosedCandle = null;
-        foreach (Candle candle in candles.OrderBy(candle => candle.OpenTime))
+        foreach (Candle candle in candles)
         {
             ReplayFrame? frame = await _analysis.ProcessAsync(candle, cancellationToken)
                 .ConfigureAwait(false);
@@ -209,7 +209,7 @@ internal sealed class OandaLiveAnalysisSession
             : _interval.AddTo(lastClose.Value);
     }
 
-    private DateTimeOffset? LastClosedCandleAt() => _analysis.Snapshot().LastOrDefault()?.AvailableAt;
+    private DateTimeOffset? LastClosedCandleAt() => _analysis.LastAvailableAt;
 
     private void SetConnected()
     {

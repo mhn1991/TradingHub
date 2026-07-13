@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
+    <ProjectReference Include="../Simulator/Simulator.csproj" />
   </ItemGroup>
 </Project>

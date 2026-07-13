@@ -41,7 +41,9 @@ public sealed class SimulatedBrokerRuntime
         _state.AdvanceMarket(candle);
         _state.RecordCandle(candle);
 
-        IReadOnlyList<SimulatedOrder> orders = _state.GetEligibleOrders(candle.Instrument);
+        IReadOnlyList<SimulatedOrder> orders = _state.GetEligibleOrders(
+            candle.Instrument,
+            candle.Prices.Open);
         foreach (SimulatedOrder order in orders)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -137,6 +139,92 @@ public sealed class SimulatedBrokerRuntime
         _ensureActive();
         _state.RecordCandle(candle);
     }
+
+    public Task LiquidateAtMarketCloseAsync(
+        Candle candle,
+        CancellationToken cancellationToken = default)
+    {
+        _ensureActive();
+        ArgumentNullException.ThrowIfNull(candle);
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidateExecutionCandle(candle);
+
+        BrokerPosition? position = _state.GetPositions()
+            .FirstOrDefault(item => item.Instrument == candle.Instrument);
+        if (position is null || position.Quantity <= 0m)
+        {
+            return Task.CompletedTask;
+        }
+
+        foreach (BrokerOrder openOrder in _state.GetOpenOrders(candle.Instrument))
+        {
+            if (_state.TryCancel(openOrder.BrokerOrderId, out SimulatedOrder? cancelled) &&
+                cancelled is not null)
+            {
+                _events.Append(SimulatedOrderClient.ToEvent(
+                    cancelled,
+                    OrderEventType.Cancelled,
+                    _clock.UtcNow,
+                    message: "Cancelled during end-of-simulation liquidation."));
+            }
+        }
+
+        OrderSide side = position.Side == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
+        SimulatedOrder liquidation = _state.CreateOrder(new PlaceOrderRequest
+        {
+            Instrument = candle.Instrument,
+            Side = side,
+            Type = StandardOrderType.Market,
+            Quantity = new OrderQuantity(position.Quantity, QuantityUnit.Units),
+            ClientOrderId = $"simulation-liquidation-{_state.MarketSequence}"
+        }, _clock.UtcNow);
+
+        decimal executionPrice = ApplyCostsToPrice(
+            candle.Prices.Close,
+            side,
+            StandardOrderType.Market,
+            null);
+        decimal quoteToBaseRate = _state.GetQuoteToBaseCurrencyRate(candle.Instrument);
+        decimal commission = Math.Abs(executionPrice * position.Quantity) *
+            quoteToBaseRate *
+            _options.CommissionRate;
+
+        if (!_state.TryApplyFill(
+                liquidation.BrokerOrderId,
+                executionPrice,
+                position.Quantity,
+                commission,
+                _clock.UtcNow,
+                out FillApplicationResult? result,
+                out SimulatedOrder? rejected,
+                out string? rejectionReason))
+        {
+            if (rejected is not null)
+            {
+                _events.Append(SimulatedOrderClient.ToEvent(
+                    rejected,
+                    OrderEventType.Rejected,
+                    _clock.UtcNow,
+                    message: rejectionReason));
+            }
+
+            throw new InvalidOperationException(
+                rejectionReason ?? "The final simulated position could not be liquidated.");
+        }
+
+        FillApplicationResult applied = result
+            ?? throw new InvalidOperationException("Final liquidation did not return a fill result.");
+        _events.Append(SimulatedOrderClient.ToEvent(
+            applied.Order,
+            OrderEventType.Filled,
+            _clock.UtcNow,
+            executionPrice,
+            position.Quantity,
+            commission,
+            "Liquidated at the final available candle close."));
+        return Task.CompletedTask;
+    }
+
 
     private static void ValidateExecutionCandle(Candle candle)
     {

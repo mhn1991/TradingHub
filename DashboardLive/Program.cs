@@ -3,6 +3,8 @@ using System.Text.Json.Serialization;
 using Dashboard.Live;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
+using Simulator.Jobs;
+using Simulator.Services;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<LiveFeedOptions>(
@@ -36,6 +38,30 @@ builder.Services.AddHostedService(services =>
     services.GetRequiredService<BinanceLiveAnalysisService>());
 builder.Services.AddHostedService(services =>
     services.GetRequiredService<OandaWorkspaceService>());
+
+// Shared backtest application service (Dashboard + CLI).
+string jobsDirectory = Path.GetFullPath(Path.Combine(
+    builder.Environment.ContentRootPath,
+    "..",
+    ".cache",
+    "simulation-jobs"));
+builder.Services.AddSingleton<ISimulationJobRepository>(_ => new FileSimulationJobRepository(jobsDirectory));
+builder.Services.AddSingleton<BacktestApplicationService>(services =>
+{
+    var appService = new BacktestApplicationService(
+        services.GetRequiredService<ISimulationJobRepository>(),
+        new BacktestApplicationServiceOptions
+        {
+            MaxConcurrentJobs = 1,
+            QueueCapacity = 4
+        });
+    return appService;
+});
+builder.Services.AddSingleton<IBacktestApplicationService>(services =>
+    services.GetRequiredService<BacktestApplicationService>());
+builder.Services.AddSingleton<SimulationRealtimePublisher>();
+builder.Services.AddHostedService<SimulationRealtimeBridge>();
+builder.Services.AddSignalR();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
     .SetIsOriginAllowed(origin =>
     {
@@ -48,7 +74,8 @@ builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
             uri.Host is "localhost" or "127.0.0.1";
     })
     .AllowAnyHeader()
-    .AllowAnyMethod()));
+    .AllowAnyMethod()
+    .AllowCredentials()));
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
@@ -458,4 +485,8 @@ app.MapGet("/api/live/events", async (
     }
 });
 
+app.MapSimulationEndpoints();
+app.MapHub<SimulationHub>("/hubs/simulations");
+
 app.Run();
+

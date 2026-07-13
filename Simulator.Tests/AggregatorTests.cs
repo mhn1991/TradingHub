@@ -321,4 +321,45 @@ public sealed class AggregatorTests
             Assert.That(volume.Kind, Is.EqualTo(VolumeKind.Unknown));
         });
     }
+    [Test]
+    public void GapPolicy_ResetIncompleteBuckets_DoesNotBridgeClosedMarketGap()
+    {
+        InstrumentKey instrument = new("FX:GBP/USD");
+        BarInterval five = BarInterval.Minutes(5);
+        BarInterval fifteen = BarInterval.Minutes(15);
+        DateTimeOffset friday = new(2026, 1, 2, 21, 50, 0, TimeSpan.Zero);
+        DateTimeOffset sunday = new(2026, 1, 4, 22, 0, 0, TimeSpan.Zero);
+        var aggregator = new MultiTimeframeAggregator(
+            instrument,
+            [fifteen],
+            gapPolicy: BaseCandleGapPolicy.ResetIncompleteBuckets);
+
+        Assert.That(aggregator.Apply(TestCandles.Create(
+            instrument, friday, five, 100m, 101m, 99m, 100m)), Is.Empty);
+
+        var closed = new List<CandleClosedEvent>();
+        for (int index = 0; index < 3; index++)
+        {
+            decimal open = 200m + index;
+            closed.AddRange(aggregator.Apply(TestCandles.Create(
+                instrument,
+                sunday.AddMinutes(index * 5),
+                five,
+                open,
+                open + 2m,
+                open - 1m,
+                open + 1m)));
+        }
+
+        Candle candle = closed.Single().Candle;
+        Assert.Multiple(() =>
+        {
+            Assert.That(candle.OpenTime, Is.EqualTo(sunday));
+            Assert.That(candle.CloseTime, Is.EqualTo(sunday.AddMinutes(15)));
+            Assert.That(candle.Prices.Open, Is.EqualTo(200m));
+            Assert.That(candle.Prices.Close, Is.EqualTo(203m));
+            Assert.That(candle.Prices.Low, Is.EqualTo(199m));
+        });
+    }
+
 }

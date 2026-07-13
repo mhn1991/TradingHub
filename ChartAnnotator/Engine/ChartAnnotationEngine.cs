@@ -19,6 +19,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
     private readonly RansacTrendlineDetector _trendlineDetector;
     private readonly ChannelDetector _channelDetector;
     private readonly ConfidenceScorer _confidenceScorer;
+    private readonly MarketStructureAnalyzer _marketStructureAnalyzer;
     private readonly ConcurrentDictionary<ChartKey, AnalysisState> _states = [];
 
     public ChartAnnotationEngine(
@@ -26,7 +27,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         SupportResistanceDetector? supportResistance = null,
         RansacTrendlineDetector? trendlineDetector = null,
         ChannelDetector? channelDetector = null,
-        ConfidenceScorer? confidenceScorer = null)
+        ConfidenceScorer? confidenceScorer = null,
+        MarketStructureAnalyzer? marketStructureAnalyzer = null)
     {
         _options = options ?? new ChartAnnotationOptions();
         Validate(_options);
@@ -34,6 +36,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         _trendlineDetector = trendlineDetector ?? new RansacTrendlineDetector();
         _channelDetector = channelDetector ?? new ChannelDetector();
         _confidenceScorer = confidenceScorer ?? new ConfidenceScorer();
+        _marketStructureAnalyzer = marketStructureAnalyzer ??
+            new MarketStructureAnalyzer(_options.StructureDirectionToleranceAtr);
     }
 
     public ValueTask<AnalysisSnapshot> ProcessAsync(
@@ -92,9 +96,17 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         state.LastSequence = candleEvent.Sequence;
         state.Version++;
 
+        bool atrWasReady = state.Atr.IsReady;
         state.Atr.Update(candleEvent.Candle);
+        bool atrBecameReady = !atrWasReady && state.Atr.IsReady;
         state.Rsi.Update(candleEvent.Candle.Prices.Close);
         state.Bollinger.Update(candleEvent.Candle.Prices.Close);
+        AtrAnalysisSnapshot atrAnalysis = state.Atr.IsReady
+            ? state.AtrAnalysis.Update(state.Atr.Current, candleEvent.Candle.Prices.Close)
+            : AtrAnalysisSnapshot.Empty;
+        BollingerAnalysisSnapshot bollingerAnalysis = state.BollingerAnalysis.Update(
+            candleEvent.Candle.Prices.Close,
+            state.Bollinger);
 
         IReadOnlyList<SwingPoint> confirmed = state.SwingDetector.Update(candleEvent.Candle);
         foreach (SwingPoint swing in confirmed)
@@ -102,27 +114,66 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             state.Swings.Add(swing);
         }
 
+        RsiAnalysisSnapshot rsiAnalysis = state.RsiAnalysis.Update(
+            candleEvent.Candle,
+            state.Rsi.IsReady ? state.Rsi.Current : null,
+            confirmed,
+            state.Atr.IsReady ? state.Atr.Current : null);
+
         if (confirmed.Count > 0)
         {
             state.SwingSnapshot = state.Swings.Snapshot();
         }
 
+        MarketStructureSnapshot previousStructure = state.MarketStructure;
+        MarketStructureSnapshot structure = _marketStructureAnalyzer.Analyze(
+            state.SwingSnapshot,
+            candleEvent.Candle,
+            state.Atr.IsReady ? state.Atr.Current : null,
+            previousStructure);
+        state.MarketStructure = structure;
+        bool structureChanged = structure.DirectionChanged;
+        bool breakChanged = structure.Break != previousStructure.Break;
         bool runHeavyAnalysis = confirmed.Count > 0 ||
+            atrBecameReady ||
+            structureChanged ||
+            breakChanged ||
             state.Version == 1 ||
             state.Version % _options.HeavyAnalysisEveryCandles == 0;
 
-        if (runHeavyAnalysis && state.Atr.IsReady)
+        if (state.Atr.IsReady)
         {
+            // Use one immutable view of the confirmed swings and one ATR value for
+            // the complete structural-analysis pass.
             IReadOnlyList<SwingPoint> swingSnapshot = state.SwingSnapshot;
-            state.Zones = _supportResistance.Detect(swingSnapshot, state.Atr.Current);
-            state.Trendlines = _trendlineDetector.Detect(
-                swingSnapshot,
-                state.Atr.Current,
-                state.Version);
-            state.Channels = _channelDetector.Detect(
-                state.Trendlines,
-                state.LastCloseTime.Value,
-                state.Atr.Current);
+            decimal currentAtr = state.Atr.Current;
+
+            if (runHeavyAnalysis)
+            {
+                state.Zones = _supportResistance.Detect(
+                    swingSnapshot,
+                    currentAtr);
+
+                state.Trendlines = _trendlineDetector.Detect(
+                    swingSnapshot,
+                    currentAtr,
+                    state.Version,
+                    MarketStructureDirection.Unknown);
+            }
+
+            // Channel validation is inexpensive because the trendline collection is
+            // small. Run it for every closed candle so a projected channel advances
+            // to the current time and is removed immediately when the latest close
+            // breaks outside it. Trendline fitting remains on the heavy schedule.
+            state.Channels = state.Trendlines.Count == 0
+                ? []
+                : _channelDetector.Detect(
+                    state.Trendlines,
+                    swingSnapshot,
+                    closeTime,
+                    currentAtr,
+                    candleEvent.Candle.Prices.Close,
+                    MarketStructureDirection.Unknown);
         }
 
         IndicatorSnapshot indicators = new()
@@ -131,16 +182,18 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             Rsi = state.Rsi.IsReady ? state.Rsi.Current : null,
             BollingerMiddle = state.Bollinger.IsReady ? state.Bollinger.Middle : null,
             BollingerUpper = state.Bollinger.IsReady ? state.Bollinger.Upper : null,
-            BollingerLower = state.Bollinger.IsReady ? state.Bollinger.Lower : null
+            BollingerLower = state.Bollinger.IsReady ? state.Bollinger.Lower : null,
+            AtrAnalysis = atrAnalysis,
+            RsiAnalysis = rsiAnalysis,
+            BollingerAnalysis = bollingerAnalysis
         };
-
         ConfidenceScore confidence = _confidenceScorer.Calculate(
             candleEvent.Candle,
             indicators,
             state.Zones,
             state.Trendlines,
-            state.Channels);
-
+            state.Channels,
+            structure);
         AnalysisSnapshot snapshot = new()
         {
             Instrument = key.Instrument,
@@ -153,6 +206,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             PriceZones = state.Zones,
             Trendlines = state.Trendlines,
             Channels = state.Channels,
+            MarketStructure = structure,
             Confidence = confidence
         };
 
@@ -164,7 +218,10 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             indicators.BollingerMiddle,
             indicators.BollingerUpper,
             indicators.BollingerLower,
-            confidence.Total));
+            confidence.Total,
+            indicators.AtrAnalysis,
+            indicators.RsiAnalysis,
+            indicators.BollingerAnalysis));
         return snapshot;
     }
 
@@ -213,10 +270,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         }
     }
 
-    private AnalysisState GetOrCreate(ChartKey key)
-    {
-        return _states.GetOrAdd(key, _ => new AnalysisState(_options));
-    }
+    private AnalysisState GetOrCreate(ChartKey key) =>
+        _states.GetOrAdd(key, _ => new AnalysisState(_options));
 
     private static void Validate(ChartAnnotationOptions options)
     {
@@ -225,11 +280,32 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             options.IndicatorCapacity < 1 ||
             options.HeavyAnalysisEveryCandles < 1 ||
             options.AtrPeriod <= 1 ||
+            options.AtrAnalysisHistoryPeriod < 2 ||
+            options.AtrAnalysisChangeLookback < 1 ||
+            options.AtrAnalysisChangeLookback >= options.AtrAnalysisHistoryPeriod ||
+            options.AtrAnalysisMinimumSamples < 2 ||
+            options.AtrAnalysisMinimumSamples > options.AtrAnalysisHistoryPeriod ||
+            options.AtrDirectionThresholdPercent < 0m ||
             options.RsiPeriod <= 1 ||
+            options.RsiMomentumLookback < 1 ||
+            options.RsiMomentumThreshold < 0m ||
+            options.RsiMinimumDivergenceDifference < 0m ||
+            options.RsiMinimumPriceDifferenceAtr < 0m ||
+            options.RsiSignalLifetimeCandles < 1 ||
             options.BollingerPeriod <= 1 ||
             options.BollingerStandardDeviations <= 0m ||
+            options.BollingerWidthHistoryPeriod < 2 ||
+            options.BollingerWidthChangeLookback < 1 ||
+            options.BollingerWidthChangeLookback >= options.BollingerWidthHistoryPeriod ||
+            options.BollingerWidthMinimumSamples < 2 ||
+            options.BollingerWidthMinimumSamples > options.BollingerWidthHistoryPeriod ||
+            options.BollingerWidthDirectionThresholdPercent < 0m ||
+            options.BollingerSqueezePercentile is < 0m or > 100m ||
+            options.BollingerWidePercentile is < 0m or > 100m ||
+            options.BollingerWidePercentile <= options.BollingerSqueezePercentile ||
             options.SwingLeftBars < 1 ||
-            options.SwingRightBars < 1)
+            options.SwingRightBars < 1 ||
+            options.StructureDirectionToleranceAtr < 0m)
         {
             throw new ArgumentOutOfRangeException(nameof(options));
         }
@@ -243,10 +319,30 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             Swings = new RingBuffer<SwingPoint>(options.SwingCapacity);
             IndicatorHistory = new RingBuffer<IndicatorPoint>(options.IndicatorCapacity);
             Atr = new AtrState(options.AtrPeriod);
+            AtrAnalysis = new AtrAnalysisState(
+                options.AtrAnalysisHistoryPeriod,
+                options.AtrAnalysisChangeLookback,
+                options.AtrAnalysisMinimumSamples,
+                options.AtrDirectionThresholdPercent);
             Rsi = new RsiState(options.RsiPeriod);
+            RsiAnalysis = new RsiAnalysisState(
+                Math.Max(options.IndicatorCapacity, options.RsiMomentumLookback + 1),
+                Math.Max(options.SwingCapacity, 2),
+                options.RsiMomentumLookback,
+                options.RsiMomentumThreshold,
+                options.RsiMinimumDivergenceDifference,
+                options.RsiMinimumPriceDifferenceAtr,
+                options.RsiSignalLifetimeCandles);
             Bollinger = new BollingerState(
                 options.BollingerPeriod,
                 options.BollingerStandardDeviations);
+            BollingerAnalysis = new BollingerAnalysisState(
+                options.BollingerWidthHistoryPeriod,
+                options.BollingerWidthChangeLookback,
+                options.BollingerWidthMinimumSamples,
+                options.BollingerWidthDirectionThresholdPercent,
+                options.BollingerSqueezePercentile,
+                options.BollingerWidePercentile);
             SwingDetector = new SwingDetector(
                 options.SwingLeftBars,
                 options.SwingRightBars);
@@ -258,15 +354,19 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         public RingBuffer<IndicatorPoint> IndicatorHistory { get; }
         public IReadOnlyList<SwingPoint> SwingSnapshot { get; set; } = [];
         public AtrState Atr { get; }
+        public AtrAnalysisState AtrAnalysis { get; }
         public RsiState Rsi { get; }
+        public RsiAnalysisState RsiAnalysis { get; }
         public BollingerState Bollinger { get; }
+        public BollingerAnalysisState BollingerAnalysis { get; }
         public SwingDetector SwingDetector { get; }
         public IReadOnlyList<PriceZone> Zones { get; set; } = [];
         public IReadOnlyList<Trendline> Trendlines { get; set; } = [];
         public IReadOnlyList<PriceChannel> Channels { get; set; } = [];
+        public MarketStructureSnapshot MarketStructure { get; set; } = MarketStructureSnapshot.Empty;
         public AnalysisSnapshot? Latest { get; set; }
         public DateTimeOffset? LastCloseTime { get; set; }
-        public long LastSequence { get; set; }
+        public long LastSequence { get; set; } = -1;
         public long Version { get; set; }
     }
 }

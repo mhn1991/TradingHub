@@ -9,9 +9,12 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "data:generate": "dotnet run --configuration Release --no-build --project ../DashboardExporter/DashboardExporter.csproj -- ./public/data/sample-replay.json",
-    "data:validate": "node ./scripts/validate-replay.mjs"
+    "data:validate": "node ./scripts/validate-replay.mjs",
+    "backtest": "dotnet run --configuration Release --project ../BacktestRunner/BacktestRunner.csproj --",
+    "backtest:help": "dotnet run --configuration Release --project ../BacktestRunner/BacktestRunner.csproj -- --help"
   },
   "dependencies": {
+    "@microsoft/signalr": "^8.0.7",
     "vue": "^3.5.39"
   },
   "devDependencies": {

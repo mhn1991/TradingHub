@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>TradingCore</RootNamespace>
+    <AssemblyName>TradingCore</AssemblyName>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Agent/Agent.csproj" />
+    <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
+    <ProjectReference Include="../ExecutionManager/ExecutionManager.csproj" />
+    <ProjectReference Include="../RiskManager/RiskManager.csproj" />
+    <ProjectReference Include="../TradingJournal/TradingJournal.csproj" />
+  </ItemGroup>
+</Project>

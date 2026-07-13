@@ -114,6 +114,7 @@ public sealed class SimulationRunnerTests
         public string Name => "Buy once";
         public IReadOnlySet<BarInterval> RequiredIntervals { get; } = new HashSet<BarInterval> { interval };
         public BarInterval TriggerInterval => interval;
+        public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.ProtectiveStopAndStrategyExit;
         public DateTimeOffset? DecisionTime { get; private set; }
 
         public Task<AgentDecision> EvaluateAsync(
@@ -147,6 +148,7 @@ public sealed class SimulationRunnerTests
         public string Name => "Recording agent";
         public IReadOnlySet<BarInterval> RequiredIntervals { get; } = required.ToHashSet();
         public BarInterval TriggerInterval { get; } = trigger;
+        public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.ProtectiveStopAndStrategyExit;
         public AgentMarketContext? LastContext { get; private set; }
 
         public Task<AgentDecision> EvaluateAsync(

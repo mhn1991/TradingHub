@@ -2,7 +2,10 @@
 
 This Vue dashboard replays the actual output of `ChartAnnotationEngine`. It shows:
 
-- Candles, volume, Bollinger Bands, and RSI.
+- Candles, volume, Bollinger Bands, RSI, and ATR.
+- Bollinger squeeze/narrowing/widening/expansion context with normalized bandwidth and historical percentile.
+- RSI momentum plus regular/hidden divergence and same-direction convergence, revealed only after the underlying swing is confirmed.
+- ATR normalized volatility regime, percentile, and contraction/expansion direction.
 - Swing pivots at their historical pivot time, revealed only at `confirmedAt`.
 - Support/resistance zones, RANSAC trendlines, and detected channels.
 - Confidence contributions, indicator warm-up, replay continuity, and analysis timing.
@@ -23,6 +26,39 @@ npm run dev
 ```
 
 Open `http://localhost:5173`. Use Space to play or pause, and the left/right arrow keys to step through candles.
+
+## Chart navigation and annotations
+
+- Drag the chart horizontally to move through the known candle history without changing replay time.
+- Use the mouse wheel over the chart to zoom in or out.
+- **Older**, **Newer**, **Latest**, and **Fit** provide keyboard-accessible viewport controls.
+- The viewport never displays candles after the selected replay frame, so historical inspection does not introduce look-ahead.
+- Bollinger squeeze and expansion periods are shaded; squeeze-release candles have a vertical marker.
+- RSI regular/hidden divergence and convergence are drawn on both price and RSI panels.
+- Normalized ATR has its own panel, with low/high volatility regimes shaded.
+- Multiple support/resistance fits are retained across structure regimes. Their confirmed
+  pivot span is solid, endpoints are marked, and the projection to the chart edge is dashed.
+- Channels use distinct boundary pairs and follow the same confirmed/projected treatment.
+- Price zones are clipped overlays and do not change the candle price scale.
+- Each derived layer can be enabled or disabled independently from the chart header.
+
+
+## Run a historical dual-strategy backtest
+
+From the repository root, set your OANDA practice credentials and run the new CLI:
+
+```bash
+export Oanda__AccountId='YOUR_PRACTICE_ACCOUNT_ID'
+export Oanda__AccessToken='YOUR_PRACTICE_ACCESS_TOKEN'
+
+dotnet run --configuration Release --project BacktestRunner/BacktestRunner.csproj -- \
+  --instrument FX:GBP/JPY \
+  --from 2025-07-13 \
+  --to 2026-07-13 \
+  --execution-interval 1m
+```
+
+Then start this Vue application with `npm ci && npm run dev`. The Simulator workspace loads the generated manifest automatically and provides a strategy selector, comparison cards, chart trade overlays, and the complete trade journal. See `../RUN_BACKTEST.md` for all options.
 
 ## Run with live public data
 

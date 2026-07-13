@@ -6,7 +6,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <IsAotCompatible>true</IsAotCompatible>
+    <!-- Job persistence, streaming cache, and chunked replay use System.Text.Json.
+         Keep the core simulation engine trim-friendly; full native AOT publish for
+         Dashboard/CLI hosts is not required. -->
+    <IsAotCompatible>false</IsAotCompatible>
+    <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
@@ -14,5 +18,9 @@
     <ProjectReference Include="../Brokers/Brokers.csproj" />
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
     <ProjectReference Include="../Agent/Agent.csproj" />
+    <ProjectReference Include="../RiskManager/RiskManager.csproj" />
+    <ProjectReference Include="../ExecutionManager/ExecutionManager.csproj" />
+    <ProjectReference Include="../TradingCore/TradingCore.csproj" />
+    <ProjectReference Include="../TradingJournal/TradingJournal.csproj" />
   </ItemGroup>
 </Project>

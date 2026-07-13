@@ -1,6 +1,10 @@
 using Agent.Abstractions;
-using Agent.Execution;
+using ExecutionManager;
+using TradingJournal;
 using Agent.Models;
+using TradingCore.Pipeline;
+using RiskManager.Safety;
+using TradingCore.MarketData;
 using Brokers.Models;
 using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
@@ -14,6 +18,7 @@ namespace Simulator.Engine;
 /// <summary>
 /// Deterministic historical runner. It processes existing orders before exposing the
 /// current candle close to the Agent, so newly submitted orders can only fill later.
+/// Data quality and safety controls are evaluated before every strategy decision.
 /// </summary>
 public sealed class SimulationRunner
 {
@@ -22,9 +27,17 @@ public sealed class SimulationRunner
     private readonly MultiTimeframeAggregator _aggregator;
     private readonly IChartAnnotator _annotator;
     private readonly ITradingAgent _agent;
-    private readonly IExecutionCoordinator _execution;
+    private readonly SafeTradingPipeline _pipeline;
+    private readonly ITradingSafetyController _safety;
+    private readonly ITradeJournal _journal;
     private readonly SimulatedBrokerClient _broker;
     private readonly Dictionary<BarInterval, AnalysisSnapshot> _latestAnalysis = [];
+    private long _lastProcessedLedgerSequence;
+    private AgentDecision? _pendingEntryDecision;
+    private string? _pendingEntryBrokerOrderId;
+    private SimulatedTradeRecord? _activeTrade;
+    private string? _pendingExitReason;
+    private readonly List<SimulatedTradeRecord> _trades = [];
 
     public SimulationRunner(
         IHistoricalCandleSource source,
@@ -33,15 +46,26 @@ public sealed class SimulationRunner
         IChartAnnotator annotator,
         ITradingAgent agent,
         IExecutionCoordinator execution,
-        SimulatedBrokerClient broker)
+        SimulatedBrokerClient broker,
+        IMarketDataQualityGate? dataQuality = null,
+        ITradingSafetyController? safety = null,
+        ITradeJournal? journal = null)
     {
         _source = source ?? throw new ArgumentNullException(nameof(source));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _aggregator = aggregator ?? throw new ArgumentNullException(nameof(aggregator));
         _annotator = annotator ?? throw new ArgumentNullException(nameof(annotator));
         _agent = agent ?? throw new ArgumentNullException(nameof(agent));
-        _execution = execution ?? throw new ArgumentNullException(nameof(execution));
+        ArgumentNullException.ThrowIfNull(execution);
         _broker = broker ?? throw new ArgumentNullException(nameof(broker));
+        _safety = safety ?? new TradingSafetyController();
+        _journal = journal ?? NullTradeJournal.Instance;
+        _pipeline = new SafeTradingPipeline(
+            _agent,
+            execution,
+            dataQuality,
+            _safety,
+            _journal);
 
         if (_agent.RequiredIntervals.Count == 0)
         {
@@ -73,9 +97,11 @@ public sealed class SimulationRunner
     {
         DateTimeOffset? startedAt = null;
         DateTimeOffset? endedAt = null;
+        Candle? lastBaseCandle = null;
 
         await foreach (Candle baseCandle in _source.ReadAsync(cancellationToken))
         {
+            lastBaseCandle = baseCandle;
             DateTimeOffset eventTime = baseCandle.CloseTime ?? baseCandle.OpenTime;
             startedAt ??= baseCandle.OpenTime;
             endedAt = eventTime;
@@ -83,8 +109,16 @@ public sealed class SimulationRunner
 
             // Existing orders react first. Orders created from this candle's analysis
             // are stamped with the new market sequence and cannot fill here.
+            BrokerPosition? positionBefore = (await _broker.Positions
+                .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(position => position.Instrument == baseCandle.Instrument);
             await _broker.Runtime.ProcessExecutionCandleAsync(baseCandle, cancellationToken)
                 .ConfigureAwait(false);
+            BrokerPosition? positionAfter = (await _broker.Positions
+                .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(position => position.Instrument == baseCandle.Instrument);
+            CapturePositionTransition(baseCandle, positionBefore, positionAfter);
+            RecordNewClosedTrades();
 
             IReadOnlyList<CandleClosedEvent> closedEvents = _aggregator.Apply(baseCandle);
             bool triggerClosed = false;
@@ -137,12 +171,10 @@ public sealed class SimulationRunner
                 OpenOrders = openOrders
             };
 
-            AgentDecision decision = await _agent
-                .EvaluateAsync(context, cancellationToken)
+            TradingPipelineResult pipelineResult = await _pipeline
+                .ProcessAsync(context, _broker, cancellationToken)
                 .ConfigureAwait(false);
-            await _execution
-                .ProcessAsync(decision, _broker, cancellationToken)
-                .ConfigureAwait(false);
+            CaptureDecision(pipelineResult);
         }
 
         if (startedAt is null || endedAt is null)
@@ -150,7 +182,217 @@ public sealed class SimulationRunner
             throw new InvalidOperationException("The historical source did not provide any candles.");
         }
 
-        return _broker.State.BuildResult(startedAt.Value, endedAt.Value);
+        if (_broker.Options.CloseOpenPositionsAtEnd && lastBaseCandle is not null)
+        {
+            BrokerPosition? positionBefore = (await _broker.Positions
+                .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(position => position.Instrument == lastBaseCandle.Instrument);
+            if (positionBefore is not null)
+            {
+                _pendingExitReason = "End of simulation liquidation.";
+                await _broker.Runtime.LiquidateAtMarketCloseAsync(lastBaseCandle, cancellationToken)
+                    .ConfigureAwait(false);
+                BrokerPosition? positionAfter = (await _broker.Positions
+                    .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
+                    .FirstOrDefault(position => position.Instrument == lastBaseCandle.Instrument);
+                CapturePositionTransition(lastBaseCandle, positionBefore, positionAfter);
+            }
+        }
+
+        RecordNewClosedTrades();
+        SimulationResult result = _broker.State.BuildResult(startedAt.Value, endedAt.Value);
+        if (_activeTrade is not null)
+        {
+            _trades.Add(_activeTrade with
+            {
+                ClosedAt = endedAt,
+                ExitReason = SimulatedTradeExitReason.EndOfSimulation,
+                ExitReasonText = "Position remained open at the end of the requested history."
+            });
+            _activeTrade = null;
+        }
+        return result with { Trades = _trades.ToArray() };
+    }
+
+    private void CaptureDecision(TradingPipelineResult result)
+    {
+        AgentDecision? decision = result.Decision;
+        if (decision is null || result.Submission is null ||
+            result.Submission.Status == SubmissionStatus.Rejected)
+        {
+            return;
+        }
+
+        if (decision.Action is AgentAction.Buy or AgentAction.Sell)
+        {
+            _pendingEntryDecision = decision;
+            _pendingEntryBrokerOrderId = result.Submission.BrokerOrderId;
+        }
+        else if (decision.Action == AgentAction.Close)
+        {
+            _pendingExitReason = decision.Reason;
+        }
+    }
+
+    private void CapturePositionTransition(
+        Candle candle,
+        BrokerPosition? before,
+        BrokerPosition? after)
+    {
+        DateTimeOffset timestamp = candle.CloseTime ?? candle.OpenTime;
+        if (before is null && after is not null && _pendingEntryDecision is not null)
+        {
+            AgentDecision decision = _pendingEntryDecision;
+            decimal entryCommission = -_broker.State.GetLedger()
+                .Where(entry =>
+                    entry.Type == LedgerEntryType.Commission &&
+                    (_pendingEntryBrokerOrderId is null || entry.OrderId == _pendingEntryBrokerOrderId) &&
+                    entry.Timestamp == timestamp)
+                .Sum(entry => entry.Amount);
+            _activeTrade = new SimulatedTradeRecord
+            {
+                StrategyName = decision.StrategyName ?? _agent.Name,
+                SetupId = decision.SetupId ?? decision.DecisionId ?? $"setup:{timestamp:O}",
+                Instrument = decision.Instrument,
+                Side = after.Side,
+                SetupStartedAt = decision.SetupStartedAt ?? decision.CreatedAt,
+                ConfirmationAt = decision.ConfirmationAt,
+                SignalCreatedAt = decision.CreatedAt,
+                OpenedAt = timestamp,
+                SignalPrice = decision.ReferencePrice,
+                EntryPrice = after.AveragePrice,
+                Quantity = after.Quantity,
+                StopLossPrice = decision.StopLossPrice,
+                TakeProfitPrice = decision.TakeProfitPrice,
+                ExpectedRewardRisk = decision.ExpectedRewardRisk,
+                Commission = entryCommission,
+                StopSource = decision.StopSource,
+                TargetSource = decision.TargetSource,
+                SetupReason = decision.Reason,
+                ExitReason = SimulatedTradeExitReason.Unknown
+            };
+            _pendingEntryDecision = null;
+            _pendingEntryBrokerOrderId = null;
+            return;
+        }
+
+        if (before is not null && after is null && _activeTrade is not null)
+        {
+            LedgerEntry? realised = _broker.State.GetLedger()
+                .Where(entry => entry.Type == LedgerEntryType.RealisedProfitLoss && entry.Timestamp == timestamp)
+                .OrderByDescending(entry => entry.Sequence)
+                .FirstOrDefault();
+            decimal gross = realised?.Amount ?? 0m;
+            string? exitOrderId = realised?.OrderId;
+            decimal exitCommission = -_broker.State.GetLedger()
+                .Where(entry =>
+                    entry.Type == LedgerEntryType.Commission &&
+                    entry.Timestamp == timestamp &&
+                    (exitOrderId is null || entry.OrderId == exitOrderId))
+                .Sum(entry => entry.Amount);
+            decimal totalCommission = _activeTrade.Commission + exitCommission;
+            decimal entryPrice = _activeTrade.EntryPrice ?? before.AveragePrice ?? candle.Prices.Open;
+            decimal quoteToBaseRate = _broker.State.GetQuoteToBaseCurrencyRate(before.Instrument);
+            decimal quoteProfitLoss = gross / quoteToBaseRate;
+            decimal exitPrice = before.Side == OrderSide.Buy
+                ? entryPrice + quoteProfitLoss / Math.Max(before.Quantity, 0.00000001m)
+                : entryPrice - quoteProfitLoss / Math.Max(before.Quantity, 0.00000001m);
+            BrokerOrder? exitOrder = exitOrderId is null ? null : _broker.State.GetOrder(exitOrderId);
+            SimulatedTradeExitReason exitReason = DetermineExitReason(
+                candle,
+                _activeTrade,
+                _pendingExitReason,
+                exitOrder);
+            decimal? initialRisk = _activeTrade.StopLossPrice is decimal stop
+                ? Math.Abs(entryPrice - stop) * before.Quantity * quoteToBaseRate
+                : null;
+            _trades.Add(_activeTrade with
+            {
+                ClosedAt = timestamp,
+                ExitPrice = exitPrice,
+                GrossProfitLoss = gross,
+                Commission = totalCommission,
+                NetProfitLoss = gross - totalCommission,
+                RMultiple = initialRisk is > 0m ? (gross - totalCommission) / initialRisk.Value : null,
+                ExitReason = exitReason,
+                ExitReasonText = _pendingExitReason ?? exitReason.ToString()
+            });
+            _activeTrade = null;
+            _pendingExitReason = null;
+        }
+    }
+
+    private static SimulatedTradeExitReason DetermineExitReason(
+        Candle candle,
+        SimulatedTradeRecord trade,
+        string? strategyReason,
+        BrokerOrder? exitOrder)
+    {
+        if (!string.IsNullOrWhiteSpace(strategyReason))
+        {
+            if (strategyReason.Contains("End of simulation", StringComparison.OrdinalIgnoreCase))
+            {
+                return SimulatedTradeExitReason.EndOfSimulation;
+            }
+
+            return strategyReason.Contains("invalid", StringComparison.OrdinalIgnoreCase)
+                ? SimulatedTradeExitReason.StructuralInvalidation
+                : SimulatedTradeExitReason.StrategyClose;
+        }
+        if (string.Equals(exitOrder?.Type, StandardOrderType.Stop.ToString(), StringComparison.Ordinal))
+            return SimulatedTradeExitReason.StopLoss;
+        if (string.Equals(exitOrder?.Type, StandardOrderType.Limit.ToString(), StringComparison.Ordinal))
+            return SimulatedTradeExitReason.TakeProfit;
+        if (trade.StopLossPrice is decimal stop && candle.Prices.Low <= stop && candle.Prices.High >= stop)
+            return SimulatedTradeExitReason.StopLoss;
+        if (trade.TakeProfitPrice is decimal target && candle.Prices.Low <= target && candle.Prices.High >= target)
+            return SimulatedTradeExitReason.TakeProfit;
+        return SimulatedTradeExitReason.Unknown;
+    }
+
+    private void RecordNewClosedTrades()
+    {
+        foreach (LedgerEntry entry in _broker.State.GetLedger()
+                     .Where(entry =>
+                         entry.Sequence > _lastProcessedLedgerSequence &&
+                         entry.Type == LedgerEntryType.RealisedProfitLoss)
+                     .OrderBy(entry => entry.Sequence))
+        {
+            _lastProcessedLedgerSequence = entry.Sequence;
+            // Safety limits should use the complete trade result, including both
+            // entry and exit commissions, rather than the gross realised ledger item.
+            SimulatedTradeRecord? matchingTrade = _trades.LastOrDefault(trade =>
+                trade.ClosedAt == entry.Timestamp);
+            decimal netClosedTrade = matchingTrade?.NetProfitLoss ?? entry.Amount;
+            TradingSafetySnapshot snapshot = _safety.RecordClosedTrade(netClosedTrade, entry.Timestamp);
+            _journal.Append(new TradeJournalEntry
+            {
+                Sequence = 0,
+                Timestamp = entry.Timestamp,
+                Type = TradeJournalEventType.ClosedTradeRecorded,
+                Value = netClosedTrade,
+                Message = $"Recorded net closed-trade P/L {netClosedTrade:F2}. " +
+                    $"Safety state is {snapshot.State}."
+            });
+
+            if (!snapshot.CanOpenNewTrades)
+            {
+                _journal.Append(new TradeJournalEntry
+                {
+                    Sequence = 0,
+                    Timestamp = entry.Timestamp,
+                    Type = TradeJournalEventType.SafetyStateChanged,
+                    Value = entry.Amount,
+                    Message = snapshot.Message ?? snapshot.Reason.ToString()
+                });
+            }
+        }
+
+        long latestSequence = _broker.State.GetLedger()
+            .Select(entry => entry.Sequence)
+            .DefaultIfEmpty(_lastProcessedLedgerSequence)
+            .Max();
+        _lastProcessedLedgerSequence = Math.Max(_lastProcessedLedgerSequence, latestSequence);
     }
 
     private bool HasRequiredSnapshots(DateTimeOffset timestamp) =>

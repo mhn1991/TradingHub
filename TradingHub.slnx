@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="BacktestRunner/BacktestRunner.csproj" />
   <Project Path="Agent/Agent.csproj" />
   <Project Path="Brokers.IntegrationTests/Brokers.IntegrationTests.csproj" />
   <Project Path="Brokers/Brokers.csproj" />
@@ -11,4 +12,9 @@
   <Project Path="Simulator.Tests/Simulator.Tests.csproj" />
   <Project Path="Simulator/Simulator.csproj" />
   <Project Path="TradingHub.UnitTests/TradingHub.UnitTests.csproj" />
+  <Project Path="ExecutionManager/ExecutionManager.csproj" />
+  <Project Path="RiskManager/RiskManager.csproj" />
+  <Project Path="TradeManager/TradeManager.csproj" />
+  <Project Path="TradingCore/TradingCore.csproj" />
+  <Project Path="TradingJournal/TradingJournal.csproj" />
 </Solution>

@@ -1,6 +1,11 @@
 using Agent.Abstractions;
-using Agent.Execution;
+using ExecutionManager;
+using TradingJournal;
+using RiskManager.Safety;
+using TradingCore.MarketData;
 using Brokers.Models;
+using Brokers.Safety;
+using RiskManager;
 using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
 using Simulator.Abstractions;
@@ -16,6 +21,10 @@ public sealed record SimulationSession(
     IChartAnnotator Annotator,
     IAdjustableSimulationClock Clock) : IAsyncDisposable
 {
+    public ITradingSafetyController? Safety { get; init; }
+    public IMarketDataQualityGate? DataQuality { get; init; }
+    public ITradeJournal? Journal { get; init; }
+
     public ValueTask DisposeAsync() => Broker.DisposeAsync();
 }
 
@@ -28,7 +37,10 @@ public static class SimulationFactory
         ITradingAgent agent,
         SimulationOptions? simulationOptions = null,
         ChartAnnotationOptions? annotationOptions = null,
-        IExecutionCoordinator? executionCoordinator = null)
+        IExecutionCoordinator? executionCoordinator = null,
+        IMarketDataQualityGate? dataQuality = null,
+        ITradingSafetyController? safety = null,
+        ITradeJournal? journal = null)
     {
         ArgumentNullException.ThrowIfNull(baseCandles);
         ArgumentNullException.ThrowIfNull(analysisIntervals);
@@ -43,9 +55,15 @@ public static class SimulationFactory
             var aggregator = new MultiTimeframeAggregator(
                 instrument,
                 analysisIntervals,
-                options.CandleCapacity);
+                options.CandleCapacity,
+                options.BaseCandleGapPolicy);
             var source = new EnumerableCandleSource(baseCandles);
-            var execution = executionCoordinator ?? new ExecutionCoordinator();
+            IMarketDataQualityGate qualityGate = dataQuality ?? new MarketDataQualityGate();
+            ITradingSafetyController safetyController = safety ?? new TradingSafetyController();
+            ITradeJournal tradeJournal = journal ?? new InMemoryTradeJournal(options.LedgerCapacity);
+            IExecutionCoordinator execution = executionCoordinator ?? new ExecutionCoordinator(
+                safety: safetyController,
+                journal: tradeJournal);
             var runner = new SimulationRunner(
                 source,
                 clock,
@@ -53,14 +71,127 @@ public static class SimulationFactory
                 annotator,
                 agent,
                 execution,
-                broker);
+                broker,
+                qualityGate,
+                safetyController,
+                tradeJournal);
 
-            return new SimulationSession(runner, broker, annotator, clock);
+            return new SimulationSession(runner, broker, annotator, clock)
+            {
+                Safety = safetyController,
+                DataQuality = qualityGate,
+                Journal = tradeJournal
+            };
         }
         catch
         {
             broker.DisposeAsync().GetAwaiter().GetResult();
             throw;
         }
+    }
+
+
+    /// <summary>
+    /// Creates a conservative simulation while respecting how the strategy exits.
+    /// Bracket strategies must provide both stop and target; reverse-exit strategies
+    /// must provide a protective stop but may intentionally omit a fixed target.
+    /// </summary>
+    public static SimulationSession CreateStrategyAwareHistorical(
+        InstrumentKey instrument,
+        IEnumerable<Candle> baseCandles,
+        IEnumerable<BarInterval> analysisIntervals,
+        ITradingAgent agent,
+        SimulationOptions? simulationOptions = null,
+        ChartAnnotationOptions? annotationOptions = null,
+        TradingSafetyOptions? safetyOptions = null,
+        MarketDataQualityOptions? dataQualityOptions = null,
+        ExecutionOptions? executionOptions = null,
+        BrokerExecutionSafetyOptions? brokerSafetyOptions = null)
+    {
+        ArgumentNullException.ThrowIfNull(agent);
+        PreTradeRiskOptions riskOptions = agent.ExitManagementMode switch
+        {
+            AgentExitManagementMode.ProtectiveStopAndStrategyExit => new PreTradeRiskOptions
+            {
+                RequireStopLoss = true,
+                RequireTakeProfit = false,
+                MinimumRewardRiskRatio = null,
+                MaximumOpenPositions = 1,
+                MaximumLossPercentageOfBalance = 0.5m,
+                AllowPyramiding = false
+            },
+            AgentExitManagementMode.Bracket => new PreTradeRiskOptions
+            {
+                RequireStopLoss = true,
+                RequireTakeProfit = true,
+                MinimumRewardRiskRatio = PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
+                MaximumOpenPositions = 1,
+                MaximumLossPercentageOfBalance = 0.5m,
+                AllowPyramiding = false
+            },
+            _ => PreTradeRiskOptions.PhaseOneSafeDefaults
+        };
+
+        return CreatePhaseOneSafeHistorical(
+            instrument,
+            baseCandles,
+            analysisIntervals,
+            agent,
+            simulationOptions,
+            annotationOptions,
+            safetyOptions,
+            dataQualityOptions,
+            executionOptions,
+            riskOptions,
+            brokerSafetyOptions);
+    }
+
+    /// <summary>
+    /// Creates a simulation with conservative Phase 1 entry controls enabled.
+    /// Strategies used with this factory must provide reference, stop-loss, and take-profit prices.
+    /// </summary>
+    public static SimulationSession CreatePhaseOneSafeHistorical(
+        InstrumentKey instrument,
+        IEnumerable<Candle> baseCandles,
+        IEnumerable<BarInterval> analysisIntervals,
+        ITradingAgent agent,
+        SimulationOptions? simulationOptions = null,
+        ChartAnnotationOptions? annotationOptions = null,
+        TradingSafetyOptions? safetyOptions = null,
+        MarketDataQualityOptions? dataQualityOptions = null,
+        ExecutionOptions? executionOptions = null,
+        PreTradeRiskOptions? riskOptions = null,
+        BrokerExecutionSafetyOptions? brokerSafetyOptions = null)
+    {
+        SimulationOptions resolvedSimulationOptions = simulationOptions ?? new SimulationOptions();
+        TradingSafetyOptions resolvedSafetyOptions = safetyOptions ?? new TradingSafetyOptions
+        {
+            MaximumDailyLoss = resolvedSimulationOptions.StartingBalance * 0.01m,
+            MaximumWeeklyLoss = resolvedSimulationOptions.StartingBalance * 0.03m,
+            MaximumConsecutiveLosses = 3
+        };
+        MarketDataQualityOptions resolvedDataQualityOptions = dataQualityOptions ??
+            new MarketDataQualityOptions { RequireIndicatorsReady = true };
+        var safety = new TradingSafetyController(resolvedSafetyOptions);
+        var journal = new InMemoryTradeJournal(resolvedSimulationOptions.LedgerCapacity);
+        var dataQuality = new MarketDataQualityGate(resolvedDataQualityOptions);
+        var execution = new ExecutionCoordinator(
+            executionOptions,
+            new PreTradeRiskManager(riskOptions ?? PreTradeRiskOptions.PhaseOneSafeDefaults),
+            new BrokerExecutionSafety(brokerSafetyOptions),
+            safety,
+            journal);
+
+        return CreateHistorical(
+            instrument,
+            baseCandles,
+            analysisIntervals,
+            agent,
+            resolvedSimulationOptions,
+            annotationOptions,
+            execution,
+            dataQuality,
+            safety,
+            journal);
     }
 }

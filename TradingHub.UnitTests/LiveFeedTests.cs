@@ -150,6 +150,29 @@ public sealed class LiveFeedTests
     }
 
     [Test]
+    public async Task BoundedHttpContent_RejectsAnOversizedUnknownLengthResponse()
+    {
+        using var content = new StreamContent(new MemoryStream(new byte[11]));
+        content.Headers.ContentLength = null;
+
+        Assert.That(
+            async () => await BoundedHttpContent.ReadAsync(content, 10, CancellationToken.None),
+            Throws.TypeOf<InvalidDataException>());
+    }
+
+    [Test]
+    public async Task BoundedHttpContent_ReadsAResponseAtTheExactLimit()
+    {
+        byte[] expected = Enumerable.Range(0, 10).Select(value => (byte)value).ToArray();
+        using var content = new StreamContent(new MemoryStream(expected));
+        content.Headers.ContentLength = null;
+
+        byte[] actual = await BoundedHttpContent.ReadAsync(content, expected.Length, CancellationToken.None);
+
+        Assert.That(actual, Is.EqualTo(expected));
+    }
+
+    [Test]
     public async Task WorkspaceCatalog_ReportsEnvironmentAndConfigurationHonestly()
     {
         using var client = new HttpClient(new StubHttpMessageHandler(request =>
@@ -428,10 +451,12 @@ public sealed class LiveFeedTests
         Assert.Multiple(() =>
         {
             Assert.That(frames, Has.Count.EqualTo(5));
+            Assert.That(frames[0].Index, Is.EqualTo(5));
             Assert.That(frames[^1].Index, Is.EqualTo(9));
             Assert.That(frames[^1].Indicators.Rsi, Is.Not.Null);
             Assert.That(frames[^1].Indicators.BollingerMiddle, Is.Not.Null);
             Assert.That(state.GapsDetected, Is.Zero);
+            Assert.That(state.LastAvailableAt, Is.EqualTo(frames[^1].AvailableAt));
         });
     }
 

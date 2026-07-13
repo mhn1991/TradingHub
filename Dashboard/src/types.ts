@@ -6,6 +6,26 @@ export interface ReplayDataset {
   source: string
   parameters: AnnotationParameters
   series: ReplaySeries[]
+  trades?: ReplayTrade[]
+  performance?: ReplayPerformanceSummary | null
+}
+
+export interface BacktestMarketDataset {
+  schemaVersion: number
+  title: string
+  instrument: string
+  generatedAt: string
+  source: string
+  parameters: AnnotationParameters
+  series: ReplaySeries[]
+}
+
+export interface BacktestRunDataset {
+  schemaVersion: number
+  strategyName: string
+  title: string
+  trades: ReplayTrade[]
+  performance: ReplayPerformanceSummary
 }
 
 export interface AnnotationParameters {
@@ -13,12 +33,141 @@ export interface AnnotationParameters {
   swingCapacity: number
   indicatorCapacity: number
   atrPeriod: number
+  atrAnalysisHistoryPeriod?: number
+  atrAnalysisChangeLookback?: number
+  atrAnalysisMinimumSamples?: number
+  atrDirectionThresholdPercent?: number
   rsiPeriod: number
+  rsiMomentumLookback?: number
+  rsiMomentumThreshold?: number
+  rsiMinimumDivergenceDifference?: number
+  rsiMinimumPriceDifferenceAtr?: number
+  rsiSignalLifetimeCandles?: number
   bollingerPeriod: number
   bollingerStandardDeviations: number
+  bollingerWidthHistoryPeriod?: number
+  bollingerWidthChangeLookback?: number
+  bollingerWidthMinimumSamples?: number
+  bollingerWidthDirectionThresholdPercent?: number
+  bollingerSqueezePercentile?: number
+  bollingerWidePercentile?: number
   swingLeftBars: number
   swingRightBars: number
   heavyAnalysisEveryCandles: number
+  structureDirectionToleranceAtr?: number
+  resetLinesOnStructureChange?: boolean
+}
+
+
+export interface ReplayTrade {
+  strategyName: string
+  setupId: string
+  side: string
+  setupStartedAt: string
+  confirmationAt: string | null
+  signalCreatedAt: string
+  openedAt: string | null
+  closedAt: string | null
+  signalPrice: number | null
+  entryPrice: number | null
+  exitPrice: number | null
+  stopLossPrice: number | null
+  takeProfitPrice: number | null
+  quantity: number
+  expectedRewardRisk: number | null
+  stopSource: string | null
+  targetSource: string | null
+  grossProfitLoss: number
+  commission: number
+  netProfitLoss: number
+  rMultiple: number | null
+  exitReason: string
+  setupReason: string
+  exitReasonText: string | null
+}
+
+export interface ReplayPerformanceSummary {
+  tradeCount: number
+  winningTrades: number
+  losingTrades: number
+  netProfit: number
+  winRatePercent: number
+  averageR: number | null
+  profitFactor: number | null
+  maximumDrawdown: number
+  currency: string
+  startingBalance: number
+  finalBalance: number
+  finalEquity: number
+  totalCommission: number
+}
+
+export interface StrategyProgressSnapshot {
+  strategyName: string
+  strategyId: string
+  balance: number
+  equity: number
+  unrealizedProfitLoss: number
+  openPositions: number
+  completedTrades: number
+  activeSetups: number
+  netProfit: number
+  status?: string | null
+  lastError?: string | null
+}
+
+export interface SimulationJobSnapshot {
+  id: string
+  revision?: number
+  status: string
+  createdAt: string
+  startedAt?: string | null
+  completedAt?: string | null
+  instrument: string
+  requestedFrom: string
+  requestedTo: string
+  warmupFrom?: string | null
+  currentMarketTime?: string | null
+  processedBaseCandles: number
+  estimatedBaseCandleCount?: number | null
+  progressPercent: number
+  candlesPerSecond: number
+  strategies: StrategyProgressSnapshot[]
+  error?: string | null
+  isComplete: boolean
+  outputDirectory?: string | null
+  inputStreamId?: string | null
+  inputRequestId?: string | null
+  inputHash?: string | null
+  dataSourceStatus?: string | null
+  sourceProgress?: {
+    phase: string
+    fromCache: boolean
+    candlesRead: number
+    pagesRead: number
+    latestCandle?: string | null
+    estimatedCandles?: number | null
+    percent?: number | null
+  } | null
+}
+
+export interface BacktestManifestRun {
+  id: string
+  strategyName: string
+  file: string
+  performance: ReplayPerformanceSummary
+}
+
+export interface BacktestManifest {
+  schemaVersion: number
+  title: string
+  generatedAt: string
+  instrument: string
+  from: string
+  to: string
+  executionInterval: string
+  marketFile: string
+  runs: BacktestManifestRun[]
 }
 
 export interface ReplaySeries {
@@ -36,6 +185,7 @@ export interface ReplayFrame {
   priceZones: PriceZone[]
   trendlines: Trendline[]
   channels: PriceChannel[]
+  marketStructure?: MarketStructureSnapshot
   confidence: ConfidenceScore
   analysisMicroseconds: number
 }
@@ -50,12 +200,77 @@ export interface ReplayCandle {
   volume: number
 }
 
+export type MomentumDirection = 'Unknown' | 'Falling' | 'Stable' | 'Rising'
+export type VolatilityDirection = 'Unknown' | 'Contracting' | 'Stable' | 'Expanding'
+export type AtrVolatilityRegime = 'Unknown' | 'VeryLow' | 'Low' | 'Normal' | 'High' | 'VeryHigh'
+export type BollingerWidthRegime = 'Unknown' | 'Squeeze' | 'Narrow' | 'Normal' | 'Wide' | 'Expansion'
+export type RsiZone = 'Unknown' | 'Oversold' | 'Bearish' | 'Neutral' | 'Bullish' | 'Overbought'
+export type RsiRelationshipType =
+  | 'None'
+  | 'RegularBullishDivergence'
+  | 'RegularBearishDivergence'
+  | 'HiddenBullishDivergence'
+  | 'HiddenBearishDivergence'
+  | 'BullishConvergence'
+  | 'BearishConvergence'
+
+export interface AtrAnalysisSnapshot {
+  normalizedPercent: number | null
+  changePercent: number | null
+  percentile: number | null
+  direction: VolatilityDirection
+  regime: AtrVolatilityRegime
+  sampleCount: number
+}
+
+export interface BollingerAnalysisSnapshot {
+  bandwidthPercent: number | null
+  bandwidthChangePercent: number | null
+  percentB: number | null
+  widthPercentile: number | null
+  widthDirection: VolatilityDirection
+  widthRegime: BollingerWidthRegime
+  isSqueeze: boolean
+  isExpansion: boolean
+  squeezeReleased: boolean
+  sampleCount: number
+}
+
+export interface RsiRelationshipSnapshot {
+  type: RsiRelationshipType
+  firstPivotTime: string
+  secondPivotTime: string
+  confirmedAt: string
+  firstPrice: number
+  secondPrice: number
+  firstRsi: number
+  secondRsi: number
+  priceChange: number
+  rsiChange: number
+  strength: number
+  ageCandles: number
+  isDivergence: boolean
+  isConvergence: boolean
+}
+
+export interface RsiAnalysisSnapshot {
+  zone: RsiZone
+  momentumDirection: MomentumDirection
+  momentumChange: number | null
+  latestRelationship: RsiRelationshipSnapshot | null
+  isNewRelationship: boolean
+  sampleCount: number
+}
+
 export interface IndicatorSnapshot {
   atr: number | null
   rsi: number | null
   bollingerMiddle: number | null
   bollingerUpper: number | null
   bollingerLower: number | null
+  atrAnalysis?: AtrAnalysisSnapshot
+  rsiAnalysis?: RsiAnalysisSnapshot
+  bollingerAnalysis?: BollingerAnalysisSnapshot
 }
 
 export type SwingType = 'High' | 'Low'
@@ -82,6 +297,8 @@ export interface PriceZone {
 export type TrendlineType = 'Support' | 'Resistance'
 
 export interface Trendline {
+  startTime?: string
+  endTime?: string
   originTime: string
   originPrice: number
   slopePerSecond: number
@@ -91,11 +308,32 @@ export interface Trendline {
   type: TrendlineType
 }
 
+export type MarketStructureDirection = 'Unknown' | 'Rising' | 'Falling' | 'Sideways'
+export type MarketStructureBreak = 'None' | 'Bullish' | 'Bearish'
+
+export interface MarketStructureSnapshot {
+  direction: MarketStructureDirection
+  previousDirection: MarketStructureDirection
+  break: MarketStructureBreak
+  directionChanged: boolean
+  segmentStartedAt: string | null
+  changedAt: string | null
+  lastSwingHigh: SwingPoint | null
+  lastSwingLow: SwingPoint | null
+  consecutiveHigherHighs: number
+  consecutiveHigherLows: number
+  consecutiveLowerHighs: number
+  consecutiveLowerLows: number
+  strength: number
+}
+
 export type ChannelDirection = 'Falling' | 'Sideways' | 'Rising'
 
 export interface PriceChannel {
   lowerLine: Trendline
   upperLine: Trendline
+  startTime?: string
+  endTime?: string
   direction: ChannelDirection
   width: number
   widthAtr: number
@@ -115,6 +353,9 @@ export interface ConfidenceScore {
 
 export interface ChartLayers {
   bollinger: boolean
+  bollingerRegimes: boolean
+  rsiRelationships: boolean
+  atr: boolean
   volume: boolean
   swings: boolean
   zones: boolean

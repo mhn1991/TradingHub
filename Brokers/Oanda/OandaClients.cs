@@ -31,7 +31,14 @@ internal sealed class OandaMarketDataClient(
             .SendAsync(command, cancellationToken)
             .ConfigureAwait(false);
 
-        return response.Candles.Select(candle => OandaMappings.ToCandle(candle, query)).ToArray();
+        var candles = new List<Candle>(response.Candles.Count);
+        foreach (OandaCandle candle in response.Candles)
+        {
+            candles.Add(OandaMappings.ToCandle(candle, query));
+        }
+
+        candles.Sort(static (left, right) => left.OpenTime.CompareTo(right.OpenTime));
+        return candles;
     }
 
 }

@@ -36,16 +36,24 @@ internal sealed class OandaGetCandlesCommand(
         var query = new List<string>
         {
             $"granularity={Uri.EscapeDataString(granularity)}",
-            $"count={limit.ToString(CultureInfo.InvariantCulture)}",
             "price=M",
             "dailyAlignment=0",
             "alignmentTimezone=UTC",
             "weeklyAlignment=Monday"
         };
 
+        // OANDA accepts a maximum of 5,000 candles per response. When both
+        // time bounds are supplied the range itself defines the page, so count
+        // must not also be sent. Count remains useful for one-sided/latest queries.
+        if (from is null || to is null)
+        {
+            query.Add($"count={limit.ToString(CultureInfo.InvariantCulture)}");
+        }
+
         if (from is not null)
         {
             query.Add($"from={Uri.EscapeDataString(from.Value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture))}");
+            query.Add("includeFirst=true");
         }
 
         if (to is not null)

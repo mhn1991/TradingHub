@@ -1,7 +1,10 @@
-using Agent.Execution;
+using ExecutionManager;
 using Agent.Models;
 using Brokers.Abstractions;
 using Brokers.Models;
+using Brokers.Safety;
+using RiskManager;
+using RiskManager.Safety;
 using Simulator.Broker;
 using Simulator.Models;
 using Simulator.Time;
@@ -82,18 +85,18 @@ public sealed class ExecutionCoordinatorTests
     }
 
     [Test]
-    public void InvalidExecutionOptions_AreRejected()
+    public void InvalidRiskOptions_AreRejectedByRiskManager()
     {
         Assert.Multiple(() =>
         {
             Assert.That(
-                () => new ExecutionCoordinator(new ExecutionOptions { MinimumConfidence = -1m }),
+                () => new PreTradeRiskManager(new PreTradeRiskOptions { MinimumConfidence = -1m }),
                 Throws.TypeOf<ArgumentOutOfRangeException>());
             Assert.That(
-                () => new ExecutionCoordinator(new ExecutionOptions { MinimumConfidence = 101m }),
+                () => new PreTradeRiskManager(new PreTradeRiskOptions { MinimumConfidence = 101m }),
                 Throws.TypeOf<ArgumentOutOfRangeException>());
             Assert.That(
-                () => new ExecutionCoordinator(new ExecutionOptions
+                () => new PreTradeRiskManager(new PreTradeRiskOptions
                 {
                     MaximumAbsolutePositionQuantity = 0m
                 }),
@@ -101,16 +104,51 @@ public sealed class ExecutionCoordinatorTests
         });
     }
 
-    [TestCase(AgentAction.Close)]
-    [TestCase(AgentAction.Cancel)]
-    public void UnsupportedDecisionAction_IsRejected(AgentAction action)
+    [Test]
+    public void UnsupportedCancelDecision_IsRejected()
     {
         var broker = new FakeTradingBroker();
-        AgentDecision decision = BuyDecision() with { Action = action };
+        AgentDecision decision = BuyDecision() with { Action = AgentAction.Cancel };
 
         Assert.That(
             async () => await new ExecutionCoordinator().ProcessAsync(decision, broker),
             Throws.TypeOf<NotSupportedException>());
+    }
+
+    [Test]
+    public async Task CloseDecision_BypassesEntrySafetyAndSubmitsReduceOnlyStyleMarketOrder()
+    {
+        var safety = new TradingSafetyController();
+        safety.Trip(SafetyTripReason.Manual, "New entries are disabled for the test.", Now);
+        var broker = new FakeTradingBroker
+        {
+            Positions = [Position(OrderSide.Buy, 2m)],
+            Orders = [Order(OrderStatus.Open)]
+        };
+        var coordinator = new ExecutionCoordinator(safety: safety);
+        AgentDecision decision = BuyDecision() with
+        {
+            DecisionId = "close-decision",
+            Action = AgentAction.Close,
+            SuggestedQuantity = 2m,
+            StopLossPrice = null,
+            TakeProfitPrice = null,
+            Reason = "Close the existing position."
+        };
+
+        OrderSubmission submission = (await coordinator.ProcessAsync(decision, broker))!;
+        PlaceOrderRequest request = broker.PlacedRequests.Single();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(submission.Status, Is.EqualTo(SubmissionStatus.Accepted));
+            Assert.That(request.Side, Is.EqualTo(OrderSide.Sell));
+            Assert.That(request.Type, Is.EqualTo(StandardOrderType.Market));
+            Assert.That(request.Quantity.Value, Is.EqualTo(2m));
+            Assert.That(request.StopLoss, Is.Null);
+            Assert.That(request.TakeProfit, Is.Null);
+            Assert.That(broker.CancelledOrderIds, Is.EquivalentTo(new[] { "order" }));
+        });
     }
 
     [Test]
@@ -203,10 +241,11 @@ public sealed class ExecutionCoordinatorTests
     public async Task AccountGate_CanBeExplicitlyDisabled()
     {
         var broker = new FakeTradingBroker { Accounts = [] };
-        var coordinator = new ExecutionCoordinator(new ExecutionOptions
-        {
-            BlockWhenAccountCannotTrade = false
-        });
+        var coordinator = new ExecutionCoordinator(
+            brokerSafety: new BrokerExecutionSafety(new BrokerExecutionSafetyOptions
+            {
+                BlockWhenAccountCannotTrade = false
+            }));
 
         OrderSubmission result = (await coordinator.ProcessAsync(BuyDecision(), broker))!;
 
@@ -242,10 +281,11 @@ public sealed class ExecutionCoordinatorTests
         bool expectedAccepted)
     {
         var broker = new FakeTradingBroker();
-        var coordinator = new ExecutionCoordinator(new ExecutionOptions
-        {
-            MaximumAbsolutePositionQuantity = maximum
-        });
+        var coordinator = new ExecutionCoordinator(
+            riskManager: new PreTradeRiskManager(new PreTradeRiskOptions
+            {
+                MaximumAbsolutePositionQuantity = maximum
+            }));
 
         OrderSubmission result = (await coordinator.ProcessAsync(
             BuyDecision() with { SuggestedQuantity = quantity },
@@ -255,13 +295,14 @@ public sealed class ExecutionCoordinatorTests
     }
 
     [Test]
-    public async Task MinimumConfidence_RejectsWithoutReadingBroker()
+    public async Task MinimumConfidence_IsOwnedByRiskManager()
     {
-        var broker = new FakeTradingBroker { ThrowOnRead = true };
-        var coordinator = new ExecutionCoordinator(new ExecutionOptions
-        {
-            MinimumConfidence = 95m
-        });
+        var broker = new FakeTradingBroker();
+        var coordinator = new ExecutionCoordinator(
+            riskManager: new PreTradeRiskManager(new PreTradeRiskOptions
+            {
+                MinimumConfidence = 95m
+            }));
 
         OrderSubmission result = (await coordinator.ProcessAsync(BuyDecision(), broker))!;
 
@@ -279,10 +320,11 @@ public sealed class ExecutionCoordinatorTests
         {
             Positions = [Position(OrderSide.Buy, 1m)]
         };
-        var coordinator = new ExecutionCoordinator(new ExecutionOptions
-        {
-            AllowPyramiding = true
-        });
+        var coordinator = new ExecutionCoordinator(
+            riskManager: new PreTradeRiskManager(new PreTradeRiskOptions
+            {
+                AllowPyramiding = true
+            }));
 
         OrderSubmission result = (await coordinator.ProcessAsync(BuyDecision(), broker))!;
 
@@ -375,6 +417,7 @@ public sealed class ExecutionCoordinatorTests
         public IReadOnlyList<BrokerPosition> Positions { get; init; } = [];
         public IReadOnlyList<BrokerOrder> Orders { get; init; } = [];
         public List<PlaceOrderRequest> PlacedRequests { get; } = [];
+        public List<string> CancelledOrderIds { get; } = [];
         public bool ThrowOnRead { get; init; }
         public IMarketDataClient MarketData => new FakeMarketDataClient();
         IAccountClient IBrokerClient.Accounts => new FakeAccountClient(this);
@@ -428,7 +471,11 @@ public sealed class ExecutionCoordinatorTests
 
             public Task CancelOrderAsync(
                 string brokerOrderId,
-                CancellationToken cancellationToken = default) => Task.CompletedTask;
+                CancellationToken cancellationToken = default)
+            {
+                owner.CancelledOrderIds.Add(brokerOrderId);
+                return Task.CompletedTask;
+            }
 
             public async IAsyncEnumerable<OrderEvent> StreamOrderEventsAsync(
                 [System.Runtime.CompilerServices.EnumeratorCancellation]

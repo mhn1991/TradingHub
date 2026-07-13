@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Brokers.Models;
+using ChartAnnotator.Collections;
 using ChartAnnotator.Engine;
 using ChartAnnotator.Models;
 using Dashboard.Contracts;
@@ -50,12 +51,12 @@ internal sealed class LiveAnalysisState
     private readonly object _sync = new();
     private readonly InstrumentKey _instrument;
     private readonly BarInterval _interval;
-    private readonly int _frameCapacity;
     private readonly ChartAnnotationEngine _annotator;
     private readonly ClosedCandleCursor _cursor;
     private readonly Func<DateTimeOffset, DateTimeOffset, bool>? _isExpectedGap;
-    private readonly List<ReplayFrame> _frames = [];
+    private readonly RingBuffer<ReplayFrame> _frames;
     private long _sequence;
+    private long _gapsDetected;
     private int _processedFrames;
 
     public LiveAnalysisState(
@@ -83,13 +84,24 @@ internal sealed class LiveAnalysisState
         ArgumentNullException.ThrowIfNull(annotationOptions);
         _instrument = instrument;
         _interval = interval;
-        _frameCapacity = frameCapacity;
         _annotator = new ChartAnnotationEngine(annotationOptions);
         _cursor = new ClosedCandleCursor(interval);
         _isExpectedGap = isExpectedGap;
+        _frames = new RingBuffer<ReplayFrame>(frameCapacity);
     }
 
-    public long GapsDetected { get; private set; }
+    public long GapsDetected => Interlocked.Read(ref _gapsDetected);
+
+    public DateTimeOffset? LastAvailableAt
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _frames.Count == 0 ? null : _frames.Latest.AvailableAt;
+            }
+        }
+    }
 
     public async ValueTask<ReplayFrame?> ProcessAsync(
         Candle candle,
@@ -125,7 +137,7 @@ internal sealed class LiveAnalysisState
             (previousOpenTime is null ||
              _isExpectedGap?.Invoke(previousOpenTime.Value, candle.OpenTime) != true))
         {
-            GapsDetected++;
+            Interlocked.Increment(ref _gapsDetected);
         }
 
         ReplayFrame frame = ReplayContractMapper.ToFrame(
@@ -135,10 +147,6 @@ internal sealed class LiveAnalysisState
         lock (_sync)
         {
             _frames.Add(frame);
-            if (_frames.Count > _frameCapacity)
-            {
-                _frames.RemoveAt(0);
-            }
         }
 
         return frame;
@@ -148,7 +156,7 @@ internal sealed class LiveAnalysisState
     {
         lock (_sync)
         {
-            return _frames.ToArray();
+            return _frames.Snapshot();
         }
     }
 }

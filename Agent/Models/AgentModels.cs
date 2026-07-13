@@ -15,6 +15,11 @@ public enum AgentAction
 public sealed record AgentDecision
 {
     public string? DecisionId { get; init; }
+    public string? SetupId { get; init; }
+    public string? StrategyName { get; init; }
+    public DateTimeOffset? SetupStartedAt { get; init; }
+    public DateTimeOffset? ConfirmationAt { get; init; }
+    public BarInterval? SignalInterval { get; init; }
     public required AgentAction Action { get; init; }
     public required InstrumentKey Instrument { get; init; }
     public decimal? SuggestedQuantity { get; init; }
@@ -22,8 +27,12 @@ public sealed record AgentDecision
     public StandardOrderType OrderType { get; init; } = StandardOrderType.Market;
     public decimal? LimitPrice { get; init; }
     public decimal? StopPrice { get; init; }
+    public decimal? ReferencePrice { get; init; }
     public decimal? StopLossPrice { get; init; }
     public decimal? TakeProfitPrice { get; init; }
+    public string? StopSource { get; init; }
+    public string? TargetSource { get; init; }
+    public decimal? ExpectedRewardRisk { get; init; }
     public required decimal Confidence { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required string Reason { get; init; }

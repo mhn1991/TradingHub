@@ -75,7 +75,7 @@ internal sealed class OandaWorkspaceService : BackgroundService
                 WorkspaceDataKind.Market,
                 IsConfigured: false,
                 IsReadOnly: true,
-                "OANDA is available but not connected. Configure its practice account token and account ID on the backend.",
+                "OANDA is disabled on the backend. Set Oanda__Enabled, Oanda__AccountId, and Oanda__AccessToken before starting DashboardLive.",
                 []);
         }
 
@@ -252,8 +252,16 @@ internal sealed class OandaWorkspaceService : BackgroundService
     {
         if (_client is null)
         {
+            _logger.LogInformation(
+                "OANDA is disabled; no OANDA requests will be sent. Set Oanda__Enabled=true, " +
+                "Oanda__AccountId, and Oanda__AccessToken before starting DashboardLive.");
             return;
         }
+
+        _logger.LogInformation(
+            "OANDA {Environment} workspace is configured. Demo order execution is {OrderPolicy}.",
+            _options.Environment,
+            DemoOrderExecutionEnabled ? "enabled" : "disabled");
 
         int attempt = 0;
         while (!stoppingToken.IsCancellationRequested)

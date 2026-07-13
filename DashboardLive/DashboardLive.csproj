@@ -7,9 +7,11 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../Agent/Agent.csproj" />
     <ProjectReference Include="../Brokers/Brokers.csproj" />
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
     <ProjectReference Include="../DashboardContracts/DashboardContracts.csproj" />
     <ProjectReference Include="../Networking/Networking.csproj" />
+    <ProjectReference Include="../Simulator/Simulator.csproj" />
   </ItemGroup>
 </Project>

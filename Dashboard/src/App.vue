@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, shallowRef, watch } from 'vue'
 import AnalysisChart from './components/AnalysisChart.vue'
+import SimulatorPanel from './components/SimulatorPanel.vue'
 import { duration, price, timestamp } from './format'
+import { metricsAt } from './seriesMetrics'
 import type {
+  BacktestManifest,
+  BacktestMarketDataset,
+  BacktestRunDataset,
   ChartLayers,
   LiveFeedStatus,
   LiveReplayPayload,
@@ -12,6 +17,7 @@ import type {
   OrderSubmission,
   ReplayDataset,
   ReplayFrame,
+  ReplayTrade,
   ReplaySeries,
   WorkspaceAsset,
   WorkspaceBroker,
@@ -47,7 +53,7 @@ const fallbackCatalog: WorkspaceCatalog = {
     {
       id: 'oanda', displayName: 'OANDA', environment: 'Demo', dataKind: 'Market',
       isConfigured: false, isReadOnly: true, canTrade: false,
-      description: 'OANDA is available but not connected. Configure its practice account token and account ID on the backend.', assets: [],
+      description: 'OANDA is disabled on the backend. Set Oanda__Enabled, Oanda__AccountId, and Oanda__AccessToken before starting DashboardLive.', assets: [],
     },
     {
       id: 'ig', displayName: 'IG', environment: 'Demo', dataKind: 'Market',
@@ -57,12 +63,16 @@ const fallbackCatalog: WorkspaceCatalog = {
   ],
 }
 
-const dataset = ref<ReplayDataset | null>(null)
-const replayDataset = ref<ReplayDataset | null>(null)
+const dataset = shallowRef<ReplayDataset | null>(null)
+const replayDataset = shallowRef<ReplayDataset | null>(null)
+const backtestManifest = ref<BacktestManifest | null>(null)
+const backtestMarket = shallowRef<BacktestMarketDataset | null>(null)
+const selectedBacktestId = ref('')
 const workspaceCatalog = ref<WorkspaceCatalog>(fallbackCatalog)
 const workspaces = ref<WorkspaceDefinition[]>([])
 const activeWorkspaceId = ref('')
 const mode = ref<'replay' | 'live'>('replay')
+const uiView = ref<'workspaces' | 'simulator'>('workspaces')
 const liveStatus = ref<LiveFeedStatus | null>(null)
 const activeSeriesIndex = ref(0)
 const selectedIndex = ref(0)
@@ -88,6 +98,9 @@ const orderForm = reactive({
 })
 const layers = reactive<ChartLayers>({
   bollinger: true,
+  bollingerRegimes: true,
+  rsiRelationships: true,
+  atr: true,
   volume: true,
   swings: true,
   zones: true,
@@ -96,9 +109,16 @@ const layers = reactive<ChartLayers>({
 })
 let playbackTimer: number | undefined
 let marketPollTimer: number | undefined
+let workspacePersistTimer: number | undefined
 let liveEvents: EventSource | undefined
 let orderEvents: EventSource | undefined
+let sourceAbortController: AbortController | undefined
 let sourceGeneration = 0
+
+function humanizeEnum(value: string | null | undefined): string {
+  if (!value || value === 'Unknown' || value === 'None') return 'Waiting for context'
+  return value.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+}
 
 const activeWorkspace = computed<WorkspaceDefinition | null>(() =>
   workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) ?? null,
@@ -119,12 +139,31 @@ const availableTimeframes = computed(() => {
 const activeSeries = computed<ReplaySeries | null>(() =>
   dataset.value?.series[activeSeriesIndex.value] ?? null,
 )
+const selectedBacktestRun = computed(() =>
+  backtestManifest.value?.runs.find((run) => run.id === selectedBacktestId.value) ?? null,
+)
+const replayPerformance = computed(() => dataset.value?.performance ?? null)
+const replayTrades = computed(() => [...(dataset.value?.trades ?? [])]
+  .sort((left, right) => new Date(right.signalCreatedAt).getTime() - new Date(left.signalCreatedAt).getTime()),
+)
 const currentFrame = computed<ReplayFrame | null>(() =>
   activeSeries.value?.frames[selectedIndex.value] ?? null,
 )
-const processedFrames = computed(() =>
-  activeSeries.value?.frames.slice(0, selectedIndex.value + 1) ?? [],
-)
+const currentStructure = computed(() => currentFrame.value?.marketStructure ?? ({
+  direction: 'Unknown' as const,
+  previousDirection: 'Unknown' as const,
+  break: 'None' as const,
+  directionChanged: false,
+  segmentStartedAt: null,
+  changedAt: null,
+  lastSwingHigh: null,
+  lastSwingLow: null,
+  consecutiveHigherHighs: 0,
+  consecutiveHigherLows: 0,
+  consecutiveLowerHighs: 0,
+  consecutiveLowerLows: 0,
+  strength: 0,
+}))
 const environmentLabel = computed(() => {
   const broker = activeBroker.value
   if (!broker) return 'Unknown'
@@ -145,6 +184,34 @@ const rsiState = computed(() => {
   if (value >= 55) return { label: 'Bullish pressure', tone: 'positive' }
   if (value <= 45) return { label: 'Bearish pressure', tone: 'danger' }
   return { label: 'Balanced', tone: 'neutral' }
+})
+const rsiRelationship = computed(() =>
+  currentFrame.value?.indicators.rsiAnalysis?.latestRelationship ?? null,
+)
+const newRsiRelationship = computed(() =>
+  currentFrame.value?.indicators.rsiAnalysis?.isNewRelationship
+    ? currentFrame.value.indicators.rsiAnalysis.latestRelationship
+    : null,
+)
+const rsiContextLabel = computed(() => {
+  const relationship = rsiRelationship.value
+  if (relationship && relationship.ageCandles <= 10) {
+    return `${humanizeEnum(relationship.type)} · ${relationship.strength.toFixed(0)} strength`
+  }
+  const analysis = currentFrame.value?.indicators.rsiAnalysis
+  if (!analysis) return rsiState.value.label
+  return `${humanizeEnum(analysis.momentumDirection)} momentum · ${humanizeEnum(analysis.zone)}`
+})
+const bollingerContextLabel = computed(() => {
+  const analysis = currentFrame.value?.indicators.bollingerAnalysis
+  if (!analysis || analysis.widthRegime === 'Unknown') return bandWidthLabel.value
+  const release = analysis.squeezeReleased ? 'Squeeze released' : humanizeEnum(analysis.widthRegime)
+  return `${release} · ${humanizeEnum(analysis.widthDirection)}`
+})
+const atrContextLabel = computed(() => {
+  const analysis = currentFrame.value?.indicators.atrAnalysis
+  if (!analysis || analysis.regime === 'Unknown') return atrLabel.value
+  return `${humanizeEnum(analysis.regime)} · ${humanizeEnum(analysis.direction)}`
 })
 const bandPosition = computed(() => {
   const frame = currentFrame.value
@@ -195,40 +262,29 @@ const freshSwings = computed(() =>
     swing.confirmedAt === currentFrame.value?.availableAt,
   ) ?? [],
 )
+const strongestZones = computed(() =>
+  [...(currentFrame.value?.priceZones ?? [])]
+    .sort((left, right) => right.strength - left.strength)
+    .slice(0, 4),
+)
+const selectedSeriesMetrics = computed(() => {
+  const series = activeSeries.value
+  return series
+    ? metricsAt(series, selectedIndex.value, isForex.value)
+    : {
+        timing: { average: 0, p95: 0, maximum: 0 },
+        integrity: { gaps: 0, futureSwings: 0, warmupFrames: 0 },
+      }
+})
 const timing = computed(() => {
-  const values = processedFrames.value
-    .map((frame) => frame.analysisMicroseconds)
-    .sort((left, right) => left - right)
-  if (!values.length) return { average: 0, p95: 0, maximum: 0 }
-  const average = values.reduce((total, value) => total + value, 0) / values.length
-  const p95 = values[Math.min(values.length - 1, Math.ceil(values.length * 0.95) - 1)]
-  return { average, p95, maximum: values.at(-1) ?? 0 }
+  return selectedSeriesMetrics.value.timing
 })
 const integrity = computed(() => {
-  const series = activeSeries.value
-  if (!series) return { gaps: 0, futureSwings: 0, warmupFrames: 0 }
-  let gaps = 0
-  let futureSwings = 0
-  let warmupFrames = 0
-  const frames = series.frames.slice(0, selectedIndex.value + 1)
-  frames.forEach((frame, index) => {
-    if (frame.indicators.rsi == null || frame.indicators.bollingerMiddle == null) warmupFrames++
-    if (index > 0) {
-      const elapsed = (new Date(frame.availableAt).getTime() -
-        new Date(frames[index - 1].availableAt).getTime()) / 1_000
-      if (Math.abs(elapsed - series.intervalSeconds) > 1 &&
-        !(isForex.value && isExpectedForexClosure(
-          frames[index - 1].availableAt,
-          frame.availableAt))) gaps++
-    }
-    futureSwings += frame.swings.filter((swing) =>
-      new Date(swing.confirmedAt).getTime() > new Date(frame.availableAt).getTime(),
-    ).length
-  })
+  const metrics = selectedSeriesMetrics.value.integrity
   return {
-    gaps: Math.max(gaps, mode.value === 'live' ? (liveStatus.value?.gapsDetected ?? 0) : 0),
-    futureSwings,
-    warmupFrames,
+    gaps: Math.max(metrics.gaps, mode.value === 'live' ? (liveStatus.value?.gapsDetected ?? 0) : 0),
+    futureSwings: metrics.futureSwings,
+    warmupFrames: metrics.warmupFrames,
   }
 })
 const confidenceTone = computed(() => {
@@ -285,6 +341,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeyboard)
   stopPlaybackTimer()
   disconnectDataSource()
+  if (workspacePersistTimer !== undefined) window.clearTimeout(workspacePersistTimer)
+  persistWorkspaces()
 })
 
 watch([isPlaying, playbackSpeed, activeSeries], () => {
@@ -294,14 +352,101 @@ watch([isPlaying, playbackSpeed, activeSeries], () => {
 })
 
 watch(workspaces, () => {
-  if (workspaces.value.length) localStorage.setItem(workspaceStorageKey, JSON.stringify(workspaces.value))
-}, { deep: true })
+  if (workspacePersistTimer !== undefined) window.clearTimeout(workspacePersistTimer)
+  workspacePersistTimer = window.setTimeout(persistWorkspaces, 250)
+}, { deep: true, flush: 'post' })
+
+function persistWorkspaces() {
+  workspacePersistTimer = undefined
+  if (workspaces.value.length) {
+    localStorage.setItem(workspaceStorageKey, JSON.stringify(workspaces.value))
+  }
+}
 
 async function loadSampleReplay() {
+  const manifestResponse = await fetch(`${import.meta.env.BASE_URL}data/backtests/manifest.json`, { cache: 'no-store' })
+    .catch(() => null)
+  if (manifestResponse?.ok) {
+    const manifest = await manifestResponse.json() as BacktestManifest
+    if (manifest.schemaVersion === 1 && Array.isArray(manifest.runs) && manifest.runs.length > 0) {
+      backtestManifest.value = manifest
+      const queryStrategy = new URLSearchParams(window.location.search).get('strategy')
+      selectedBacktestId.value = manifest.runs.some((run) => run.id === queryStrategy)
+        ? queryStrategy!
+        : (manifest.runs.find((run) => run.id.includes('improved'))?.id ?? manifest.runs[0].id)
+      await loadBacktestRun(selectedBacktestId.value)
+      return
+    }
+  }
+
   const response = await fetch(`${import.meta.env.BASE_URL}data/sample-replay.json`)
   if (!response.ok) throw new Error(`Replay request failed with HTTP ${response.status}.`)
   replayDataset.value = validateDataset(await response.json())
   syncReplayAsset(replayDataset.value)
+}
+
+async function loadBacktestRun(id: string) {
+  const manifest = backtestManifest.value
+  const run = manifest?.runs.find((item) => item.id === id)
+  if (!manifest || !run) throw new Error(`Backtest strategy '${id}' was not found in the manifest.`)
+
+  if (!backtestMarket.value) {
+    const marketResponse = await fetch(
+      `${import.meta.env.BASE_URL}data/backtests/${manifest.marketFile}`,
+      { cache: 'no-store' },
+    )
+    if (!marketResponse.ok) throw new Error(`Backtest market replay failed with HTTP ${marketResponse.status}.`)
+    const market = await marketResponse.json() as BacktestMarketDataset
+    if (market.schemaVersion !== 1 || !Array.isArray(market.series) || market.series.length === 0) {
+      throw new Error('Backtest market replay is invalid.')
+    }
+    backtestMarket.value = market
+  }
+
+  const response = await fetch(`${import.meta.env.BASE_URL}data/backtests/${run.file}`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`Backtest strategy result failed with HTTP ${response.status}.`)
+  const strategy = await response.json() as BacktestRunDataset
+  const market = backtestMarket.value
+  if (!market || strategy.schemaVersion !== 1 || !Array.isArray(strategy.trades) || !strategy.performance) {
+    throw new Error('Backtest strategy result is invalid.')
+  }
+
+  selectedBacktestId.value = run.id
+  replayDataset.value = validateDataset({
+    schemaVersion: 1,
+    title: strategy.title,
+    instrument: market.instrument,
+    generatedAt: market.generatedAt,
+    source: market.source,
+    parameters: market.parameters,
+    series: market.series,
+    trades: strategy.trades,
+    performance: strategy.performance,
+  })
+  syncReplayAsset(replayDataset.value)
+}
+
+async function changeBacktest(event: Event) {
+  await selectBacktest((event.target as HTMLSelectElement).value)
+}
+
+async function selectBacktest(id: string) {
+  if (!id || id === selectedBacktestId.value) return
+  loading.value = true
+  loadError.value = null
+  try {
+    await loadBacktestRun(id)
+    if (activeBroker.value?.id === 'simulator' && replayDataset.value) {
+      setDataset(replayDataset.value)
+      const workspace = activeWorkspace.value
+      const index = replayDataset.value.series.findIndex((series) => series.interval === workspace?.interval)
+      selectSeries(index < 0 ? 0 : index)
+    }
+  } catch (error) {
+    loadError.value = messageFrom(error, 'The selected backtest could not be loaded.')
+  } finally {
+    loading.value = false
+  }
 }
 
 async function loadWorkspaceCatalog() {
@@ -357,7 +502,13 @@ function normalizeWorkspace(workspace: WorkspaceDefinition) {
 }
 
 function setDataset(value: ReplayDataset, preservePosition = false) {
-  dataset.value = value
+  dataset.value = markRaw({
+    ...value,
+    series: value.series.map((series) => markRaw({
+      ...series,
+      frames: shallowReactive(series.frames),
+    })),
+  })
   activeSeriesIndex.value = 0
   if (!preservePosition || mode.value === 'live') selectedIndex.value = Math.max(0, value.series[0].frames.length - 1)
   isPlaying.value = false
@@ -382,6 +533,7 @@ async function activateWorkspace(id: string) {
 
 async function loadActiveWorkspace() {
   disconnectDataSource()
+  sourceAbortController = new AbortController()
   const workspace = activeWorkspace.value
   const broker = activeBroker.value
   dataset.value = null
@@ -418,7 +570,7 @@ async function loadActiveWorkspace() {
   if (broker.id === 'binance') {
     const generation = sourceGeneration
     await refreshMarketSnapshot(generation)
-    marketPollTimer = window.setInterval(() => void refreshMarketSnapshot(generation), pollMilliseconds(workspace.interval))
+    scheduleMarketSnapshot(generation, workspace.interval)
     return
   }
   if (broker.id === 'oanda') {
@@ -571,12 +723,15 @@ async function connectLive(eventsPath = 'api/live/events', allowOneShot = true) 
   loadError.value = null
   if (allowOneShot && new URLSearchParams(window.location.search).get('once') === '1') {
     try {
-      const response = await fetch(`${import.meta.env.BASE_URL}api/live/snapshot`)
+      const response = await fetch(`${import.meta.env.BASE_URL}api/live/snapshot`, {
+        signal: sourceAbortController?.signal,
+      })
       if (!response.ok) throw new Error(`Live snapshot failed with HTTP ${response.status}.`)
       const payload = await response.json() as LiveReplayPayload
       if (generation === sourceGeneration) applyLiveSnapshot(payload)
     } catch (error) {
       if (generation !== sourceGeneration) return
+      if (isAbortError(error)) return
       loadError.value = messageFrom(error, 'The live snapshot failed.')
       loading.value = false
     }
@@ -603,11 +758,15 @@ async function connectLive(eventsPath = 'api/live/events', allowOneShot = true) 
       if (currentDataset && currentSeries && update.frames.length > 0) {
         const newestKnownIndex = currentSeries.frames.at(-1)?.index ?? -1
         const additions = update.frames.filter((frame) => frame.index > newestKnownIndex)
-        const frames = [...currentSeries.frames, ...additions].slice(-500)
-        dataset.value = { ...currentDataset, generatedAt: frames.at(-1)?.availableAt ?? currentDataset.generatedAt,
-          series: [{ ...currentSeries, frames }] }
-        selectedIndex.value = Math.max(0, frames.length - 1)
-        loading.value = frames.length === 0
+        if (additions.length > 0) {
+          currentSeries.frames.push(...additions)
+          const frameCapacity = Math.max(1, currentDataset.parameters.candleCapacity)
+          const overflow = currentSeries.frames.length - frameCapacity
+          if (overflow > 0) currentSeries.frames.splice(0, overflow)
+          currentDataset.generatedAt = currentSeries.frames.at(-1)?.availableAt ?? currentDataset.generatedAt
+          selectedIndex.value = Math.max(0, currentSeries.frames.length - 1)
+          loading.value = currentSeries.frames.length === 0
+        }
       }
       loadError.value = null
     } catch (error) {
@@ -625,7 +784,9 @@ async function loadOandaAccount(generation = sourceGeneration) {
   if (activeBroker.value?.id !== 'oanda' || generation !== sourceGeneration) return
   oandaAccountLoading.value = true
   try {
-    const response = await fetch(`${import.meta.env.BASE_URL}api/workspaces/oanda/account`)
+    const response = await fetch(`${import.meta.env.BASE_URL}api/workspaces/oanda/account`, {
+      signal: sourceAbortController?.signal,
+    })
     if (!response.ok) {
       const problem = await response.json().catch(() => null) as { error?: string; detail?: string } | null
       throw new Error(problem?.error ?? problem?.detail ?? `OANDA account request failed with HTTP ${response.status}.`)
@@ -633,6 +794,7 @@ async function loadOandaAccount(generation = sourceGeneration) {
     const account = await response.json() as OandaWorkspaceAccount
     if (generation === sourceGeneration) oandaAccount.value = account
   } catch (error) {
+    if (isAbortError(error)) return
     if (generation === sourceGeneration) loadError.value = messageFrom(error, 'OANDA account data could not be loaded.')
   } finally {
     if (generation === sourceGeneration) oandaAccountLoading.value = false
@@ -734,7 +896,9 @@ async function refreshMarketSnapshot(generation: number) {
   if (!workspace || generation !== sourceGeneration) return
   try {
     const query = new URLSearchParams({ symbol: workspace.symbol, interval: workspace.interval })
-    const response = await fetch(`${import.meta.env.BASE_URL}api/workspaces/binance/snapshot?${query}`)
+    const response = await fetch(`${import.meta.env.BASE_URL}api/workspaces/binance/snapshot?${query}`, {
+      signal: sourceAbortController?.signal,
+    })
     if (!response.ok) {
       const problem = await response.json().catch(() => null) as { error?: string; detail?: string } | null
       throw new Error(problem?.error ?? problem?.detail ?? `Market snapshot failed with HTTP ${response.status}.`)
@@ -747,13 +911,25 @@ async function refreshMarketSnapshot(generation: number) {
     loading.value = false
   } catch (error) {
     if (generation !== sourceGeneration) return
+    if (isAbortError(error)) return
     loadError.value = messageFrom(error, 'The workspace market snapshot failed.')
     loading.value = false
   }
 }
 
+function scheduleMarketSnapshot(generation: number, interval: string) {
+  if (generation !== sourceGeneration || activeBroker.value?.id !== 'binance') return
+  marketPollTimer = window.setTimeout(async () => {
+    marketPollTimer = undefined
+    await refreshMarketSnapshot(generation)
+    scheduleMarketSnapshot(generation, interval)
+  }, pollMilliseconds(interval))
+}
+
 function disconnectDataSource() {
   sourceGeneration++
+  sourceAbortController?.abort()
+  sourceAbortController = undefined
   liveEvents?.close()
   liveEvents = undefined
   orderEvents?.close()
@@ -762,7 +938,7 @@ function disconnectDataSource() {
   oandaAccountLoading.value = false
   ordersArmed.value = false
   orderNotice.value = null
-  if (marketPollTimer !== undefined) window.clearInterval(marketPollTimer)
+  if (marketPollTimer !== undefined) window.clearTimeout(marketPollTimer)
   marketPollTimer = undefined
 }
 
@@ -770,23 +946,37 @@ function optionalNumber(value: number | null) {
   return value == null || value === 0 || !Number.isFinite(value) ? null : value
 }
 
-function isExpectedForexClosure(previousValue: string, nextValue: string) {
-  const previous = new Date(previousValue)
-  const next = new Date(nextValue)
-  const elapsed = next.getTime() - previous.getTime()
-  if (elapsed <= 0 || elapsed > 4 * 24 * 60 * 60 * 1_000) return false
-  const day = new Date(Date.UTC(previous.getUTCFullYear(), previous.getUTCMonth(), previous.getUTCDate()))
-  const finalDay = Date.UTC(next.getUTCFullYear(), next.getUTCMonth(), next.getUTCDate())
-  while (day.getTime() <= finalDay) {
-    if (day.getUTCDay() === 0 || day.getUTCDay() === 6) return true
-    day.setUTCDate(day.getUTCDate() + 1)
-  }
-  return false
-}
-
 function accountAmount(value: number | null | undefined, currency?: string | null) {
   if (value == null) return '—'
   return `${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${currency ? ` ${currency}` : ''}`
+}
+
+function signedAmount(value: number, currency?: string | null) {
+  const prefix = value > 0 ? '+' : ''
+  return `${prefix}${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${currency ? ` ${currency}` : ''}`
+}
+
+function jumpToTrade(trade: ReplayTrade) {
+  const value = dataset.value
+  if (!value) return
+  const detailedIndex = value.series.findIndex((series) => series.interval === '5m')
+  const seriesIndex = detailedIndex >= 0 ? detailedIndex : activeSeriesIndex.value
+  const series = value.series[seriesIndex]
+  if (!series?.frames.length) return
+  if (seriesIndex !== activeSeriesIndex.value) selectSeries(seriesIndex)
+
+  const target = new Date(trade.openedAt ?? trade.signalCreatedAt).getTime()
+  let bestIndex = 0
+  let bestDistance = Number.POSITIVE_INFINITY
+  series.frames.forEach((frame, index) => {
+    const distance = Math.abs(new Date(frame.availableAt).getTime() - target)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestIndex = index
+    }
+  })
+  selectedIndex.value = bestIndex
+  isPlaying.value = false
 }
 
 function applyLiveSnapshot(payload: LiveReplayPayload) {
@@ -823,6 +1013,10 @@ function createId() {
 function messageFrom(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
 </script>
 
 <template>
@@ -838,6 +1032,20 @@ function messageFrom(error: unknown, fallback: string) {
         </div>
       </div>
       <div class="topbar-actions">
+        <div class="view-toggle" role="tablist" aria-label="Dashboard views">
+          <button
+            type="button"
+            class="button button-secondary"
+            :class="{ active: uiView === 'workspaces' }"
+            @click="uiView = 'workspaces'"
+          >Workspaces</button>
+          <button
+            type="button"
+            class="button button-secondary"
+            :class="{ active: uiView === 'simulator' }"
+            @click="uiView = 'simulator'"
+          >Simulator</button>
+        </div>
         <div class="engine-status">
           <span :class="['status-dot', sourceStateClass]"></span>
           {{ sourceLabel }}
@@ -849,7 +1057,9 @@ function messageFrom(error: unknown, fallback: string) {
       </div>
     </header>
 
-    <section v-if="activeWorkspace" class="workspace-dock" aria-label="Trading workspaces">
+    <SimulatorPanel v-if="uiView === 'simulator'" />
+
+    <section v-if="uiView === 'workspaces' && activeWorkspace" class="workspace-dock" aria-label="Trading workspaces">
       <div class="workspace-tabs" role="tablist" aria-label="Open workspaces">
         <div
           v-for="workspaceItem in workspaces"
@@ -911,12 +1121,20 @@ function messageFrom(error: unknown, fallback: string) {
             </option>
           </select>
         </label>
+        <label v-if="activeBroker?.id === 'simulator' && backtestManifest?.runs.length" class="workspace-select-control strategy-control">
+          <span>Backtest strategy</span>
+          <select :value="selectedBacktestId" :disabled="loading" @change="changeBacktest">
+            <option v-for="run in backtestManifest.runs" :key="run.id" :value="run.id">
+              {{ run.strategyName }}
+            </option>
+          </select>
+        </label>
         <p class="broker-description">{{ activeBroker?.description }}</p>
         <span v-if="catalogWarning" class="catalog-warning">{{ catalogWarning }}</span>
       </div>
     </section>
 
-    <main v-if="dataset && activeSeries && currentFrame" class="workspace">
+    <main v-if="uiView === 'workspaces' && dataset && activeSeries && currentFrame" class="workspace">
       <section class="workspace-heading">
         <div>
           <div class="eyebrow">{{ dataset.source }}</div>
@@ -939,6 +1157,22 @@ function messageFrom(error: unknown, fallback: string) {
             @click="changeTimeframe(interval)"
           >{{ interval }}</button>
         </div>
+      </section>
+
+      <section v-if="mode === 'replay' && backtestManifest?.runs.length" class="backtest-comparison-strip">
+        <button
+          v-for="run in backtestManifest.runs"
+          :key="run.id"
+          type="button"
+          :class="['backtest-run-card', { active: run.id === selectedBacktestId }]"
+          @click="selectBacktest(run.id)"
+        >
+          <span>{{ run.strategyName }}</span>
+          <strong :class="run.performance.netProfit >= 0 ? 'positive-text' : 'negative-text'">
+            {{ signedAmount(run.performance.netProfit, run.performance.currency) }}
+          </strong>
+          <small>{{ run.performance.tradeCount }} trades · {{ run.performance.winRatePercent.toFixed(1) }}% wins · {{ run.performance.averageR?.toFixed(2) ?? '—' }}R avg</small>
+        </button>
       </section>
 
       <section v-if="activeBroker?.id === 'oanda'" class="oanda-account-strip">
@@ -965,23 +1199,39 @@ function messageFrom(error: unknown, fallback: string) {
         <article class="metric-card">
           <div class="metric-label">RSI · {{ dataset.parameters.rsiPeriod }}</div>
           <strong>{{ currentFrame.indicators.rsi?.toFixed(1) ?? '—' }}</strong>
-          <span :class="`${rsiState.tone}-text`">{{ rsiState.label }}</span>
+          <span :class="`${rsiState.tone}-text`">{{ rsiContextLabel }}</span>
         </article>
         <article class="metric-card">
           <div class="metric-label">Bollinger position</div>
           <strong>{{ bandPosition == null ? '—' : `${bandPosition.toFixed(0)}%` }}</strong>
-          <span>{{ bandWidthLabel }}</span>
+          <span>{{ bollingerContextLabel }}</span>
         </article>
         <article class="metric-card">
           <div class="metric-label">ATR · {{ dataset.parameters.atrPeriod }}</div>
           <strong>{{ price(currentFrame.indicators.atr) }}</strong>
-          <span>{{ atrLabel }}</span>
+          <span>{{ atrContextLabel }}</span>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Market structure</div>
+          <strong>{{ currentStructure.direction }}</strong>
+          <span v-if="currentStructure.break !== 'None'" class="negative-text">{{ currentStructure.break }} break</span>
+          <span v-else>{{ currentStructure.strength.toFixed(0) }} strength</span>
         </article>
         <article class="metric-card confidence-card">
           <div class="metric-label">Confidence</div>
           <strong>{{ currentFrame.confidence.total.toFixed(1) }}</strong>
           <span :class="`confidence-${confidenceTone}`">{{ confidenceTone }}</span>
         </article>
+      </section>
+
+      <section v-if="mode === 'replay' && replayPerformance" class="backtest-performance-strip">
+        <article><span>Strategy</span><strong>{{ selectedBacktestRun?.strategyName ?? dataset.title }}</strong></article>
+        <article><span>Net profit</span><strong :class="replayPerformance.netProfit >= 0 ? 'positive-text' : 'negative-text'">{{ signedAmount(replayPerformance.netProfit, replayPerformance.currency) }}</strong></article>
+        <article><span>Win rate</span><strong>{{ replayPerformance.winRatePercent.toFixed(1) }}%</strong><small>{{ replayPerformance.winningTrades }}W / {{ replayPerformance.losingTrades }}L</small></article>
+        <article><span>Profit factor</span><strong>{{ replayPerformance.profitFactor?.toFixed(2) ?? '—' }}</strong></article>
+        <article><span>Average R</span><strong>{{ replayPerformance.averageR?.toFixed(2) ?? '—' }}</strong></article>
+        <article><span>Closed-trade drawdown</span><strong>{{ replayPerformance.maximumDrawdown.toLocaleString(undefined, { maximumFractionDigits: 2 }) }} {{ replayPerformance.currency }}</strong></article>
+        <article><span>Final equity</span><strong>{{ replayPerformance.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 }) }} {{ replayPerformance.currency }}</strong></article>
       </section>
 
       <div class="dashboard-grid">
@@ -1012,6 +1262,7 @@ function messageFrom(error: unknown, fallback: string) {
               :selected-index="selectedIndex"
               :window-size="windowSize"
               :layers="layers"
+              :trades="dataset?.trades ?? []"
             />
 
             <div v-if="mode === 'replay'" class="replay-controls">
@@ -1048,7 +1299,8 @@ function messageFrom(error: unknown, fallback: string) {
                   <option :value="50">50</option>
                   <option :value="100">100</option>
                   <option :value="160">160</option>
-                  <option :value="500">All</option>
+                  <option :value="500">500</option>
+                  <option :value="0">All</option>
                 </select>
               </label>
             </div>
@@ -1071,7 +1323,8 @@ function messageFrom(error: unknown, fallback: string) {
                   <option :value="50">50</option>
                   <option :value="100">100</option>
                   <option :value="160">160</option>
-                  <option :value="500">All</option>
+                  <option :value="500">500</option>
+                  <option :value="0">All</option>
                 </select>
               </label>
             </div>
@@ -1095,6 +1348,12 @@ function messageFrom(error: unknown, fallback: string) {
                 <div><i :style="{ left: `${Math.max(0, Math.min(100, bandPosition ?? 0))}%` }"></i></div>
                 <span>Upper</span>
               </div>
+              <div v-if="currentFrame.indicators.bollingerAnalysis" class="band-stack indicator-context">
+                <div><label>Width regime</label><strong>{{ humanizeEnum(currentFrame.indicators.bollingerAnalysis.widthRegime) }}</strong></div>
+                <div><label>Width direction</label><strong>{{ humanizeEnum(currentFrame.indicators.bollingerAnalysis.widthDirection) }}</strong></div>
+                <div><label>Bandwidth</label><strong>{{ currentFrame.indicators.bollingerAnalysis.bandwidthPercent?.toFixed(3) ?? '—' }}%</strong></div>
+                <div><label>Historical percentile</label><strong>{{ currentFrame.indicators.bollingerAnalysis.widthPercentile?.toFixed(1) ?? '—' }}%</strong></div>
+              </div>
             </article>
 
             <article class="panel detail-panel">
@@ -1104,7 +1363,7 @@ function messageFrom(error: unknown, fallback: string) {
                   <div class="panel-subtitle">Confirmed on this candle—never shown early</div>
                 </div>
               </header>
-              <div v-if="freshSwings.length" class="fresh-events">
+              <div v-if="freshSwings.length || newRsiRelationship" class="fresh-events">
                 <div v-for="swing in freshSwings" :key="`${swing.pivotTime}-${swing.type}`">
                   <span :class="swing.type === 'High' ? 'event-high' : 'event-low'">{{ swing.type[0] }}</span>
                   <div>
@@ -1112,10 +1371,21 @@ function messageFrom(error: unknown, fallback: string) {
                     <small>Pivot {{ timestamp(swing.pivotTime) }} · strength {{ swing.strength }}</small>
                   </div>
                 </div>
+                <div v-if="newRsiRelationship" :key="newRsiRelationship.confirmedAt">
+                  <span :class="newRsiRelationship.type.includes('Bullish') ? 'event-low' : 'event-high'">R</span>
+                  <div>
+                    <strong>{{ humanizeEnum(newRsiRelationship.type) }}</strong>
+                    <small>
+                      Price {{ price(newRsiRelationship.firstPrice) }} → {{ price(newRsiRelationship.secondPrice) }} ·
+                      RSI {{ newRsiRelationship.firstRsi.toFixed(1) }} → {{ newRsiRelationship.secondRsi.toFixed(1) }} ·
+                      strength {{ newRsiRelationship.strength.toFixed(0) }}
+                    </small>
+                  </div>
+                </div>
               </div>
               <div v-else class="empty-state">
                 <span>○</span>
-                No new swing was confirmed at this frame.
+                No new swing or RSI relationship was confirmed at this frame.
               </div>
             </article>
           </div>
@@ -1165,7 +1435,7 @@ function messageFrom(error: unknown, fallback: string) {
             </div>
             <div class="zone-list">
               <div
-                v-for="zone in currentFrame.priceZones.slice().sort((a, b) => b.strength - a.strength).slice(0, 4)"
+                v-for="zone in strongestZones"
                 :key="`${zone.type}-${zone.centrePrice}`"
               >
                 <span :class="`zone-chip ${zone.type.toLowerCase()}`">{{ zone.type }}</span>
@@ -1205,6 +1475,46 @@ function messageFrom(error: unknown, fallback: string) {
           </article>
         </aside>
       </div>
+
+      <section v-if="mode === 'replay' && replayTrades.length" class="panel backtest-trades-panel">
+        <header class="panel-header">
+          <div>
+            <div class="panel-title">Strategy trade journal</div>
+            <div class="panel-subtitle">Click a row to jump to its setup and entry on the chart</div>
+          </div>
+          <span>{{ replayTrades.length }} recorded trades</span>
+        </header>
+        <div class="backtest-trades-scroll">
+          <table class="backtest-trades-table">
+            <thead>
+              <tr>
+                <th>Setup</th><th>Confirmation</th><th>Signal</th><th>Opened</th><th>Closed</th>
+                <th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th><th>Exit</th><th>Exit reason</th><th>Expected R</th><th>Fees</th><th>Net P/L</th><th>Realised R</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="trade in replayTrades" :key="trade.setupId" tabindex="0" @click="jumpToTrade(trade)" @keydown.enter="jumpToTrade(trade)">
+                <td>{{ timestamp(trade.setupStartedAt) }}</td>
+                <td>{{ trade.confirmationAt ? timestamp(trade.confirmationAt) : '—' }}</td>
+                <td>{{ timestamp(trade.signalCreatedAt) }}</td>
+                <td>{{ trade.openedAt ? timestamp(trade.openedAt) : 'Not filled' }}</td>
+                <td>{{ trade.closedAt ? timestamp(trade.closedAt) : 'Open' }}</td>
+                <td><span :class="['trade-side-chip', trade.side.toLowerCase()]">{{ trade.side }}</span></td>
+                <td>{{ trade.quantity.toLocaleString() }}</td>
+                <td>{{ price(trade.entryPrice) }}</td>
+                <td :title="trade.stopSource ?? undefined">{{ price(trade.stopLossPrice) }}</td>
+                <td :title="trade.targetSource ?? undefined">{{ price(trade.takeProfitPrice) }}</td>
+                <td>{{ price(trade.exitPrice) }}</td>
+                <td :title="trade.exitReasonText ?? trade.exitReason">{{ humanizeEnum(trade.exitReason) }}</td>
+                <td>{{ trade.expectedRewardRisk?.toFixed(2) ?? '—' }}</td>
+                <td>{{ trade.commission.toLocaleString(undefined, { maximumFractionDigits: 2 }) }}</td>
+                <td :class="trade.netProfitLoss >= 0 ? 'positive-text' : 'negative-text'">{{ signedAmount(trade.netProfitLoss, replayPerformance?.currency) }}</td>
+                <td>{{ trade.rMultiple?.toFixed(2) ?? '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <section v-if="activeBroker?.id === 'oanda'" class="oanda-trading-grid">
         <article class="panel oanda-portfolio-panel">
@@ -1270,10 +1580,18 @@ function messageFrom(error: unknown, fallback: string) {
       </section>
     </main>
 
-    <main v-else class="loading-screen">
+    <main v-else-if="uiView === 'workspaces'" class="loading-screen">
       <div class="loading-mark"><span></span><span></span><span></span></div>
       <h1>{{ emptyTitle }}</h1>
       <p>{{ emptyMessage }}</p>
+      <div v-if="activeBroker?.id === 'oanda' && !activeBroker.isConfigured" class="oanda-setup-help">
+        <strong>Backend configuration required</strong>
+        <code>Oanda__Enabled=true</code>
+        <code>Oanda__Environment=Demo</code>
+        <code>Oanda__AccountId=&lt;practice account ID&gt;</code>
+        <code>Oanda__AccessToken=&lt;practice token&gt;</code>
+        <small>Set these in the shell that starts DashboardLive, then restart the backend. The token is never sent to the browser.</small>
+      </div>
       <button v-if="mode === 'replay' && !loading" class="button button-primary" type="button" @click="fileInput?.click()">Choose replay JSON</button>
     </main>
 

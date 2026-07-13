@@ -174,9 +174,25 @@ public sealed class IndicatorAndAnnotationEdgeTests
         yield return new ChartAnnotationOptions { IndicatorCapacity = 0 };
         yield return new ChartAnnotationOptions { HeavyAnalysisEveryCandles = 0 };
         yield return new ChartAnnotationOptions { AtrPeriod = 1 };
+        yield return new ChartAnnotationOptions { AtrAnalysisHistoryPeriod = 1 };
+        yield return new ChartAnnotationOptions { AtrAnalysisHistoryPeriod = 5, AtrAnalysisChangeLookback = 5 };
+        yield return new ChartAnnotationOptions { AtrAnalysisHistoryPeriod = 5, AtrAnalysisMinimumSamples = 6 };
+        yield return new ChartAnnotationOptions { AtrDirectionThresholdPercent = -1m };
         yield return new ChartAnnotationOptions { RsiPeriod = 1 };
+        yield return new ChartAnnotationOptions { RsiMomentumLookback = 0 };
+        yield return new ChartAnnotationOptions { RsiMomentumThreshold = -1m };
+        yield return new ChartAnnotationOptions { RsiMinimumDivergenceDifference = -1m };
+        yield return new ChartAnnotationOptions { RsiMinimumPriceDifferenceAtr = -1m };
+        yield return new ChartAnnotationOptions { RsiSignalLifetimeCandles = 0 };
         yield return new ChartAnnotationOptions { BollingerPeriod = 1 };
         yield return new ChartAnnotationOptions { BollingerStandardDeviations = 0m };
+        yield return new ChartAnnotationOptions { BollingerWidthHistoryPeriod = 1 };
+        yield return new ChartAnnotationOptions { BollingerWidthHistoryPeriod = 5, BollingerWidthChangeLookback = 5 };
+        yield return new ChartAnnotationOptions { BollingerWidthHistoryPeriod = 5, BollingerWidthMinimumSamples = 6 };
+        yield return new ChartAnnotationOptions { BollingerWidthDirectionThresholdPercent = -1m };
+        yield return new ChartAnnotationOptions { BollingerSqueezePercentile = -1m };
+        yield return new ChartAnnotationOptions { BollingerWidePercentile = 101m };
+        yield return new ChartAnnotationOptions { BollingerSqueezePercentile = 80m, BollingerWidePercentile = 80m };
         yield return new ChartAnnotationOptions { SwingLeftBars = 0 };
         yield return new ChartAnnotationOptions { SwingRightBars = 0 };
     }

@@ -189,20 +189,33 @@ internal sealed class SimulatedBrokerState
         }
     }
 
-    public IReadOnlyList<SimulatedOrder> GetEligibleOrders(InstrumentKey instrument)
+    public IReadOnlyList<SimulatedOrder> GetEligibleOrders(
+        InstrumentKey instrument,
+        decimal? candleOpen = null)
     {
         lock (_sync)
         {
-            return _orders.Values
+            IEnumerable<SimulatedOrder> open = _orders.Values
                 .Where(order =>
                     order.IsOpen &&
                     order.Request.Instrument == instrument &&
-                    order.SubmittedMarketSequence < MarketSequence)
-                .OrderBy(order => order.SubmittedMarketSequence)
-                .ThenBy(GetOcoExecutionPriority)
-                .ThenBy(order => order.BrokerOrderId, StringComparer.Ordinal)
-                .Select(order => order.Copy())
-                .ToArray();
+                    order.SubmittedMarketSequence < MarketSequence);
+
+            // Nearest-to-open: sort by distance first; exact ties use stop-first.
+            // Conservative/optimistic: sort by policy priority only.
+            IOrderedEnumerable<SimulatedOrder> ordered =
+                _options.OcoFillPolicy == OcoFillPolicy.NearestToOpenFirst
+                    ? open
+                        .OrderBy(order => order.SubmittedMarketSequence)
+                        .ThenBy(order => GetNearestDistance(order, candleOpen))
+                        .ThenBy(order => GetOcoExecutionPriority(order, candleOpen))
+                        .ThenBy(order => order.BrokerOrderId, StringComparer.Ordinal)
+                    : open
+                        .OrderBy(order => order.SubmittedMarketSequence)
+                        .ThenBy(order => GetOcoExecutionPriority(order, candleOpen))
+                        .ThenBy(order => order.BrokerOrderId, StringComparer.Ordinal);
+
+            return ordered.Select(order => order.Copy()).ToArray();
         }
     }
 
@@ -263,6 +276,11 @@ internal sealed class SimulatedBrokerState
             }
 
             decimal signedFill = order.Request.Side == OrderSide.Buy ? quantity : -quantity;
+            bool reducesExistingPosition = _positions.TryGetValue(
+                    order.Request.Instrument,
+                    out MutablePosition? existingPosition) &&
+                existingPosition.SignedQuantity != 0m &&
+                Math.Sign(existingPosition.SignedQuantity) != Math.Sign(signedFill);
             decimal quoteToBaseRate = GetQuoteToBaseCurrencyRateUnsafe(order.Request.Instrument);
             decimal realised = ApplyPositionFillUnsafe(
                 order.Request.Instrument,
@@ -282,7 +300,7 @@ internal sealed class SimulatedBrokerState
                     "Execution commission");
             }
 
-            if (realised != 0m)
+            if (realised != 0m || reducesExistingPosition)
             {
                 AddLedgerUnsafe(
                     timestamp,
@@ -324,6 +342,17 @@ internal sealed class SimulatedBrokerState
             }
 
             return siblings.Select(order => order.Copy()).ToArray();
+        }
+    }
+
+    internal BrokerOrder? GetOrder(string brokerOrderId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(brokerOrderId);
+        lock (_sync)
+        {
+            return _orders.TryGetValue(brokerOrderId, out SimulatedOrder? order)
+                ? ToBrokerOrder(order)
+                : null;
         }
     }
 
@@ -500,7 +529,7 @@ internal sealed class SimulatedBrokerState
         CreatedAt = order.SubmittedAt
     };
 
-    private int GetOcoExecutionPriority(SimulatedOrder order)
+    private int GetOcoExecutionPriority(SimulatedOrder order, decimal? candleOpen)
     {
         if (order.OcoGroupId is null)
         {
@@ -513,8 +542,26 @@ internal sealed class SimulatedBrokerState
             (OcoFillPolicy.StopLossFirst, StandardOrderType.Limit) => 1,
             (OcoFillPolicy.TakeProfitFirst, StandardOrderType.Limit) => -1,
             (OcoFillPolicy.TakeProfitFirst, StandardOrderType.Stop) => 1,
+            // Nearest uses secondary key; ties prefer stop (conservative).
+            (OcoFillPolicy.NearestToOpenFirst, StandardOrderType.Stop) => -1,
+            (OcoFillPolicy.NearestToOpenFirst, StandardOrderType.Limit) => 1,
             _ => 0
         };
+    }
+
+    private decimal GetNearestDistance(SimulatedOrder order, decimal? candleOpen)
+    {
+        if (_options.OcoFillPolicy != OcoFillPolicy.NearestToOpenFirst ||
+            order.OcoGroupId is null ||
+            candleOpen is not decimal open)
+        {
+            return 0m;
+        }
+
+        decimal? level = order.Request.Type == StandardOrderType.Stop
+            ? order.Request.StopPrice
+            : order.Request.LimitPrice;
+        return level is decimal price ? Math.Abs(price - open) : decimal.MaxValue;
     }
 
     private string? GetMarginRejectionReasonUnsafe(

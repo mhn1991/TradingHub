@@ -106,7 +106,8 @@ internal static class BinanceKlineParser
                 closeTime < now.ToUnixTimeMilliseconds()));
         }
 
-        return candles.OrderBy(candle => candle.OpenTime).ToArray();
+        candles.Sort(static (left, right) => left.OpenTime.CompareTo(right.OpenTime));
+        return candles;
     }
 
     private static Candle CreateCandle(

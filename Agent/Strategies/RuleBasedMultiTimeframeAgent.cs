@@ -59,6 +59,7 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
     public string Name => "Rule-based multi-timeframe agent";
     public IReadOnlySet<BarInterval> RequiredIntervals { get; }
     public BarInterval TriggerInterval => _entryInterval;
+    public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.Bracket;
 
     public Task<AgentDecision> EvaluateAsync(
         AgentMarketContext context,
@@ -133,6 +134,7 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
             SuggestedQuantity = _quantity,
             QuantityUnit = QuantityUnit.Units,
             OrderType = StandardOrderType.Market,
+            ReferencePrice = close,
             StopLossPrice = buy ? close - distance : close + distance,
             TakeProfitPrice = buy ? close + distance * 2m : close - distance * 2m,
             Confidence = confidence,

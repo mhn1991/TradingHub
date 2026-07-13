@@ -14,6 +14,7 @@ internal sealed class RecordingTradingAgent(
     public string Name => "Recording test agent";
     public IReadOnlySet<BarInterval> RequiredIntervals { get; } = requiredIntervals.ToHashSet();
     public BarInterval TriggerInterval { get; } = triggerInterval;
+    public AgentExitManagementMode ExitManagementMode { get; init; } = AgentExitManagementMode.Bracket;
     public List<AgentMarketContext> Contexts { get; } = [];
 
     public Task<AgentDecision> EvaluateAsync(

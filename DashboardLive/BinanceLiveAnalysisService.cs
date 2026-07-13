@@ -227,17 +227,10 @@ internal sealed class BinanceLiveAnalysisService : BackgroundService
         }
 
         response.EnsureSuccessStatusCode();
-        if (response.Content.Headers.ContentLength > MaximumRestResponseBytes)
-        {
-            throw new InvalidDataException("The Binance warm-up response exceeded four MiB.");
-        }
-
-        byte[] body = await response.Content.ReadAsByteArrayAsync(cancellationToken)
-            .ConfigureAwait(false);
-        if (body.Length > MaximumRestResponseBytes)
-        {
-            throw new InvalidDataException("The Binance warm-up response exceeded four MiB.");
-        }
+        byte[] body = await BoundedHttpContent.ReadAsync(
+            response.Content,
+            MaximumRestResponseBytes,
+            cancellationToken).ConfigureAwait(false);
 
         IReadOnlyList<Candle> candles = BinanceKlineParser.ParseRest(
             body,

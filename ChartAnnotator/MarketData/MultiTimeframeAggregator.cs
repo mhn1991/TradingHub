@@ -4,6 +4,12 @@ using ChartAnnotator.Models;
 
 namespace ChartAnnotator.MarketData;
 
+public enum BaseCandleGapPolicy
+{
+    Throw,
+    ResetIncompleteBuckets
+}
+
 /// <summary>
 /// Aggregates an ordered base-candle stream into multiple aligned timeframes.
 /// One instance should be owned by one instrument-processing worker.
@@ -13,6 +19,7 @@ public sealed class MultiTimeframeAggregator
     private static readonly TimeSpan CloseTimeTolerance = TimeSpan.FromSeconds(1);
     private readonly InstrumentKey _instrument;
     private readonly Dictionary<BarInterval, AggregateState> _states;
+    private readonly BaseCandleGapPolicy _gapPolicy;
     private long _sequence;
     private BarInterval? _baseInterval;
     private DateTimeOffset? _expectedNextBaseOpenTime;
@@ -20,7 +27,8 @@ public sealed class MultiTimeframeAggregator
     public MultiTimeframeAggregator(
         InstrumentKey instrument,
         IEnumerable<BarInterval> intervals,
-        int candleCapacity = 2_000)
+        int candleCapacity = 2_000,
+        BaseCandleGapPolicy gapPolicy = BaseCandleGapPolicy.Throw)
     {
         ArgumentNullException.ThrowIfNull(intervals);
         if (candleCapacity <= 0)
@@ -33,7 +41,13 @@ public sealed class MultiTimeframeAggregator
             throw new ArgumentException("An instrument is required.", nameof(instrument));
         }
 
+        if (!Enum.IsDefined(gapPolicy))
+        {
+            throw new ArgumentOutOfRangeException(nameof(gapPolicy));
+        }
+
         _instrument = instrument;
+        _gapPolicy = gapPolicy;
         BarInterval[] targetIntervals = intervals.Distinct().ToArray();
         if (targetIntervals.Any(interval => !interval.IsValid))
         {
@@ -74,9 +88,21 @@ public sealed class MultiTimeframeAggregator
         if (_expectedNextBaseOpenTime is DateTimeOffset expectedOpen &&
             baseCandle.OpenTime != expectedOpen)
         {
-            throw new InvalidOperationException(
-                $"The base-candle stream is discontinuous. Expected {expectedOpen:O}, " +
-                $"but received {baseCandle.OpenTime:O}.");
+            if (baseCandle.OpenTime < expectedOpen ||
+                _gapPolicy == BaseCandleGapPolicy.Throw)
+            {
+                throw new InvalidOperationException(
+                    $"The base-candle stream is discontinuous. Expected {expectedOpen:O}, " +
+                    $"but received {baseCandle.OpenTime:O}.");
+            }
+
+            // Historical broker feeds naturally omit closed-market periods such as
+            // weekends. Never complete a partially formed aggregate across that gap;
+            // discard it and begin cleanly at the next available session candle.
+            foreach (AggregateState state in _states.Values)
+            {
+                state.ResetIncomplete();
+            }
         }
 
         DateTimeOffset sourcePeriodEnd = baseCandle.Interval.AddTo(baseCandle.OpenTime);
@@ -234,6 +260,8 @@ public sealed class MultiTimeframeAggregator
 
             return completed;
         }
+
+        public void ResetIncomplete() => _current = null;
 
         public Candle? Flush(bool includeIncomplete)
         {

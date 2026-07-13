@@ -6,7 +6,8 @@ namespace ChartAnnotator.Structure;
 
 /// <summary>
 /// Confirms a pivot only after the configured right-side candles have closed.
-/// This preserves the difference between PivotTime and ConfirmedAt.
+/// This preserves the difference between PivotTime and ConfirmedAt and avoids
+/// repainting an unconfirmed local high or low.
 /// </summary>
 public sealed class SwingDetector
 {
@@ -33,6 +34,7 @@ public sealed class SwingDetector
 
     public IReadOnlyList<SwingPoint> Update(Candle candle)
     {
+        ArgumentNullException.ThrowIfNull(candle);
         _window.Add(candle);
         if (!_window.IsFull)
         {
@@ -51,12 +53,24 @@ public sealed class SwingDetector
             }
 
             Candle other = _window[index];
-            isHigh &= candidate.Prices.High > other.Prices.High;
-            isLow &= candidate.Prices.Low < other.Prices.Low;
+            if (index < _left)
+            {
+                // Equality is allowed on the left and forbidden on the right. This
+                // gives a flat double-top/bottom to its most recent candle rather
+                // than dropping the swing entirely or emitting duplicate pivots.
+                isHigh &= candidate.Prices.High >= other.Prices.High;
+                isLow &= candidate.Prices.Low <= other.Prices.Low;
+            }
+            else
+            {
+                isHigh &= candidate.Prices.High > other.Prices.High;
+                isLow &= candidate.Prices.Low < other.Prices.Low;
+            }
         }
 
         DateTimeOffset confirmedAt = candle.CloseTime ?? candle.OpenTime;
         var result = new List<SwingPoint>(2);
+
         if (isHigh)
         {
             result.Add(new SwingPoint
