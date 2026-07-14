@@ -16,18 +16,21 @@ public interface IStrategyWorkerHost : IAsyncDisposable
         MarketFrame frame,
         CancellationToken cancellationToken = default);
 
+    ValueTask<Task<StrategyFrameResult[]>> EnqueueBatchAsync(
+        IReadOnlyList<MarketFrame> frames,
+        CancellationToken cancellationToken = default);
+
     StrategyWorkerMetrics SnapshotMetrics();
 }
 
 public sealed record StrategyFrameEnvelope
 {
-    public required MarketFrame Frame { get; init; }
-    public required TaskCompletionSource<StrategyFrameResult> Completion { get; init; }
+    public required IReadOnlyList<MarketFrame> Frames { get; init; }
+    public required TaskCompletionSource<StrategyFrameResult[]> Completion { get; init; }
 }
 
 /// <summary>
-/// Persistent per-strategy worker. One task or dedicated thread for the entire simulation —
-/// never one thread per market frame.
+/// Persistent per-strategy task worker for the entire simulation.
 /// </summary>
 public sealed class StrategyWorkerHost : IStrategyWorkerHost
 {
@@ -47,8 +50,7 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
 
     public StrategyWorkerHost(
         StrategySimulationSession session,
-        int channelCapacity,
-        StrategyWorkerMode mode)
+        int channelCapacity)
     {
         Session = session ?? throw new ArgumentNullException(nameof(session));
         if (channelCapacity < 1)
@@ -66,18 +68,7 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
             AllowSynchronousContinuations = false
         });
 
-        if (mode == StrategyWorkerMode.DedicatedThread)
-        {
-            _loop = Task.Factory.StartNew(
-                () => RunLoopAsync(_cts.Token),
-                CancellationToken.None,
-                TaskCreationOptions.LongRunning,
-                TaskScheduler.Default).Unwrap();
-        }
-        else
-        {
-            _loop = Task.Run(() => RunLoopAsync(_cts.Token));
-        }
+        _loop = Task.Run(() => RunLoopAsync(_cts.Token));
     }
 
     public string StrategyId { get; }
@@ -90,9 +81,21 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
         MarketFrame frame,
         CancellationToken cancellationToken = default)
     {
-        var tcs = new TaskCompletionSource<StrategyFrameResult>(
+        Task<StrategyFrameResult[]> batch = await EnqueueBatchAsync([frame], cancellationToken)
+            .ConfigureAwait(false);
+        return FirstAsync(batch);
+    }
+
+    public async ValueTask<Task<StrategyFrameResult[]>> EnqueueBatchAsync(
+        IReadOnlyList<MarketFrame> frames,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        if (frames.Count == 0)
+            throw new ArgumentException("At least one frame is required.", nameof(frames));
+        var tcs = new TaskCompletionSource<StrategyFrameResult[]>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        var envelope = new StrategyFrameEnvelope { Frame = frame, Completion = tcs };
+        var envelope = new StrategyFrameEnvelope { Frames = frames, Completion = tcs };
 
         var wait = Stopwatch.StartNew();
         await _channel.Writer.WriteAsync(envelope, cancellationToken).ConfigureAwait(false);
@@ -109,10 +112,17 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
         return tcs.Task;
     }
 
+    private static async Task<StrategyFrameResult> FirstAsync(Task<StrategyFrameResult[]> batch)
+    {
+        StrategyFrameResult[] results = await batch.ConfigureAwait(false);
+        return results[0];
+    }
+
     public void Complete() => _channel.Writer.TryComplete();
 
     public StrategyWorkerMetrics SnapshotMetrics()
     {
+        StrategyWorkerMetrics session = Session.BuildMetrics();
         long frames = Interlocked.Read(ref _processedFrames);
         TimeSpan total = TimeSpan.FromTicks(Interlocked.Read(ref _totalProcessingTicks));
         TimeSpan max = TimeSpan.FromTicks(Interlocked.Read(ref _maxProcessingTicks));
@@ -125,7 +135,11 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
             MaximumFrameProcessingTime = max,
             AverageFrameProcessingTime = average,
             BarrierWaitTime = TimeSpan.FromTicks(Interlocked.Read(ref _producerWaitTicks)),
-            PeakChannelOccupancy = Volatile.Read(ref _peakOccupancy)
+            PeakChannelOccupancy = Volatile.Read(ref _peakOccupancy),
+            ManagementEvaluations = session.ManagementEvaluations,
+            StopAmendmentRequests = session.StopAmendmentRequests,
+            AcceptedStopAmendments = session.AcceptedStopAmendments,
+            RejectedStopAmendments = session.RejectedStopAmendments
         };
     }
 
@@ -165,32 +179,43 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
             {
                 Interlocked.Decrement(ref _currentOccupancy);
                 _idle.Stop();
-                if (envelope.Frame.Sequence <= _lastSequence)
+                var results = new List<StrategyFrameResult>(envelope.Frames.Count);
+                Exception? failure = null;
+                foreach (MarketFrame frame in envelope.Frames)
                 {
-                    Interlocked.Increment(ref _failures);
-                    envelope.Completion.TrySetException(new InvalidOperationException(
-                        $"Strategy '{StrategyName}' received out-of-order frame {envelope.Frame.Sequence} after {_lastSequence}."));
-                    continue;
+                    if (frame.Sequence <= _lastSequence)
+                    {
+                        failure = new InvalidOperationException(
+                            $"Strategy '{StrategyName}' received out-of-order frame {frame.Sequence} after {_lastSequence}.");
+                        break;
+                    }
+
+                    _lastSequence = frame.Sequence;
+                    _processing.Restart();
+                    try
+                    {
+                        results.Add(await Session
+                            .ProcessFrameAsync(frame, cancellationToken)
+                            .ConfigureAwait(false));
+                        _processing.Stop();
+                        RecordTiming(_processing.Elapsed);
+                    }
+                    catch (Exception exception)
+                    {
+                        _processing.Stop();
+                        RecordTiming(_processing.Elapsed);
+                        Session.MarkFailed(frame.Sequence, exception.ToString());
+                        failure = exception;
+                        break;
+                    }
                 }
 
-                _lastSequence = envelope.Frame.Sequence;
-                _processing.Restart();
-                try
+                if (failure is null)
+                    envelope.Completion.TrySetResult(results.ToArray());
+                else
                 {
-                    StrategyFrameResult result = await Session
-                        .ProcessFrameAsync(envelope.Frame, cancellationToken)
-                        .ConfigureAwait(false);
-                    _processing.Stop();
-                    RecordTiming(_processing.Elapsed);
-                    envelope.Completion.TrySetResult(result);
-                }
-                catch (Exception exception)
-                {
-                    _processing.Stop();
-                    RecordTiming(_processing.Elapsed);
                     Interlocked.Increment(ref _failures);
-                    Session.MarkFailed(envelope.Frame.Sequence, exception.ToString());
-                    envelope.Completion.TrySetException(exception);
+                    envelope.Completion.TrySetException(failure);
                 }
 
                 _idle.Restart();
@@ -219,4 +244,3 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
         }
     }
 }
-

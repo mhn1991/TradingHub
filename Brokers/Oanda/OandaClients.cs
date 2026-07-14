@@ -203,3 +203,30 @@ internal sealed class OandaPositionClient(
         return result;
     }
 }
+
+/// <summary>
+/// OANDA dependent-order replacement is deliberately disabled until the native
+/// trade/order mutation endpoint, precision metadata, and reconciliation path are
+/// covered by integration tests. The existing stop is never cancelled as fallback.
+/// </summary>
+internal sealed class OandaProtectiveOrderClient : IProtectiveOrderClient
+{
+    public Task<ProtectiveStopAmendmentResult> AmendProtectiveStopAsync(
+        AmendProtectiveStopRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new ProtectiveStopAmendmentResult
+        {
+            Status = ProtectiveStopAmendmentStatus.Unsupported,
+            ClientAmendmentId = request.ClientAmendmentId,
+            PreviousStopOrderId = request.ExistingStopOrderId,
+            CurrentStopOrderId = request.ExistingStopOrderId,
+            RequestedStopPrice = request.NewStopPrice,
+            RejectionReason =
+                "OANDA protective-stop amendment is not enabled; the existing stop remains active.",
+            Certainty = ExecutionCertainty.NotSent
+        });
+    }
+}

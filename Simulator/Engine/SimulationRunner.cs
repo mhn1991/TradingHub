@@ -112,12 +112,16 @@ public sealed class SimulationRunner
             BrokerPosition? positionBefore = (await _broker.Positions
                 .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
                 .FirstOrDefault(position => position.Instrument == baseCandle.Instrument);
+            if (_activeTrade is not null)
+                UpdateExcursions(baseCandle);
             await _broker.Runtime.ProcessExecutionCandleAsync(baseCandle, cancellationToken)
                 .ConfigureAwait(false);
             BrokerPosition? positionAfter = (await _broker.Positions
                 .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
                 .FirstOrDefault(position => position.Instrument == baseCandle.Instrument);
             CapturePositionTransition(baseCandle, positionBefore, positionAfter);
+            if (positionBefore is null && positionAfter is not null && _activeTrade is not null)
+                UpdateExcursions(baseCandle);
             RecordNewClosedTrades();
 
             IReadOnlyList<CandleClosedEvent> closedEvents = _aggregator.Apply(baseCandle);
@@ -320,6 +324,60 @@ public sealed class SimulationRunner
             _activeTrade = null;
             _pendingExitReason = null;
         }
+    }
+
+    private void UpdateExcursions(Candle candle)
+    {
+        if (_activeTrade?.EntryPrice is not decimal entry || _activeTrade.Quantity <= 0m)
+            return;
+
+        decimal favourablePrice = _activeTrade.Side == OrderSide.Buy
+            ? candle.Prices.High
+            : candle.Prices.Low;
+        decimal adversePrice = _activeTrade.Side == OrderSide.Buy
+            ? candle.Prices.Low
+            : candle.Prices.High;
+        decimal direction = _activeTrade.Side == OrderSide.Buy ? 1m : -1m;
+        decimal quoteToBase = _broker.State.GetQuoteToBaseCurrencyRate(_activeTrade.Instrument);
+        decimal favourableAmount =
+            (favourablePrice - entry) * direction * _activeTrade.Quantity * quoteToBase;
+        decimal adverseAmount =
+            (adversePrice - entry) * direction * _activeTrade.Quantity * quoteToBase;
+        decimal? initialRisk = _activeTrade.StopLossPrice is decimal stop
+            ? Math.Abs(entry - stop) * _activeTrade.Quantity * quoteToBase
+            : null;
+        DateTimeOffset timestamp = candle.CloseTime ?? candle.Interval.AddTo(candle.OpenTime);
+
+        SimulatedTradeRecord updated = _activeTrade;
+        if (updated.MaximumFavourableExcursionAt is null ||
+            favourableAmount > updated.MaximumFavourableExcursionAmount)
+        {
+            updated = updated with
+            {
+                MaximumFavourableExcursionPrice = favourablePrice,
+                MaximumFavourableExcursionAmount = favourableAmount,
+                MaximumFavourableExcursionR = initialRisk is > 0m
+                    ? favourableAmount / initialRisk.Value
+                    : null,
+                MaximumFavourableExcursionAt = timestamp
+            };
+        }
+
+        if (updated.MaximumAdverseExcursionAt is null ||
+            adverseAmount < updated.MaximumAdverseExcursionAmount)
+        {
+            updated = updated with
+            {
+                MaximumAdverseExcursionPrice = adversePrice,
+                MaximumAdverseExcursionAmount = adverseAmount,
+                MaximumAdverseExcursionR = initialRisk is > 0m
+                    ? adverseAmount / initialRisk.Value
+                    : null,
+                MaximumAdverseExcursionAt = timestamp
+            };
+        }
+
+        _activeTrade = updated;
     }
 
     private static SimulatedTradeExitReason DetermineExitReason(

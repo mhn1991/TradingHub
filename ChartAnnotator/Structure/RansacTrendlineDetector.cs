@@ -9,14 +9,26 @@ public sealed record RansacOptions(
     int MaximumPivots = 300,
     int RandomSeed = 12_345,
     int MaximumLinesPerType = 4,
+
+    // Candidate pairs must include an anchor from this many newest pivots.
     int RecentAnchorPivots = 16,
-    int MaximumEndPivotAge = 12,
-    decimal MaximumViolationRatio = 0.20m);
+
+    // Reject a line whose newest inlier is older than this many later same-type pivots.
+    int MaximumEndPivotAge = 6,
+
+    // At least one inlier must fall inside this many newest pivots.
+    int RequiredRecentInliersWindow = 4,
+
+    decimal MaximumViolationRatio = 0.20m,
+
+    // Extra least-squares weight on the newest inlier relative to the oldest.
+    decimal RecentPivotWeightBoost = 3m);
 
 /// <summary>
 /// Finds support lines from confirmed swing lows and resistance lines from confirmed
-/// swing highs. Candidate pairs are evaluated deterministically from recent pivots
-/// backwards so unchanged input cannot produce a different set of lines.
+/// swing highs. Candidate pairs are seeded from recent anchors backwards. Fitted lines
+/// are re-anchored at the most recent inlier so OriginTime/OriginPrice describe the
+/// current end of the structure, not the oldest historical touch.
 /// </summary>
 public sealed class RansacTrendlineDetector
 {
@@ -32,7 +44,9 @@ public sealed class RansacTrendlineDetector
             _options.MaximumLinesPerType < 1 ||
             _options.RecentAnchorPivots < 1 ||
             _options.MaximumEndPivotAge < 0 ||
-            _options.MaximumViolationRatio is < 0m or > 1m)
+            _options.RequiredRecentInliersWindow < 1 ||
+            _options.MaximumViolationRatio is < 0m or > 1m ||
+            _options.RecentPivotWeightBoost < 0m)
         {
             throw new ArgumentOutOfRangeException(nameof(options));
         }
@@ -42,7 +56,15 @@ public sealed class RansacTrendlineDetector
         IReadOnlyList<SwingPoint> swings,
         decimal atr,
         long version = 0,
-        MarketStructureDirection direction = MarketStructureDirection.Unknown)
+        MarketStructureDirection direction = MarketStructureDirection.Unknown) =>
+        Detect(swings, atr, version, direction, asOf: null);
+
+    public IReadOnlyList<Trendline> Detect(
+        IReadOnlyList<SwingPoint> swings,
+        decimal atr,
+        long version,
+        MarketStructureDirection direction,
+        DateTimeOffset? asOf)
     {
         ArgumentNullException.ThrowIfNull(swings);
         if (atr <= 0m)
@@ -69,7 +91,8 @@ public sealed class RansacTrendlineDetector
                 .ToArray(),
             TrendlineType.Support,
             atr,
-            direction));
+            direction,
+            asOf));
         result.AddRange(DetectMany(
             ordered
                 .Where(point => point.Type == SwingType.High)
@@ -77,10 +100,10 @@ public sealed class RansacTrendlineDetector
                 .ToArray(),
             TrendlineType.Resistance,
             atr,
-            direction));
+            direction,
+            asOf));
 
-        // Active lines are returned first. This also makes downstream recent-first
-        // channel discovery independent of the original swing collection ordering.
+        // Active / most-recently-ending lines first for channel discovery and display.
         return result
             .OrderByDescending(line => line.EndTime)
             .ThenByDescending(line => line.FitScore)
@@ -92,7 +115,8 @@ public sealed class RansacTrendlineDetector
         SwingPoint[] points,
         TrendlineType type,
         decimal atr,
-        MarketStructureDirection direction)
+        MarketStructureDirection direction,
+        DateTimeOffset? asOf)
     {
         if (points.Length < _options.MinimumInliers)
         {
@@ -111,7 +135,8 @@ public sealed class RansacTrendlineDetector
                 points,
                 type,
                 threshold,
-                direction);
+                direction,
+                asOf);
             if (best is null)
             {
                 break;
@@ -121,6 +146,7 @@ public sealed class RansacTrendlineDetector
             {
                 StartTime = best.StartTime,
                 EndTime = best.EndTime,
+                // Origin is the most recent end of the fitted segment.
                 OriginTime = best.OriginTime,
                 OriginPrice = best.OriginPrice,
                 SlopePerSecond = best.Slope,
@@ -145,16 +171,16 @@ public sealed class RansacTrendlineDetector
         IReadOnlyList<SwingPoint> recencyReference,
         TrendlineType type,
         decimal threshold,
-        MarketStructureDirection direction)
+        MarketStructureDirection direction,
+        DateTimeOffset? asOf)
     {
         int lastIndex = points.Count - 1;
         int firstAnchor = Math.Max(1, points.Count - _options.RecentAnchorPivots);
         Candidate? best = null;
         int evaluated = 0;
 
-        // Expand backwards by gap while cycling through recent anchors. This tests
-        // the newest pivots first but does not spend the whole budget on only the
-        // single latest pivot when that pivot is an outlier.
+        // Expand backwards by gap while cycling through recent anchors. Newest
+        // pivots are always the "anchor" side of the seed pair.
         for (int gap = 1;
              gap < points.Count && evaluated < _options.MaximumIterations;
              gap++)
@@ -179,6 +205,7 @@ public sealed class RansacTrendlineDetector
                     continue;
                 }
 
+                // Seed slope using the recent anchor as the forward point.
                 decimal slope = (anchor.Price - older.Price) / seconds;
                 if (!SlopeMatchesDirection(slope, direction))
                 {
@@ -192,7 +219,8 @@ public sealed class RansacTrendlineDetector
                     older.Price,
                     slope,
                     type,
-                    threshold);
+                    threshold,
+                    asOf);
                 if (candidate is null ||
                     !SlopeMatchesDirection(candidate.Slope, direction))
                 {
@@ -212,16 +240,17 @@ public sealed class RansacTrendlineDetector
     private Candidate? BuildCandidate(
         IReadOnlyList<SwingPoint> fitPoints,
         IReadOnlyList<SwingPoint> recencyReference,
-        DateTimeOffset originTime,
-        decimal originPrice,
+        DateTimeOffset seedOriginTime,
+        decimal seedOriginPrice,
         decimal initialSlope,
         TrendlineType type,
-        decimal threshold)
+        decimal threshold,
+        DateTimeOffset? asOf)
     {
         SwingPoint[] initialInliers = FindInliers(
             fitPoints,
-            originTime,
-            originPrice,
+            seedOriginTime,
+            seedOriginPrice,
             initialSlope,
             threshold);
         if (initialInliers.Length < _options.MinimumInliers)
@@ -274,16 +303,43 @@ public sealed class RansacTrendlineDetector
         }
 
         DateTimeOffset startTime = finalInliers.Min(point => point.PivotTime);
-        DateTimeOffset endTime = finalInliers.Max(point => point.PivotTime);
+        DateTimeOffset lastInlierTime = finalInliers.Max(point => point.PivotTime);
         int endPivotAge = recencyReference.Count(
-            point => point.PivotTime > endTime);
+            point => point.PivotTime > lastInlierTime);
         if (endPivotAge > _options.MaximumEndPivotAge)
         {
             return null;
         }
 
+        // Require the consensus to touch the recent side of the fit set. Using the
+        // remaining fit set (not the global series) allows a second older regime
+        // line to be discovered after a newer line's inliers were removed.
+        if (fitPoints.Count > 0)
+        {
+            int window = Math.Min(_options.RequiredRecentInliersWindow, fitPoints.Count);
+            DateTimeOffset recentWindowStart = fitPoints
+                .OrderBy(point => point.PivotTime)
+                .TakeLast(window)
+                .First()
+                .PivotTime;
+            if (!finalInliers.Any(point => point.PivotTime >= recentWindowStart))
+            {
+                return null;
+            }
+        }
+
+        // Active lines extend to the analysis time so display/projection starts from
+        // "now" rather than stopping at an older last-inlier candle.
+        DateTimeOffset endTime = lastInlierTime;
+        if (asOf is DateTimeOffset analysisTime &&
+            analysisTime > lastInlierTime &&
+            endPivotAge <= 1)
+        {
+            endTime = analysisTime;
+        }
+
         SwingPoint[] relevantPoints = recencyReference
-            .Where(point => point.PivotTime >= startTime)
+            .Where(point => point.PivotTime >= startTime && point.PivotTime <= endTime)
             .ToArray();
         int violations = CountBoundaryViolations(
             relevantPoints,
@@ -301,7 +357,7 @@ public sealed class RansacTrendlineDetector
         decimal meanError = finalInliers
             .Average(point => Math.Abs(point.Price - PriceAt(fit, point.PivotTime)));
         int spanPivotCount = recencyReference.Count(point =>
-            point.PivotTime >= startTime && point.PivotTime <= endTime);
+            point.PivotTime >= startTime && point.PivotTime <= lastInlierTime);
         decimal quality = CalculateQuality(
             finalInliers.Length,
             recencyReference.Count,
@@ -336,6 +392,9 @@ public sealed class RansacTrendlineDetector
                 slope * (decimal)(point.PivotTime - originTime).TotalSeconds;
             return Math.Abs(point.Price - prediction) <= threshold;
         })
+        // Keep chronological order for SequenceEqual stability checks.
+        .OrderBy(point => point.PivotTime)
+        .ThenBy(point => point.ConfirmedAt)
         .ToArray();
 
     private static int CountBoundaryViolations(
@@ -377,11 +436,12 @@ public sealed class RansacTrendlineDetector
             35m,
             (decimal)inlierCount / Math.Max(_options.MinimumInliers, 1) * 15m);
         decimal fitScore =
-            (1m - Math.Min(1m, meanError / threshold)) * 30m;
+            (1m - Math.Min(1m, meanError / threshold)) * 25m;
+        // Strong preference for lines that still touch the newest pivots.
         decimal recencyScore = Math.Clamp(
             1m - (decimal)endPivotAge / (_options.MaximumEndPivotAge + 1m),
             0m,
-            1m) * 25m;
+            1m) * 30m;
         decimal coverageScore =
             (decimal)inlierCount / Math.Max(totalPointCount, 1) * 5m;
         decimal spanScore = Math.Min(
@@ -406,8 +466,12 @@ public sealed class RansacTrendlineDetector
         candidate.Quality > best.Quality ||
         candidate.Quality == best.Quality && candidate.EndTime > best.EndTime ||
         candidate.Quality == best.Quality && candidate.EndTime == best.EndTime &&
+        candidate.EndPivotAge < best.EndPivotAge ||
+        candidate.Quality == best.Quality && candidate.EndTime == best.EndTime &&
+        candidate.EndPivotAge == best.EndPivotAge &&
         candidate.Inliers.Count > best.Inliers.Count ||
         candidate.Quality == best.Quality && candidate.EndTime == best.EndTime &&
+        candidate.EndPivotAge == best.EndPivotAge &&
         candidate.Inliers.Count == best.Inliers.Count && candidate.MeanError < best.MeanError;
 
     private static bool SlopeMatchesDirection(
@@ -419,29 +483,60 @@ public sealed class RansacTrendlineDetector
             _ => true
         };
 
-    private static FittedLine Refit(IReadOnlyList<SwingPoint> points)
+    /// <summary>
+    /// Weighted least-squares fit re-anchored at the newest inlier. Older code
+    /// used the oldest pivot as OriginTime, which made lines appear to "start"
+    /// from the left/historical side of the chart.
+    /// </summary>
+    private FittedLine Refit(IReadOnlyList<SwingPoint> points)
     {
-        DateTimeOffset originTime = points.Min(point => point.PivotTime);
-        decimal[] x = points
-            .Select(point =>
-                (decimal)(point.PivotTime - originTime).TotalSeconds)
+        SwingPoint[] ordered = points
+            .OrderBy(point => point.PivotTime)
+            .ThenBy(point => point.ConfirmedAt)
             .ToArray();
-        decimal[] y = points.Select(point => point.Price).ToArray();
-        decimal meanX = x.Average();
-        decimal meanY = y.Average();
+
+        DateTimeOffset originTime = ordered[^1].PivotTime;
+        int lastIndex = ordered.Length - 1;
+        decimal[] x = new decimal[ordered.Length];
+        decimal[] y = new decimal[ordered.Length];
+        decimal[] weights = new decimal[ordered.Length];
+
+        for (int index = 0; index < ordered.Length; index++)
+        {
+            x[index] = (decimal)(ordered[index].PivotTime - originTime).TotalSeconds;
+            y[index] = ordered[index].Price;
+            // Oldest weight = 1, newest weight = 1 + boost.
+            decimal recency = lastIndex == 0
+                ? 1m
+                : (decimal)index / lastIndex;
+            weights[index] = 1m + recency * _options.RecentPivotWeightBoost;
+        }
+
+        decimal weightSum = weights.Sum();
+        decimal meanX = 0m;
+        decimal meanY = 0m;
+        for (int index = 0; index < ordered.Length; index++)
+        {
+            meanX += weights[index] * x[index];
+            meanY += weights[index] * y[index];
+        }
+
+        meanX /= weightSum;
+        meanY /= weightSum;
+
         decimal numerator = 0m;
         decimal denominator = 0m;
-
-        for (int index = 0; index < x.Length; index++)
+        for (int index = 0; index < ordered.Length; index++)
         {
             decimal dx = x[index] - meanX;
-            numerator += dx * (y[index] - meanY);
-            denominator += dx * dx;
+            numerator += weights[index] * dx * (y[index] - meanY);
+            denominator += weights[index] * dx * dx;
         }
 
         decimal slope = denominator == 0m ? 0m : numerator / denominator;
-        decimal intercept = meanY - slope * meanX;
-        return new FittedLine(originTime, intercept, slope);
+        // Intercept at the recent origin (x = 0 for the newest pivot time).
+        decimal originPrice = meanY - slope * meanX;
+        return new FittedLine(originTime, originPrice, slope);
     }
 
     private static decimal PriceAt(FittedLine line, DateTimeOffset time) =>

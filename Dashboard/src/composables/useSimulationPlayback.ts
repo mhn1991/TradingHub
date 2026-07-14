@@ -1,4 +1,5 @@
 import { computed, onUnmounted, ref, watch, type Ref } from 'vue'
+import type { ReplayFrame } from '../types'
 
 export interface PlaybackRow {
   sequence: number
@@ -10,6 +11,16 @@ export interface PlaybackRow {
   close: number
   volume?: number
   isWarmup?: boolean
+  analysis?: {
+    indicators: ReplayFrame['indicators']
+    swings: ReplayFrame['swings']
+    priceZones: ReplayFrame['priceZones']
+    trendlines: ReplayFrame['trendlines']
+    channels: ReplayFrame['channels']
+    marketStructure?: ReplayFrame['marketStructure']
+    priceAction?: ReplayFrame['priceAction']
+    confidence: ReplayFrame['confidence']
+  } | null
 }
 
 export function useSimulationPlayback(rows: Ref<PlaybackRow[]>) {

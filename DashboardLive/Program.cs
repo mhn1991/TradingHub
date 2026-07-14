@@ -1,12 +1,17 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Dashboard.Live;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 using Simulator.Jobs;
 using Simulator.Services;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+builder.WebHost.ConfigureKestrel(options =>
+    options.Limits.MaxRequestBodySize = 2L * 1024 * 1024 * 1024);
+builder.Services.Configure<FormOptions>(options =>
+    options.MultipartBodyLengthLimit = 2L * 1024 * 1024 * 1024);
 builder.Services.Configure<LiveFeedOptions>(
     builder.Configuration.GetSection(LiveFeedOptions.SectionName));
 builder.Services.Configure<OandaWorkspaceOptions>(
@@ -34,6 +39,7 @@ builder.Services.AddSingleton(services => new BinanceWorkspaceMarketData(
     services.GetRequiredService<TimeProvider>(),
     services.GetRequiredService<IOptions<LiveFeedOptions>>(),
     services.GetRequiredService<OandaWorkspaceService>()));
+builder.Services.AddSingleton<SimulationBrokerCatalogService>();
 builder.Services.AddHostedService(services =>
     services.GetRequiredService<BinanceLiveAnalysisService>());
 builder.Services.AddHostedService(services =>
@@ -62,6 +68,7 @@ builder.Services.AddSingleton<IBacktestApplicationService>(services =>
 builder.Services.AddSingleton<SimulationRealtimePublisher>();
 builder.Services.AddHostedService<SimulationRealtimeBridge>();
 builder.Services.AddSignalR();
+builder.Services.AddProblemDetails();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
     .SetIsOriginAllowed(origin =>
     {
@@ -80,6 +87,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 WebApplication app = builder.Build();
+app.UseExceptionHandler();
 app.UseCors();
 
 string dashboardPath = Path.GetFullPath(Path.Combine(
@@ -489,4 +497,3 @@ app.MapSimulationEndpoints();
 app.MapHub<SimulationHub>("/hubs/simulations");
 
 app.Run();
-

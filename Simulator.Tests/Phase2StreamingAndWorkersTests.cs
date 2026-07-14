@@ -29,9 +29,50 @@ public sealed class Phase2StreamingAndWorkersTests
         await using var enumerator = stream.StreamAsync(request, cts.Token).GetAsyncEnumerator(cts.Token);
         Assert.That(await enumerator.MoveNextAsync(), Is.True);
         Assert.That(enumerator.Current.OpenTime, Is.Not.EqualTo(default(DateTimeOffset)));
-        Assert.That(source.PagesRequested, Is.EqualTo(1));
+        // The corrected hysteresis keeps filling toward capacity, so the second
+        // page may already be in flight while rows from the first page are consumed.
+        Assert.That(source.PagesRequested, Is.EqualTo(2));
         gate.SetResult();
         cts.Cancel();
+    }
+
+    [Test]
+    public async Task LowWatermark_Hysteresis_FillsTowardCapacityAndReportsWaits()
+    {
+        InstrumentKey instrument = new("FX:EUR/USD");
+        BarInterval interval = BarInterval.Minutes(1);
+        DateTimeOffset start = new(2025, 6, 2, 0, 0, 0, TimeSpan.Zero);
+        Candle[] candles = BuildCandles(instrument, interval, start, 300);
+        var stream = new LowWatermarkPrefetchStream(
+            new EnumerablePagedCandleSource(candles),
+            capacity: 64,
+            lowWatermark: 8);
+        var request = new HistoricalCandleRequest(
+            instrument,
+            interval,
+            start,
+            start.AddMinutes(candles.Length),
+            PageSize: 16);
+
+        int received = 0;
+        await foreach (MarketCandle _ in stream.StreamAsync(request))
+        {
+            received++;
+            if (received < 100)
+                await Task.Delay(1);
+        }
+        PrefetchDiagnostics diagnostics = stream.SnapshotDiagnostics();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(received, Is.EqualTo(candles.Length));
+            Assert.That(diagnostics.PeakUnread, Is.GreaterThan(8 + 1));
+            Assert.That(diagnostics.PeakUnread, Is.LessThanOrEqualTo(64));
+            Assert.That(diagnostics.PagesRequested, Is.GreaterThan(1));
+            Assert.That(diagnostics.SourceWaits, Is.GreaterThan(0));
+            Assert.That(diagnostics.ConsumerWaits, Is.GreaterThan(0));
+            Assert.That(diagnostics.CurrentUnread, Is.EqualTo(0));
+        });
     }
 
     [Test]
@@ -44,9 +85,9 @@ public sealed class Phase2StreamingAndWorkersTests
         Candle[] candles = BuildCandles(instrument, baseInterval, start, count);
 
         ComparativeSimulationResult parallel = await RunAsync(
-            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.ParallelWorkers, StrategyWorkerMode.Task);
+            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.ParallelWorkers);
         ComparativeSimulationResult sequential = await RunAsync(
-            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.Sequential, StrategyWorkerMode.Task);
+            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.Sequential);
 
         Assert.That(parallel.InputHash, Is.EqualTo(sequential.InputHash));
         foreach (StrategySimulationResult left in sequential.Strategies)
@@ -59,7 +100,7 @@ public sealed class Phase2StreamingAndWorkersTests
     }
 
     [Test]
-    public async Task Dedicated_Thread_Mode_Matches_Sequential_Fingerprint_Counts()
+    public async Task Task_Worker_Mode_Matches_Sequential_Fingerprint_Counts()
     {
         InstrumentKey instrument = new("FX:EUR/USD");
         BarInterval baseInterval = BarInterval.Minutes(1);
@@ -68,15 +109,15 @@ public sealed class Phase2StreamingAndWorkersTests
         Candle[] candles = BuildCandles(instrument, baseInterval, start, count);
 
         ComparativeSimulationResult sequential = await RunAsync(
-            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.Sequential, StrategyWorkerMode.Task);
-        ComparativeSimulationResult dedicated = await RunAsync(
-            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.ParallelWorkers, StrategyWorkerMode.DedicatedThread);
+            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.Sequential);
+        ComparativeSimulationResult parallel = await RunAsync(
+            candles, instrument, start, start.AddMinutes(count), StrategyExecutionMode.ParallelWorkers);
 
-        Assert.That(dedicated.InputHash, Is.EqualTo(sequential.InputHash));
-        Assert.That(dedicated.ProcessedBaseCandles, Is.EqualTo(sequential.ProcessedBaseCandles));
+        Assert.That(parallel.InputHash, Is.EqualTo(sequential.InputHash));
+        Assert.That(parallel.ProcessedBaseCandles, Is.EqualTo(sequential.ProcessedBaseCandles));
         foreach (StrategySimulationResult left in sequential.Strategies)
         {
-            StrategySimulationResult right = dedicated.Strategies.Single(item => item.StrategyId == left.StrategyId);
+            StrategySimulationResult right = parallel.Strategies.Single(item => item.StrategyId == left.StrategyId);
             Assert.That(right.Result.NetProfit, Is.EqualTo(left.Result.NetProfit));
         }
     }
@@ -148,8 +189,7 @@ public sealed class Phase2StreamingAndWorkersTests
         InstrumentKey instrument,
         DateTimeOffset from,
         DateTimeOffset to,
-        StrategyExecutionMode mode,
-        StrategyWorkerMode workerMode)
+        StrategyExecutionMode mode)
     {
         string output = Path.Combine(Path.GetTempPath(), "th-phase2-eng", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(output);
@@ -169,7 +209,6 @@ public sealed class Phase2StreamingAndWorkersTests
             PrefetchLowWatermark = 1_000,
             SourcePageSize = 500,
             StrategyExecutionMode = mode,
-            StrategyWorkerMode = workerMode,
             StrategyChannelCapacity = 4,
             ProgressPublishIntervalMilliseconds = 200,
             ReplayChunkSize = 500

@@ -91,6 +91,9 @@ public sealed class StreamingCandleCacheWriter : IStreamingCandleCacheWriter
         if (!string.IsNullOrWhiteSpace(directory))
             Directory.CreateDirectory(directory);
 
+        // A writer for this exact cache key owns its unpublished sidecars.
+        TryDelete(_temporaryPath);
+        TryDelete(_manifestPath + ".tmp");
         CleanupStaleTemporary(directory);
     }
 
@@ -131,6 +134,18 @@ public sealed class StreamingCandleCacheWriter : IStreamingCandleCacheWriter
         if (_committed)
             return;
 
+        string contentHash = _count == 0
+            ? string.Empty
+            : Convert.ToHexString(_hasher.GetCurrentHash()).ToLowerInvariant();
+        if (metadata.CandleCount != _count ||
+            metadata.FirstCandle != _first ||
+            metadata.LastCandle != _last ||
+            !string.Equals(metadata.ContentHash, contentHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Cache commit metadata does not match the written candle stream.");
+        }
+
         if (_writer is not null)
         {
             await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -164,7 +179,7 @@ public sealed class StreamingCandleCacheWriter : IStreamingCandleCacheWriter
             CandleCount = metadata.CandleCount,
             FirstCandle = metadata.FirstCandle,
             LastCandle = metadata.LastCandle,
-            ContentHash = metadata.ContentHash,
+            ContentHash = contentHash,
             CreatedAt = metadata.CreatedAt,
             Complete = true
         };
@@ -247,12 +262,49 @@ public sealed class StreamingCandleCacheWriter : IStreamingCandleCacheWriter
                 return false;
             }
 
-            // Truncation check: open gzip and ensure it reads.
+            // Read the entire gzip stream (including its trailer) and validate the
+            // manifest against the canonical serialized row stream.
             await using FileStream file = File.OpenRead(dataPath);
             await using var gzip = new GZipStream(file, CompressionMode.Decompress);
             using var reader = new StreamReader(gzip, Encoding.UTF8);
-            string? first = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            return !string.IsNullOrWhiteSpace(first);
+            string? header = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(header))
+                return false;
+
+            using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long count = 0;
+            DateTimeOffset? first = null;
+            DateTimeOffset? last = null;
+            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    return false;
+
+                CacheCandleRow? row = JsonSerializer.Deserialize<CacheCandleRow>(line, JsonOptions);
+                if (row is null ||
+                    row.OpenTime < request.From ||
+                    row.OpenTime >= request.To ||
+                    row.CloseTime != request.BaseInterval.AddTo(row.OpenTime) ||
+                    row.High < Math.Max(row.Open, row.Close) ||
+                    row.Low > Math.Min(row.Open, row.Close) ||
+                    row.High < row.Low ||
+                    row.Volume < 0m ||
+                    (last is not null && row.OpenTime <= last))
+                {
+                    return false;
+                }
+
+                first ??= row.OpenTime;
+                last = row.OpenTime;
+                count++;
+                hasher.AppendData(Encoding.UTF8.GetBytes(line));
+            }
+
+            string hash = Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
+            return count == manifest.CandleCount &&
+                   first == manifest.FirstCandle &&
+                   last == manifest.LastCandle &&
+                   string.Equals(hash, manifest.ContentHash, StringComparison.OrdinalIgnoreCase);
         }
         catch
         {

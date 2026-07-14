@@ -1,8 +1,12 @@
 using System.Text.Json.Serialization;
+using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.MarketData;
+using RiskManager;
+using RiskManager.Safety;
 using Simulator.MarketData;
+using TradeManager;
 
 namespace Simulator.Models;
 
@@ -10,12 +14,6 @@ public enum StrategyExecutionMode
 {
     Sequential,
     ParallelWorkers
-}
-
-public enum StrategyWorkerMode
-{
-    Task,
-    DedicatedThread
 }
 
 public enum AnalysisSharingMode
@@ -40,8 +38,7 @@ public enum AmbiguousIntrabarPolicy
 public enum FillModel
 {
     HistoricalBidAsk,
-    MidpointPlusConfiguredSpread,
-    SyntheticSpreadModel
+    MidpointPlusConfiguredSpread
 }
 
 public enum SimulationJobStatus
@@ -93,7 +90,6 @@ public sealed record BacktestRuntimeOptions
     public int? WarmupBaseCandleCount { get; init; }
 
     public StrategyExecutionMode StrategyExecutionMode { get; init; } = StrategyExecutionMode.ParallelWorkers;
-    public StrategyWorkerMode StrategyWorkerMode { get; init; } = StrategyWorkerMode.Task;
     public int StrategyChannelCapacity { get; init; } = 4;
     public int MaximumParallelStrategies { get; init; } = 4;
     public StrategyFailurePolicy StrategyFailurePolicy { get; init; } = StrategyFailurePolicy.StopEntireComparison;
@@ -108,9 +104,9 @@ public sealed record BacktestRuntimeOptions
     public bool UseHistoricalBidAsk { get; init; }
     public bool RefreshCache { get; init; }
     public bool NoCache { get; init; }
-    public int DeterministicSeed { get; init; } = 12_345;
-
     public int ReplayChunkSize { get; init; } = 5_000;
+    public int ExecutionDetailPreEntryFrames { get; init; } = 120;
+    public int ExecutionDetailPostExitFrames { get; init; } = 120;
     public int ProgressPublishIntervalMilliseconds { get; init; } = 500;
 
     public int CandleCapacity { get; init; } = 5_000;
@@ -118,6 +114,21 @@ public sealed record BacktestRuntimeOptions
     public int OrderEventCapacity { get; init; } = 16_384;
 
     public BaseCandleGapPolicy BaseCandleGapPolicy { get; init; } = BaseCandleGapPolicy.ResetIncompleteBuckets;
+
+    public PositionManagementOptions LegacyPositionManagement { get; init; } =
+        PositionManagementOptions.LegacyDefaults;
+
+    public PositionManagementOptions ImprovedPositionManagement { get; init; } =
+        PositionManagementOptions.ImprovedDefaults;
+
+    /// <summary>
+    /// Account-level safety and daily equity-profit protection. Null thresholds leave
+    /// the corresponding rule disabled.
+    /// </summary>
+    public TradingSafetyOptions SafetyOptions { get; init; } = new();
+
+    /// <summary>Order-size calculation and capital/margin reservation policy.</summary>
+    public PositionSizingOptions PositionSizing { get; init; } = new();
 
     public SimulationTimeframeOptions ToTimeframeOptions() => new()
     {
@@ -139,9 +150,46 @@ public sealed record BacktestRuntimeOptions
 
         ToTimeframeOptions().Validate();
         StrategyTimeframes.Validate();
+        LegacyPositionManagement.Validate();
+        ImprovedPositionManagement.Validate();
+        SafetyOptions.Validate();
+        PositionSizing.Validate();
+
+        BarInterval[] derivedAnalysisIntervals = StrategyTimeframes.RequiredIntervals
+            .Concat(ResolveManagementIntervals("legacy"))
+            .Concat(ResolveManagementIntervals("improved"))
+            .Distinct()
+            .ToArray();
+        foreach (BarInterval interval in derivedAnalysisIntervals)
+        {
+            if (!interval.IsValid ||
+                BarIntervalParser.CompareDuration(interval, AnalysisBaseInterval) < 0)
+            {
+                throw new ArgumentException(
+                    $"Derived analysis interval {BarIntervalParser.Format(interval)} must be " +
+                    $">= analysis base {BarIntervalParser.Format(AnalysisBaseInterval)}.");
+            }
+
+            if (interval != AnalysisBaseInterval &&
+                interval.Unit is BarUnit.Second or BarUnit.Minute or BarUnit.Hour &&
+                !BarIntervalParser.IsDivisible(interval, AnalysisBaseInterval))
+            {
+                throw new ArgumentException(
+                    $"Derived analysis interval {BarIntervalParser.Format(interval)} is not aligned with " +
+                    $"analysis base {BarIntervalParser.Format(AnalysisBaseInterval)}.");
+            }
+        }
+
         HistoricalCapabilityRegistry.ValidateExecutionInterval(SourceKind, ExecutionInterval);
 
-        if (SourceKind is HistoricalDataSourceKind.ImportedSecondCandles or HistoricalDataSourceKind.RecordedQuotes)
+        if (UseHistoricalBidAsk &&
+            !HistoricalCapabilityRegistry.Get(SourceKind).SupportsHistoricalBidAsk)
+        {
+            throw new ArgumentException(
+                $"Historical bid/ask is not available for {HistoricalCapabilityRegistry.Get(SourceKind).SourceName}.");
+        }
+
+        if (SourceKind == HistoricalDataSourceKind.ImportedSecondCandles)
         {
             if (string.IsNullOrWhiteSpace(ImportedCandlePath) || !File.Exists(ImportedCandlePath))
             {
@@ -169,6 +217,8 @@ public sealed record BacktestRuntimeOptions
                 $"Selected strategy count ({selectedStrategyCount}) exceeds MaximumParallelStrategies ({MaximumParallelStrategies}).");
         if (ReplayChunkSize < 1)
             throw new ArgumentOutOfRangeException(nameof(ReplayChunkSize));
+        if (ExecutionDetailPreEntryFrames < 0 || ExecutionDetailPostExitFrames < 0)
+            throw new ArgumentOutOfRangeException(nameof(ExecutionDetailPreEntryFrames));
         if (ProgressPublishIntervalMilliseconds < 50)
             throw new ArgumentOutOfRangeException(nameof(ProgressPublishIntervalMilliseconds), "Progress interval must be >= 50ms.");
         if (WarmupDays < 0)
@@ -178,13 +228,34 @@ public sealed record BacktestRuntimeOptions
         if (CandleCapacity < 1 || LedgerCapacity < 1 || OrderEventCapacity < 1)
             throw new ArgumentException("Capacities must be positive.");
         if (!Enum.IsDefined(StrategyExecutionMode) ||
-            !Enum.IsDefined(StrategyWorkerMode) ||
             !Enum.IsDefined(AnalysisSharingMode) ||
             !Enum.IsDefined(StrategyFailurePolicy) ||
             !Enum.IsDefined(AmbiguousIntrabarPolicy))
         {
             throw new ArgumentException("One or more enumeration values are invalid.");
         }
+    }
+
+    public PositionManagementOptions GetPositionManagement(string strategyId) =>
+        strategyId.Contains("legacy", StringComparison.OrdinalIgnoreCase)
+            ? LegacyPositionManagement
+            : ImprovedPositionManagement;
+
+    public BarInterval ResolveManagementInterval(string strategyId)
+    {
+        PositionManagementOptions options = GetPositionManagement(strategyId);
+        return options.MainStructureInterval ?? options.ManagementInterval ??
+            StrategyTimeframes.ConfirmationInterval;
+    }
+
+    public IReadOnlyList<BarInterval> ResolveManagementIntervals(string strategyId)
+    {
+        PositionManagementOptions options = GetPositionManagement(strategyId);
+        BarInterval fast = options.FastStructureInterval ?? StrategyTimeframes.EntryInterval;
+        BarInterval main = options.MainStructureInterval ?? options.ManagementInterval ??
+            StrategyTimeframes.ConfirmationInterval;
+        BarInterval thesis = options.ThesisInterval ?? StrategyTimeframes.TrendInterval;
+        return [fast, main, thesis];
     }
 
     public OcoFillPolicy ToOcoFillPolicy() => AmbiguousIntrabarPolicy switch
@@ -232,6 +303,9 @@ public sealed record BacktestRequest
     public decimal SpreadBasisPoints { get; init; } = 1m;
     public decimal SlippageBasisPoints { get; init; } = 0.5m;
     public decimal MinimumRewardRisk { get; init; } = 1.5m;
+    public PriceActionConfirmationMode PriceActionConfirmation { get; init; } = PriceActionConfirmationMode.Soft;
+    public decimal MinimumPriceActionConfidence { get; init; } = 55m;
+    public bool RejectStrongOpposingPriceAction { get; init; } = true;
     public string OutputDirectory { get; init; } = Path.Combine("Dashboard", "public", "data", "simulations");
     public string CacheDirectory { get; init; } = Path.Combine(".cache", "oanda");
     public string JobsDirectory { get; init; } = Path.Combine(".cache", "simulation-jobs");
@@ -254,6 +328,10 @@ public sealed record BacktestRequest
             throw new ArgumentException("At least one strategy is required.");
         if (StartingBalance <= 0 || Quantity <= 0 || Leverage <= 0 || MinimumRewardRisk <= 0)
             throw new ArgumentException("Balance, quantity, leverage, and minimum R:R must be positive.");
+        if (!Enum.IsDefined(PriceActionConfirmation) || MinimumPriceActionConfidence is < 0m or > 100m)
+            throw new ArgumentException("Price-action confirmation mode and confidence must be valid.");
+        if (InlineCandles is null && Runtime.SourceKind == HistoricalDataSourceKind.InlineTestData)
+            throw new ArgumentException("InlineTestData requires InlineCandles and is not an external source.");
 
         // Inline fixtures use the inline capability set (includes 1s for tests).
         BacktestRuntimeOptions runtime = InlineCandles is not null

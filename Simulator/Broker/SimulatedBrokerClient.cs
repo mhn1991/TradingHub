@@ -5,7 +5,7 @@ using Simulator.Models;
 
 namespace Simulator.Broker;
 
-public sealed class SimulatedBrokerClient : ITradingBrokerClient
+public sealed class SimulatedBrokerClient : IProtectiveOrderBrokerClient, IAccountCurrencyConversionProvider
 {
     private readonly BoundedAsyncEventLog<OrderEvent> _orderEvents;
     private readonly SimulatedBrokerState _state;
@@ -42,9 +42,19 @@ public sealed class SimulatedBrokerClient : ITradingBrokerClient
     public IAccountClient Accounts { get; }
     public ITradingOrderClient Orders => _orders;
     IOrderClient IBrokerClient.Orders => _orders;
+    public TradingBrokerCapabilities TradingCapabilities { get; } = new()
+    {
+        SupportsNativeStopAmendment = false,
+        SupportsAtomicOrderReplacement = true,
+        SupportsDependentOcoAmendment = true
+    };
+    public IProtectiveOrderClient ProtectiveOrders => _orders;
     public IPositionClient Positions { get; }
     public ICostClient Costs { get; }
     public SimulatedBrokerRuntime Runtime { get; }
+
+    public bool TryGetQuoteToAccountCurrencyRate(InstrumentKey instrument, out decimal rate) =>
+        _state.TryGetQuoteToBaseCurrencyRate(instrument, out rate, out _);
 
     public ValueTask DisposeAsync()
     {

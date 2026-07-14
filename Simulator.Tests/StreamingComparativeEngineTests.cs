@@ -205,7 +205,6 @@ public sealed class StreamingComparativeEngineTests
             PrefetchLowWatermark = 1_000,
             SourcePageSize = 500,
             StrategyExecutionMode = mode,
-            StrategyWorkerMode = StrategyWorkerMode.Task,
             ProgressPublishIntervalMilliseconds = 100,
             ReplayChunkSize = 100
         };

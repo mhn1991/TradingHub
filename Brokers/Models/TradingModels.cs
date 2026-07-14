@@ -56,6 +56,8 @@ public sealed record PlaceOrderRequest
     public StandardTimeInForce TimeInForce { get; init; } = StandardTimeInForce.GoodTillCancelled;
     public DateTimeOffset? ExpireAt { get; init; }
     public string? ClientOrderId { get; init; }
+    /// <summary>Rejects or clamps any fill that would increase or reverse exposure.</summary>
+    public bool ReduceOnly { get; init; }
     public StopLossInstruction? StopLoss { get; init; }
     public TakeProfitInstruction? TakeProfit { get; init; }
 }
@@ -94,6 +96,7 @@ public enum OrderEventType
     PartiallyFilled,
     Filled,
     Cancelled,
+    Replaced,
     Expired
 }
 

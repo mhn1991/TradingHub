@@ -10,7 +10,7 @@ The runtime is split by responsibility so strategy code does not own trading saf
 - `Brokers` — broker adapters, broker account/order-state execution checks, and the pure broker/local position reconciliation engine.
 - `RiskManager` — pre-trade risk policy, sizing/exposure limits, protective-order requirements, and daily/weekly/consecutive-loss safety state.
 - `ExecutionManager` — idempotent order orchestration, broker-state/risk assessment coordination, order submission, execution journaling, and reconciliation safety escalation.
-- `TradeManager` — post-entry break-even, trailing-stop, and structure-break exit recommendations.
+- `TradeManager` — post-entry break-even, structure/ATR trailing, staged scale-out, profit-floor/giveback, and deterioration/exhaustion recommendations.
 - `TradingCore` — the end-to-end safe trading pipeline and market-data quality gate.
 - `TradingJournal` — reusable bounded audit-journal contracts and in-memory implementation.
 - `ChartAnnotator` — indicators, swings, zones, trendlines, channels, and market structure.
@@ -19,6 +19,9 @@ The runtime is split by responsibility so strategy code does not own trading saf
 - `BacktestRunner` — thin CLI adapter over the shared `IBacktestApplicationService`.
 
 `ExecutionManager` intentionally coordinates broker safety and risk policy, but it does not define either policy. Broker-specific/account-order checks live in `Brokers.Safety`; financial risk thresholds live in `RiskManager`; and the comparison portion of reconciliation lives in `Brokers.Reconciliation`.
+
+
+The current quantitative-risk upgrade adds risk-based position sizing, role-based multi-timeframe confirmation, and multi-speed position management. See [`QUANTITATIVE_RISK_AND_MTF.md`](QUANTITATIVE_RISK_AND_MTF.md) for the execution order, defaults, invariants, and the deliberate boundary between independent strategy comparison and a future shared portfolio allocator.
 
 ## Implemented Phase 1: safe trading foundation
 
@@ -49,7 +52,7 @@ Implemented controls:
   - stops are never widened.
 - Simulation integration that feeds realised P/L back into the safety controller.
 
-> The current broker abstraction supports stop-loss/take-profit instructions when opening an order, but it does not yet expose a broker-neutral amend-stop endpoint. `StructureBasedTradeManager` therefore produces deterministic stop/exit recommendations for the execution layer to apply when amend APIs are added.
+Phase 4 adds a broker-neutral protective-stop amendment contract. The simulator performs an atomic replacement that preserves OCO linkage and becomes executable only on the next execution sequence. `ExecutionManager` validates the broker position, exact existing stop, tick size, executable side, and risk reduction before mutation. OANDA advertises amendment as unsupported in this build because a native, atomic mapping has not yet been implemented; the old stop is never cancelled as an unsafe fallback.
 
 ## Implemented Phase 2: chart annotation and structure
 
@@ -79,6 +82,8 @@ The primary UX is **Dashboard → Simulator**:
 4. Receive a `simulationId` immediately; progress, balances, and trades stream while the backend processes 1m candles as fast as correctness allows.
 5. Pause/resume **compute** independently from visual playback.
 
+Legacy and Improved have separate break-even/structure activation, management-interval, ATR-buffer, and adverse-structure settings. The live panel displays current/initial stops and locked R; completed trades retain every accepted or rejected amendment and render a stepped stop line.
+
 Architecture details: [`ARCHITECTURE_SIMULATOR.md`](ARCHITECTURE_SIMULATOR.md).
 
 ### CLI (same application service)
@@ -99,6 +104,8 @@ npm run dev
 ```
 
 See `RUN_BACKTEST.md` for all controls, cache behaviour, and dashboard output details.
+
+For a reproducible disabled-versus-structure/ATR comparison of both strategies, add `--trailing-comparison` to the CLI command. Results are written to `trailing-comparison.json` with P/L, drawdown, R, MFE/MAE, exit reasons, amendments, locked R, and giveback metrics.
 
 ## Safe simulation example
 
@@ -143,10 +150,30 @@ npm run data:validate
 
 Integration tests under `Brokers.IntegrationTests` are explicit and require broker test/demo credentials in the environment.
 
-## Recommended next work
 
-- Add broker-neutral amend/cancel protection APIs and wire trade-management recommendations to live positions.
+## Profit protection and position reduction
+
+The simulator now supports staged partial exits, a protected runner, profit-floor ratchets, MFE maximum-giveback protection, stagnation reduction, structural deterioration, corroborated momentum decay, confirmed post-expansion volatility exhaustion, and optional UTC risk-window or spread/ATR stress reductions.
+
+Every close decision is broker-neutral **reduce-only**. The simulated broker clamps stale close quantities to the actual remaining position and atomically resizes attached stop/target orders, preventing a partial close or stale full-close request from reversing the position. OANDA maps reduce-only closes to `positionFill = REDUCE_ONLY`.
+
+The long-run trade-feed endpoint also tolerates old, null, truncated, or partially written trade indexes and advances past corrupt rows instead of returning repeated HTTP 500 responses.
+
+See [`PROFIT_PROTECTION_AND_LONG_RUN_FIX.md`](PROFIT_PROTECTION_AND_LONG_RUN_FIX.md) and [`FINAL_PROFIT_PROTECTION_VALIDATION.md`](FINAL_PROFIT_PROTECTION_VALIDATION.md).
+
+## Remaining production work
+
+- Implement and certify a native atomic OANDA stop-amendment mapping before enabling live trailing there.
+- Add a historical bid/ask candle source; current historical fills remain midpoint plus configured spread/slippage.
 - Persist the audit journal and safety state to PostgreSQL rather than memory only.
 - Run long soak tests with forced disconnects, restarts, partial fills, and position reconciliation failures.
 - Add portfolio-level currency/correlation exposure controls before expanding the live instrument universe.
 - Generate Phase 3 ML training rows from historical annotations using time-split, lookahead-safe labels.
+
+## Price action and warm-up calibration
+
+The analysis pipeline now includes deterministic BOS/CHoCH, break-and-retest, structural rejection, displacement, liquidity-sweep, compression/expansion, price-leg, and ADX/DMI evidence. Profiles are maintained separately per instrument/timeframe during warm-up and frozen before evaluation. See `PRICE_ACTION_CALIBRATION_AND_DIAGNOSTICS.md` and `FINAL_PHASE2_VALIDATION.md`.
+
+## Simulator broker and asset picker
+
+See [`BROKER_ASSET_SELECTION.md`](BROKER_ASSET_SELECTION.md) for the supported OANDA, Binance Spot, imported-dataset, and IG availability rules.

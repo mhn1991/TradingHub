@@ -26,6 +26,7 @@ CLI ───────────┘
 | ChartAnnotator | Indicators, swings, structure, annotation snapshots |
 | Agent | Multi-timeframe setup progression and trade intent |
 | RiskManager / ExecutionManager | Risk approval and order lifecycle |
+| TradeManager | Pure deterministic break-even, structure/ATR, and adverse-structure recommendations |
 | DashboardLive | Simulation API, job queue host, SignalR |
 | Dashboard | Configuration, progress, playback, comparison UI |
 | BacktestRunner | Thin CLI adapter over the application service |
@@ -34,12 +35,12 @@ CLI ───────────┘
 
 - `IBacktestApplicationService` starts, queries, pauses, resumes, and cancels jobs.
 - `FileSimulationJobRepository` persists snapshots under `.cache/simulation-jobs`.
-- A bounded `Channel` job queue owns background workers (no fire-and-forget).
+- A bounded `Channel` job queue owns background workers. Each running job also owns a single ordered async state actor; source/engine/control/trade/terminal updates are reduced to monotonic snapshots before SignalR and coalesced persistence.
 - Refresh-safe: status, progress, errors, and output paths survive browser reload.
 
-## One-minute canonical clock
+## Execution clock and management ordering
 
-Simulation advances on completed 1m candles only:
+Simulation advances on completed execution candles (1m, OANDA-native 5s, or imported 1s):
 
 ```text
 Read 1m candle
@@ -48,17 +49,19 @@ Read 1m candle
   → update shared annotation snapshots
   → build immutable MarketFrame
   → evaluate strategies (sequential or parallel barrier)
-  → create orders eligible from next candle
+  → evaluate TradeManager only when its configured management interval closes
+  → atomically replace a risk-reducing stop, eligible from execution sequence N+1
+  → create other orders eligible from next candle
   → write compact replay events
 ```
 
-No lookahead: orders created on frame `N` fill no earlier than frame `N+1`.
+No lookahead: orders and amended stops created on frame `N` fill no earlier than frame `N+1`. R, MFE-R, and MAE-R always retain the immutable initial-stop denominator.
 
 ## Streaming source, cache, prefetch
 
 - `IHistoricalCandleStream` yields `MarketCandle` without materialising a full year.
 - `OandaStreamingCandleSource` pages OANDA, de-duplicates boundaries, retries transient failures, and writes/reads a versioned compressed cache.
-- `PrefetchingCandleStream` uses a bounded channel with absolute sequences (never overwrites unread data).
+- Prefetch uses hysteresis: fill toward channel capacity, suspend near capacity, then resume once unread rows drain to the low watermark. Diagnostics expose current/peak unread, pages, source/consumer waits, capacity, and low watermark.
 - `MarketDataQualityTracker` reports duplicates, gaps, weekend vs session gaps, and an input hash.
 
 ## Shared analysis and parallel workers
@@ -81,8 +84,11 @@ simulations/{simulationId}/
   manifest.json
   market/chunk-*.json.gz
   strategies/{id}/events-*.json.gz
-  strategies/{id}/trades.json.gz
+  strategies/{id}/trades.ndjson
+  strategies/{id}/trades.index.json
   strategies/{id}/performance.json.gz
+  execution-detail/{strategy}/{setup}/chunk-*.json.gz
+  execution-detail/{strategy}/{setup}/index.json
   COMPLETE | INCOMPLETE
 ```
 
@@ -95,9 +101,13 @@ POST   /api/simulations
 GET    /api/simulations
 GET    /api/simulations/{id}
 POST   /api/simulations/{id}/pause|resume|cancel
-GET    /api/simulations/{id}/strategies|trades|performance
+POST   /api/simulations/imports
+GET    /api/simulations/imports
+DELETE /api/simulations/imports/{datasetId}
+GET    /api/simulations/{id}/strategies|trades?cursor=|performance
 GET    /api/simulations/{id}/replay[?from=&to=]
 GET    /api/simulations/{id}/replay/chunks[/{chunkId}]
+GET    /api/simulations/{id}/replay/execution-detail[/{chunkId}]?strategy=&setupId=
 SignalR /hubs/simulations
 ```
 
@@ -122,6 +132,16 @@ SignalR /hubs/simulations
 - **Custom strategy stack:** trend / confirmation / entry intervals; effective analysis = requested ∪ strategy requirements ∪ analysis base.
 - Shared parser: `BarIntervalParser`.
 
+## Phase 4 — dynamic protection
+
+- `StructureBasedTradeManager` is invoked by every production `StrategySimulationSession` on its configured management interval only.
+- Cost-aware break-even includes entry/estimated-exit commission, spread, two-sided slippage, and an ATR buffer.
+- Structural candidates use confirmed swings and available support/resistance zones with ATR buffers, minimum-improvement/cooldown gates, and never-widen rules.
+- `ExecutionCoordinator.AmendProtectiveStopAsync` validates exact broker state and bypasses entry-only safety locks without bypassing reconciliation checks.
+- The simulated broker replaces the stop atomically under one state lock and retains the bracket target/OCO group.
+- Replay events and trades include stop requests, accept/reject/unsupported outcomes, structure source, locked R, and precise stop exit reason.
+- OANDA reports this capability as unsupported until a native atomic implementation is certified.
+
 ## Final corrective notes (Legacy exit mode)
 
 Legacy must declare `ExitManagementMode` through `ITradingAgent` as
@@ -133,7 +153,7 @@ blocked Legacy entries with `TakeProfitPrice = null`.
 
 - **True first-run streaming**: OANDA pages yield to the simulator while a temporary cache is appended; commit is atomic.
 - **Low-watermark prefetch**: `IPagedHistoricalCandleSource` + `LowWatermarkPrefetchStream`.
-- **Persistent strategy workers**: `StrategyWorkerHost` (task or one dedicated thread per strategy for the whole run).
+- **Persistent strategy workers**: `StrategyWorkerHost` uses one bounded async task worker per strategy for the whole run.
 - **Async frame-boundary pause**: `AsyncPauseGate`.
 - **Coalesced job persistence** with monotonic `Revision`.
 - **Completed job cleanup** from in-memory `_running`; CLI awaits completion TCS.
@@ -146,7 +166,7 @@ See `SIMULATOR_PHASE2_VALIDATION.md`.
 ## Known limitations
 
 - Historical bid/ask OANDA components not implemented (option off / documented).
-- Full AnalysisChart trade-marker integration in Simulator panel is still lightweight.
-- Event-driven strategy lifecycle / annotation delta chunks are partial (OHLC chunks + progressive trades API).
+- OANDA protective-stop amendment is intentionally unsupported; no cancel-first fallback is used.
+- The main chart stays at analysis-base resolution; sub-minute execution detail is loaded per selected trade.
 - Stage-level allocation profiling across ChartAnnotator internals is incomplete.
 - `Simulator` is not fully AOT-compatible due to JSON job/cache/replay I/O.

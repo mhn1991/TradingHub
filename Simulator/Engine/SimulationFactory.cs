@@ -85,7 +85,9 @@ public static class SimulationFactory
         }
         catch
         {
-            broker.DisposeAsync().GetAwaiter().GetResult();
+            // SimulatedBrokerClient disposal is synchronous today; do not introduce
+            // sync-over-async into this synchronous compatibility factory.
+            _ = broker.DisposeAsync();
             throw;
         }
     }

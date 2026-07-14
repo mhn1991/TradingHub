@@ -67,6 +67,24 @@ public sealed class DomainTests
     }
 
     [Test]
+    public async Task BinanceClient_AllowsPublicMarketDataWithoutApiCredentials()
+    {
+        await using var client = new BinanceBrokerClient(new BinanceOptions
+        {
+            Environment = BrokerEnvironment.Live,
+            BaseAddress = new Uri("https://data-api.binance.vision/")
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(client.Capabilities.SupportsMarketData, Is.True);
+            Assert.That(client.Capabilities.SupportsAccounts, Is.False);
+            Assert.That(client.Capabilities.SupportsOrders, Is.False);
+            Assert.That(client.Capabilities.SupportsCosts, Is.False);
+        });
+    }
+
+    [Test]
     public void BinanceSigner_IsDeterministicWithFixedTime()
     {
         var signer = new BinanceRequestSigner(
@@ -147,10 +165,30 @@ public sealed class DomainTests
             Assert.That(payload.Order.Units, Is.EqualTo("-250"));
             Assert.That(payload.Order.Price, Is.EqualTo("1.125"));
             Assert.That(payload.Order.TimeInForce, Is.EqualTo("GTC"));
+            Assert.That(payload.Order.PositionFill, Is.EqualTo("DEFAULT"));
             Assert.That(payload.Order.ClientExtensions!.Id, Is.EqualTo("client-1"));
             Assert.That(payload.Order.StopLossOnFill!.Price, Is.EqualTo("1.14"));
             Assert.That(payload.Order.TakeProfitOnFill!.Price, Is.EqualTo("1.1"));
         });
+    }
+
+    [Test]
+    public void OandaCloseMapping_UsesReduceOnlyPositionFill()
+    {
+        OandaCreateOrderEnvelope payload = OandaMappings.ToOrderRequest(
+            new PlaceOrderRequest
+            {
+                Instrument = new InstrumentKey("FX:EUR/USD"),
+                Side = OrderSide.Sell,
+                Type = StandardOrderType.Market,
+                Quantity = new OrderQuantity(100m, QuantityUnit.Units),
+                ClientOrderId = "reduce-only-close",
+                ReduceOnly = true
+            },
+            "EUR_USD",
+            "reduce-only-close");
+
+        Assert.That(payload.Order.PositionFill, Is.EqualTo("REDUCE_ONLY"));
     }
 
     [Test]

@@ -44,9 +44,17 @@ public sealed class SimulatedBrokerRuntime
         IReadOnlyList<SimulatedOrder> orders = _state.GetEligibleOrders(
             candle.Instrument,
             candle.Prices.Open);
-        foreach (SimulatedOrder order in orders)
+        foreach (SimulatedOrder candidate in orders)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // Earlier fills in this candle can resize or cancel protective orders. Refresh the
+            // order before evaluating it so a stale pre-loop copy can never over-close and
+            // reverse the position after a partial reduction.
+            SimulatedOrder? current = _state.GetSimulatedOrder(candidate.BrokerOrderId);
+            if (current is null || !current.IsOpen)
+                continue;
+            SimulatedOrder order = current;
 
             if (IsExpired(order))
             {
@@ -119,8 +127,26 @@ public sealed class SimulatedBrokerRuntime
                     OrderEventType.Filled,
                     _clock.UtcNow,
                     executionPrice,
-                    quantity,
-                    commission));
+                    applied.FilledQuantity,
+                    applied.Commission));
+
+            foreach (SimulatedOrder resized in applied.ResizedProtectiveOrders)
+            {
+                _events.Append(SimulatedOrderClient.ToEvent(
+                    resized,
+                    OrderEventType.Replaced,
+                    _clock.UtcNow,
+                    message: $"Protective quantity reconciled to {resized.Request.Quantity.Value}."));
+            }
+
+            foreach (SimulatedOrder cancelled in applied.CancelledProtectiveOrders)
+            {
+                _events.Append(SimulatedOrderClient.ToEvent(
+                    cancelled,
+                    OrderEventType.Cancelled,
+                    _clock.UtcNow,
+                    message: "Protective order cancelled because the position was fully closed."));
+            }
 
             foreach (SimulatedOrder sibling in _state.CancelOcoSiblings(applied.Order.BrokerOrderId))
             {
@@ -219,8 +245,8 @@ public sealed class SimulatedBrokerRuntime
             OrderEventType.Filled,
             _clock.UtcNow,
             executionPrice,
-            position.Quantity,
-            commission,
+            applied.FilledQuantity,
+            applied.Commission,
             "Liquidated at the final available candle close."));
         return Task.CompletedTask;
     }

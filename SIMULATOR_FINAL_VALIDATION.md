@@ -73,7 +73,7 @@ cd Dashboard && npm run typecheck && npm run build
 - Full historical bid/ask OANDA not implemented (option remains off).
 - Incremental JSONL trade journal + SignalR `TradeCompleted` while running still partial (trades mainly at completion + file sidecars).
 - Real AnalysisChart overlay integration in Simulator panel still lightweight (playback OHLC + comparison).
-- True OS-thread affinity for “DedicatedThread” not proven (LongRunning task loop retained; documented).
+- Historical note: the unproven `DedicatedThread` compatibility mode was removed in Phase 4; task workers are the only exposed worker host.
 - 500k-candle / one-month OANDA wall-clock benchmarks not run in this environment (no live credentials).
 - Event-driven strategy lifecycle chunks and annotation deltas not fully shipped.
 - Clean source-only archive packaging not produced as a zip in this pass.

@@ -4,7 +4,9 @@ using Agent.Strategies;
 using Brokers.Models;
 using RiskManager;
 using Simulator.Engine;
+using Simulator.MarketData;
 using Simulator.Models;
+using TradeManager;
 
 namespace Simulator.Tests;
 
@@ -166,11 +168,17 @@ public sealed class LegacyExitModeAndRiskTests
         await using SimulationSession session = SimulationFactory.CreateStrategyAwareHistorical(
             instrument,
             candles,
-            [BarInterval.Minutes(5), BarInterval.Minutes(15), BarInterval.Hours(1)],
+            [BarInterval.Minutes(1), BarInterval.Minutes(5), BarInterval.Minutes(15)],
             new LegacyProgressiveAgent(new ProgressiveStrategyOptions
             {
+                TrendInterval = BarInterval.Minutes(15),
+                ConfirmationInterval = BarInterval.Minutes(5),
+                EntryInterval = BarInterval.Minutes(1),
                 Quantity = 1_000m,
-                MinimumRewardRisk = 1.5m
+                MinimumRewardRisk = 1.5m,
+                MinimumTrendConfidence = 0m,
+                MinimumConfirmationConfidence = 0m,
+                MinimumEntryConfidence = 0m
             }),
             new SimulationOptions
             {
@@ -196,16 +204,164 @@ public sealed class LegacyExitModeAndRiskTests
 
         // Either opened/closed trades or at least submitted/filled orders — not zero activity solely due to R:R reject.
         bool anyTradeActivity = result.SubmittedOrders > 0 || result.Trades.Count > 0 || result.FilledOrders > 0;
-        // Soft assert: with synthetic data may not always signal, but must not be blocked by R:R-only rejects when signalled.
-        // Stronger guarantee: ExitManagementMode is ProtectiveStop so factory risk is correct.
+        // ExitManagementMode is ProtectiveStop so factory risk is correct.
         Assert.That(
             ((ITradingAgent)new LegacyProgressiveAgent()).ExitManagementMode,
             Is.EqualTo(AgentExitManagementMode.ProtectiveStopAndStrategyExit));
 
-        // If any order was rejected for R:R, that is a failure.
-        // We cannot easily inspect rejections here; Submitted without R:R path is covered by unit risk tests.
-        _ = anyTradeActivity;
-        Assert.That(result.EndedAt, Is.GreaterThan(result.StartedAt));
+        IReadOnlyList<TradingJournal.TradeJournalEntry> journal = session.Journal!.Snapshot();
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.EndedAt, Is.GreaterThan(result.StartedAt));
+            Assert.That(anyTradeActivity, Is.True,
+                "Legacy must submit or fill an order; a missing-target R:R regression must not silently yield zero activity.");
+            Assert.That(result.SubmittedOrders > 0 || result.FilledOrders > 0, Is.True);
+            Assert.That(journal.Any(entry =>
+                    entry.Type == TradingJournal.TradeJournalEventType.SignalRejected &&
+                    entry.Message.Contains("reward/risk", StringComparison.OrdinalIgnoreCase) &&
+                    entry.Message.Contains("take-profit", StringComparison.OrdinalIgnoreCase)),
+                Is.False);
+        });
+    }
+
+    [Test]
+    public async Task Legacy_StreamedRegression_ActivatesTrailingWithoutChangingInitialRisk()
+    {
+        InstrumentKey instrument = new("FX:EUR/USD");
+        BarInterval minute = BarInterval.Minutes(1);
+        DateTimeOffset start = new(2025, 6, 2, 8, 0, 0, TimeSpan.Zero);
+        Candle[] candles = BuildTrendingCandles(instrument, minute, start, 600);
+        var strategyOptions = new ProgressiveStrategyOptions
+        {
+            TrendInterval = BarInterval.Minutes(15),
+            ConfirmationInterval = BarInterval.Minutes(5),
+            EntryInterval = minute,
+            Quantity = 1_000m,
+            MinimumTrendConfidence = 0m,
+            MinimumConfirmationConfidence = 0m,
+            MinimumEntryConfidence = 0m
+        };
+        string output = Path.Combine(Path.GetTempPath(), "phase4-legacy", Guid.NewGuid().ToString("N"));
+        var runtime = new BacktestRuntimeOptions
+        {
+            ExecutionInterval = minute,
+            AnalysisBaseInterval = minute,
+            AnalysisIntervals = [minute, BarInterval.Minutes(5), BarInterval.Minutes(15)],
+            StrategyTimeframes = new ProgressiveStrategyTimeframes
+            {
+                TrendInterval = BarInterval.Minutes(15),
+                ConfirmationInterval = BarInterval.Minutes(5),
+                EntryInterval = minute
+            },
+            WarmupDays = 0,
+            PrefetchCapacity = 256,
+            PrefetchLowWatermark = 32,
+            SourcePageSize = 128,
+            StrategyExecutionMode = StrategyExecutionMode.Sequential,
+            ReplayChunkSize = 100,
+            LegacyPositionManagement = new PositionManagementOptions
+            {
+                Mode = TrailingStopMode.BreakEvenOnly,
+                ManagementInterval = minute,
+                BreakEvenActivationR = 0.01m,
+                StructureTrailActivationR = 0.01m,
+                BreakEvenBufferAtr = 0m,
+                MinimumStopImprovementAtr = 0m,
+                PreserveBracketTarget = false
+            }
+        };
+        var engine = new StreamingComparativeEngine(
+            new Simulator.Abstractions.EnumerableMarketCandleStream(candles),
+            [("legacy", (ITradingAgent)new LegacyProgressiveAgent(strategyOptions))]);
+        ComparativeSimulationResult result = await engine.RunAsync(
+            new StreamingComparativeEngineOptions
+            {
+                SimulationId = Guid.NewGuid(),
+                Instrument = instrument,
+                EvaluationFrom = start,
+                EvaluationTo = start.AddMinutes(candles.Length),
+                StreamFrom = start,
+                AnalysisIntervals = runtime.AnalysisIntervals,
+                Runtime = runtime,
+                SimulationOptions = new SimulationOptions
+                {
+                    StartingBalance = 100_000m,
+                    Leverage = 20m,
+                    CommissionRate = 0m,
+                    SpreadBasisPoints = 0m,
+                    SlippageBasisPoints = 0m,
+                    CloseOpenPositionsAtEnd = true,
+                    BaseCandleGapPolicy = ChartAnnotator.MarketData.BaseCandleGapPolicy.ResetIncompleteBuckets
+                },
+                OutputDirectory = output,
+                InputStreamId = "phase4-legacy-regression"
+            },
+            new HistoricalCandleRequest(instrument, minute, start, start.AddMinutes(candles.Length)));
+
+        SimulatedTradeRecord[] trades = result.Strategies.Single().Result.Trades.ToArray();
+        SimulatedTradeRecord trailed = trades.First(trade => trade.StopAmendmentCount > 0);
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Strategies.Single().Result.SubmittedOrders, Is.GreaterThan(0));
+            Assert.That(trailed.TakeProfitPrice, Is.Null);
+            Assert.That(trailed.BreakEvenActivatedAt, Is.Not.Null);
+            Assert.That(
+                trailed.CurrentStopLossPrice!.Value > trailed.InitialStopLossPrice!.Value,
+                Is.True);
+            Assert.That(trailed.InitialStopLossPrice, Is.EqualTo(trailed.StopLossPrice));
+            Assert.That(trailed.StopAmendments.All(amendment =>
+                amendment.Status is ProtectiveStopAmendmentStatus.Accepted or
+                    ProtectiveStopAmendmentStatus.Replaced), Is.True);
+        });
+    }
+
+    [Test]
+    public async Task ProtectiveStopAgent_OpensAndClosesTradeWithoutTakeProfit_EndToEnd()
+    {
+        InstrumentKey instrument = new("FX:EUR/USD");
+        BarInterval interval = BarInterval.Minutes(1);
+        DateTimeOffset start = new(2025, 6, 2, 8, 0, 0, TimeSpan.Zero);
+        Candle[] candles = BuildTrendingCandles(instrument, interval, start, 30);
+        var agent = new DeterministicProtectiveStopAgent();
+
+        await using SimulationSession session = SimulationFactory.CreateStrategyAwareHistorical(
+            instrument,
+            candles,
+            [BarInterval.Minutes(5)],
+            agent,
+            new SimulationOptions
+            {
+                BaseCurrency = "USD",
+                StartingBalance = 100_000m,
+                CloseOpenPositionsAtEnd = true,
+                BaseCandleGapPolicy = ChartAnnotator.MarketData.BaseCandleGapPolicy.ResetIncompleteBuckets,
+                CommissionRate = 0m,
+                SpreadBasisPoints = 0m,
+                SlippageBasisPoints = 0m
+            },
+            safetyOptions: new RiskManager.Safety.TradingSafetyOptions
+            {
+                TripOnCriticalDataQualityIssue = false
+            },
+            dataQualityOptions: new TradingCore.MarketData.MarketDataQualityOptions
+            {
+                RequireIndicatorsReady = false,
+                RejectGaps = false
+            });
+
+        SimulationResult result = await session.Runner.RunAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.SubmittedOrders, Is.GreaterThan(0));
+            Assert.That(result.FilledOrders, Is.GreaterThan(0));
+            Assert.That(result.Trades, Is.Not.Empty);
+            Assert.That(result.Trades[0].TakeProfitPrice, Is.Null);
+            Assert.That(result.Trades[0].MaximumFavourableExcursionAt, Is.Not.Null);
+            Assert.That(result.Trades[0].MaximumAdverseExcursionAt, Is.Not.Null);
+            Assert.That(result.Trades[0].MaximumFavourableExcursionAmount, Is.GreaterThanOrEqualTo(0m));
+            Assert.That(result.Trades[0].MaximumAdverseExcursionAmount, Is.LessThanOrEqualTo(0m));
+        });
     }
 
     private static Candle[] BuildTrendingCandles(
@@ -218,10 +374,10 @@ public sealed class LegacyExitModeAndRiskTests
         decimal price = 1.1000m;
         for (int i = 0; i < count; i++)
         {
-            decimal drift = i * 0.00002m;
-            decimal wave = (decimal)Math.Sin(i / 30.0) * 0.0008m;
+            decimal target = 1.1000m + i * 0.000002m +
+                (decimal)Math.Sin(i / 7.0) * 0.0008m;
             decimal open = price;
-            decimal close = price + drift + wave;
+            decimal close = target;
             DateTimeOffset openTime = start.AddMinutes(i);
             candles[i] = new Candle
             {
@@ -240,5 +396,54 @@ public sealed class LegacyExitModeAndRiskTests
         }
 
         return candles;
+    }
+
+    private sealed class DeterministicProtectiveStopAgent : ITradingAgent
+    {
+        private bool _submitted;
+
+        public string Name => "Deterministic protective-stop agent";
+        public IReadOnlySet<BarInterval> RequiredIntervals { get; } =
+            new HashSet<BarInterval> { BarInterval.Minutes(5) };
+        public BarInterval TriggerInterval => BarInterval.Minutes(5);
+        public AgentExitManagementMode ExitManagementMode =>
+            AgentExitManagementMode.ProtectiveStopAndStrategyExit;
+
+        public Task<AgentDecision> EvaluateAsync(
+            AgentMarketContext context,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            decimal price = context.Analysis.Get(BarInterval.Minutes(5)).LatestCandle.Prices.Close;
+            AgentDecision decision = _submitted
+                ? new AgentDecision
+                {
+                    Action = AgentAction.Observe,
+                    Instrument = context.Instrument,
+                    Confidence = 0m,
+                    CreatedAt = context.Timestamp,
+                    Reason = "Already submitted"
+                }
+                : new AgentDecision
+                {
+                    StrategyName = Name,
+                    SetupId = "protective-stop-test",
+                    SetupStartedAt = context.Timestamp,
+                    SignalInterval = BarInterval.Minutes(5),
+                    Action = AgentAction.Buy,
+                    Instrument = context.Instrument,
+                    SuggestedQuantity = 1_000m,
+                    QuantityUnit = QuantityUnit.Units,
+                    OrderType = StandardOrderType.Market,
+                    ReferencePrice = price,
+                    StopLossPrice = price - 0.01m,
+                    TakeProfitPrice = null,
+                    Confidence = 100m,
+                    CreatedAt = context.Timestamp,
+                    Reason = "Deterministic entry without a fixed target"
+                };
+            _submitted = true;
+            return Task.FromResult(decision);
+        }
     }
 }

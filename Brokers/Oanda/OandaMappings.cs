@@ -192,6 +192,7 @@ internal static class OandaMappings
                 Instrument = nativeInstrument,
                 Units = Format(signedUnits),
                 TimeInForce = timeInForce,
+                PositionFill = request.ReduceOnly ? "REDUCE_ONLY" : "DEFAULT",
                 Price = orderPrice is null ? null : Format(orderPrice.Value),
                 GtdTime = timeInForce == "GTD"
                     ? request.ExpireAt!.Value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)

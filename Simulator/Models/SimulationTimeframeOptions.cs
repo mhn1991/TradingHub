@@ -116,24 +116,45 @@ public sealed record SimulationTimeframeOptions
     }
 }
 
-/// <summary>Configurable progressive strategy timeframe stack.</summary>
+/// <summary>Configurable role-based progressive strategy timeframe stack.</summary>
 public sealed record ProgressiveStrategyTimeframes
 {
     public BarInterval TrendInterval { get; init; } = BarInterval.Hours(1);
+    public IReadOnlyList<BarInterval> SecondaryTrendIntervals { get; init; } = [];
+    public IReadOnlyList<BarInterval> SetupIntervals { get; init; } = [];
     public BarInterval ConfirmationInterval { get; init; } = BarInterval.Minutes(15);
+    public IReadOnlyList<BarInterval> AdditionalConfirmationIntervals { get; init; } = [];
     public BarInterval EntryInterval { get; init; } = BarInterval.Minutes(5);
+    public int MinimumSecondaryTrendAlignments { get; init; }
+    public int MinimumSetupAlignments { get; init; }
+    public int MinimumConfirmationAlignments { get; init; } = 1;
+    public bool StrongOppositionVeto { get; init; } = true;
 
     public void Validate()
     {
-        if (!TrendInterval.IsValid || !ConfirmationInterval.IsValid || !EntryInterval.IsValid)
-            throw new ArgumentException("Strategy timeframes must be valid.");
-
-        if (BarIntervalParser.CompareDuration(EntryInterval, ConfirmationInterval) >= 0)
-            throw new ArgumentException("EntryInterval must be strictly finer than ConfirmationInterval.");
-        if (BarIntervalParser.CompareDuration(ConfirmationInterval, TrendInterval) >= 0)
-            throw new ArgumentException("ConfirmationInterval must be strictly finer than TrendInterval.");
+        var options = new Agent.Strategies.ProgressiveStrategyOptions
+        {
+            TrendInterval = TrendInterval,
+            SecondaryTrendIntervals = SecondaryTrendIntervals,
+            SetupIntervals = SetupIntervals,
+            ConfirmationInterval = ConfirmationInterval,
+            AdditionalConfirmationIntervals = AdditionalConfirmationIntervals,
+            EntryInterval = EntryInterval,
+            MinimumSecondaryTrendAlignments = MinimumSecondaryTrendAlignments,
+            MinimumSetupAlignments = MinimumSetupAlignments,
+            MinimumConfirmationAlignments = MinimumConfirmationAlignments,
+            StrongOppositionVeto = StrongOppositionVeto
+        };
+        options.Validate();
     }
 
     public IReadOnlyList<BarInterval> RequiredIntervals =>
-        [EntryInterval, ConfirmationInterval, TrendInterval];
+        [
+            EntryInterval,
+            ConfirmationInterval,
+            .. AdditionalConfirmationIntervals,
+            .. SetupIntervals,
+            .. SecondaryTrendIntervals,
+            TrendInterval
+        ];
 }

@@ -44,6 +44,73 @@ public sealed class PhaseOneAndTwoSafetyTests
     }
 
     [Test]
+    public void DailyEquityProfitTarget_PausesNewEntriesAndResetsNextUtcDay()
+    {
+        var safety = new TradingSafetyController(new TradingSafetyOptions
+        {
+            DailyEquityProfitTarget = 500m
+        });
+
+        safety.ObserveEquity(100_000m, Start);
+        TradingSafetySnapshot locked = safety.ObserveEquity(100_500m, Start.AddHours(8));
+        TradingSafetySnapshot nextDay = safety.ObserveEquity(100_500m, Start.AddDays(1));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(locked.State, Is.EqualTo(TradingSafetyState.Paused));
+            Assert.That(locked.Reason, Is.EqualTo(SafetyTripReason.DailyProfitTarget));
+            Assert.That(locked.CanOpenNewTrades, Is.False);
+            Assert.That(nextDay.State, Is.EqualTo(TradingSafetyState.Active));
+            Assert.That(nextDay.DailyEquityProfitLoss, Is.Zero);
+        });
+    }
+
+    [Test]
+    public void DailyEquityGiveback_PausesOnlyAfterActivationAndConfiguredGiveback()
+    {
+        var safety = new TradingSafetyController(new TradingSafetyOptions
+        {
+            DailyEquityGivebackActivation = 400m,
+            MaximumDailyEquityGiveback = 150m
+        });
+
+        safety.ObserveEquity(100_000m, Start);
+        TradingSafetySnapshot peak = safety.ObserveEquity(100_500m, Start.AddHours(1));
+        TradingSafetySnapshot protectedSnapshot = safety.ObserveEquity(100_349m, Start.AddHours(2));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(peak.State, Is.EqualTo(TradingSafetyState.Active));
+            Assert.That(peak.PeakDailyEquityProfitLoss, Is.EqualTo(500m));
+            Assert.That(protectedSnapshot.State, Is.EqualTo(TradingSafetyState.Paused));
+            Assert.That(protectedSnapshot.Reason, Is.EqualTo(SafetyTripReason.DailyProfitGiveback));
+        });
+    }
+
+    [Test]
+    public void DailyEquityGiveback_RejectsGivebackLargerThanActivation()
+    {
+        Assert.That(
+            () => new TradingSafetyOptions
+            {
+                DailyEquityGivebackActivation = 400m,
+                MaximumDailyEquityGiveback = 500m
+            }.Validate(),
+            Throws.TypeOf<ArgumentOutOfRangeException>());
+    }
+
+    [Test]
+    public void DailyEquityGiveback_RequiresBothValues()
+    {
+        Assert.That(
+            () => new TradingSafetyOptions
+            {
+                DailyEquityGivebackActivation = 400m
+            }.Validate(),
+            Throws.TypeOf<ArgumentOutOfRangeException>());
+    }
+
+    [Test]
     public void DataQualityGate_AllowsVersionDeltaWhenIntermediateTimeframeCandlesExist()
     {
         var gate = new MarketDataQualityGate();
@@ -232,7 +299,10 @@ public sealed class PhaseOneAndTwoSafetyTests
         };
 
         TradeManagementRecommendation recommendation =
-            new StructureBasedTradeManager().Evaluate(trade, analysis);
+            new StructureBasedTradeManager(new PositionManagementOptions
+            {
+                ExitOnAdverseStructureBreak = true
+            }).Evaluate(trade, analysis);
 
         Assert.That(recommendation.Action, Is.EqualTo(TradeManagementAction.Exit));
     }

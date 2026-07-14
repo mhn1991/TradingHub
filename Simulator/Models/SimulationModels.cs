@@ -55,18 +55,96 @@ public sealed record LedgerEntry
 
 public enum SimulatedTradeExitReason
 {
+    InitialStopLoss,
+    BreakEvenStop,
+    TrailedStructureStop,
+    ProfitFloorStop,
+    MfeGivebackStop,
     StopLoss,
     TakeProfit,
+    ReverseStrategyClose,
     StrategyClose,
     StructuralInvalidation,
+    TradeManagerStructureExit,
+    ProfitFloorExit,
+    MaximumGivebackExit,
+    SafetyClose,
     EndOfSimulation,
     Unknown
+}
+
+public sealed record StopAmendmentRecord
+{
+    public required long RequestedSequence { get; init; }
+    public long? EffectiveSequence { get; init; }
+    public required DateTimeOffset RequestedAt { get; init; }
+    public DateTimeOffset? AcceptedAt { get; init; }
+    public required decimal PreviousStopPrice { get; init; }
+    public required decimal ProposedStopPrice { get; init; }
+    public decimal? AcceptedStopPrice { get; init; }
+    public required decimal OpenProfitR { get; init; }
+    public required decimal LockedProfitR { get; init; }
+    public required StopAmendmentReason Reason { get; init; }
+    public required string Explanation { get; init; }
+    public required ProtectiveStopAmendmentStatus Status { get; init; }
+    public string? PreviousStopOrderId { get; init; }
+    public string? CurrentStopOrderId { get; init; }
+    public string? RejectionReason { get; init; }
+    public string? AnalysisInterval { get; init; }
+    public long? AnalysisSnapshotVersion { get; init; }
+    public decimal? Atr { get; init; }
+    public decimal? StructuralLevel { get; init; }
+    public string? StructureSource { get; init; }
+    public decimal? RawEntryPrice { get; init; }
+    public decimal? CostAdjustedBreakEvenPrice { get; init; }
+    public decimal? AtrBufferPrice { get; init; }
+}
+
+public enum PartialExitReason
+{
+    ScaleOutProfit,
+    OpposingStructure,
+    Stagnation,
+    StructuralDeterioration,
+    MomentumDecay,
+    VolatilityExhaustion,
+    SessionRisk,
+    ExecutionCostStress,
+    RiskReduction,
+    Manual,
+    Unknown
+}
+
+public sealed record PartialExitRecord
+{
+    public required string ExitId { get; init; }
+    public required string StageId { get; init; }
+    public required long RequestedSequence { get; init; }
+    public required long ExecutionSequence { get; init; }
+    public required DateTimeOffset RequestedAt { get; init; }
+    public required DateTimeOffset ExecutedAt { get; init; }
+    public required decimal QuantityBefore { get; init; }
+    public required decimal QuantityClosed { get; init; }
+    public required decimal QuantityRemaining { get; init; }
+    public required decimal ExitPrice { get; init; }
+    public required decimal GrossProfitLoss { get; init; }
+    public required decimal AllocatedEntryCommission { get; init; }
+    public required decimal ExitCommission { get; init; }
+    public required decimal NetProfitLoss { get; init; }
+    public required decimal RealizedR { get; init; }
+    public required decimal OpenProfitRBeforeExit { get; init; }
+    public required PartialExitReason Reason { get; init; }
+    public string? StructureSource { get; init; }
+    public decimal? StructuralLevel { get; init; }
+    public required string Explanation { get; init; }
+    public string? BrokerOrderId { get; init; }
 }
 
 public sealed record SimulatedTradeRecord
 {
     public required string StrategyName { get; init; }
     public required string SetupId { get; init; }
+    public string? PositionId { get; init; }
     public required InstrumentKey Instrument { get; init; }
     public required OrderSide Side { get; init; }
     public required DateTimeOffset SetupStartedAt { get; init; }
@@ -77,14 +155,47 @@ public sealed record SimulatedTradeRecord
     public decimal? SignalPrice { get; init; }
     public decimal? EntryPrice { get; init; }
     public decimal? ExitPrice { get; init; }
+    public decimal? AverageExitPrice { get; init; }
+    /// <summary>Compatibility quantity; always the original opened quantity.</summary>
     public decimal Quantity { get; init; }
+    public decimal InitialQuantity { get; init; }
+    public decimal RemainingQuantity { get; init; }
+    /// <summary>Compatibility alias for the original immutable initial stop.</summary>
     public decimal? StopLossPrice { get; init; }
+    public decimal? InitialStopLossPrice { get; init; }
+    public decimal? CurrentStopLossPrice { get; init; }
+    public decimal? FinalStopLossPrice { get; init; }
+    public string? InitialStopOrderId { get; init; }
+    public string? CurrentStopOrderId { get; init; }
     public decimal? TakeProfitPrice { get; init; }
     public decimal? ExpectedRewardRisk { get; init; }
+    public decimal? MaximumFavourableExcursionPrice { get; init; }
+    public decimal MaximumFavourableExcursionAmount { get; init; }
+    public decimal? MaximumFavourableExcursionR { get; init; }
+    public DateTimeOffset? MaximumFavourableExcursionAt { get; init; }
+    public decimal? MaximumAdverseExcursionPrice { get; init; }
+    public decimal MaximumAdverseExcursionAmount { get; init; }
+    public decimal? MaximumAdverseExcursionR { get; init; }
+    public DateTimeOffset? MaximumAdverseExcursionAt { get; init; }
     public decimal GrossProfitLoss { get; init; }
+    public decimal EntryCommission { get; init; }
     public decimal Commission { get; init; }
     public decimal NetProfitLoss { get; init; }
+    public decimal RealizedPartialGrossProfitLoss { get; init; }
+    public decimal RealizedPartialCommission { get; init; }
+    public decimal RealizedPartialNetProfitLoss { get; init; }
     public decimal? RMultiple { get; init; }
+    public int StopAmendmentCount { get; init; }
+    public DateTimeOffset? BreakEvenActivatedAt { get; init; }
+    public DateTimeOffset? StructureTrailingActivatedAt { get; init; }
+    public decimal MaximumLockedInR { get; init; }
+    public int PositionReductionCount { get; init; }
+    public DateTimeOffset? RunnerActivatedAt { get; init; }
+    public DateTimeOffset? ProfitFloorActivatedAt { get; init; }
+    public DateTimeOffset? MaximumGivebackProtectionActivatedAt { get; init; }
+    public IReadOnlyList<string> CompletedReductionStageIds { get; init; } = [];
+    public IReadOnlyList<PartialExitRecord> PartialExits { get; init; } = [];
+    public IReadOnlyList<StopAmendmentRecord> StopAmendments { get; init; } = [];
     public SimulatedTradeExitReason ExitReason { get; init; }
     public string? StopSource { get; init; }
     public string? TargetSource { get; init; }

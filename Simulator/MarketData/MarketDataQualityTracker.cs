@@ -71,7 +71,12 @@ public sealed class MarketDataQualityTracker
         _previousOpen = candle.OpenTime;
     }
 
-    public void RecordIncompleteAggregate() => _incompleteAggregates++;
+    public void RecordIncompleteAggregate(long count = 1)
+    {
+        if (count < 0)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        _incompleteAggregates += count;
+    }
 
     public MarketDataQualityReport BuildReport(string? explicitHash = null)
     {

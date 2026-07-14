@@ -42,13 +42,16 @@ public sealed class ImportedSecondCandleSource : IHistoricalCandleStream
     {
         using var reader = new StreamReader(_path);
         string? header = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        int lineNumber = 1;
         bool hasHeader = header is not null &&
                          header.Contains("timestamp", StringComparison.OrdinalIgnoreCase);
+        DateTimeOffset? previous = null;
 
         if (!hasHeader && header is not null)
         {
-            MarketCandle? first = ParseLine(header, request);
-            if (first is not null)
+            MarketCandle first = ParseLine(header, lineNumber);
+            previous = first.OpenTime;
+            if (IsInRange(first, request))
                 yield return first;
         }
 
@@ -58,19 +61,59 @@ public sealed class ImportedSecondCandleSource : IHistoricalCandleStream
             string? line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (line is null)
                 break;
+            lineNumber++;
             if (string.IsNullOrWhiteSpace(line))
                 continue;
-            MarketCandle? candle = ParseLine(line, request);
-            if (candle is not null)
+
+            MarketCandle candle = ParseLine(line, lineNumber);
+            if (previous is DateTimeOffset last && candle.OpenTime <= last)
+            {
+                string issue = candle.OpenTime == last ? "duplicate" : "out-of-order";
+                throw new InvalidDataException(
+                    $"Imported candle line {lineNumber} is {issue}: {candle.OpenTime:O} follows {last:O}.");
+            }
+
+            previous = candle.OpenTime;
+            if (IsInRange(candle, request))
                 yield return candle;
         }
     }
 
-    private MarketCandle? ParseLine(string line, HistoricalCandleRequest request)
+    public static async Task<long> ValidateFileAsync(
+        string path,
+        BarInterval interval,
+        CancellationToken cancellationToken = default)
     {
-        string[] parts = line.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 5)
-            return null;
+        var source = new ImportedSecondCandleSource(
+            path,
+            new InstrumentKey("IMPORT:VALIDATION"),
+            interval);
+        var request = new HistoricalCandleRequest(
+            new InstrumentKey("IMPORT:VALIDATION"),
+            interval,
+            DateTimeOffset.MinValue,
+            DateTimeOffset.MaxValue,
+            UseHistoricalBidAsk: false,
+            NoCache: true);
+        long count = 0;
+        await foreach (MarketCandle _ in source.StreamAsync(request, cancellationToken).ConfigureAwait(false))
+            count++;
+        if (count == 0)
+            throw new InvalidDataException("The imported candle file contains no data rows.");
+        return count;
+    }
+
+    private static bool IsInRange(MarketCandle candle, HistoricalCandleRequest request) =>
+        candle.OpenTime >= request.From && candle.OpenTime < request.To;
+
+    private MarketCandle ParseLine(string line, int lineNumber)
+    {
+        string[] parts = line.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length is not (5 or 6) || parts.Take(5).Any(string.IsNullOrWhiteSpace))
+        {
+            throw new InvalidDataException(
+                $"Imported candle line {lineNumber} must be timestamp,open,high,low,close[,volume].");
+        }
 
         if (!DateTimeOffset.TryParse(
                 parts[0],
@@ -78,24 +121,41 @@ public sealed class ImportedSecondCandleSource : IHistoricalCandleStream
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
                 out DateTimeOffset openTime))
         {
-            return null;
+            throw new InvalidDataException(
+                $"Imported candle line {lineNumber} has an invalid timestamp '{parts[0]}'.");
         }
 
-        if (openTime < request.From || openTime >= request.To)
-            return null;
+        long intervalTicks = TimeSpan.FromSeconds(_interval.Value).Ticks;
+        if (openTime.UtcDateTime.Ticks % intervalTicks != 0)
+        {
+            throw new InvalidDataException(
+                $"Imported candle line {lineNumber} timestamp {openTime:O} is not aligned to {_interval}.");
+        }
 
         if (!decimal.TryParse(parts[1], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal open) ||
             !decimal.TryParse(parts[2], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal high) ||
             !decimal.TryParse(parts[3], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal low) ||
             !decimal.TryParse(parts[4], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal close))
         {
-            return null;
+            throw new InvalidDataException(
+                $"Imported candle line {lineNumber} contains an invalid OHLC value.");
+        }
+
+        if (high < Math.Max(open, close) || low > Math.Min(open, close) || high < low)
+        {
+            throw new InvalidDataException(
+                $"Imported candle line {lineNumber} violates OHLC invariants.");
         }
 
         decimal? volume = null;
-        if (parts.Length > 5 &&
-            decimal.TryParse(parts[5], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal vol))
+        if (parts.Length == 6)
         {
+            if (!decimal.TryParse(parts[5], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal vol) ||
+                vol < 0m)
+            {
+                throw new InvalidDataException(
+                    $"Imported candle line {lineNumber} contains an invalid volume.");
+            }
             volume = vol;
         }
 

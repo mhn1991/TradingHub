@@ -97,6 +97,7 @@ const orderForm = reactive({
   takeProfit: null as number | null,
 })
 const layers = reactive<ChartLayers>({
+  priceAction: true,
   bollinger: true,
   bollingerRegimes: true,
   rsiRelationships: true,

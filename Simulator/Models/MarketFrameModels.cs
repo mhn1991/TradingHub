@@ -1,6 +1,7 @@
 using Brokers.Models;
 using ChartAnnotator.Models;
 using Simulator.MarketData;
+using TradeManager;
 
 namespace Simulator.Models;
 
@@ -13,6 +14,8 @@ public sealed record MarketFrame
     public required long Sequence { get; init; }
     public required DateTimeOffset AvailableAt { get; init; }
     public required MarketCandle ExecutionCandle { get; init; }
+    /// <summary>Completed analysis-base candle, present only on analysis close frames.</summary>
+    public Candle? AnalysisBaseCandle { get; init; }
     public required IReadOnlySet<BarInterval> ClosedIntervals { get; init; }
     public required IReadOnlyDictionary<BarInterval, AnalysisSnapshot> Snapshots { get; init; }
     public required string InputStreamId { get; init; }
@@ -36,8 +39,80 @@ public sealed record StrategyFrameResult
     public required int CompletedTrades { get; init; }
     public required int ActiveSetups { get; init; }
     public SimulatedTradeRecord? NewlyCompletedTrade { get; init; }
+    public IReadOnlyList<StrategyReplayEvent> Events { get; init; } = [];
+    public string? ExecutionDetailSetupId { get; init; }
+    public bool CaptureExecutionDetail { get; init; }
     public string? Status { get; init; }
     public TimeSpan ProcessingTime { get; init; }
+}
+
+public enum StrategyReplayEventType
+{
+    SetupCreated,
+    SetupAdvanced,
+    SetupExpired,
+    SetupInvalidated,
+    PriceActionEvaluated,
+    PriceActionConfirmed,
+    SignalCreated,
+    RiskRejected,
+    OrderSubmitted,
+    OrderRejected,
+    OrderFilled,
+    PositionOpened,
+    BreakEvenActivated,
+    StructureTrailActivated,
+    ProfitFloorActivated,
+    MaximumGivebackProtectionActivated,
+    TradeManagementEvaluated,
+    PartialExitRecommended,
+    PartialExitSubmitted,
+    PartialExitAccepted,
+    PartialExitRejected,
+    ProtectiveQuantityUpdated,
+    RunnerActivated,
+    SafetyStateChanged,
+    StopAmendmentRequested,
+    StopAmendmentAccepted,
+    StopAmendmentRejected,
+    StopAmendmentUnsupported,
+    StopHit,
+    TargetHit,
+    StrategyCloseRequested,
+    PositionClosed,
+    TradeCompleted,
+    StrategyFailed
+}
+
+public sealed record StrategyReplayEvent
+{
+    public required StrategyReplayEventType Type { get; init; }
+    public required string StrategyId { get; init; }
+    public string? SetupId { get; init; }
+    public string? PositionId { get; init; }
+    public required long Sequence { get; init; }
+    public required DateTimeOffset EventTime { get; init; }
+    public decimal? PreviousStop { get; init; }
+    public decimal? ProposedStop { get; init; }
+    public decimal? AcceptedStop { get; init; }
+    public StopAmendmentReason? AmendmentReason { get; init; }
+    public decimal? OpenProfitR { get; init; }
+    public decimal? LockedProfitR { get; init; }
+    public string? AnalysisInterval { get; init; }
+    public long? AnalysisSnapshotVersion { get; init; }
+    public string? Reason { get; init; }
+    public string? ReasonCode { get; init; }
+    public PriceActionEventType? PriceActionTrigger { get; init; }
+    public decimal? PriceActionConfidence { get; init; }
+    public decimal? QuantityBefore { get; init; }
+    public decimal? QuantityChanged { get; init; }
+    public decimal? QuantityRemaining { get; init; }
+    public decimal? RealizedProfitLoss { get; init; }
+    public decimal? RealizedR { get; init; }
+    public string? ReductionStageId { get; init; }
+    public PositionReductionReason? PositionReductionReason { get; init; }
+    public decimal? ProfitFloorR { get; init; }
+    public decimal? MaximumGivebackFloorR { get; init; }
 }
 
 public sealed record HistoricalCandleRequest(

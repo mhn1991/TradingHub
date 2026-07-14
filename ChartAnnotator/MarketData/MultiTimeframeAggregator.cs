@@ -67,6 +67,12 @@ public sealed class MultiTimeframeAggregator
 
     public IReadOnlyCollection<BarInterval> Intervals => _states.Keys;
 
+    /// <summary>
+    /// Number of target buckets discarded because their leading member or an interior
+    /// base candle was missing. Discarded buckets are never emitted as complete.
+    /// </summary>
+    public long IncompleteAggregateCount => _states.Values.Sum(state => state.IncompleteAggregateCount);
+
     public IReadOnlyList<CandleClosedEvent> Apply(Candle baseCandle)
     {
         ArgumentNullException.ThrowIfNull(baseCandle);
@@ -210,6 +216,7 @@ public sealed class MultiTimeframeAggregator
     {
         private readonly InstrumentKey _instrument;
         private MutableCandle? _current;
+        private DateTimeOffset? _skipUntil;
 
         public AggregateState(InstrumentKey instrument, BarInterval interval, int capacity)
         {
@@ -220,6 +227,7 @@ public sealed class MultiTimeframeAggregator
 
         public BarInterval Interval { get; }
         public RingBuffer<Candle> Completed { get; }
+        public long IncompleteAggregateCount { get; private set; }
 
         public void ValidateCoverage(DateTimeOffset sourceOpen, DateTimeOffset sourcePeriodEnd)
         {
@@ -241,6 +249,23 @@ public sealed class MultiTimeframeAggregator
 
             if (_current is null)
             {
+                if (_skipUntil is DateTimeOffset skipUntil)
+                {
+                    if (source.OpenTime < skipUntil)
+                        return completed;
+                    _skipUntil = null;
+                }
+
+                // A target candle is complete only when its first source member is
+                // present. Starting halfway through a bucket would otherwise create a
+                // partial OHLC candle marked complete at the target boundary.
+                if (source.OpenTime != bucketStart)
+                {
+                    _skipUntil = bucketEnd;
+                    IncompleteAggregateCount++;
+                    return completed;
+                }
+
                 _current = MutableCandle.Start(_instrument, source, Interval, bucketStart, bucketEnd);
             }
             else if (_current.OpenTime != bucketStart)
@@ -261,7 +286,15 @@ public sealed class MultiTimeframeAggregator
             return completed;
         }
 
-        public void ResetIncomplete() => _current = null;
+        public void ResetIncomplete()
+        {
+            if (_current is null)
+                return;
+
+            _skipUntil = _current.CloseTime;
+            _current = null;
+            IncompleteAggregateCount++;
+        }
 
         public Candle? Flush(bool includeIncomplete)
         {

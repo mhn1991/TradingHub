@@ -61,9 +61,10 @@ public sealed class AnalysisTests
         var detector = new SupportResistanceDetector(new DbscanOptions(
             EpsilonAtr: 0.25m,
             MinimumPoints: 2,
-            MaximumPivots: 100));
+            MaximumPivots: 100,
+            MinimumStrength: 20m));
 
-        IReadOnlyList<PriceZone> zones = detector.Detect(swings, atr: 1m);
+        IReadOnlyList<PriceZone> zones = detector.Detect(swings, atr: 1m, currentPrice: 105m);
 
         Assert.Multiple(() =>
         {
@@ -79,6 +80,117 @@ public sealed class AnalysisTests
                     zone.CentrePrice == 110m),
                 Is.True);
         });
+    }
+
+    [Test]
+    public void SupportResistance_SplitsTemporallyDistantTouchesAtSamePrice()
+    {
+        DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var swings = new List<SwingPoint>
+        {
+            Swing(start, 100m, SwingType.Low),
+            Swing(start.AddMinutes(5), 100.05m, SwingType.Low),
+            Swing(start.AddMinutes(10), 99.95m, SwingType.Low)
+        };
+
+        // Large chronological gap of unrelated pivots between two visits to ~100.
+        for (int index = 0; index < 40; index++)
+        {
+            swings.Add(Swing(
+                start.AddMinutes(20 + index * 5),
+                120m + index * 0.1m,
+                index % 2 == 0 ? SwingType.High : SwingType.Low));
+        }
+
+        swings.Add(Swing(start.AddMinutes(300), 100.02m, SwingType.Low));
+        swings.Add(Swing(start.AddMinutes(305), 99.98m, SwingType.Low));
+        swings.Add(Swing(start.AddMinutes(310), 100.01m, SwingType.Low));
+
+        var detector = new SupportResistanceDetector(new DbscanOptions(
+            EpsilonAtr: 0.25m,
+            MinimumPoints: 2,
+            MaximumPivots: 200,
+            MaximumTemporalGapSwings: 20,
+            MinimumStrength: 20m,
+            MaximumActiveDistanceAtr: 50m));
+
+        IReadOnlyList<PriceZone> zones = detector.Detect(swings, atr: 1m, currentPrice: 100m);
+        PriceZone[] nearHundred = zones
+            .Where(zone => Math.Abs(zone.CentrePrice - 100m) <= 0.2m)
+            .ToArray();
+
+        // Old and new visits must not collapse into a single active zone.
+        Assert.That(nearHundred.Length, Is.GreaterThanOrEqualTo(2));
+    }
+
+    [Test]
+    public void SupportResistance_FlipsBrokenResistanceIntoNearbySupport()
+    {
+        DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        SwingPoint[] swings =
+        [
+            Swing(start, 110m, SwingType.High),
+            Swing(start.AddMinutes(5), 110.1m, SwingType.High),
+            Swing(start.AddMinutes(10), 109.9m, SwingType.High)
+        ];
+
+        var detector = new SupportResistanceDetector(new DbscanOptions(
+            EpsilonAtr: 0.25m,
+            MinimumPoints: 2,
+            MinimumStrength: 20m,
+            BreakToleranceAtr: 0.10m));
+
+        // Close has broken above the old resistance but is still nearby.
+        IReadOnlyList<PriceZone> zones = detector.Detect(swings, atr: 1m, currentPrice: 110.5m);
+
+        Assert.That(zones, Is.Not.Empty);
+        Assert.That(zones[0].Type, Is.EqualTo(PriceZoneType.Support));
+    }
+
+    [Test]
+    public void SupportResistance_DropsZonesFarFromCurrentPrice()
+    {
+        DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        SwingPoint[] swings =
+        [
+            Swing(start, 100m, SwingType.Low),
+            Swing(start.AddMinutes(5), 100.1m, SwingType.Low),
+            Swing(start.AddMinutes(10), 99.9m, SwingType.Low)
+        ];
+
+        var detector = new SupportResistanceDetector(new DbscanOptions(
+            EpsilonAtr: 0.25m,
+            MinimumPoints: 2,
+            MinimumStrength: 10m,
+            MaximumActiveDistanceAtr: 2m));
+
+        IReadOnlyList<PriceZone> zones = detector.Detect(swings, atr: 1m, currentPrice: 120m);
+        Assert.That(zones, Is.Empty);
+    }
+
+    [Test]
+    public void SupportResistance_UsesRecentTouchesForMixedRole()
+    {
+        DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        // Older highs at the level, then recent lows retesting it as demand.
+        SwingPoint[] swings =
+        [
+            Swing(start, 100.05m, SwingType.High),
+            Swing(start.AddMinutes(5), 99.95m, SwingType.High),
+            Swing(start.AddMinutes(30), 100.02m, SwingType.Low),
+            Swing(start.AddMinutes(35), 99.98m, SwingType.Low),
+            Swing(start.AddMinutes(40), 100.00m, SwingType.Low)
+        ];
+
+        var detector = new SupportResistanceDetector(new DbscanOptions(
+            EpsilonAtr: 0.25m,
+            MinimumPoints: 2,
+            RecentRoleTouchCount: 3,
+            MinimumStrength: 20m));
+
+        IReadOnlyList<PriceZone> zones = detector.Detect(swings, atr: 1m, currentPrice: 100.5m);
+        Assert.That(zones, Is.Not.Empty);
+        Assert.That(zones[0].Type, Is.EqualTo(PriceZoneType.Support));
     }
 
     [Test]
@@ -113,6 +225,44 @@ public sealed class AnalysisTests
     }
 
     [Test]
+    public void Ransac_OriginIsAnchoredAtMostRecentInlier_NotOldest()
+    {
+        DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        SwingPoint[] swings = Enumerable.Range(0, 6)
+            .Select(index => Swing(
+                start.AddMinutes(index * 5),
+                100m + index,
+                SwingType.Low))
+            .ToArray();
+        DateTimeOffset asOf = start.AddMinutes(30);
+
+        var detector = new RansacTrendlineDetector(new RansacOptions(
+            MaximumIterations: 200,
+            DistanceThresholdAtr: 0.1m,
+            MinimumInliers: 3));
+
+        Trendline line = detector.Detect(
+            swings,
+            atr: 1m,
+            version: 1,
+            MarketStructureDirection.Unknown,
+            asOf).Single();
+
+        DateTimeOffset newestInlier = swings[^1].PivotTime;
+        Assert.Multiple(() =>
+        {
+            // Origin must describe the recent end of the line.
+            Assert.That(line.OriginTime, Is.EqualTo(newestInlier));
+            Assert.That(line.StartTime, Is.EqualTo(swings[0].PivotTime));
+            Assert.That(line.EndTime, Is.EqualTo(asOf));
+            Assert.That(line.OriginPrice, Is.EqualTo(swings[^1].Price).Within(0.05m));
+            // Price at the oldest touch still lands on the historical start.
+            Assert.That(line.PriceAt(swings[0].PivotTime), Is.EqualTo(swings[0].Price).Within(0.05m));
+            Assert.That(line.PriceAt(newestInlier), Is.EqualTo(swings[^1].Price).Within(0.05m));
+        });
+    }
+
+    [Test]
     public void Ransac_ReturnsMultipleBoundedLinesForDistinctPivotGroups_RecentFirst()
     {
         DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
@@ -134,7 +284,9 @@ public sealed class AnalysisTests
             DistanceThresholdAtr: 0.01m,
             MinimumInliers: 3,
             MaximumPivots: 100,
-            MaximumLinesPerType: 4));
+            MaximumLinesPerType: 4,
+            MaximumEndPivotAge: 8,
+            RequiredRecentInliersWindow: 3));
 
         IReadOnlyList<Trendline> lines = detector.Detect(
             [.. firstSegment, .. secondSegment],
@@ -146,9 +298,11 @@ public sealed class AnalysisTests
             Assert.That(lines, Has.Count.EqualTo(2));
             Assert.That(lines.All(line => line.InlierCount == 4), Is.True);
             Assert.That(lines.All(line => line.StartTime < line.EndTime), Is.True);
+            Assert.That(lines.All(line => line.OriginTime >= line.StartTime), Is.True);
 
-            // TrendlineDetector now returns active/recent structures first.
+            // Active/recent structures first; origin is the recent end of each line.
             Assert.That(lines[0].StartTime, Is.GreaterThan(lines[1].EndTime));
+            Assert.That(lines[0].OriginTime, Is.EqualTo(lines[0].EndTime).Or.GreaterThanOrEqualTo(secondSegment[^1].PivotTime));
         });
     }
 
@@ -256,6 +410,118 @@ public sealed class AnalysisTests
         {
             Assert.That(inside, Has.Count.EqualTo(1));
             Assert.That(broken, Is.Empty);
+        });
+    }
+
+    [Test]
+    public void ChannelDetector_BuildsParallelChannelFromSupportWhenResistanceSlopeDiffers()
+    {
+        // Independently fitted resistance has a different slope. The old detector
+        // rejected this pair as non-parallel; the fixed detector projects a true
+        // parallel upper boundary from the support line through swing highs.
+        DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        decimal slope = 1m / 300m; // +1 price per 5 minutes
+        Trendline support = new()
+        {
+            StartTime = start,
+            EndTime = start.AddMinutes(20),
+            OriginTime = start,
+            OriginPrice = 100m,
+            SlopePerSecond = slope,
+            InlierCount = 4,
+            MeanAbsoluteError = 0.01m,
+            FitScore = 90m,
+            Type = TrendlineType.Support
+        };
+        // Deliberately wrong / non-parallel resistance — should be ignored.
+        Trendline mismatchedResistance = new()
+        {
+            StartTime = start,
+            EndTime = start.AddMinutes(20),
+            OriginTime = start,
+            OriginPrice = 110m,
+            SlopePerSecond = slope * 0.25m,
+            InlierCount = 3,
+            MeanAbsoluteError = 0.05m,
+            FitScore = 70m,
+            Type = TrendlineType.Resistance
+        };
+
+        SwingPoint[] swings =
+        [
+            Swing(start, 100m, SwingType.Low),
+            Swing(start.AddMinutes(5), 111m, SwingType.High),
+            Swing(start.AddMinutes(10), 102m, SwingType.Low),
+            Swing(start.AddMinutes(15), 113m, SwingType.High),
+            Swing(start.AddMinutes(20), 104m, SwingType.Low),
+            Swing(start.AddMinutes(25), 115m, SwingType.High)
+        ];
+
+        DateTimeOffset detectedAt = start.AddMinutes(30);
+        var detector = new ChannelDetector();
+        IReadOnlyList<PriceChannel> channels = detector.Detect(
+            [support, mismatchedResistance],
+            swings,
+            detectedAt,
+            atr: 1m,
+            currentPrice: 110m);
+
+        Assert.That(channels, Is.Not.Empty);
+        PriceChannel channel = channels[0];
+        Assert.Multiple(() =>
+        {
+            Assert.That(channel.Direction, Is.EqualTo(ChannelDirection.Rising));
+            Assert.That(channel.LowerLine.SlopePerSecond, Is.EqualTo(slope));
+            Assert.That(channel.UpperLine.SlopePerSecond, Is.EqualTo(slope));
+            Assert.That(channel.WidthAtr, Is.EqualTo(10m).Within(0.25m));
+            Assert.That(
+                channel.UpperLine.PriceAt(start) - channel.LowerLine.PriceAt(start),
+                Is.EqualTo(10m).Within(0.25m));
+        });
+    }
+
+    [Test]
+    public void ChannelDetector_FromRansacTrendlines_FindsRisingChannel()
+    {
+        DateTimeOffset start = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        // Perfect rising channel: support 100+i, resistance 110+i every 5 minutes.
+        SwingPoint[] swings = Enumerable.Range(0, 5)
+            .SelectMany(index => new[]
+            {
+                Swing(start.AddMinutes(index * 10), 100m + index, SwingType.Low),
+                Swing(start.AddMinutes(index * 10 + 5), 110m + index, SwingType.High)
+            })
+            .ToArray();
+
+        var trendlines = new RansacTrendlineDetector(new RansacOptions(
+            MaximumIterations: 300,
+            DistanceThresholdAtr: 0.15m,
+            MinimumInliers: 3,
+            MaximumPivots: 100,
+            MaximumLinesPerType: 2));
+
+        IReadOnlyList<Trendline> lines = trendlines.Detect(swings, atr: 1m);
+        Assert.That(lines.Any(line => line.Type == TrendlineType.Support), Is.True);
+
+        DateTimeOffset detectedAt = start.AddMinutes(55);
+        var detector = new ChannelDetector();
+        IReadOnlyList<PriceChannel> channels = detector.Detect(
+            lines,
+            swings,
+            detectedAt,
+            atr: 1m,
+            currentPrice: 112m);
+
+        Assert.That(channels, Is.Not.Empty);
+        PriceChannel channel = channels[0];
+        Assert.Multiple(() =>
+        {
+            Assert.That(channel.Direction, Is.EqualTo(ChannelDirection.Rising));
+            Assert.That(channel.WidthAtr, Is.EqualTo(10m).Within(1m));
+            Assert.That(channel.LowerLine.SlopePerSecond, Is.EqualTo(channel.UpperLine.SlopePerSecond));
+            Assert.That(
+                channel.LowerLine.PriceAt(detectedAt),
+                Is.LessThan(channel.UpperLine.PriceAt(detectedAt)));
         });
     }
 

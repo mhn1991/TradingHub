@@ -1,3 +1,5 @@
+using ChartAnnotator.PriceAction;
+
 namespace ChartAnnotator.Engine;
 
 public sealed record ChartAnnotationOptions
@@ -6,6 +8,7 @@ public sealed record ChartAnnotationOptions
     public int SwingCapacity { get; init; } = 500;
     public int IndicatorCapacity { get; init; } = 2_000;
     public int AtrPeriod { get; init; } = 14;
+    public int AdxPeriod { get; init; } = 14;
     public int AtrAnalysisHistoryPeriod { get; init; } = 50;
     public int AtrAnalysisChangeLookback { get; init; } = 5;
     public int AtrAnalysisMinimumSamples { get; init; } = 20;
@@ -28,4 +31,5 @@ public sealed record ChartAnnotationOptions
     public int SwingRightBars { get; init; } = 2;
     public int HeavyAnalysisEveryCandles { get; init; } = 12;
     public decimal StructureDirectionToleranceAtr { get; init; } = 0.05m;
+    public PriceActionOptions PriceAction { get; init; } = new();
 }

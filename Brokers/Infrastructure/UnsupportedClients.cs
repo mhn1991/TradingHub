@@ -18,3 +18,18 @@ internal sealed class UnsupportedCostClient(BrokerKind broker) : ICostClient
         CancellationToken cancellationToken = default) =>
         throw new BrokerFeatureNotSupportedException(broker, "Direct commission schedule");
 }
+
+internal sealed class UnsupportedAccountClient(BrokerKind broker) : IAccountClient
+{
+    public Task<IReadOnlyList<AccountSnapshot>> GetAccountsAsync(
+        CancellationToken cancellationToken = default) =>
+        throw new BrokerFeatureNotSupportedException(broker, "Authenticated account access");
+}
+
+internal sealed class UnsupportedOrderClient(BrokerKind broker) : IOrderClient
+{
+    public Task<IReadOnlyList<BrokerOrder>> GetOpenOrdersAsync(
+        InstrumentKey? instrument = null,
+        CancellationToken cancellationToken = default) =>
+        throw new BrokerFeatureNotSupportedException(broker, "Authenticated order access");
+}

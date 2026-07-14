@@ -1,19 +1,37 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Simulator.Models;
 
 namespace Simulator.Jobs;
 
-/// <summary>File-backed job store. Can later be replaced by a database without changing callers.</summary>
+public sealed record SimulationJobRecoveryReport
+{
+    public int ValidJobs { get; init; }
+    public int InterruptedJobsMarkedFailed { get; init; }
+    public int QuarantinedFiles { get; init; }
+    public int TemporaryFilesRemoved { get; init; }
+    public IReadOnlyList<string> WarningCodes { get; init; } = [];
+}
+
+/// <summary>
+/// Versioned, file-backed job store. Individual legacy/corrupt files are isolated so
+/// one historical job can never prevent the service from starting a new simulation.
+/// </summary>
 public sealed class FileSimulationJobRepository : ISimulationJobRepository
 {
+    public const int CurrentSchemaVersion = 2;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter() }
     };
 
+    private static readonly JsonSerializerOptions PermissiveLegacyOptions = CreateLegacyOptions();
+
     private readonly string _root;
+    private readonly string _quarantine;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public FileSimulationJobRepository(string rootDirectory)
@@ -21,8 +39,12 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
         if (string.IsNullOrWhiteSpace(rootDirectory))
             throw new ArgumentException("Jobs directory is required.", nameof(rootDirectory));
         _root = Path.GetFullPath(rootDirectory);
+        _quarantine = Path.Combine(_root, "quarantine");
         Directory.CreateDirectory(_root);
+        Directory.CreateDirectory(_quarantine);
     }
+
+    public SimulationJobRecoveryReport LastRecoveryReport { get; private set; } = new();
 
     public async Task SaveAsync(SimulationJobSnapshot snapshot, CancellationToken cancellationToken = default)
     {
@@ -31,29 +53,41 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
         try
         {
             string path = GetPath(snapshot.Id);
-            if (File.Exists(path))
+            SimulationJobSnapshot? previous = File.Exists(path)
+                ? await ReadSnapshotUnsafeAsync(path, quarantineOnFailure: true, cancellationToken)
+                    .ConfigureAwait(false)
+                : null;
+            if (previous is not null && snapshot.Revision < previous.Revision)
+                return;
+
+            string temporary = path + $".{Guid.NewGuid():N}.tmp";
+            try
             {
-                await using FileStream existing = File.OpenRead(path);
-                SimulationJobSnapshot? previous =
-                    await JsonSerializer.DeserializeAsync<SimulationJobSnapshot>(
-                        existing,
-                        JsonOptions,
-                        cancellationToken).ConfigureAwait(false);
-                if (previous is not null && snapshot.Revision < previous.Revision)
+                await using (FileStream stream = new(
+                    temporary,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 64 * 1024,
+                    useAsync: true))
                 {
-                    // Never overwrite a newer revision with an older one.
-                    return;
+                    var persisted = new PersistedSimulationJob
+                    {
+                        SchemaVersion = CurrentSchemaVersion,
+                        Snapshot = snapshot
+                    };
+                    await JsonSerializer.SerializeAsync(stream, persisted, JsonOptions, cancellationToken)
+                        .ConfigureAwait(false);
+                    await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
-            }
 
-            string temporary = path + ".tmp";
-            await using (FileStream stream = File.Create(temporary))
+                File.Move(temporary, path, overwrite: true);
+            }
+            finally
             {
-                await JsonSerializer.SerializeAsync(stream, snapshot, JsonOptions, cancellationToken)
-                    .ConfigureAwait(false);
+                if (File.Exists(temporary))
+                    File.Delete(temporary);
             }
-
-            File.Move(temporary, path, overwrite: true);
         }
         finally
         {
@@ -64,13 +98,48 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
     /// <summary>Mark non-terminal jobs as interrupted after process restart.</summary>
     public async Task MarkInterruptedJobsAsync(CancellationToken cancellationToken = default)
     {
-        IReadOnlyList<SimulationJobSnapshot> jobs = await ListAsync(500, cancellationToken).ConfigureAwait(false);
+        int removedTemporary = 0;
+        int quarantinedBefore = CountQuarantinedFiles();
+        var warnings = new HashSet<string>(StringComparer.Ordinal);
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (string temporary in Directory.EnumerateFiles(_root, "*.tmp"))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    File.Delete(temporary);
+                    removedTemporary++;
+                }
+                catch (IOException)
+                {
+                    warnings.Add("TemporaryJobCleanupFailed");
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    warnings.Add("TemporaryJobCleanupFailed");
+                }
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        IReadOnlyList<SimulationJobSnapshot> jobs = await ListAsync(500, cancellationToken)
+            .ConfigureAwait(false);
+        int interrupted = 0;
         foreach (SimulationJobSnapshot job in jobs)
         {
-            if (job.IsComplete)
+            if (job.IsComplete ||
+                job.Status is SimulationJobStatus.Completed or
+                    SimulationJobStatus.Failed or
+                    SimulationJobStatus.Cancelled)
+            {
                 continue;
-            if (job.Status is SimulationJobStatus.Completed or SimulationJobStatus.Failed or SimulationJobStatus.Cancelled)
-                continue;
+            }
 
             await SaveAsync(job with
             {
@@ -80,7 +149,21 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
                 CompletedAt = DateTimeOffset.UtcNow,
                 Error = "Interrupted by service restart. Partial replay output may remain on disk."
             }, cancellationToken).ConfigureAwait(false);
+            interrupted++;
         }
+
+        int quarantinedAfter = CountQuarantinedFiles();
+        int quarantined = Math.Max(0, quarantinedAfter - quarantinedBefore);
+        if (quarantined > 0)
+            warnings.Add("PersistedJobsQuarantined");
+        LastRecoveryReport = new SimulationJobRecoveryReport
+        {
+            ValidJobs = jobs.Count,
+            InterruptedJobsMarkedFailed = interrupted,
+            QuarantinedFiles = quarantined,
+            TemporaryFilesRemoved = removedTemporary,
+            WarningCodes = warnings.OrderBy(item => item, StringComparer.Ordinal).ToArray()
+        };
     }
 
     public async Task<SimulationJobSnapshot?> GetAsync(
@@ -94,11 +177,8 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await using FileStream stream = File.OpenRead(path);
-            return await JsonSerializer.DeserializeAsync<SimulationJobSnapshot>(
-                stream,
-                JsonOptions,
-                cancellationToken).ConfigureAwait(false);
+            return await ReadSnapshotUnsafeAsync(path, quarantineOnFailure: true, cancellationToken)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -118,18 +198,18 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
         {
             var items = new List<SimulationJobSnapshot>();
             foreach (string path in Directory.EnumerateFiles(_root, "*.json")
-                         .OrderByDescending(File.GetLastWriteTimeUtc)
-                         .Take(take))
+                         .OrderByDescending(File.GetLastWriteTimeUtc))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await using FileStream stream = File.OpenRead(path);
-                SimulationJobSnapshot? snapshot =
-                    await JsonSerializer.DeserializeAsync<SimulationJobSnapshot>(
-                        stream,
-                        JsonOptions,
-                        cancellationToken).ConfigureAwait(false);
+                SimulationJobSnapshot? snapshot = await ReadSnapshotUnsafeAsync(
+                        path,
+                        quarantineOnFailure: true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 if (snapshot is not null)
                     items.Add(snapshot);
+                if (items.Count >= take)
+                    break;
             }
 
             return items;
@@ -140,5 +220,121 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
         }
     }
 
+    private async Task<SimulationJobSnapshot?> ReadSnapshotUnsafeAsync(
+        string path,
+        bool quarantineOnFailure,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using FileStream stream = new(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                useAsync: true);
+            using JsonDocument document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            JsonElement root = document.RootElement;
+
+            SimulationJobSnapshot? snapshot;
+            if (root.ValueKind == JsonValueKind.Object &&
+                root.TryGetProperty("schemaVersion", out JsonElement schemaElement) &&
+                root.TryGetProperty("snapshot", out JsonElement snapshotElement))
+            {
+                int schema = schemaElement.GetInt32();
+                if (schema > CurrentSchemaVersion || schema < 1)
+                    throw new UnsupportedPersistedJobSchemaException(schema);
+                snapshot = snapshotElement.Deserialize<SimulationJobSnapshot>(JsonOptions);
+            }
+            else
+            {
+                // Phase 1-4 files were stored as a raw snapshot. Deserialize them
+                // permissively, then rewrite on the next mutation using the envelope.
+                snapshot = root.Deserialize<SimulationJobSnapshot>(PermissiveLegacyOptions);
+            }
+
+            if (snapshot is null || snapshot.Id == Guid.Empty)
+                throw new JsonException("Persisted job does not contain a valid simulation ID.");
+            return snapshot;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is JsonException or
+                IOException or
+                UnauthorizedAccessException or
+                NotSupportedException or
+                FormatException or
+                InvalidOperationException or
+                UnsupportedPersistedJobSchemaException)
+        {
+            if (quarantineOnFailure)
+                QuarantineUnsafe(path, ClassifyFailure(exception));
+            return null;
+        }
+    }
+
+    private void QuarantineUnsafe(string path, string reason)
+    {
+        if (!File.Exists(path))
+            return;
+        Directory.CreateDirectory(_quarantine);
+        string original = Path.GetFileName(path);
+        string destination = Path.Combine(
+            _quarantine,
+            $"{Path.GetFileNameWithoutExtension(original)}.{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}.{reason}.json");
+        try
+        {
+            File.Move(path, destination, overwrite: false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // A concurrent recovery may already have moved the file, or the process
+            // may lack permission to quarantine it. Either way, recovery continues
+            // because a single historical file must not poison the repository.
+        }
+    }
+
+    private int CountQuarantinedFiles() => Directory.Exists(_quarantine)
+        ? Directory.EnumerateFiles(_quarantine, "*.json").Count()
+        : 0;
+
+    private static string ClassifyFailure(Exception exception) => exception switch
+    {
+        UnsupportedPersistedJobSchemaException => "unsupported-schema",
+        JsonException or FormatException or InvalidOperationException => "invalid-json",
+        UnauthorizedAccessException => "access-denied",
+        IOException => "io-error",
+        _ => "unsupported-content"
+    };
+
+    private static JsonSerializerOptions CreateLegacyOptions()
+    {
+        var resolver = new DefaultJsonTypeInfoResolver();
+        resolver.Modifiers.Add(typeInfo =>
+        {
+            foreach (JsonPropertyInfo property in typeInfo.Properties)
+                property.IsRequired = false;
+        });
+        return new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            TypeInfoResolver = resolver,
+            Converters = { new JsonStringEnumConverter() }
+        };
+    }
+
     private string GetPath(Guid id) => Path.Combine(_root, $"{id:N}.json");
+
+    private sealed record PersistedSimulationJob
+    {
+        public required int SchemaVersion { get; init; }
+        public required SimulationJobSnapshot Snapshot { get; init; }
+    }
+
+    private sealed class UnsupportedPersistedJobSchemaException(int schemaVersion)
+        : Exception($"Persisted simulation job schema {schemaVersion} is unsupported.");
 }

@@ -36,6 +36,9 @@ public sealed record AgentDecision
     public required decimal Confidence { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required string Reason { get; init; }
+    public string? ReasonCode { get; init; }
+    public PriceActionEventType? PriceActionTrigger { get; init; }
+    public decimal? PriceActionConfidence { get; init; }
 }
 
 public sealed class MultiTimeframeAnalysis

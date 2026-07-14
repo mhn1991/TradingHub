@@ -19,6 +19,8 @@ public enum SafetyTripReason
     ConsecutiveLossLimit,
     BrokerStateMismatch,
     ExecutionFailure,
+    DailyProfitTarget,
+    DailyProfitGiveback,
     External
 }
 
@@ -27,7 +29,35 @@ public sealed record TradingSafetyOptions
     public decimal? MaximumDailyLoss { get; init; }
     public decimal? MaximumWeeklyLoss { get; init; }
     public int? MaximumConsecutiveLosses { get; init; }
+    /// <summary>Optional account-currency daily equity profit at which new entries are paused.</summary>
+    public decimal? DailyEquityProfitTarget { get; init; }
+    /// <summary>Peak daily equity profit required before giveback protection becomes active.</summary>
+    public decimal? DailyEquityGivebackActivation { get; init; }
+    /// <summary>Maximum account-currency giveback from the daily equity peak.</summary>
+    public decimal? MaximumDailyEquityGiveback { get; init; }
     public bool TripOnCriticalDataQualityIssue { get; init; } = true;
+
+    public void Validate()
+    {
+        if (MaximumDailyLoss is <= 0m ||
+            MaximumWeeklyLoss is <= 0m ||
+            MaximumConsecutiveLosses is <= 0 ||
+            DailyEquityProfitTarget is <= 0m ||
+            DailyEquityGivebackActivation is <= 0m ||
+            MaximumDailyEquityGiveback is <= 0m ||
+            ((DailyEquityGivebackActivation is null) !=
+             (MaximumDailyEquityGiveback is null)) ||
+            (DailyEquityGivebackActivation is decimal activation &&
+             MaximumDailyEquityGiveback is decimal giveback &&
+             giveback > activation))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(TradingSafetyOptions),
+                "Configured safety limits must be positive, daily equity giveback " +
+                "activation/amount must either both be supplied or both be omitted, " +
+                "and maximum giveback cannot exceed its activation profit.");
+        }
+    }
 }
 
 public sealed record TradingSafetySnapshot
@@ -39,6 +69,8 @@ public sealed record TradingSafetySnapshot
     public decimal DailyRealizedProfitLoss { get; init; }
     public decimal WeeklyRealizedProfitLoss { get; init; }
     public int ConsecutiveLosses { get; init; }
+    public decimal DailyEquityProfitLoss { get; init; }
+    public decimal PeakDailyEquityProfitLoss { get; init; }
 
     public bool CanOpenNewTrades => State == TradingSafetyState.Active;
 }
@@ -50,6 +82,7 @@ public interface ITradingSafetyController
     bool TripOnCriticalDataQualityIssue { get; }
 
     TradingSafetySnapshot RecordClosedTrade(decimal realizedProfitLoss, DateTimeOffset timestamp);
+    TradingSafetySnapshot ObserveEquity(decimal equity, DateTimeOffset timestamp);
     TradingSafetySnapshot Pause(string message, DateTimeOffset timestamp);
     TradingSafetySnapshot Resume(DateTimeOffset timestamp);
     TradingSafetySnapshot Trip(SafetyTripReason reason, string message, DateTimeOffset timestamp);
@@ -70,18 +103,14 @@ public sealed class TradingSafetyController : ITradingSafetyController
     private decimal _dailyRealizedProfitLoss;
     private decimal _weeklyRealizedProfitLoss;
     private int _consecutiveLosses;
+    private decimal? _dailyEquityBaseline;
+    private decimal _dailyEquityProfitLoss;
+    private decimal _peakDailyEquityProfitLoss;
 
     public TradingSafetyController(TradingSafetyOptions? options = null)
     {
         _options = options ?? new TradingSafetyOptions();
-        if (_options.MaximumDailyLoss is <= 0m ||
-            _options.MaximumWeeklyLoss is <= 0m ||
-            _options.MaximumConsecutiveLosses is <= 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(options),
-                "Configured safety limits must be positive.");
-        }
+        _options.Validate();
     }
 
     public TradingSafetySnapshot Snapshot
@@ -157,18 +186,49 @@ public sealed class TradingSafetyController : ITradingSafetyController
         }
     }
 
+    public TradingSafetySnapshot ObserveEquity(decimal equity, DateTimeOffset timestamp)
+    {
+        lock (_sync)
+        {
+            RollPeriods(timestamp);
+            _dailyEquityBaseline ??= equity;
+            _dailyEquityProfitLoss = equity - _dailyEquityBaseline.Value;
+            _peakDailyEquityProfitLoss = Math.Max(
+                _peakDailyEquityProfitLoss,
+                _dailyEquityProfitLoss);
+
+            if (_options.DailyEquityProfitTarget is decimal target &&
+                _dailyEquityProfitLoss >= target)
+            {
+                PauseCore(
+                    SafetyTripReason.DailyProfitTarget,
+                    $"Daily equity profit {_dailyEquityProfitLoss:F2} reached the configured " +
+                    $"target of {target:F2}; new entries are paused until the next UTC day.",
+                    timestamp);
+            }
+            else if (_options.DailyEquityGivebackActivation is decimal activation &&
+                     _options.MaximumDailyEquityGiveback is decimal maximumGiveback &&
+                     _peakDailyEquityProfitLoss >= activation &&
+                     _peakDailyEquityProfitLoss - _dailyEquityProfitLoss >= maximumGiveback)
+            {
+                PauseCore(
+                    SafetyTripReason.DailyProfitGiveback,
+                    $"Daily equity gave back {_peakDailyEquityProfitLoss - _dailyEquityProfitLoss:F2} " +
+                    $"from its peak after profit protection activated at {activation:F2}; " +
+                    "new entries are paused until the next UTC day.",
+                    timestamp);
+            }
+
+            return CreateSnapshot();
+        }
+    }
+
     public TradingSafetySnapshot Pause(string message, DateTimeOffset timestamp)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
         lock (_sync)
         {
-            if (_state != TradingSafetyState.Tripped)
-            {
-                _state = TradingSafetyState.Paused;
-                _reason = SafetyTripReason.Manual;
-                _message = message;
-                _changedAt = timestamp;
-            }
+            PauseCore(SafetyTripReason.Manual, message, timestamp);
 
             return CreateSnapshot();
         }
@@ -222,6 +282,9 @@ public sealed class TradingSafetyController : ITradingSafetyController
             _dailyRealizedProfitLoss = 0m;
             _weeklyRealizedProfitLoss = 0m;
             _consecutiveLosses = 0;
+            _dailyEquityBaseline = null;
+            _dailyEquityProfitLoss = 0m;
+            _peakDailyEquityProfitLoss = 0m;
             return CreateSnapshot();
         }
     }
@@ -234,6 +297,17 @@ public sealed class TradingSafetyController : ITradingSafetyController
         {
             _currentDay = day;
             _dailyRealizedProfitLoss = 0m;
+            _dailyEquityBaseline = null;
+            _dailyEquityProfitLoss = 0m;
+            _peakDailyEquityProfitLoss = 0m;
+            if (_state == TradingSafetyState.Paused &&
+                _reason is SafetyTripReason.DailyProfitTarget or SafetyTripReason.DailyProfitGiveback)
+            {
+                _state = TradingSafetyState.Active;
+                _reason = SafetyTripReason.None;
+                _message = null;
+                _changedAt = timestamp;
+            }
         }
 
         int isoYear = ISOWeek.GetYear(utc);
@@ -244,6 +318,20 @@ public sealed class TradingSafetyController : ITradingSafetyController
             _currentIsoWeek = isoWeek;
             _weeklyRealizedProfitLoss = 0m;
         }
+    }
+
+    private void PauseCore(
+        SafetyTripReason reason,
+        string message,
+        DateTimeOffset timestamp)
+    {
+        if (_state == TradingSafetyState.Tripped)
+            return;
+
+        _state = TradingSafetyState.Paused;
+        _reason = reason;
+        _message = message;
+        _changedAt = timestamp;
     }
 
     private void TripCore(
@@ -265,6 +353,8 @@ public sealed class TradingSafetyController : ITradingSafetyController
         ChangedAt = _changedAt,
         DailyRealizedProfitLoss = _dailyRealizedProfitLoss,
         WeeklyRealizedProfitLoss = _weeklyRealizedProfitLoss,
-        ConsecutiveLosses = _consecutiveLosses
+        ConsecutiveLosses = _consecutiveLosses,
+        DailyEquityProfitLoss = _dailyEquityProfitLoss,
+        PeakDailyEquityProfitLoss = _peakDailyEquityProfitLoss
     };
 }

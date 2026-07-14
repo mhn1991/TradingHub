@@ -33,4 +33,13 @@ public sealed class SimulationRealtimePublisher
 
         return _hub.Clients.Group(group).SendAsync(eventName, snapshot, cancellationToken);
     }
+
+    public Task PublishTradeAsync(
+        Guid simulationId,
+        string strategyId,
+        SimulatedTradeRecord trade,
+        CancellationToken cancellationToken = default) =>
+        _hub.Clients
+            .Group(simulationId.ToString("N"))
+            .SendAsync("TradeCompleted", new { simulationId, strategyId, trade }, cancellationToken);
 }

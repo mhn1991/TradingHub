@@ -9,7 +9,7 @@ using Networking.Http;
 
 namespace Brokers.Oanda;
 
-public sealed class OandaBrokerClient : ITradingBrokerClient
+public sealed class OandaBrokerClient : IProtectiveOrderBrokerClient
 {
     private static readonly TransportId RestTransportId = new("oanda.rest");
     private readonly BrokerHttpRuntime _runtime;
@@ -76,6 +76,7 @@ public sealed class OandaBrokerClient : ITradingBrokerClient
             options.AccountId,
             instrumentMappings,
             _streamingClient);
+        ProtectiveOrders = new OandaProtectiveOrderClient();
         Positions = new OandaPositionClient(
             _runtime.Gateway,
             RestTransportId,
@@ -90,6 +91,9 @@ public sealed class OandaBrokerClient : ITradingBrokerClient
     public IAccountClient Accounts { get; }
     public ITradingOrderClient Orders { get; }
     IOrderClient IBrokerClient.Orders => Orders;
+    public TradingBrokerCapabilities TradingCapabilities { get; } =
+        TradingBrokerCapabilities.Unsupported;
+    public IProtectiveOrderClient ProtectiveOrders { get; }
     public IPositionClient Positions { get; }
     public ICostClient Costs { get; }
 

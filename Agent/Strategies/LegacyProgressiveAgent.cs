@@ -23,10 +23,12 @@ public sealed class LegacyProgressiveAgent(ProgressiveStrategyOptions? options =
         decimal atr = entry.Indicators.Atr ?? price * 0.002m;
         bool buy = state.Side == SetupSide.Buy;
         decimal stop = buy ? price - atr * Options.FallbackStopAtr : price + atr * Options.FallbackStopAtr;
-        decimal confidence = entry.Confidence.Total * 0.45m + confirmation.Confidence.Total * 0.30m + trend.Confidence.Total * 0.25m;
+        decimal confidence = entry.Confidence.Total * 0.45m + confirmation.Confidence.Total * 0.30m + trend.Confidence.Total * 0.25m +
+            PriceActionConfidenceAdjustment(entry, state.Side);
         return Trade(context, state, buy ? AgentAction.Buy : AgentAction.Sell, confidence,
             price, stop, null,
-            "Progressive higher-timeframe partial setup confirmed on the entry timeframe; exit waits for reversal.",
+            $"Progressive higher-timeframe partial setup confirmed on the entry timeframe; " +
+            $"price action: {PriceActionSummary(entry, state.Side)}; exit waits for reversal.",
             "Entry ATR safety stop", "Reverse setup exit");
     }
 

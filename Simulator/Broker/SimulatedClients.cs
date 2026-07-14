@@ -78,7 +78,7 @@ internal sealed class SimulatedOrderClient(
     SimulatedBrokerState state,
     BoundedAsyncEventLog<OrderEvent> events,
     ISimulationClock clock,
-    Action ensureActive) : ITradingOrderClient
+    Action ensureActive) : ITradingOrderClient, IProtectiveOrderClient
 {
     public Task<IReadOnlyList<BrokerOrder>> GetOpenOrdersAsync(
         InstrumentKey? instrument = null,
@@ -173,6 +173,52 @@ internal sealed class SimulatedOrderClient(
 
         events.Append(ToEvent(cancelled, OrderEventType.Cancelled, clock.UtcNow));
         return Task.CompletedTask;
+    }
+
+    public Task<ProtectiveStopAmendmentResult> AmendProtectiveStopAsync(
+        AmendProtectiveStopRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ensureActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(request);
+
+        SimulatedProtectiveStopReplacement replacement =
+            state.AmendProtectiveStop(request, clock.UtcNow);
+        if (!replacement.IsReplay)
+        {
+            if (replacement.PreviousOrder is not null)
+            {
+                events.Append(ToEvent(
+                    replacement.PreviousOrder,
+                    OrderEventType.Replaced,
+                    clock.UtcNow,
+                    message: $"Protective stop replaced by {replacement.CurrentOrder?.BrokerOrderId}."));
+            }
+
+            if (replacement.CurrentOrder is not null)
+            {
+                events.Append(ToEvent(
+                    replacement.CurrentOrder,
+                    OrderEventType.Accepted,
+                    clock.UtcNow,
+                    message: $"Protective stop amendment {request.ClientAmendmentId} accepted."));
+            }
+            else if (replacement.Result.Status == ProtectiveStopAmendmentStatus.Rejected)
+            {
+                events.Append(new OrderEvent
+                {
+                    BrokerOrderId = request.ExistingStopOrderId ?? request.ClientAmendmentId,
+                    ClientOrderId = request.ClientAmendmentId,
+                    Instrument = request.Instrument,
+                    Type = OrderEventType.Rejected,
+                    Timestamp = clock.UtcNow,
+                    Message = replacement.Result.RejectionReason
+                });
+            }
+        }
+
+        return Task.FromResult(replacement.Result);
     }
 
     public async IAsyncEnumerable<OrderEvent> StreamOrderEventsAsync(

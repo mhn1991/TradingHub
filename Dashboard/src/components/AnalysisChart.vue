@@ -415,6 +415,64 @@ const swingVisuals = computed(() => (analysisFrame.value?.swings ?? [])
     fresh: swing.confirmedAt === analysisFrame.value?.availableAt,
   })))
 
+const priceActionVisuals = computed(() => {
+  if (props.layers.priceAction === false) return []
+  const events = new Map<string, NonNullable<ReplayFrame['priceAction']>['events'][number]>()
+  for (const frame of visibleFrames.value) {
+    for (const event of frame.priceAction?.events ?? []) {
+      if (event.confidence < 55) continue
+      if (event.type.endsWith('Impulse') || event.type.endsWith('Pullback')) continue
+      events.set(event.eventId, event)
+    }
+  }
+
+  return [...events.values()]
+    .filter(event => isTimeVisible(event.confirmedAt))
+    .map(event => {
+      const bullish = event.direction === 'Bullish'
+      const reference = event.referenceLevel ?? event.brokenLevel ?? priceForTime(event.confirmedAt)
+      const y = yPrice(reference)
+      return {
+        event,
+        bullish,
+        x: xForTime(event.confirmedAt),
+        y,
+        points: priceActionPoints(bullish, xForTime(event.confirmedAt), y),
+      }
+    })
+})
+
+function stopVisual(trade: ReplayTrade) {
+  if (!trade.openedAt) return { path: '', accepted: [], rejected: [] }
+  const initial = trade.initialStopLossPrice ?? trade.stopLossPrice
+  if (initial == null) return { path: '', accepted: [], rejected: [] }
+  const endTime = trade.closedAt ?? visibleFrames.value.at(-1)?.availableAt ?? trade.openedAt
+  const amendments = [...(trade.stopAmendments ?? [])]
+    .sort((left, right) => new Date(left.requestedAt).getTime() - new Date(right.requestedAt).getTime())
+  const accepted = amendments.filter(item => item.status === 'Accepted' || item.status === 'Replaced')
+  const rejected = amendments.filter(item => item.status === 'Rejected' || item.status === 'Unsupported')
+  let current = initial
+  let path = `M${xForTime(trade.openedAt)} ${yPrice(current)}`
+  const acceptedMarkers = [] as Array<{ amendment: (typeof amendments)[number]; x: number; y: number }>
+  for (const amendment of accepted) {
+    const stamp = amendment.acceptedAt ?? amendment.requestedAt
+    const next = amendment.acceptedStopPrice ?? amendment.proposedStopPrice
+    const x = xForTime(stamp)
+    path += ` L${x} ${yPrice(current)} L${x} ${yPrice(next)}`
+    current = next
+    acceptedMarkers.push({ amendment, x, y: yPrice(next) })
+  }
+  path += ` L${xForTime(endTime)} ${yPrice(current)}`
+  return {
+    path,
+    accepted: acceptedMarkers,
+    rejected: rejected.map(amendment => ({
+      amendment,
+      x: xForTime(amendment.requestedAt),
+      y: yPrice(amendment.proposedStopPrice),
+    })),
+  }
+}
 
 const tradeVisuals = computed(() => (props.trades ?? [])
   .filter((trade) =>
@@ -422,6 +480,7 @@ const tradeVisuals = computed(() => (props.trades ?? [])
     (trade.confirmationAt && isTimeVisible(trade.confirmationAt)) ||
     (trade.openedAt && isTimeVisible(trade.openedAt)) ||
     (trade.closedAt && isTimeVisible(trade.closedAt)) ||
+    (trade.partialExits ?? []).some(exit => isTimeVisible(exit.executedAt)) ||
     isTimeVisible(trade.signalCreatedAt))
   .map((trade) => ({
     trade,
@@ -440,7 +499,10 @@ const tradeVisuals = computed(() => (props.trades ?? [])
     exitVisible: trade.closedAt ? isTimeVisible(trade.closedAt) : false,
     exitX: trade.closedAt ? xForTime(trade.closedAt) : null,
     exitY: trade.exitPrice == null ? null : yPrice(trade.exitPrice),
-    stopY: trade.stopLossPrice == null ? null : yPrice(trade.stopLossPrice),
+    partialExits: (trade.partialExits ?? [])
+      .filter(exit => isTimeVisible(exit.executedAt))
+      .map(exit => ({ exit, x: xForTime(exit.executedAt), y: yPrice(exit.exitPrice) })),
+    stop: stopVisual(trade),
     targetY: trade.takeProfitPrice == null ? null : yPrice(trade.takeProfitPrice),
     profitable: trade.netProfitLoss >= 0,
   })))
@@ -818,6 +880,12 @@ function bodyHeight(openY: number, closeY: number): number {
   return Math.max(1.5, Math.abs(closeY - openY))
 }
 
+function priceActionPoints(bullish: boolean, x: number, y: number): string {
+  return bullish
+    ? `${x},${y - 12} ${x - 7},${y + 2} ${x + 7},${y + 2}`
+    : `${x},${y + 12} ${x - 7},${y - 2} ${x + 7},${y - 2}`
+}
+
 function swingPoints(swing: SwingPoint, x: number, y: number): string {
   return swing.type === 'High'
     ? `${x - 6},${y - 11} ${x + 6},${y - 11} ${x},${y - 2}`
@@ -862,7 +930,7 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       :class="['analysis-chart', { 'is-dragging': dragging }]"
       :viewBox="`0 0 ${width} ${height}`"
       role="img"
-      aria-label="Interactive candlestick chart with Bollinger regimes, RSI relationships, ATR context and market structure annotations"
+      aria-label="Interactive candlestick chart with Bollinger regimes, RSI relationships, ATR context, price action and market structure annotations"
       @pointerdown="handlePointerDown"
       @pointerenter="handlePointerEnter"
       @pointermove="handlePointerMove"
@@ -1114,6 +1182,17 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           </polygon>
         </g>
 
+        <g v-if="layers.priceAction !== false" class="price-action-events">
+          <polygon
+            v-for="item in priceActionVisuals"
+            :key="item.event.eventId"
+            :points="item.points"
+            :class="item.bullish ? 'price-action-bullish' : 'price-action-bearish'"
+          >
+            <title>{{ item.event.type }} · confidence {{ item.event.confidence.toFixed(1) }} · {{ item.event.explanation }}</title>
+          </polygon>
+        </g>
+
         <line
           v-if="analysisFrame"
           class="last-price-line"
@@ -1159,7 +1238,7 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <line :x1="hoverX" :x2="hoverX" :y1="priceTop" :y2="atrTop + atrHeight" />
         <circle :cx="hoverX" :cy="yPrice(hoveredFrame.candle.close)" r="4" />
         <g :transform="`translate(${tooltipX}, ${priceTop + 10})`" class="hover-card">
-          <rect width="216" height="108" rx="7" />
+          <rect width="216" height="130" rx="7" />
           <text x="12" y="19" class="hover-time">{{ timestamp(hoveredFrame.availableAt) }} UTC</text>
           <text x="12" y="40">O <tspan>{{ price(hoveredFrame.candle.open) }}</tspan></text>
           <text x="112" y="40">H <tspan>{{ price(hoveredFrame.candle.high) }}</tspan></text>
@@ -1169,6 +1248,8 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           <text x="112" y="80">RSI <tspan>{{ hoveredFrame.indicators.rsi?.toFixed(1) ?? 'warm-up' }}</tspan></text>
           <text x="12" y="100">ATR% <tspan>{{ hoveredFrame.indicators.atrAnalysis?.normalizedPercent?.toFixed(3) ?? 'warm-up' }}</tspan></text>
           <text x="112" y="100">BB <tspan>{{ hoveredFrame.indicators.bollingerAnalysis?.widthRegime ?? 'warm-up' }}</tspan></text>
+          <text x="12" y="120">ADX <tspan>{{ hoveredFrame.indicators.adxAnalysis?.adx?.toFixed(1) ?? 'warm-up' }}</tspan></text>
+          <text x="112" y="120">PA <tspan>{{ hoveredFrame.priceAction?.bias ?? 'Neutral' }}</tspan></text>
         </g>
       </g>
 
@@ -1180,10 +1261,23 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
             :class="item.profitable ? 'trade-profit' : 'trade-loss'"
             :x1="item.entryX" :y1="item.entryY" :x2="item.exitX" :y2="item.exitY"
           />
-          <line
-            v-if="item.entryX != null && item.exitX != null && item.stopY != null"
-            class="trade-stop-line" :x1="item.entryX" :x2="item.exitX" :y1="item.stopY" :y2="item.stopY"
-          />
+          <path v-if="item.stop.path" class="trade-stop-line trade-stop-step" :d="item.stop.path" />
+          <circle
+            v-for="marker in item.stop.accepted"
+            :key="`accepted-${marker.amendment.requestedSequence}`"
+            class="trade-stop-accepted"
+            :cx="marker.x" :cy="marker.y" r="3.5"
+          >
+            <title>{{ marker.amendment.acceptedAt ?? marker.amendment.requestedAt }} · {{ marker.amendment.previousStopPrice }} → {{ marker.amendment.acceptedStopPrice ?? marker.amendment.proposedStopPrice }} · open {{ marker.amendment.openProfitR }}R · locked {{ marker.amendment.lockedProfitR }}R · {{ marker.amendment.reason }} · {{ marker.amendment.structureSource ?? 'no structure source' }} · ATR {{ marker.amendment.atr ?? '—' }} · {{ marker.amendment.status }}</title>
+          </circle>
+          <path
+            v-for="marker in item.stop.rejected"
+            :key="`rejected-${marker.amendment.requestedSequence}`"
+            class="trade-stop-rejected"
+            :d="`M${marker.x - 4} ${marker.y - 4} L${marker.x + 4} ${marker.y + 4} M${marker.x + 4} ${marker.y - 4} L${marker.x - 4} ${marker.y + 4}`"
+          >
+            <title>{{ marker.amendment.requestedAt }} · {{ marker.amendment.previousStopPrice }} → {{ marker.amendment.proposedStopPrice }} · open {{ marker.amendment.openProfitR }}R · locked {{ marker.amendment.lockedProfitR }}R · {{ marker.amendment.reason }} · {{ marker.amendment.structureSource ?? 'no structure source' }} · ATR {{ marker.amendment.atr ?? '—' }} · {{ marker.amendment.status }} · {{ marker.amendment.rejectionReason ?? marker.amendment.explanation }}</title>
+          </path>
           <line
             v-if="item.entryX != null && item.exitX != null && item.targetY != null"
             class="trade-target-line" :x1="item.entryX" :x2="item.exitX" :y1="item.targetY" :y2="item.targetY"
@@ -1214,6 +1308,14 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           >
             <title>{{ item.trade.strategyName }} {{ item.trade.side }} at {{ item.trade.entryPrice }}</title>
           </path>
+          <rect
+            v-for="partial in item.partialExits"
+            :key="partial.exit.exitId"
+            class="trade-partial-exit"
+            :x="partial.x - 5" :y="partial.y - 5" width="10" height="10" rx="2"
+          >
+            <title>{{ partial.exit.reason }} · closed {{ partial.exit.quantityClosed }} · remaining {{ partial.exit.quantityRemaining }} · P/L {{ partial.exit.netProfitLoss }} · realised {{ partial.exit.realizedR }}R</title>
+          </rect>
           <circle
             v-if="item.exitVisible && item.exitX != null && item.exitY != null"
             :class="['trade-exit', item.profitable ? 'trade-profit' : 'trade-loss']"

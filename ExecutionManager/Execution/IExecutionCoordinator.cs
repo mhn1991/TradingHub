@@ -10,4 +10,9 @@ public interface IExecutionCoordinator
         AgentDecision decision,
         ITradingBrokerClient broker,
         CancellationToken cancellationToken = default);
+
+    Task<ProtectiveStopAmendmentResult> AmendProtectiveStopAsync(
+        ProtectiveStopAmendmentCommand command,
+        ITradingBrokerClient broker,
+        CancellationToken cancellationToken = default);
 }

@@ -1,9 +1,13 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Channels;
 using Agent.Abstractions;
 using Agent.Strategies;
 using Brokers;
+using Brokers.Abstractions;
+using Brokers.Binance;
 using Brokers.Models;
 using Brokers.Oanda;
 using Simulator.Abstractions;
@@ -34,6 +38,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
     private readonly ConcurrentDictionary<Guid, RunningJob> _running = new();
     private readonly Channel<Guid> _queue;
     private readonly CancellationTokenSource _serviceLifetime = new();
+    private readonly Task _initialization;
     private readonly Task[] _workers;
     private bool _disposed;
 
@@ -57,11 +62,11 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             AllowSynchronousContinuations = false
         });
 
-        if (repository is FileSimulationJobRepository fileRepo)
-        {
-            // Do not leave stale "Running" jobs after process restart.
-            fileRepo.MarkInterruptedJobsAsync().GetAwaiter().GetResult();
-        }
+        // Do not leave stale "Running" jobs after process restart. Public operations
+        // await this owned initialization task; construction never blocks on async I/O.
+        _initialization = repository is FileSimulationJobRepository fileRepo
+            ? fileRepo.MarkInterruptedJobsAsync()
+            : Task.CompletedTask;
 
         _workers = Enumerable.Range(0, _options.MaxConcurrentJobs)
             .Select(_ => Task.Run(() => WorkerLoopAsync(_serviceLifetime.Token)))
@@ -69,12 +74,14 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
     }
 
     public event Action<SimulationJobSnapshot>? JobUpdated;
+    public event Action<Guid, string, SimulatedTradeRecord>? TradeCompleted;
 
     public async Task<SimulationJobHandle> StartAsync(
         BacktestRequest request,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        await _initialization.WaitAsync(cancellationToken).ConfigureAwait(false);
         ArgumentNullException.ThrowIfNull(request);
         request.Validate();
 
@@ -85,6 +92,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         Directory.CreateDirectory(outputDirectory);
 
         string inputRequestId = BuildInputRequestId(request);
+        string configurationId = BuildSimulationConfigurationId(request, inputRequestId);
         var snapshot = new SimulationJobSnapshot
         {
             Id = id,
@@ -117,16 +125,22 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             }).ToArray(),
             OutputDirectory = outputDirectory,
             InputRequestId = inputRequestId,
+            SimulationConfigurationId = configurationId,
             Request = request with { AccessToken = null, AccountId = null },
             DataSourceStatus = "Queued"
         };
 
-        var running = new RunningJob(id, request, snapshot, outputDirectory);
+        var running = new RunningJob(
+            id,
+            request,
+            snapshot,
+            outputDirectory,
+            PersistAsync,
+            RaiseUpdated);
         if (!_running.TryAdd(id, running))
             throw new InvalidOperationException("Failed to register simulation job.");
 
-        await PersistAsync(snapshot, terminal: false, cancellationToken).ConfigureAwait(false);
-        RaiseUpdated(snapshot);
+        await running.PublishInitialAsync(cancellationToken).ConfigureAwait(false);
 
         await _queue.Writer.WriteAsync(id, cancellationToken).ConfigureAwait(false);
         return new SimulationJobHandle(id, SimulationJobStatus.Queued);
@@ -136,19 +150,24 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         Guid simulationId,
         CancellationToken cancellationToken = default)
     {
+        await _initialization.WaitAsync(cancellationToken).ConfigureAwait(false);
         if (_running.TryGetValue(simulationId, out RunningJob? job))
             return job.Snapshot;
 
         return await _repository.GetAsync(simulationId, cancellationToken).ConfigureAwait(false);
     }
 
-    public Task<IReadOnlyList<SimulationJobSnapshot>> ListAsync(
+    public async Task<IReadOnlyList<SimulationJobSnapshot>> ListAsync(
         int take = 50,
-        CancellationToken cancellationToken = default) =>
-        _repository.ListAsync(take, cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        await _initialization.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await _repository.ListAsync(take, cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task PauseAsync(Guid simulationId, CancellationToken cancellationToken = default)
     {
+        await _initialization.WaitAsync(cancellationToken).ConfigureAwait(false);
         if (!_running.TryGetValue(simulationId, out RunningJob? job))
         {
             SimulationJobSnapshot? existing = await _repository.GetAsync(simulationId, cancellationToken)
@@ -160,8 +179,19 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             throw new InvalidOperationException($"Simulation '{simulationId}' is not running in this process.");
         }
 
-        if (job.Snapshot.IsComplete)
+        SimulationJobSnapshot current = job.Snapshot;
+        if (current.IsComplete)
             throw new InvalidOperationException($"Simulation '{simulationId}' is already complete.");
+        if (current.Status is not (
+                SimulationJobStatus.PreparingData or
+                SimulationJobStatus.DownloadingData or
+                SimulationJobStatus.LoadingCache or
+                SimulationJobStatus.WarmingUp or
+                SimulationJobStatus.Running))
+        {
+            throw new InvalidOperationException(
+                $"Simulation '{simulationId}' cannot be paused while {current.Status}.");
+        }
 
         job.PauseGate.Pause();
         await UpdateStatusAsync(job, SimulationJobStatus.Paused, cancellationToken).ConfigureAwait(false);
@@ -169,6 +199,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
     public async Task ResumeAsync(Guid simulationId, CancellationToken cancellationToken = default)
     {
+        await _initialization.WaitAsync(cancellationToken).ConfigureAwait(false);
         if (!_running.TryGetValue(simulationId, out RunningJob? job))
         {
             SimulationJobSnapshot? existing = await _repository.GetAsync(simulationId, cancellationToken)
@@ -180,8 +211,14 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             throw new InvalidOperationException($"Simulation '{simulationId}' is not running in this process.");
         }
 
-        if (job.Snapshot.IsComplete)
+        SimulationJobSnapshot current = job.Snapshot;
+        if (current.IsComplete)
             throw new InvalidOperationException($"Simulation '{simulationId}' is already complete.");
+        if (current.Status != SimulationJobStatus.Paused)
+        {
+            throw new InvalidOperationException(
+                $"Simulation '{simulationId}' cannot be resumed while {current.Status}.");
+        }
 
         job.PauseGate.Resume();
         await UpdateStatusAsync(job, SimulationJobStatus.Running, cancellationToken).ConfigureAwait(false);
@@ -189,6 +226,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
     public async Task CancelAsync(Guid simulationId, CancellationToken cancellationToken = default)
     {
+        await _initialization.WaitAsync(cancellationToken).ConfigureAwait(false);
         if (!_running.TryGetValue(simulationId, out RunningJob? job))
         {
             SimulationJobSnapshot? existing = await _repository.GetAsync(simulationId, cancellationToken)
@@ -243,6 +281,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         if (_disposed)
             return;
         _disposed = true;
+        await _initialization.ConfigureAwait(false);
         _queue.Writer.TryComplete();
         _serviceLifetime.Cancel();
         try
@@ -257,6 +296,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         foreach (RunningJob job in _running.Values)
         {
             job.Cancellation.Cancel();
+            await job.StopActorAsync().ConfigureAwait(false);
             job.Cancellation.Dispose();
             job.Completion.TrySetCanceled();
         }
@@ -275,7 +315,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             {
                 ComparativeSimulationResult result = await ExecuteJobAsync(job, serviceToken)
                     .ConfigureAwait(false);
-                SimulationJobSnapshot completed = NextRevision(job.Snapshot) with
+                SimulationJobSnapshot completed = await job.ApplyAsync(current => NextRevision(current) with
                 {
                     Status = SimulationJobStatus.Completed,
                     CompletedAt = DateTimeOffset.UtcNow,
@@ -296,39 +336,31 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                         CompletedTrades = item.Result.Trades.Count,
                         ActiveSetups = 0,
                         NetProfit = item.Result.NetProfit,
-                        Status = item.IsComplete ? "Completed" : "Incomplete"
+                        Status = item.IsComplete ? "Completed" : "Incomplete",
+                        Performance = StrategyPerformanceSnapshot.FromTrades(item.Result.Trades)
                     }).ToArray()
-                };
-                job.Snapshot = completed;
-                await PersistAsync(completed, terminal: true, CancellationToken.None).ConfigureAwait(false);
-                RaiseUpdated(completed);
+                }, terminal: true, CancellationToken.None).ConfigureAwait(false);
                 job.Completion.TrySetResult(result);
             }
             catch (OperationCanceledException) when (job.Cancellation.IsCancellationRequested)
             {
-                SimulationJobSnapshot cancelled = NextRevision(job.Snapshot) with
+                SimulationJobSnapshot cancelled = await job.ApplyAsync(current => NextRevision(current) with
                 {
                     Status = SimulationJobStatus.Cancelled,
                     CompletedAt = DateTimeOffset.UtcNow,
                     IsComplete = true
-                };
-                job.Snapshot = cancelled;
-                await PersistAsync(cancelled, terminal: true, CancellationToken.None).ConfigureAwait(false);
-                RaiseUpdated(cancelled);
+                }, terminal: true, CancellationToken.None).ConfigureAwait(false);
                 job.Completion.TrySetCanceled(job.Cancellation.Token);
             }
             catch (Exception exception)
             {
-                SimulationJobSnapshot failed = NextRevision(job.Snapshot) with
+                SimulationJobSnapshot failed = await job.ApplyAsync(current => NextRevision(current) with
                 {
                     Status = SimulationJobStatus.Failed,
                     CompletedAt = DateTimeOffset.UtcNow,
                     IsComplete = true,
                     Error = exception.Message
-                };
-                job.Snapshot = failed;
-                await PersistAsync(failed, terminal: true, CancellationToken.None).ConfigureAwait(false);
-                RaiseUpdated(failed);
+                }, terminal: true, CancellationToken.None).ConfigureAwait(false);
                 job.Completion.TrySetException(exception);
             }
             finally
@@ -336,6 +368,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                 // Release in-memory resources; file-backed snapshot remains.
                 if (_running.TryRemove(id, out RunningJob? finished))
                 {
+                    await finished.StopActorAsync().ConfigureAwait(false);
                     finished.Cancellation.Dispose();
                 }
             }
@@ -358,6 +391,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         IReadOnlyList<(string Id, ITradingAgent Agent)> strategies =
             (_options.StrategyFactory ?? CreateDefaultStrategies)(request);
         IHistoricalCandleStream stream = (_options.StreamFactory ?? CreateDefaultStream)(request);
+        await using IAsyncDisposable? ownedStream = stream as IAsyncDisposable;
 
         string inputRequestId = job.Snapshot.InputRequestId ?? BuildInputRequestId(request);
         // SimulationId identifies the run; InputRequestId is deterministic for the data request.
@@ -397,63 +431,65 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         {
             progressStream.ProgressChanged += download =>
             {
-                HistoricalSourceProgress sourceProgress = new()
+                job.Post(current =>
                 {
-                    Phase = download.Status,
-                    FromCache = download.FromCache,
-                    CandlesRead = download.DownloadedCandles,
-                    PagesRead = 0,
-                    LatestCandle = download.LatestCandleOpenTime,
-                    EstimatedCandles = job.Snapshot.EstimatedBaseCandleCount,
-                    Percent = job.Snapshot.EstimatedBaseCandleCount is > 0
-                        ? Math.Round(100m * download.DownloadedCandles / job.Snapshot.EstimatedBaseCandleCount.Value, 2)
-                        : null
-                };
-                SimulationJobStatus mapped = download.Status switch
-                {
-                    "DownloadingData" => SimulationJobStatus.DownloadingData,
-                    "LoadingCache" or "CacheLoaded" => SimulationJobStatus.LoadingCache,
-                    _ => job.Snapshot.Status
-                };
-                SimulationJobSnapshot next = NextRevision(job.Snapshot) with
-                {
-                    Status = job.Snapshot.Status is SimulationJobStatus.Running or SimulationJobStatus.WarmingUp
-                        ? job.Snapshot.Status
-                        : mapped,
-                    SourceProgress = sourceProgress,
-                    DataSourceStatus = download.Status,
-                    StartedAt = job.Snapshot.StartedAt ?? DateTimeOffset.UtcNow
-                };
-                job.Snapshot = next;
-                _ = PersistAsync(next, terminal: false, CancellationToken.None);
-                RaiseUpdated(next);
+                    HistoricalSourceProgress sourceProgress = new()
+                    {
+                        Phase = download.Status,
+                        FromCache = download.FromCache,
+                        CandlesRead = download.DownloadedCandles,
+                        PagesRead = download.PagesRead,
+                        LatestCandle = download.LatestCandleOpenTime,
+                        EstimatedCandles = current.EstimatedBaseCandleCount,
+                        Percent = current.EstimatedBaseCandleCount is > 0
+                            ? Math.Round(100m * download.DownloadedCandles / current.EstimatedBaseCandleCount.Value, 2)
+                            : null
+                    };
+                    SimulationJobStatus mapped = download.Status switch
+                    {
+                        "DownloadingData" => SimulationJobStatus.DownloadingData,
+                        "LoadingCache" or "CacheLoaded" => SimulationJobStatus.LoadingCache,
+                        _ => current.Status
+                    };
+                    return NextRevision(current) with
+                    {
+                        Status = current.Status is SimulationJobStatus.Running or
+                            SimulationJobStatus.WarmingUp or
+                            SimulationJobStatus.Paused or
+                            SimulationJobStatus.Cancelling
+                            ? current.Status
+                            : mapped,
+                        SourceProgress = sourceProgress,
+                        DataSourceStatus = download.Status,
+                        StartedAt = current.StartedAt ?? DateTimeOffset.UtcNow
+                    };
+                });
             };
         }
 
-        var progress = new Progress<BacktestProgress>(update =>
+        var progress = new CallbackProgress<BacktestProgress>(update =>
         {
-            DateTimeOffset now = DateTimeOffset.UtcNow;
-            double seconds = Math.Max(0.001, (now - lastSample).TotalSeconds);
-            decimal cps = (decimal)((update.ProcessedBaseCandles - lastProcessed) / seconds);
-            lastProcessed = update.ProcessedBaseCandles;
-            lastSample = now;
-
-            SimulationJobSnapshot next = NextRevision(job.Snapshot) with
+            job.Post(current =>
             {
-                Status = update.Status,
-                CurrentMarketTime = update.CurrentMarketTime,
-                ProcessedBaseCandles = update.ProcessedBaseCandles,
-                EstimatedBaseCandleCount = update.EstimatedTotalBaseCandles,
-                ProgressPercent = update.ProgressPercent,
-                CandlesPerSecond = cps > 0 ? cps : job.Snapshot.CandlesPerSecond,
-                Strategies = update.Strategies,
-                StartedAt = job.Snapshot.StartedAt ?? now,
-                DataSourceStatus = update.DataSourceStatus ?? job.Snapshot.DataSourceStatus
-            };
-            job.Snapshot = next;
-            _ = PersistAsync(next, terminal: false, CancellationToken.None);
-            RaiseUpdated(next);
-            job.ExternalProgress?.Report(update with { CandlesPerSecond = next.CandlesPerSecond });
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+                double seconds = Math.Max(0.001, (now - lastSample).TotalSeconds);
+                decimal cps = (decimal)((update.ProcessedBaseCandles - lastProcessed) / seconds);
+                lastProcessed = update.ProcessedBaseCandles;
+                lastSample = now;
+                return NextRevision(current) with
+                {
+                    Status = update.Status,
+                    CurrentMarketTime = update.CurrentMarketTime,
+                    ProcessedBaseCandles = update.ProcessedBaseCandles,
+                    EstimatedBaseCandleCount = update.EstimatedTotalBaseCandles,
+                    ProgressPercent = update.ProgressPercent,
+                    CandlesPerSecond = cps > 0 ? cps : current.CandlesPerSecond,
+                    Strategies = update.Strategies,
+                    StartedAt = current.StartedAt ?? now,
+                    DataSourceStatus = update.DataSourceStatus ?? current.DataSourceStatus
+                };
+            }, next => job.ExternalProgress?.Report(
+                update with { CandlesPerSecond = next.CandlesPerSecond }));
         });
 
         var engineOptions = new StreamingComparativeEngineOptions
@@ -470,12 +506,15 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             SimulationOptions = simulationOptions,
             OutputDirectory = job.OutputDirectory,
             InputStreamId = inputStreamId,
+            SimulationConfigurationId = job.Snapshot.SimulationConfigurationId,
             Progress = progress,
             PauseGate = job.PauseGate,
             StatusChanged = async status =>
             {
                 await UpdateStatusAsync(job, status, cancellationToken).ConfigureAwait(false);
-            }
+            },
+            TradeCompleted = (strategyId, trade) =>
+                job.NotifyAsync(() => TradeCompleted?.Invoke(job.Id, strategyId, trade), cancellationToken)
         };
 
         var candleRequest = new HistoricalCandleRequest(
@@ -502,18 +541,15 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         SimulationJobStatus status,
         CancellationToken cancellationToken)
     {
-        SimulationJobSnapshot next = NextRevision(job.Snapshot) with
+        await job.ApplyAsync(current => NextRevision(current) with
         {
             Status = status,
-            StartedAt = job.Snapshot.StartedAt ??
+            StartedAt = current.StartedAt ??
                         (status is SimulationJobStatus.Running or SimulationJobStatus.WarmingUp or SimulationJobStatus.DownloadingData
                             ? DateTimeOffset.UtcNow
-                            : job.Snapshot.StartedAt),
+                            : current.StartedAt),
             DataSourceStatus = status.ToString()
-        };
-        job.Snapshot = next;
-        await PersistAsync(next, terminal: false, cancellationToken).ConfigureAwait(false);
-        RaiseUpdated(next);
+        }, terminal: false, cancellationToken).ConfigureAwait(false);
     }
 
     private Task PersistAsync(
@@ -533,11 +569,106 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         DateTimeOffset streamFrom = request.ResolveWarmupFrom();
         string source = request.Runtime.SourceKind.ToString();
         string exec = BarIntervalParser.Format(request.Runtime.ExecutionInterval);
-        string analysisBase = BarIntervalParser.Format(request.Runtime.AnalysisBaseInterval);
         return string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"{source}|{request.Environment}|{request.Instrument.Value}|exec:{exec}|abase:{analysisBase}|{streamFrom:O}|{request.To:O}|mid|v3");
+            $"{source}|{request.Environment}|{request.Instrument.Value}|exec:{exec}|{streamFrom:O}|{request.To:O}|mid|v3");
     }
+
+    private static string BuildSimulationConfigurationId(
+        BacktestRequest request,
+        string inputRequestId)
+    {
+        BacktestRuntimeOptions runtime = request.Runtime;
+        string canonical = string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"{inputRequestId}|analysis-base:{BarIntervalParser.Format(runtime.AnalysisBaseInterval)}|" +
+            $"analysis:{string.Join(',', runtime.AnalysisIntervals.Select(BarIntervalParser.Format))}|" +
+            $"strategy-tf:{BarIntervalParser.Format(runtime.StrategyTimeframes.TrendInterval)}," +
+            $"secondary={string.Join(';', runtime.StrategyTimeframes.SecondaryTrendIntervals.Select(BarIntervalParser.Format))}," +
+            $"setup={string.Join(';', runtime.StrategyTimeframes.SetupIntervals.Select(BarIntervalParser.Format))}," +
+            $"{BarIntervalParser.Format(runtime.StrategyTimeframes.ConfirmationInterval)}," +
+            $"additional-confirm={string.Join(';', runtime.StrategyTimeframes.AdditionalConfirmationIntervals.Select(BarIntervalParser.Format))}," +
+            $"{BarIntervalParser.Format(runtime.StrategyTimeframes.EntryInterval)}," +
+            $"minimums={runtime.StrategyTimeframes.MinimumSecondaryTrendAlignments}/" +
+            $"{runtime.StrategyTimeframes.MinimumSetupAlignments}/" +
+            $"{runtime.StrategyTimeframes.MinimumConfirmationAlignments}," +
+            $"veto={runtime.StrategyTimeframes.StrongOppositionVeto}|" +
+            $"strategies:{string.Join(',', request.Strategies)}|balance:{request.StartingBalance}|" +
+            $"base-currency:{request.BaseCurrency}|quantity:{request.Quantity}|" +
+            $"leverage:{request.Leverage}|commission:{request.CommissionRate}|" +
+            $"sizing:{runtime.PositionSizing.Mode},{runtime.PositionSizing.FixedQuantity}," +
+            $"{runtime.PositionSizing.RiskPercentOfEquity},{runtime.PositionSizing.FixedCashRisk}," +
+            $"{runtime.PositionSizing.MinimumQuantity},{runtime.PositionSizing.MaximumQuantity}," +
+            $"{runtime.PositionSizing.QuantityStep},{runtime.PositionSizing.MaximumAccountMarginUsagePercent}," +
+            $"{runtime.PositionSizing.MaximumSinglePositionMarginPercent}," +
+            $"{runtime.PositionSizing.Leverage},{runtime.PositionSizing.EstimatedRoundTripCostBasisPoints}|" +
+            $"spread:{request.SpreadBasisPoints}|slippage:{request.SlippageBasisPoints}|" +
+            $"rr:{request.MinimumRewardRisk}|ambiguity:{runtime.AmbiguousIntrabarPolicy}|" +
+            $"legacy-pm:{PositionManagementIdentity(runtime.LegacyPositionManagement)}|" +
+            $"improved-pm:{PositionManagementIdentity(runtime.ImprovedPositionManagement)}|" +
+            $"safety:{SafetyIdentity(runtime.SafetyOptions)}|v4");
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string PositionManagementIdentity(TradeManager.PositionManagementOptions options)
+    {
+        string scaleOut = string.Join(';', options.ScaleOutRules
+            .OrderBy(rule => rule.StageId, StringComparer.Ordinal)
+            .Select(rule => string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{rule.StageId}:{rule.ActivationR}:{rule.MinimumOpenProfitR}:" +
+                $"{rule.FractionOfInitialQuantity}:{rule.TriggerMode}")));
+        string profitFloors = string.Join(';', options.ProfitFloorRules
+            .OrderBy(rule => rule.ActivationR)
+            .Select(rule => string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{rule.ActivationR}:{rule.LockedProfitR}")));
+        string giveback = string.Join(';', options.MaximumGivebackRules
+            .OrderBy(rule => rule.ActivationR)
+            .Select(rule => string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{rule.ActivationR}:{rule.MaximumGivebackR}")));
+        return string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"{options.Mode},{(options.ManagementInterval is BarInterval interval ? BarIntervalParser.Format(interval) : "default")}," +
+            $"mechanical={options.EvaluateMechanicalProtectionOnEveryExecutionFrame}," +
+            $"fast={(options.FastStructureInterval is BarInterval fast ? BarIntervalParser.Format(fast) : "default")}," +
+            $"main={(options.MainStructureInterval is BarInterval main ? BarIntervalParser.Format(main) : "default")}," +
+            $"thesis={(options.ThesisInterval is BarInterval thesis ? BarIntervalParser.Format(thesis) : "default")}," +
+            $"{options.BreakEvenActivationR},{options.StructureTrailActivationR},{options.AtrBufferMultiplier}," +
+            $"{options.BreakEvenBufferAtr},{options.MinimumStopImprovementAtr},{options.MinimumStopImprovementTicks}," +
+            $"{options.MinimumAnalysisBarsBetweenAmendments},{options.ExitOnAdverseStructureBreak}," +
+            $"{options.PreserveBracketTarget},{options.IncludeEstimatedExitCostsAtBreakEven}," +
+            $"{options.EnableScaleOut},{options.MinimumRunnerFraction},{options.OpposingStructureProximityAtr}," +
+            $"{options.MinimumAnalysisBarsBetweenReductions},{scaleOut}," +
+            $"{options.EnableProfitFloor},{profitFloors},{options.EnableMaximumGiveback},{giveback}," +
+            $"{options.EnableStagnationReduction},{options.StagnationMinimumOpenProfitR}," +
+            $"{options.StagnationBars},{options.StagnationMinimumMfeAdvanceR},{options.StagnationReductionFraction}," +
+            $"{options.EnableStructuralDeteriorationReduction}," +
+            $"{options.StructuralDeteriorationReductionFraction}," +
+            $"{options.MaximumStructuralDeteriorationReductions}," +
+            $"{options.EnableMomentumDecayReduction},{options.MomentumDecayMinimumOpenProfitR}," +
+            $"{options.MomentumDecayReductionFraction},{options.MaximumMomentumDecayReductions}," +
+            $"{options.EnableVolatilityExhaustionReduction}," +
+            $"{options.VolatilityExhaustionMinimumOpenProfitR}," +
+            $"{options.VolatilityExhaustionReductionFraction}," +
+            $"{options.MaximumVolatilityExhaustionReductions}," +
+            $"{options.EnableRiskWindowReduction},{options.RiskWindowStartUtc}," +
+            $"{options.RiskWindowEndUtc},{options.RiskWindowMinimumOpenProfitR}," +
+            $"{options.RiskWindowReductionFraction}," +
+            $"{options.EnableExecutionCostStressReduction},{options.MaximumSpreadToAtrRatio}," +
+            $"{options.ExecutionCostStressMinimumOpenProfitR}," +
+            $"{options.ExecutionCostStressReductionFraction}");
+    }
+
+    private static string SafetyIdentity(RiskManager.Safety.TradingSafetyOptions options) =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"{options.MaximumDailyLoss},{options.MaximumWeeklyLoss}," +
+            $"{options.MaximumConsecutiveLosses},{options.DailyEquityProfitTarget}," +
+            $"{options.DailyEquityGivebackActivation},{options.MaximumDailyEquityGiveback}," +
+            $"{options.TripOnCriticalDataQualityIssue}");
 
     private static IHistoricalCandleStream CreateDefaultStream(BacktestRequest request)
     {
@@ -558,6 +689,22 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                 runtime.ExecutionInterval);
         }
 
+        if (runtime.SourceKind == HistoricalDataSourceKind.BinanceCandles)
+        {
+            var binance = BrokerClientFactory.CreateBinance(new BinanceOptions
+            {
+                Environment = BrokerEnvironment.Live,
+                ApiKey = Environment.GetEnvironmentVariable("BINANCE_API_KEY"),
+                SecretKey = Environment.GetEnvironmentVariable("BINANCE_SECRET_KEY"),
+                BaseAddress = ResolveBinanceMarketDataBaseAddress()
+            });
+            return new BinanceStreamingCandleSource(
+                binance.MarketData,
+                BrokerEnvironment.Live,
+                request.CacheDirectory,
+                binance);
+        }
+
         if (runtime.SourceKind != HistoricalDataSourceKind.OandaCandles &&
             runtime.SourceKind != HistoricalDataSourceKind.InlineTestData)
         {
@@ -572,12 +719,11 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             AccountId = accountId,
             AccessToken = accessToken
         });
-        // Note: the stream outlives a single method call; disposal is owned by the broker
-        // client factory lifetime for this process. Integration hosts should inject StreamFactory.
         return new OandaStreamingCandleSource(
             oanda.MarketData,
             request.Environment,
-            request.CacheDirectory);
+            request.CacheDirectory,
+            oanda);
     }
 
     private static IReadOnlyList<(string Id, ITradingAgent Agent)> CreateDefaultStrategies(
@@ -587,10 +733,20 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         var strategyOptions = new ProgressiveStrategyOptions
         {
             TrendInterval = tf.TrendInterval,
+            SecondaryTrendIntervals = tf.SecondaryTrendIntervals,
+            SetupIntervals = tf.SetupIntervals,
             ConfirmationInterval = tf.ConfirmationInterval,
+            AdditionalConfirmationIntervals = tf.AdditionalConfirmationIntervals,
             EntryInterval = tf.EntryInterval,
+            MinimumSecondaryTrendAlignments = tf.MinimumSecondaryTrendAlignments,
+            MinimumSetupAlignments = tf.MinimumSetupAlignments,
+            MinimumConfirmationAlignments = tf.MinimumConfirmationAlignments,
+            StrongOppositionVeto = tf.StrongOppositionVeto,
             Quantity = request.Quantity,
-            MinimumRewardRisk = request.MinimumRewardRisk
+            MinimumRewardRisk = request.MinimumRewardRisk,
+            PriceActionConfirmation = request.PriceActionConfirmation,
+            MinimumPriceActionConfidence = request.MinimumPriceActionConfidence,
+            RejectStrongOpposingPriceAction = request.RejectStrongOpposingPriceAction
         };
 
         var list = new List<(string, ITradingAgent)>();
@@ -629,6 +785,15 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         return "USD";
     }
 
+    private static Uri ResolveBinanceMarketDataBaseAddress()
+    {
+        string? configured = Environment.GetEnvironmentVariable("BINANCE_MARKET_DATA_BASE_URL");
+        return Uri.TryCreate(configured, UriKind.Absolute, out Uri? address) &&
+               address.Scheme == Uri.UriSchemeHttps
+            ? address
+            : new Uri("https://data-api.binance.vision/");
+    }
+
     private static (string AccountId, string AccessToken) ResolveOandaCredentials(BacktestRequest request)
     {
         string? accountId = request.AccountId
@@ -636,6 +801,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             ?? Environment.GetEnvironmentVariable("Oanda__AccountId");
         string? token = request.AccessToken
             ?? Environment.GetEnvironmentVariable("OANDA_ACCESS_TOKEN")
+            ?? Environment.GetEnvironmentVariable("OANDA_TOKEN")
             ?? Environment.GetEnvironmentVariable("Oanda__AccessToken");
         if (string.IsNullOrWhiteSpace(accountId) || string.IsNullOrWhiteSpace(token))
         {
@@ -649,20 +815,38 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
     private sealed class RunningJob
     {
+        private readonly Channel<JobStateMessage> _updates;
+        private readonly Func<SimulationJobSnapshot, bool, CancellationToken, Task> _persist;
+        private readonly Action<SimulationJobSnapshot> _raiseUpdated;
+        private readonly Task _actor;
+        private SimulationJobSnapshot _snapshot;
+        private Exception? _lastActorError;
+
         public RunningJob(
             Guid id,
             BacktestRequest request,
             SimulationJobSnapshot snapshot,
-            string outputDirectory)
+            string outputDirectory,
+            Func<SimulationJobSnapshot, bool, CancellationToken, Task> persist,
+            Action<SimulationJobSnapshot> raiseUpdated)
         {
             Id = id;
             Request = request;
-            Snapshot = snapshot;
+            _snapshot = snapshot;
             OutputDirectory = outputDirectory;
             Cancellation = new CancellationTokenSource();
             PauseGate = new AsyncPauseGate();
             Completion = new TaskCompletionSource<ComparativeSimulationResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            _persist = persist;
+            _raiseUpdated = raiseUpdated;
+            _updates = Channel.CreateUnbounded<JobStateMessage>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false
+            });
+            _actor = RunActorAsync();
         }
 
         public Guid Id { get; }
@@ -671,7 +855,123 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         public CancellationTokenSource Cancellation { get; }
         public AsyncPauseGate PauseGate { get; }
         public TaskCompletionSource<ComparativeSimulationResult> Completion { get; }
-        public SimulationJobSnapshot Snapshot { get; set; }
+        public SimulationJobSnapshot Snapshot => Volatile.Read(ref _snapshot);
+        public Exception? LastActorError => Volatile.Read(ref _lastActorError);
         public IProgress<BacktestProgress>? ExternalProgress { get; set; }
+
+        public Task<SimulationJobSnapshot> PublishInitialAsync(CancellationToken cancellationToken) =>
+            EnqueueAsync(new JobStateMessage
+            {
+                PublishCurrent = true,
+                Completion = NewCompletion()
+            }, cancellationToken);
+
+        public Task<SimulationJobSnapshot> ApplyAsync(
+            Func<SimulationJobSnapshot, SimulationJobSnapshot> transition,
+            bool terminal,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(transition);
+            return EnqueueAsync(new JobStateMessage
+            {
+                Transition = transition,
+                Terminal = terminal,
+                Completion = NewCompletion()
+            }, cancellationToken);
+        }
+
+        public void Post(
+            Func<SimulationJobSnapshot, SimulationJobSnapshot> transition,
+            Action<SimulationJobSnapshot>? afterApplied = null)
+        {
+            ArgumentNullException.ThrowIfNull(transition);
+            if (!_updates.Writer.TryWrite(new JobStateMessage
+                {
+                    Transition = transition,
+                    AfterApplied = afterApplied
+                }))
+            {
+                throw new InvalidOperationException($"The state actor for job '{Id}' is closed.");
+            }
+        }
+
+        public async Task NotifyAsync(Action notification, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(notification);
+            await EnqueueAsync(new JobStateMessage
+            {
+                Notification = notification,
+                Completion = NewCompletion()
+            }, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task StopActorAsync()
+        {
+            _updates.Writer.TryComplete();
+            await _actor.ConfigureAwait(false);
+        }
+
+        private async Task<SimulationJobSnapshot> EnqueueAsync(
+            JobStateMessage message,
+            CancellationToken cancellationToken)
+        {
+            await _updates.Writer.WriteAsync(message, cancellationToken).ConfigureAwait(false);
+            return await message.Completion!.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task RunActorAsync()
+        {
+            await foreach (JobStateMessage message in _updates.Reader.ReadAllAsync().ConfigureAwait(false))
+            {
+                try
+                {
+                    SimulationJobSnapshot current = Snapshot;
+                    SimulationJobSnapshot next = message.Transition is null
+                        ? current
+                        : message.Transition(current);
+                    if (message.Transition is not null && next.Revision <= current.Revision)
+                        next = next with { Revision = current.Revision + 1 };
+
+                    if (message.Transition is not null)
+                        Volatile.Write(ref _snapshot, next);
+
+                    if (message.Transition is not null || message.PublishCurrent)
+                    {
+                        _raiseUpdated(next);
+                        await _persist(next, message.Terminal, CancellationToken.None).ConfigureAwait(false);
+                    }
+
+                    message.Notification?.Invoke();
+                    message.AfterApplied?.Invoke(next);
+                    message.Completion?.TrySetResult(next);
+                }
+                catch (Exception exception)
+                {
+                    Volatile.Write(ref _lastActorError, exception);
+                    message.Completion?.TrySetException(exception);
+                    if (message.Completion is null)
+                        Cancellation.Cancel();
+                }
+            }
+        }
+
+        private static TaskCompletionSource<SimulationJobSnapshot> NewCompletion() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private sealed record JobStateMessage
+        {
+            public Func<SimulationJobSnapshot, SimulationJobSnapshot>? Transition { get; init; }
+            public Action<SimulationJobSnapshot>? AfterApplied { get; init; }
+            public Action? Notification { get; init; }
+            public bool PublishCurrent { get; init; }
+            public bool Terminal { get; init; }
+            public TaskCompletionSource<SimulationJobSnapshot>? Completion { get; init; }
+        }
+    }
+
+    private sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        private readonly Action<T> _callback = callback ?? throw new ArgumentNullException(nameof(callback));
+        public void Report(T value) => _callback(value);
     }
 }

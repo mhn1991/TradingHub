@@ -7,18 +7,361 @@ public enum TradeManagementAction
 {
     Hold,
     MoveStop,
+    ReducePosition,
+    ReduceAndMoveStop,
     Exit
 }
 
-public sealed record StructureBasedTradeManagementOptions
+public enum TradeManagementEvaluationScope
 {
+    Combined,
+    Mechanical,
+    FastStructure,
+    MainStructure,
+    Thesis
+}
+
+public enum TradeManagementExitReason
+{
+    None,
+    AdverseStructure,
+    ProfitFloorBreached,
+    MaximumGivebackBreached
+}
+
+public enum TrailingStopMode
+{
+    Disabled,
+    BreakEvenOnly,
+    StructureAtr
+}
+
+public enum PositionReductionReason
+{
+    ScaleOutProfit,
+    OpposingStructure,
+    Stagnation,
+    StructuralDeterioration,
+    MomentumDecay,
+    VolatilityExhaustion,
+    SessionRisk,
+    ExecutionCostStress,
+    RiskReduction
+}
+
+public enum ScaleOutTriggerMode
+{
+    RThreshold,
+    OpposingStructure,
+    RThresholdOrOpposingStructure
+}
+
+public sealed record ScaleOutRule
+{
+    public required string StageId { get; init; }
+    public decimal ActivationR { get; init; }
+    public decimal MinimumOpenProfitR { get; init; }
+    public decimal FractionOfInitialQuantity { get; init; }
+    public ScaleOutTriggerMode TriggerMode { get; init; } = ScaleOutTriggerMode.RThreshold;
+}
+
+public sealed record ProfitFloorRule
+{
+    public decimal ActivationR { get; init; }
+    public decimal LockedProfitR { get; init; }
+}
+
+public sealed record ProfitGivebackRule
+{
+    public decimal ActivationR { get; init; }
+    public decimal MaximumGivebackR { get; init; }
+}
+
+public record PositionManagementOptions
+{
+    public TrailingStopMode Mode { get; init; } = TrailingStopMode.StructureAtr;
+    /// <summary>Legacy alias for MainStructureInterval.</summary>
+    public BarInterval? ManagementInterval { get; init; }
+    public bool EvaluateMechanicalProtectionOnEveryExecutionFrame { get; init; } = true;
+    public BarInterval? FastStructureInterval { get; init; }
+    public BarInterval? MainStructureInterval { get; init; }
+    public BarInterval? ThesisInterval { get; init; }
     public decimal BreakEvenActivationR { get; init; } = 1m;
     public decimal StructureTrailActivationR { get; init; } = 1.5m;
     public decimal AtrBufferMultiplier { get; init; } = 0.25m;
     public decimal BreakEvenBufferAtr { get; init; } = 0.05m;
     public decimal MinimumStopImprovementAtr { get; init; } = 0.05m;
-    public bool ExitOnAdverseStructureBreak { get; init; } = true;
+    public decimal MinimumStopImprovementTicks { get; init; } = 1m;
+    public int MinimumAnalysisBarsBetweenAmendments { get; init; } = 1;
+    public bool ExitOnAdverseStructureBreak { get; init; }
+    public bool PreserveBracketTarget { get; init; } = true;
+    public bool IncludeEstimatedExitCostsAtBreakEven { get; init; } = true;
+
+    public bool EnableScaleOut { get; init; }
+    public IReadOnlyList<ScaleOutRule> ScaleOutRules { get; init; } = [];
+    public decimal MinimumRunnerFraction { get; init; } = 0.4m;
+    public decimal OpposingStructureProximityAtr { get; init; } = 0.35m;
+    public int MinimumAnalysisBarsBetweenReductions { get; init; } = 1;
+
+    public bool EnableProfitFloor { get; init; }
+    public IReadOnlyList<ProfitFloorRule> ProfitFloorRules { get; init; } = [];
+    public bool EnableMaximumGiveback { get; init; }
+    public IReadOnlyList<ProfitGivebackRule> MaximumGivebackRules { get; init; } = [];
+
+    public bool EnableStagnationReduction { get; init; }
+    public decimal StagnationMinimumOpenProfitR { get; init; } = 0.75m;
+    public int StagnationBars { get; init; } = 12;
+    public decimal StagnationMinimumMfeAdvanceR { get; init; } = 0.10m;
+    public decimal StagnationReductionFraction { get; init; } = 0.15m;
+
+    public bool EnableStructuralDeteriorationReduction { get; init; }
+    public decimal StructuralDeteriorationReductionFraction { get; init; } = 0.20m;
+    public int MaximumStructuralDeteriorationReductions { get; init; } = 1;
+
+    public bool EnableMomentumDecayReduction { get; init; }
+    public decimal MomentumDecayMinimumOpenProfitR { get; init; } = 1.25m;
+    public decimal MomentumDecayReductionFraction { get; init; } = 0.15m;
+    public int MaximumMomentumDecayReductions { get; init; } = 1;
+
+    public bool EnableVolatilityExhaustionReduction { get; init; }
+    public decimal VolatilityExhaustionMinimumOpenProfitR { get; init; } = 1.50m;
+    public decimal VolatilityExhaustionReductionFraction { get; init; } = 0.15m;
+    public int MaximumVolatilityExhaustionReductions { get; init; } = 1;
+
+    /// <summary>
+    /// Optional broker/session risk window in UTC. Both values must be supplied together.
+    /// The window may cross midnight (for example 21:45 through 22:15 UTC).
+    /// </summary>
+    public bool EnableRiskWindowReduction { get; init; }
+    public TimeOnly? RiskWindowStartUtc { get; init; }
+    public TimeOnly? RiskWindowEndUtc { get; init; }
+    public decimal RiskWindowMinimumOpenProfitR { get; init; } = 0.50m;
+    public decimal RiskWindowReductionFraction { get; init; } = 0.25m;
+
+    public bool EnableExecutionCostStressReduction { get; init; }
+    public decimal MaximumSpreadToAtrRatio { get; init; } = 0.20m;
+    public decimal ExecutionCostStressMinimumOpenProfitR { get; init; } = 0.50m;
+    public decimal ExecutionCostStressReductionFraction { get; init; } = 0.15m;
+
+    public static PositionManagementOptions LegacyDefaults { get; } = new()
+    {
+        Mode = TrailingStopMode.StructureAtr,
+        EvaluateMechanicalProtectionOnEveryExecutionFrame = true,
+        FastStructureInterval = BarInterval.Minutes(5),
+        MainStructureInterval = BarInterval.Minutes(15),
+        ThesisInterval = BarInterval.Hours(1),
+        BreakEvenActivationR = 1m,
+        StructureTrailActivationR = 1.5m,
+        AtrBufferMultiplier = 0.25m,
+        PreserveBracketTarget = false,
+        EnableScaleOut = true,
+        ScaleOutRules =
+        [
+            new ScaleOutRule
+            {
+                StageId = "scale-1r",
+                ActivationR = 1m,
+                MinimumOpenProfitR = 1m,
+                FractionOfInitialQuantity = 0.20m,
+                TriggerMode = ScaleOutTriggerMode.RThreshold
+            },
+            new ScaleOutRule
+            {
+                StageId = "scale-1.5r-or-structure",
+                ActivationR = 1.5m,
+                MinimumOpenProfitR = 1m,
+                FractionOfInitialQuantity = 0.20m,
+                TriggerMode = ScaleOutTriggerMode.RThresholdOrOpposingStructure
+            }
+        ],
+        MinimumRunnerFraction = 0.40m,
+        EnableProfitFloor = true,
+        ProfitFloorRules =
+        [
+            new ProfitFloorRule { ActivationR = 1m, LockedProfitR = 0m },
+            new ProfitFloorRule { ActivationR = 1.5m, LockedProfitR = 0.25m },
+            new ProfitFloorRule { ActivationR = 2m, LockedProfitR = 0.75m },
+            new ProfitFloorRule { ActivationR = 3m, LockedProfitR = 2m }
+        ],
+        EnableMaximumGiveback = true,
+        MaximumGivebackRules =
+        [
+            new ProfitGivebackRule { ActivationR = 2m, MaximumGivebackR = 0.75m },
+            new ProfitGivebackRule { ActivationR = 3m, MaximumGivebackR = 0.50m }
+        ],
+        EnableStagnationReduction = true,
+        StagnationMinimumOpenProfitR = 0.75m,
+        StagnationBars = 12,
+        StagnationReductionFraction = 0.15m,
+        EnableStructuralDeteriorationReduction = true,
+        StructuralDeteriorationReductionFraction = 0.20m,
+        MaximumStructuralDeteriorationReductions = 1,
+        EnableMomentumDecayReduction = true,
+        MomentumDecayMinimumOpenProfitR = 1.25m,
+        MomentumDecayReductionFraction = 0.15m,
+        EnableVolatilityExhaustionReduction = true,
+        VolatilityExhaustionMinimumOpenProfitR = 1.50m,
+        VolatilityExhaustionReductionFraction = 0.15m,
+        // Session/rollover timing is broker and DST specific, so it is deliberately opt-in.
+        EnableRiskWindowReduction = false,
+        EnableExecutionCostStressReduction = false
+    };
+
+    public static PositionManagementOptions ImprovedDefaults { get; } = new()
+    {
+        Mode = TrailingStopMode.StructureAtr,
+        EvaluateMechanicalProtectionOnEveryExecutionFrame = true,
+        FastStructureInterval = BarInterval.Minutes(5),
+        MainStructureInterval = BarInterval.Minutes(15),
+        ThesisInterval = BarInterval.Hours(1),
+        BreakEvenActivationR = 1m,
+        StructureTrailActivationR = 2m,
+        AtrBufferMultiplier = 0.25m,
+        PreserveBracketTarget = true,
+        EnableScaleOut = true,
+        ScaleOutRules =
+        [
+            new ScaleOutRule
+            {
+                StageId = "scale-1r",
+                ActivationR = 1m,
+                MinimumOpenProfitR = 1m,
+                FractionOfInitialQuantity = 0.15m,
+                TriggerMode = ScaleOutTriggerMode.RThreshold
+            },
+            new ScaleOutRule
+            {
+                StageId = "scale-2r-or-structure",
+                ActivationR = 2m,
+                MinimumOpenProfitR = 1.25m,
+                FractionOfInitialQuantity = 0.15m,
+                TriggerMode = ScaleOutTriggerMode.RThresholdOrOpposingStructure
+            }
+        ],
+        MinimumRunnerFraction = 0.50m,
+        EnableProfitFloor = true,
+        ProfitFloorRules =
+        [
+            new ProfitFloorRule { ActivationR = 1m, LockedProfitR = 0m },
+            new ProfitFloorRule { ActivationR = 2m, LockedProfitR = 0.50m },
+            new ProfitFloorRule { ActivationR = 3m, LockedProfitR = 1.50m }
+        ],
+        EnableMaximumGiveback = true,
+        MaximumGivebackRules =
+        [
+            new ProfitGivebackRule { ActivationR = 2.5m, MaximumGivebackR = 0.75m },
+            new ProfitGivebackRule { ActivationR = 3.5m, MaximumGivebackR = 0.50m }
+        ],
+        EnableStagnationReduction = true,
+        StagnationMinimumOpenProfitR = 1m,
+        StagnationBars = 16,
+        StagnationReductionFraction = 0.10m,
+        EnableStructuralDeteriorationReduction = true,
+        StructuralDeteriorationReductionFraction = 0.15m,
+        MaximumStructuralDeteriorationReductions = 1,
+        EnableMomentumDecayReduction = true,
+        MomentumDecayMinimumOpenProfitR = 1.50m,
+        MomentumDecayReductionFraction = 0.10m,
+        EnableVolatilityExhaustionReduction = true,
+        VolatilityExhaustionMinimumOpenProfitR = 2.00m,
+        VolatilityExhaustionReductionFraction = 0.10m,
+        EnableRiskWindowReduction = false,
+        EnableExecutionCostStressReduction = false
+    };
+
+    public void Validate()
+    {
+        if (!Enum.IsDefined(Mode) ||
+            (ManagementInterval is BarInterval interval && !interval.IsValid) ||
+            (FastStructureInterval is BarInterval fast && !fast.IsValid) ||
+            (MainStructureInterval is BarInterval main && !main.IsValid) ||
+            (ThesisInterval is BarInterval thesis && !thesis.IsValid) ||
+            BreakEvenActivationR <= 0m ||
+            StructureTrailActivationR < BreakEvenActivationR ||
+            AtrBufferMultiplier < 0m || BreakEvenBufferAtr < 0m ||
+            MinimumStopImprovementAtr < 0m || MinimumStopImprovementTicks < 0m ||
+            MinimumAnalysisBarsBetweenAmendments < 1 ||
+            MinimumRunnerFraction is < 0m or >= 1m ||
+            OpposingStructureProximityAtr < 0m ||
+            MinimumAnalysisBarsBetweenReductions < 1 ||
+            StagnationMinimumOpenProfitR < 0m || StagnationBars < 1 ||
+            StagnationMinimumMfeAdvanceR < 0m ||
+            StagnationReductionFraction is <= 0m or >= 1m ||
+            StructuralDeteriorationReductionFraction is <= 0m or >= 1m ||
+            MaximumStructuralDeteriorationReductions < 0 ||
+            MomentumDecayMinimumOpenProfitR < 0m ||
+            MomentumDecayReductionFraction is <= 0m or >= 1m ||
+            MaximumMomentumDecayReductions < 0 ||
+            VolatilityExhaustionMinimumOpenProfitR < 0m ||
+            VolatilityExhaustionReductionFraction is <= 0m or >= 1m ||
+            MaximumVolatilityExhaustionReductions < 0 ||
+            RiskWindowMinimumOpenProfitR < 0m ||
+            RiskWindowReductionFraction is <= 0m or >= 1m ||
+            MaximumSpreadToAtrRatio <= 0m ||
+            ExecutionCostStressMinimumOpenProfitR < 0m ||
+            ExecutionCostStressReductionFraction is <= 0m or >= 1m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(PositionManagementOptions));
+        }
+
+        if (FastStructureInterval is BarInterval orderedFast &&
+            MainStructureInterval is BarInterval orderedMain &&
+            BarIntervalParser.CompareDuration(orderedFast, orderedMain) > 0)
+        {
+            throw new ArgumentException("Fast structure interval cannot be coarser than main structure interval.");
+        }
+        if (MainStructureInterval is BarInterval orderedMainInterval &&
+            ThesisInterval is BarInterval orderedThesis &&
+            BarIntervalParser.CompareDuration(orderedMainInterval, orderedThesis) > 0)
+        {
+            throw new ArgumentException("Main structure interval cannot be coarser than thesis interval.");
+        }
+
+        if (EnableRiskWindowReduction &&
+            (RiskWindowStartUtc is null || RiskWindowEndUtc is null ||
+             RiskWindowStartUtc == RiskWindowEndUtc))
+        {
+            throw new ArgumentException(
+                "An enabled risk window requires distinct UTC start and end times.");
+        }
+
+        if (ScaleOutRules is null || ProfitFloorRules is null || MaximumGivebackRules is null)
+            throw new ArgumentException("Profit-protection rule collections cannot be null.");
+
+        if (ScaleOutRules.Any(rule =>
+                string.IsNullOrWhiteSpace(rule.StageId) ||
+                rule.ActivationR <= 0m ||
+                rule.MinimumOpenProfitR < 0m ||
+                rule.FractionOfInitialQuantity is <= 0m or >= 1m ||
+                !Enum.IsDefined(rule.TriggerMode)) ||
+            ScaleOutRules.Select(rule => rule.StageId)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count() != ScaleOutRules.Count)
+        {
+            throw new ArgumentException("Scale-out stages must be unique and contain valid thresholds and fractions.");
+        }
+
+        decimal maximumPlannedReduction = ScaleOutRules.Sum(rule => rule.FractionOfInitialQuantity);
+        if (maximumPlannedReduction > 1m - MinimumRunnerFraction + 0.00000001m)
+            throw new ArgumentException("Scale-out stages would reduce the position below the configured runner fraction.");
+
+        if (ProfitFloorRules.Any(rule =>
+                rule.ActivationR <= 0m || rule.LockedProfitR < 0m ||
+                rule.LockedProfitR >= rule.ActivationR))
+        {
+            throw new ArgumentException("Profit-floor rules must lock a non-negative R below their activation R.");
+        }
+
+        if (MaximumGivebackRules.Any(rule =>
+                rule.ActivationR <= 0m || rule.MaximumGivebackR <= 0m ||
+                rule.MaximumGivebackR >= rule.ActivationR))
+        {
+            throw new ArgumentException("Giveback rules must have a positive giveback smaller than their activation R.");
+        }
+    }
 }
+
+/// <summary>Compatibility name retained for callers from the original TradeManager API.</summary>
+public sealed record StructureBasedTradeManagementOptions : PositionManagementOptions;
 
 public sealed record ManagedTradeState
 {
@@ -27,138 +370,769 @@ public sealed record ManagedTradeState
     public required decimal EntryPrice { get; init; }
     public required decimal InitialStopPrice { get; init; }
     public required decimal CurrentStopPrice { get; init; }
+    /// <summary>Executable bid for longs or executable ask for shorts.</summary>
     public required decimal CurrentPrice { get; init; }
+    public decimal TakeProfitPrice { get; init; }
+    public decimal InitialQuantity { get; init; } = 1m;
+    public decimal CurrentQuantity { get; init; } = 1m;
+    public decimal MinimumQuantityIncrement { get; init; } = 1m;
+    public decimal MaximumFavourableExcursionR { get; init; }
+    public IReadOnlySet<string> CompletedReductionStageIds { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    public bool HasPendingReduction { get; init; }
+    public long? LastReductionSnapshotVersion { get; init; }
+    public int AnalysisBarsSinceLastReduction { get; init; } = int.MaxValue;
+    public int AnalysisBarsWithoutNewMfe { get; init; }
+    public bool StagnationReductionCompleted { get; init; }
+    public int StructuralDeteriorationReductionCount { get; init; }
+    public int MomentumDecayReductionCount { get; init; }
+    public int VolatilityExhaustionReductionCount { get; init; }
+    public bool VolatilityExpansionSeenSinceEntry { get; init; }
+    public bool RiskWindowReductionCompleted { get; init; }
+    public bool ExecutionCostStressReductionCompleted { get; init; }
+    public DateTimeOffset EvaluatedAt { get; init; }
+    public decimal MinimumPriceIncrement { get; init; } = 0.00001m;
+    public decimal EntryCommissionPrice { get; init; }
+    public decimal ExpectedExitCommissionPrice { get; init; }
+    public decimal SpreadPrice { get; init; }
+    public decimal SlippagePrice { get; init; }
+    public long? LastAmendmentSnapshotVersion { get; init; }
+    public int AnalysisBarsSinceLastAmendment { get; init; } = int.MaxValue;
+}
+
+public sealed record PositionReductionRecommendation
+{
+    public required string StageId { get; init; }
+    public required decimal QuantityToClose { get; init; }
+    public required decimal FractionOfInitialQuantity { get; init; }
+    public required decimal QuantityRemainingAfterReduction { get; init; }
+    public required PositionReductionReason Reason { get; init; }
+    public string? StructureSource { get; init; }
+    public decimal? StructuralLevel { get; init; }
+    public required string Explanation { get; init; }
 }
 
 public sealed record TradeManagementRecommendation
 {
     public required TradeManagementAction Action { get; init; }
     public decimal? ProposedStopPrice { get; init; }
+    public PositionReductionRecommendation? PositionReduction { get; init; }
+    public TradeManagementExitReason ExitReason { get; init; }
     public required decimal OpenProfitR { get; init; }
+    public decimal? LockedProfitR { get; init; }
+    public decimal? ProfitFloorR { get; init; }
+    public decimal? MaximumGivebackFloorR { get; init; }
+    public StopAmendmentReason AmendmentReason { get; init; } = StopAmendmentReason.Other;
+    public decimal? RawEntryPrice { get; init; }
+    public decimal? CostAdjustedBreakEvenPrice { get; init; }
+    public decimal? AtrBufferPrice { get; init; }
+    public decimal? Atr { get; init; }
+    public decimal? StructuralLevel { get; init; }
+    public string? StructureSource { get; init; }
+    public required string ReasonCode { get; init; }
     public required string Reason { get; init; }
 }
 
-/// <summary>
-/// Produces deterministic stop/exit recommendations from confirmed chart structure.
-/// It never moves a stop away from the entry-side risk boundary.
-/// </summary>
-public sealed class StructureBasedTradeManager
+public interface IStructureBasedTradeManager
 {
-    private readonly StructureBasedTradeManagementOptions _options;
+    TradeManagementRecommendation Evaluate(ManagedTradeState trade, AnalysisSnapshot analysis);
 
-    public StructureBasedTradeManager(StructureBasedTradeManagementOptions? options = null)
+    TradeManagementRecommendation Evaluate(
+        ManagedTradeState trade,
+        AnalysisSnapshot analysis,
+        TradeManagementEvaluationScope scope);
+}
+
+/// <summary>
+/// Produces deterministic recommendations only. Initial R never changes after a stop amendment.
+/// Structure selects meaningful levels; ATR adds volatility spacing; profit floors, MFE giveback,
+/// staged reductions and stagnation rules protect realised and unrealised profit.
+/// Broker mutation remains an ExecutionManager responsibility.
+/// </summary>
+public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
+{
+    private readonly PositionManagementOptions _options;
+
+    public StructureBasedTradeManager(PositionManagementOptions? options = null)
     {
-        _options = options ?? new StructureBasedTradeManagementOptions();
-        if (_options.BreakEvenActivationR <= 0m ||
-            _options.StructureTrailActivationR < _options.BreakEvenActivationR ||
-            _options.AtrBufferMultiplier < 0m ||
-            _options.BreakEvenBufferAtr < 0m ||
-            _options.MinimumStopImprovementAtr < 0m)
-        {
-            throw new ArgumentOutOfRangeException(nameof(options));
-        }
+        _options = options ?? new PositionManagementOptions();
+        _options.Validate();
     }
 
     public TradeManagementRecommendation Evaluate(
         ManagedTradeState trade,
-        AnalysisSnapshot analysis)
+        AnalysisSnapshot analysis) =>
+        Evaluate(trade, analysis, TradeManagementEvaluationScope.Combined);
+
+    public TradeManagementRecommendation Evaluate(
+        ManagedTradeState trade,
+        AnalysisSnapshot analysis,
+        TradeManagementEvaluationScope scope)
     {
         ArgumentNullException.ThrowIfNull(trade);
         ArgumentNullException.ThrowIfNull(analysis);
         Validate(trade, analysis);
+        if (!Enum.IsDefined(scope))
+            throw new ArgumentOutOfRangeException(nameof(scope));
+
+        // Structural evaluations also include mechanical protection so a structural
+        // action cannot suppress a tighter break-even/profit-floor/MFE candidate on the
+        // same execution frame. Pure thesis evaluation remains exit-only.
+        bool includeMechanical = scope is TradeManagementEvaluationScope.Combined or
+            TradeManagementEvaluationScope.Mechanical or
+            TradeManagementEvaluationScope.FastStructure or
+            TradeManagementEvaluationScope.MainStructure;
+        bool includeFastStructure = scope is TradeManagementEvaluationScope.Combined or
+            TradeManagementEvaluationScope.FastStructure;
+        bool includeMainStructure = scope is TradeManagementEvaluationScope.Combined or
+            TradeManagementEvaluationScope.MainStructure;
+        bool includeThesis = scope is TradeManagementEvaluationScope.Combined or
+            TradeManagementEvaluationScope.MainStructure or
+            TradeManagementEvaluationScope.Thesis;
 
         decimal initialRisk = Math.Abs(trade.EntryPrice - trade.InitialStopPrice);
         decimal favourableMove = trade.Side == OrderSide.Buy
             ? trade.CurrentPrice - trade.EntryPrice
             : trade.EntryPrice - trade.CurrentPrice;
         decimal openProfitR = favourableMove / initialRisk;
+        decimal maximumFavourableR = Math.Max(openProfitR, trade.MaximumFavourableExcursionR);
+        bool adverseBreak = IsAdverseBreak(trade.Side, analysis.MarketStructure.Break);
 
-        if (_options.ExitOnAdverseStructureBreak && IsAdverseBreak(trade.Side, analysis.MarketStructure.Break))
+        if (includeThesis && _options.ExitOnAdverseStructureBreak && adverseBreak)
         {
-            return new TradeManagementRecommendation
-            {
-                Action = TradeManagementAction.Exit,
-                OpenProfitR = openProfitR,
-                Reason = $"An adverse {analysis.MarketStructure.Break} market-structure break was confirmed."
-            };
+            return Exit(
+                openProfitR,
+                TradeManagementExitReason.AdverseStructure,
+                "AdverseStructureExit",
+                $"An adverse {analysis.MarketStructure.Break} market-structure break was confirmed.");
         }
 
-        decimal? atr = analysis.Indicators.Atr;
-        if (atr is not > 0m || openProfitR < _options.BreakEvenActivationR)
+        ProfitProtectionFloor? floor = includeMechanical
+            ? FindProfitProtectionFloor(maximumFavourableR)
+            : null;
+        if (floor is not null && openProfitR <= floor.LockedR)
         {
-            return Hold(openProfitR, atr is not > 0m
-                ? "ATR is not ready, so no dynamic stop can be calculated."
-                : $"Open profit {openProfitR:F2}R has not reached the break-even threshold.");
+            return Exit(
+                openProfitR,
+                floor.Source == ProfitProtectionSource.MaximumGiveback
+                    ? TradeManagementExitReason.MaximumGivebackBreached
+                    : TradeManagementExitReason.ProfitFloorBreached,
+                floor.Source == ProfitProtectionSource.MaximumGiveback
+                    ? "MaximumGivebackBreached"
+                    : "ProfitFloorBreached",
+                $"Open profit fell to {openProfitR:F2}R after protection had locked {floor.LockedR:F2}R.",
+                floor);
         }
 
-        decimal candidate = BreakEvenCandidate(trade, atr.Value);
-        string reason = $"Protecting the trade after it reached {openProfitR:F2}R.";
+        decimal? atr = analysis.Indicators.Atr is decimal atrValue && atrValue > 0m
+            ? atrValue
+            : null;
+        StopCandidate? stopCandidate = BuildStopCandidate(
+            trade,
+            analysis,
+            openProfitR,
+            maximumFavourableR,
+            atr,
+            initialRisk,
+            floor,
+            includeMechanical,
+            includeFastStructure || includeMainStructure);
+        PositionReductionRecommendation? reduction = FindPositionReduction(
+            trade,
+            analysis,
+            openProfitR,
+            atr,
+            adverseBreak,
+            scope);
 
-        if (openProfitR >= _options.StructureTrailActivationR)
+        bool moveStop = stopCandidate is not null;
+        TradeManagementAction action = (reduction, moveStop) switch
         {
-            decimal? structuralCandidate = FindStructuralCandidate(trade, analysis, atr.Value);
-            if (structuralCandidate is decimal structureStop &&
-                IsMoreProtective(trade.Side, structureStop, candidate))
-            {
-                candidate = structureStop;
-                reason = "Trailing behind the nearest confirmed swing/zone with an ATR buffer.";
-            }
+            (not null, true) => TradeManagementAction.ReduceAndMoveStop,
+            (not null, false) => TradeManagementAction.ReducePosition,
+            (null, true) => TradeManagementAction.MoveStop,
+            _ => TradeManagementAction.Hold
+        };
+
+        if (action == TradeManagementAction.Hold)
+        {
+            return Hold(
+                openProfitR,
+                ResolveHoldReasonCode(trade, analysis, openProfitR, atr),
+                ResolveHoldReason(trade, analysis, openProfitR, atr));
         }
 
-        decimal minimumImprovement = atr.Value * _options.MinimumStopImprovementAtr;
-        if (!ImprovesCurrentStop(trade, candidate, minimumImprovement) ||
-            !IsBeforeCurrentPrice(trade.Side, candidate, trade.CurrentPrice))
+        string reason = string.Join(" ", new[]
         {
-            return Hold(openProfitR, "No valid structure provides a safer stop improvement yet.");
-        }
+            reduction?.Explanation,
+            stopCandidate?.Explanation
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
 
         return new TradeManagementRecommendation
         {
-            Action = TradeManagementAction.MoveStop,
-            ProposedStopPrice = candidate,
+            Action = action,
+            ProposedStopPrice = stopCandidate?.Price,
+            PositionReduction = reduction,
             OpenProfitR = openProfitR,
+            LockedProfitR = stopCandidate?.LockedR,
+            ProfitFloorR = floor?.Source == ProfitProtectionSource.ProfitFloor ? floor.LockedR : null,
+            MaximumGivebackFloorR = floor?.Source == ProfitProtectionSource.MaximumGiveback ? floor.LockedR : null,
+            AmendmentReason = stopCandidate?.Reason ?? StopAmendmentReason.Other,
+            RawEntryPrice = trade.EntryPrice,
+            CostAdjustedBreakEvenPrice = stopCandidate?.CostAdjustedBreakEvenPrice,
+            AtrBufferPrice = stopCandidate?.AtrBuffer,
+            Atr = atr,
+            StructuralLevel = stopCandidate?.StructuralLevel ?? reduction?.StructuralLevel,
+            StructureSource = stopCandidate?.Source ?? reduction?.StructureSource,
+            ReasonCode = action.ToString(),
             Reason = reason
         };
     }
 
-    private decimal BreakEvenCandidate(ManagedTradeState trade, decimal atr)
+    private StopCandidate? BuildStopCandidate(
+        ManagedTradeState trade,
+        AnalysisSnapshot analysis,
+        decimal openProfitR,
+        decimal maximumFavourableR,
+        decimal? atr,
+        decimal initialRisk,
+        ProfitProtectionFloor? floor,
+        bool includeMechanical,
+        bool includeStructure)
     {
-        decimal buffer = atr * _options.BreakEvenBufferAtr;
-        return trade.Side == OrderSide.Buy
-            ? trade.EntryPrice + buffer
-            : trade.EntryPrice - buffer;
+        if (trade.LastAmendmentSnapshotVersion is long lastVersion && analysis.Version <= lastVersion)
+            return null;
+        if (trade.AnalysisBarsSinceLastAmendment < _options.MinimumAnalysisBarsBetweenAmendments)
+            return null;
+
+        var candidates = new List<StopCandidate>();
+        if (includeMechanical &&
+            _options.Mode != TrailingStopMode.Disabled &&
+            openProfitR >= _options.BreakEvenActivationR)
+        {
+            BreakEvenCalculation breakEven = CalculateBreakEven(trade, atr ?? 0m);
+            candidates.Add(new StopCandidate(
+                breakEven.FinalPrice,
+                ToLockedR(trade.Side, trade.EntryPrice, initialRisk, breakEven.FinalPrice),
+                StopAmendmentReason.BreakEven,
+                "Cost-adjusted break-even",
+                $"Break-even protection after {openProfitR:F2}R; raw entry {trade.EntryPrice}, " +
+                $"cost-adjusted {breakEven.CostAdjustedPrice}, ATR buffer {breakEven.AtrBuffer}.",
+                CostAdjustedBreakEvenPrice: breakEven.CostAdjustedPrice,
+                AtrBuffer: breakEven.AtrBuffer));
+        }
+
+        if (includeStructure &&
+            _options.Mode == TrailingStopMode.StructureAtr &&
+            openProfitR >= _options.StructureTrailActivationR &&
+            atr is > 0m &&
+            FindStructuralCandidate(trade, analysis, atr.Value) is StructuralCandidate structural)
+        {
+            candidates.Add(new StopCandidate(
+                structural.StopPrice,
+                ToLockedR(trade.Side, trade.EntryPrice, initialRisk, structural.StopPrice),
+                structural.Reason,
+                structural.Source,
+                $"Trailing behind {structural.Source} at {structural.Level} with " +
+                $"{_options.AtrBufferMultiplier:F2} ATR ({atr.Value * _options.AtrBufferMultiplier}) buffer.",
+                StructuralLevel: structural.Level));
+        }
+
+        if (includeMechanical && floor is not null)
+        {
+            decimal floorPrice = PriceForLockedR(trade.Side, trade.EntryPrice, initialRisk, floor.LockedR);
+            candidates.Add(new StopCandidate(
+                floorPrice,
+                floor.LockedR,
+                floor.Source == ProfitProtectionSource.MaximumGiveback
+                    ? StopAmendmentReason.MfeGiveback
+                    : StopAmendmentReason.ProfitFloor,
+                floor.Source == ProfitProtectionSource.MaximumGiveback
+                    ? "MFE maximum-giveback floor"
+                    : "Profit-floor ratchet",
+                floor.Explanation));
+        }
+
+        StopCandidate? candidate = trade.Side == OrderSide.Buy
+            ? candidates.OrderByDescending(item => item.Price).FirstOrDefault()
+            : candidates.OrderBy(item => item.Price).FirstOrDefault();
+        if (candidate is null)
+            return null;
+
+        decimal atrImprovement = atr is > 0m
+            ? atr.Value * _options.MinimumStopImprovementAtr
+            : 0m;
+        decimal minimumImprovement = Math.Max(
+            atrImprovement,
+            trade.MinimumPriceIncrement * _options.MinimumStopImprovementTicks);
+        return ImprovesCurrentStop(trade, candidate.Price, minimumImprovement) &&
+            IsBeforeCurrentPrice(trade.Side, candidate.Price, trade.CurrentPrice)
+            ? candidate
+            : null;
     }
 
-    private decimal? FindStructuralCandidate(
+    private PositionReductionRecommendation? FindPositionReduction(
+        ManagedTradeState trade,
+        AnalysisSnapshot analysis,
+        decimal openProfitR,
+        decimal? atr,
+        bool adverseBreak,
+        TradeManagementEvaluationScope scope)
+    {
+        if (trade.HasPendingReduction ||
+            trade.LastReductionSnapshotVersion == analysis.Version ||
+            trade.AnalysisBarsSinceLastReduction < _options.MinimumAnalysisBarsBetweenReductions)
+        {
+            return null;
+        }
+
+        bool mechanical = scope is TradeManagementEvaluationScope.Combined or
+            TradeManagementEvaluationScope.Mechanical or
+            TradeManagementEvaluationScope.FastStructure or
+            TradeManagementEvaluationScope.MainStructure;
+        bool fastStructure = scope is TradeManagementEvaluationScope.Combined or
+            TradeManagementEvaluationScope.FastStructure;
+        bool mainStructure = scope is TradeManagementEvaluationScope.Combined or
+            TradeManagementEvaluationScope.MainStructure;
+
+        if ((fastStructure || mainStructure) &&
+            _options.EnableStructuralDeteriorationReduction && adverseBreak &&
+            trade.StructuralDeteriorationReductionCount < _options.MaximumStructuralDeteriorationReductions)
+        {
+            return CreateReduction(
+                trade,
+                $"structure-deterioration-{trade.StructuralDeteriorationReductionCount + 1}",
+                _options.StructuralDeteriorationReductionFraction,
+                PositionReductionReason.StructuralDeterioration,
+                $"Reduced exposure after an adverse {analysis.MarketStructure.Break} structure break.");
+        }
+
+        if (mainStructure && _options.EnableMomentumDecayReduction &&
+            openProfitR >= _options.MomentumDecayMinimumOpenProfitR &&
+            trade.MomentumDecayReductionCount < _options.MaximumMomentumDecayReductions &&
+            HasConfirmedMomentumDecay(trade.Side, analysis, out string momentumExplanation))
+        {
+            return CreateReduction(
+                trade,
+                $"momentum-decay-{trade.MomentumDecayReductionCount + 1}",
+                _options.MomentumDecayReductionFraction,
+                PositionReductionReason.MomentumDecay,
+                momentumExplanation);
+        }
+
+        if (mainStructure && _options.EnableVolatilityExhaustionReduction &&
+            openProfitR >= _options.VolatilityExhaustionMinimumOpenProfitR &&
+            trade.VolatilityExhaustionReductionCount < _options.MaximumVolatilityExhaustionReductions &&
+            HasConfirmedVolatilityExhaustion(
+                trade.Side,
+                analysis,
+                trade.VolatilityExpansionSeenSinceEntry,
+                out string volatilityExplanation))
+        {
+            return CreateReduction(
+                trade,
+                $"volatility-exhaustion-{trade.VolatilityExhaustionReductionCount + 1}",
+                _options.VolatilityExhaustionReductionFraction,
+                PositionReductionReason.VolatilityExhaustion,
+                volatilityExplanation);
+        }
+
+        if (mechanical && _options.EnableRiskWindowReduction &&
+            !trade.RiskWindowReductionCompleted &&
+            openProfitR >= _options.RiskWindowMinimumOpenProfitR &&
+            IsInsideRiskWindow(trade.EvaluatedAt))
+        {
+            string start = _options.RiskWindowStartUtc!.Value.ToString("HH:mm");
+            string end = _options.RiskWindowEndUtc!.Value.ToString("HH:mm");
+            return CreateReduction(
+                trade,
+                $"risk-window-{trade.EvaluatedAt:yyyyMMdd}",
+                _options.RiskWindowReductionFraction,
+                PositionReductionReason.SessionRisk,
+                $"Reduced profitable exposure inside configured UTC risk window {start}-{end}.");
+        }
+
+        decimal? spreadToAtr = atr is > 0m ? trade.SpreadPrice / atr.Value : null;
+        if (mechanical && _options.EnableExecutionCostStressReduction &&
+            !trade.ExecutionCostStressReductionCompleted &&
+            openProfitR >= _options.ExecutionCostStressMinimumOpenProfitR &&
+            spreadToAtr is decimal ratio && ratio >= _options.MaximumSpreadToAtrRatio)
+        {
+            return CreateReduction(
+                trade,
+                "execution-cost-stress",
+                _options.ExecutionCostStressReductionFraction,
+                PositionReductionReason.ExecutionCostStress,
+                $"Spread/ATR ratio {ratio:F3} reached the configured stress threshold " +
+                $"{_options.MaximumSpreadToAtrRatio:F3}.");
+        }
+
+        if (_options.EnableScaleOut)
+        {
+            OpposingStructure? opposing = (fastStructure || mainStructure) && atr is > 0m
+                ? FindOpposingStructure(trade, analysis, atr.Value)
+                : null;
+            foreach (ScaleOutRule rule in _options.ScaleOutRules.OrderBy(item => item.ActivationR))
+            {
+                if (trade.CompletedReductionStageIds.Contains(rule.StageId))
+                    continue;
+
+                bool rTriggered = openProfitR >= rule.ActivationR;
+                bool structureTriggered = opposing is not null && openProfitR >= rule.MinimumOpenProfitR;
+                bool triggered = rule.TriggerMode switch
+                {
+                    ScaleOutTriggerMode.RThreshold => mechanical && rTriggered,
+                    ScaleOutTriggerMode.OpposingStructure =>
+                        (fastStructure || mainStructure) && structureTriggered,
+                    ScaleOutTriggerMode.RThresholdOrOpposingStructure =>
+                        (mechanical && rTriggered) ||
+                        ((fastStructure || mainStructure) && structureTriggered),
+                    _ => false
+                };
+                if (!triggered)
+                    continue;
+
+                PositionReductionReason reason = structureTriggered && !rTriggered
+                    ? PositionReductionReason.OpposingStructure
+                    : PositionReductionReason.ScaleOutProfit;
+                string explanation = structureTriggered && opposing is not null
+                    ? $"Scale-out stage '{rule.StageId}' reached {opposing.Source} at {opposing.Level}."
+                    : $"Scale-out stage '{rule.StageId}' activated at {openProfitR:F2}R.";
+                return CreateReduction(
+                    trade,
+                    rule.StageId,
+                    rule.FractionOfInitialQuantity,
+                    reason,
+                    explanation,
+                    opposing?.Source,
+                    opposing?.Level);
+            }
+        }
+
+        if (mainStructure && _options.EnableStagnationReduction &&
+            !trade.StagnationReductionCompleted &&
+            openProfitR >= _options.StagnationMinimumOpenProfitR &&
+            trade.AnalysisBarsWithoutNewMfe >= _options.StagnationBars)
+        {
+            return CreateReduction(
+                trade,
+                "stagnation-reduction",
+                _options.StagnationReductionFraction,
+                PositionReductionReason.Stagnation,
+                $"No meaningful new MFE was recorded for {trade.AnalysisBarsWithoutNewMfe} management bars.");
+        }
+
+        return null;
+    }
+
+    private bool IsInsideRiskWindow(DateTimeOffset timestamp)
+    {
+        if (_options.RiskWindowStartUtc is not TimeOnly start ||
+            _options.RiskWindowEndUtc is not TimeOnly end)
+        {
+            return false;
+        }
+
+        TimeOnly value = TimeOnly.FromDateTime(timestamp.UtcDateTime);
+        return start < end
+            ? value >= start && value < end
+            : value >= start || value < end;
+    }
+
+    private static bool HasConfirmedMomentumDecay(
+        OrderSide side,
+        AnalysisSnapshot analysis,
+        out string explanation)
+    {
+        RsiAnalysisSnapshot rsi = analysis.Indicators.RsiAnalysis;
+        AdxAnalysisSnapshot adx = analysis.Indicators.AdxAnalysis;
+        RsiRelationshipType relationship = rsi.LatestRelationship?.Type ?? RsiRelationshipType.None;
+        bool relationshipIsRecent = rsi.LatestRelationship?.AgeCandles is >= 0 and <= 5;
+        bool adverseDivergence = relationshipIsRecent && (side == OrderSide.Buy
+            ? relationship == RsiRelationshipType.RegularBearishDivergence
+            : relationship == RsiRelationshipType.RegularBullishDivergence);
+        bool adverseMomentum = side == OrderSide.Buy
+            ? rsi.MomentumDirection == MomentumDirection.Falling
+            : rsi.MomentumDirection == MomentumDirection.Rising;
+        bool weakeningStrength = adx.StrengthDirection == MomentumDirection.Falling ||
+            !adx.IsTrendStrengthening;
+        // PriceActionSnapshot.Events contains only events confirmed by the current
+        // completed analysis candle. ConfirmedSequence is a market-event sequence, whereas
+        // AnalysisSnapshot.Version is a per-timeframe version; comparing them is invalid.
+        bool adversePriceAction = analysis.PriceAction.Events.Any(item =>
+            item.ConfirmedAt <= analysis.AvailableAt &&
+            (side == OrderSide.Buy
+                ? item.Type is PriceActionEventType.BearishChangeOfCharacter or
+                    PriceActionEventType.BearishDisplacement or
+                    PriceActionEventType.BearishRejection
+                : item.Type is PriceActionEventType.BullishChangeOfCharacter or
+                    PriceActionEventType.BullishDisplacement or
+                    PriceActionEventType.BullishRejection));
+
+        int evidence = (adverseDivergence ? 1 : 0) +
+            (adverseMomentum ? 1 : 0) +
+            (weakeningStrength ? 1 : 0) +
+            (adversePriceAction ? 1 : 0);
+        if (evidence < 2 || (!adverseDivergence && !adversePriceAction))
+        {
+            explanation = string.Empty;
+            return false;
+        }
+
+        explanation = $"Reduced exposure after {evidence} momentum-decay confirmations: " +
+            $"divergence={adverseDivergence}, adverseMomentum={adverseMomentum}, " +
+            $"ADXWeakening={weakeningStrength}, adversePriceAction={adversePriceAction}.";
+        return true;
+    }
+
+    private static bool HasConfirmedVolatilityExhaustion(
+        OrderSide side,
+        AnalysisSnapshot analysis,
+        bool expansionSeenSinceEntry,
+        out string explanation)
+    {
+        BollingerAnalysisSnapshot bollinger = analysis.Indicators.BollingerAnalysis;
+        AdxAnalysisSnapshot adx = analysis.Indicators.AdxAnalysis;
+        decimal close = analysis.LatestCandle.Prices.Close;
+        decimal? middle = analysis.Indicators.BollingerMiddle;
+        bool lostMiddle = middle is decimal value &&
+            (side == OrderSide.Buy ? close < value : close > value);
+        bool volatilityContracting = bollinger.WidthDirection == VolatilityDirection.Contracting ||
+            bollinger.BandwidthChangePercent is < 0m;
+        bool priorExpansionContext = expansionSeenSinceEntry;
+        bool trendWeakening = adx.StrengthDirection == MomentumDirection.Falling ||
+            !adx.IsTrendStrengthening;
+        bool noFavourableBreak = side == OrderSide.Buy
+            ? analysis.MarketStructure.Break != MarketStructureBreak.Bullish
+            : analysis.MarketStructure.Break != MarketStructureBreak.Bearish;
+
+        if (!(lostMiddle && volatilityContracting && priorExpansionContext &&
+              trendWeakening && noFavourableBreak))
+        {
+            explanation = string.Empty;
+            return false;
+        }
+
+        explanation = "Reduced exposure after volatility expansion lost momentum: " +
+            "a prior expansion was observed after entry, Bollinger width contracted, " +
+            "price lost the middle band, ADX weakened, and no new favourable structure break was confirmed.";
+        return true;
+    }
+
+    private PositionReductionRecommendation? CreateReduction(
+        ManagedTradeState trade,
+        string stageId,
+        decimal fractionOfInitialQuantity,
+        PositionReductionReason reason,
+        string explanation,
+        string? structureSource = null,
+        decimal? structuralLevel = null)
+    {
+        decimal minimumRemaining = trade.InitialQuantity * _options.MinimumRunnerFraction;
+        decimal maximumReducible = Math.Max(0m, trade.CurrentQuantity - minimumRemaining);
+        decimal desired = trade.InitialQuantity * fractionOfInitialQuantity;
+        decimal quantity = Math.Min(desired, maximumReducible);
+        quantity = RoundDown(quantity, trade.MinimumQuantityIncrement);
+        if (quantity <= 0m || trade.CurrentQuantity - quantity <= 0m)
+            return null;
+
+        return new PositionReductionRecommendation
+        {
+            StageId = stageId,
+            QuantityToClose = quantity,
+            FractionOfInitialQuantity = quantity / trade.InitialQuantity,
+            QuantityRemainingAfterReduction = trade.CurrentQuantity - quantity,
+            Reason = reason,
+            StructureSource = structureSource,
+            StructuralLevel = structuralLevel,
+            Explanation = explanation
+        };
+    }
+
+    private ProfitProtectionFloor? FindProfitProtectionFloor(decimal maximumFavourableR)
+    {
+        var floors = new List<ProfitProtectionFloor>();
+        if (_options.EnableProfitFloor)
+        {
+            ProfitFloorRule? rule = _options.ProfitFloorRules
+                .Where(item => maximumFavourableR >= item.ActivationR)
+                .OrderByDescending(item => item.LockedProfitR)
+                .FirstOrDefault();
+            if (rule is not null)
+            {
+                floors.Add(new ProfitProtectionFloor(
+                    rule.LockedProfitR,
+                    ProfitProtectionSource.ProfitFloor,
+                    $"Profit-floor ratchet activated at {rule.ActivationR:F2}R and locks {rule.LockedProfitR:F2}R."));
+            }
+        }
+
+        if (_options.EnableMaximumGiveback)
+        {
+            ProfitGivebackRule? rule = _options.MaximumGivebackRules
+                .Where(item => maximumFavourableR >= item.ActivationR)
+                .OrderByDescending(item => item.ActivationR)
+                .FirstOrDefault();
+            if (rule is not null)
+            {
+                decimal locked = Math.Max(0m, maximumFavourableR - rule.MaximumGivebackR);
+                floors.Add(new ProfitProtectionFloor(
+                    locked,
+                    ProfitProtectionSource.MaximumGiveback,
+                    $"MFE reached {maximumFavourableR:F2}R; maximum giveback {rule.MaximumGivebackR:F2}R " +
+                    $"locks {locked:F2}R."));
+            }
+        }
+
+        return floors.OrderByDescending(item => item.LockedR).FirstOrDefault();
+    }
+
+    private OpposingStructure? FindOpposingStructure(
+        ManagedTradeState trade,
+        AnalysisSnapshot analysis,
+        decimal atr)
+    {
+        decimal proximity = atr * _options.OpposingStructureProximityAtr;
+        var candidates = new List<OpposingStructure>();
+        if (trade.Side == OrderSide.Buy)
+        {
+            candidates.AddRange(analysis.PriceZones
+                .Where(zone => zone.Type is PriceZoneType.Resistance or PriceZoneType.Mixed)
+                .Select(zone => new
+                {
+                    Zone = zone,
+                    Distance = trade.CurrentPrice < zone.LowerPrice
+                        ? zone.LowerPrice - trade.CurrentPrice
+                        : trade.CurrentPrice <= zone.UpperPrice ? 0m : decimal.MaxValue
+                })
+                .Where(item => item.Distance <= proximity)
+                .Select(item => new OpposingStructure(
+                    item.Zone.LowerPrice,
+                    $"{item.Zone.Type.ToString().ToLowerInvariant()} zone")));
+            candidates.AddRange(analysis.Channels
+                .Select(channel => new
+                {
+                    Level = channel.UpperLine.PriceAt(analysis.AvailableAt),
+                    channel.Confidence
+                })
+                .Where(item => item.Level >= trade.CurrentPrice && item.Level - trade.CurrentPrice <= proximity)
+                .Select(item => new OpposingStructure(item.Level, $"upper channel ({item.Confidence:F0}% confidence)")));
+            return candidates.OrderBy(item => item.Level).FirstOrDefault();
+        }
+
+        candidates.AddRange(analysis.PriceZones
+            .Where(zone => zone.Type is PriceZoneType.Support or PriceZoneType.Mixed)
+            .Select(zone => new
+            {
+                Zone = zone,
+                Distance = trade.CurrentPrice > zone.UpperPrice
+                    ? trade.CurrentPrice - zone.UpperPrice
+                    : trade.CurrentPrice >= zone.LowerPrice ? 0m : decimal.MaxValue
+            })
+            .Where(item => item.Distance <= proximity)
+            .Select(item => new OpposingStructure(
+                item.Zone.UpperPrice,
+                $"{item.Zone.Type.ToString().ToLowerInvariant()} zone")));
+        candidates.AddRange(analysis.Channels
+            .Select(channel => new
+            {
+                Level = channel.LowerLine.PriceAt(analysis.AvailableAt),
+                channel.Confidence
+            })
+            .Where(item => item.Level <= trade.CurrentPrice && trade.CurrentPrice - item.Level <= proximity)
+            .Select(item => new OpposingStructure(item.Level, $"lower channel ({item.Confidence:F0}% confidence)")));
+        return candidates.OrderByDescending(item => item.Level).FirstOrDefault();
+    }
+
+    private BreakEvenCalculation CalculateBreakEven(ManagedTradeState trade, decimal atr)
+    {
+        decimal costs = trade.EntryCommissionPrice + trade.SpreadPrice + trade.SlippagePrice;
+        if (_options.IncludeEstimatedExitCostsAtBreakEven)
+            costs += trade.ExpectedExitCommissionPrice + trade.SlippagePrice;
+        decimal costAdjusted = trade.Side == OrderSide.Buy
+            ? trade.EntryPrice + costs
+            : trade.EntryPrice - costs;
+        decimal atrBuffer = atr * _options.BreakEvenBufferAtr;
+        decimal final = trade.Side == OrderSide.Buy
+            ? costAdjusted + atrBuffer
+            : costAdjusted - atrBuffer;
+        return new BreakEvenCalculation(costAdjusted, atrBuffer, final);
+    }
+
+    private StructuralCandidate? FindStructuralCandidate(
         ManagedTradeState trade,
         AnalysisSnapshot analysis,
         decimal atr)
     {
         decimal buffer = atr * _options.AtrBufferMultiplier;
+        var candidates = new List<StructuralCandidate>();
         if (trade.Side == OrderSide.Buy)
         {
-            decimal[] levels = analysis.PriceZones
-                .Where(zone =>
-                    (zone.Type is PriceZoneType.Support or PriceZoneType.Mixed) &&
+            candidates.AddRange(analysis.Swings
+                .Where(swing => swing.Type == SwingType.Low &&
+                    swing.Price < trade.CurrentPrice &&
+                    swing.ConfirmedAt <= analysis.AvailableAt)
+                .Select(swing => new StructuralCandidate(
+                    swing.Price,
+                    swing.Price - buffer,
+                    StopAmendmentReason.StructureSwing,
+                    $"confirmed swing low ({swing.PivotTime:O})")));
+            candidates.AddRange(analysis.PriceZones
+                .Where(zone => zone.Type is PriceZoneType.Support or PriceZoneType.Mixed &&
                     zone.UpperPrice < trade.CurrentPrice)
-                .Select(zone => zone.LowerPrice)
-                .Concat(analysis.Swings
-                    .Where(swing => swing.Type == SwingType.Low && swing.Price < trade.CurrentPrice)
-                    .Select(swing => swing.Price))
-                .ToArray();
-            return levels.Length == 0 ? null : levels.Max() - buffer;
+                .Select(zone => new StructuralCandidate(
+                    zone.LowerPrice,
+                    zone.LowerPrice - buffer,
+                    StopAmendmentReason.StructureZone,
+                    $"confirmed {zone.Type.ToString().ToLowerInvariant()} zone")));
+            candidates.AddRange(analysis.Channels
+                .Select(channel => new
+                {
+                    Level = channel.LowerLine.PriceAt(analysis.AvailableAt),
+                    channel.Confidence
+                })
+                .Where(item => item.Level < trade.CurrentPrice)
+                .Select(item => new StructuralCandidate(
+                    item.Level,
+                    item.Level - buffer,
+                    StopAmendmentReason.StructureChannel,
+                    $"lower structural channel ({item.Confidence:F0}% confidence)")));
+            return candidates.OrderByDescending(candidate => candidate.Level)
+                .ThenBy(candidate => candidate.Reason)
+                .FirstOrDefault();
         }
 
-        decimal[] resistanceLevels = analysis.PriceZones
-            .Where(zone =>
-                (zone.Type is PriceZoneType.Resistance or PriceZoneType.Mixed) &&
+        candidates.AddRange(analysis.Swings
+            .Where(swing => swing.Type == SwingType.High &&
+                swing.Price > trade.CurrentPrice &&
+                swing.ConfirmedAt <= analysis.AvailableAt)
+            .Select(swing => new StructuralCandidate(
+                swing.Price,
+                swing.Price + buffer,
+                StopAmendmentReason.StructureSwing,
+                $"confirmed swing high ({swing.PivotTime:O})")));
+        candidates.AddRange(analysis.PriceZones
+            .Where(zone => zone.Type is PriceZoneType.Resistance or PriceZoneType.Mixed &&
                 zone.LowerPrice > trade.CurrentPrice)
-            .Select(zone => zone.UpperPrice)
-            .Concat(analysis.Swings
-                .Where(swing => swing.Type == SwingType.High && swing.Price > trade.CurrentPrice)
-                .Select(swing => swing.Price))
-            .ToArray();
-        return resistanceLevels.Length == 0 ? null : resistanceLevels.Min() + buffer;
+            .Select(zone => new StructuralCandidate(
+                zone.UpperPrice,
+                zone.UpperPrice + buffer,
+                StopAmendmentReason.StructureZone,
+                $"confirmed {zone.Type.ToString().ToLowerInvariant()} zone")));
+        candidates.AddRange(analysis.Channels
+            .Select(channel => new
+            {
+                Level = channel.UpperLine.PriceAt(analysis.AvailableAt),
+                channel.Confidence
+            })
+            .Where(item => item.Level > trade.CurrentPrice)
+            .Select(item => new StructuralCandidate(
+                item.Level,
+                item.Level + buffer,
+                StopAmendmentReason.StructureChannel,
+                $"upper structural channel ({item.Confidence:F0}% confidence)")));
+        return candidates.OrderBy(candidate => candidate.Level)
+            .ThenBy(candidate => candidate.Reason)
+            .FirstOrDefault();
     }
 
     private static bool IsAdverseBreak(OrderSide side, MarketStructureBreak structureBreak) =>
@@ -168,9 +1142,6 @@ public sealed class StructureBasedTradeManager
             OrderSide.Sell => structureBreak == MarketStructureBreak.Bullish,
             _ => false
         };
-
-    private static bool IsMoreProtective(OrderSide side, decimal candidate, decimal comparison) =>
-        side == OrderSide.Buy ? candidate > comparison : candidate < comparison;
 
     private static bool ImprovesCurrentStop(
         ManagedTradeState trade,
@@ -185,27 +1156,108 @@ public sealed class StructureBasedTradeManager
     private static bool IsBeforeCurrentPrice(OrderSide side, decimal stop, decimal currentPrice) =>
         side == OrderSide.Buy ? stop < currentPrice : stop > currentPrice;
 
-    private static TradeManagementRecommendation Hold(decimal openProfitR, string reason) => new()
+    private static decimal PriceForLockedR(
+        OrderSide side,
+        decimal entryPrice,
+        decimal initialRisk,
+        decimal lockedR) => side == OrderSide.Buy
+        ? entryPrice + initialRisk * lockedR
+        : entryPrice - initialRisk * lockedR;
+
+    private static decimal ToLockedR(
+        OrderSide side,
+        decimal entryPrice,
+        decimal initialRisk,
+        decimal price) => side == OrderSide.Buy
+        ? (price - entryPrice) / initialRisk
+        : (entryPrice - price) / initialRisk;
+
+    private static decimal RoundDown(decimal value, decimal increment)
+    {
+        if (increment <= 0m)
+            return value;
+        return Math.Floor(value / increment) * increment;
+    }
+
+    private static TradeManagementRecommendation Hold(
+        decimal openProfitR,
+        string reasonCode,
+        string reason) => new()
     {
         Action = TradeManagementAction.Hold,
         OpenProfitR = openProfitR,
+        ReasonCode = reasonCode,
         Reason = reason
     };
+
+    private static TradeManagementRecommendation Exit(
+        decimal openProfitR,
+        TradeManagementExitReason exitReason,
+        string reasonCode,
+        string reason,
+        ProfitProtectionFloor? floor = null) => new()
+    {
+        Action = TradeManagementAction.Exit,
+        ExitReason = exitReason,
+        OpenProfitR = openProfitR,
+        LockedProfitR = floor?.LockedR,
+        ProfitFloorR = floor?.Source == ProfitProtectionSource.ProfitFloor ? floor.LockedR : null,
+        MaximumGivebackFloorR = floor?.Source == ProfitProtectionSource.MaximumGiveback ? floor.LockedR : null,
+        ReasonCode = reasonCode,
+        Reason = reason
+    };
+
+    private string ResolveHoldReasonCode(
+        ManagedTradeState trade,
+        AnalysisSnapshot analysis,
+        decimal openProfitR,
+        decimal? atr)
+    {
+        if (trade.HasPendingReduction)
+            return "PositionReductionPending";
+        if (trade.LastAmendmentSnapshotVersion is long version && analysis.Version <= version)
+            return "SnapshotAlreadyProcessed";
+        if (_options.Mode != TrailingStopMode.Disabled && atr is null)
+            return "AtrNotReady";
+        if (openProfitR < _options.BreakEvenActivationR)
+            return "BelowBreakEvenThreshold";
+        return "NoValidProfitProtectionImprovement";
+    }
+
+    private string ResolveHoldReason(
+        ManagedTradeState trade,
+        AnalysisSnapshot analysis,
+        decimal openProfitR,
+        decimal? atr)
+    {
+        if (trade.HasPendingReduction)
+            return "A previously submitted position reduction is still pending.";
+        if (trade.LastAmendmentSnapshotVersion is long version && analysis.Version <= version)
+            return "This analysis snapshot has already produced an amendment.";
+        if (_options.Mode != TrailingStopMode.Disabled && atr is null)
+            return "ATR is not ready, so ATR-dependent stop movement cannot be calculated.";
+        if (openProfitR < _options.BreakEvenActivationR)
+            return $"Open profit {openProfitR:F2}R has not reached the break-even threshold.";
+        return "No rule produced a safe stop improvement or non-duplicate position reduction.";
+    }
 
     private static void Validate(ManagedTradeState trade, AnalysisSnapshot analysis)
     {
         if (trade.Instrument.IsEmpty || trade.Instrument != analysis.Instrument)
-        {
             throw new ArgumentException("Trade and analysis instruments must match.", nameof(trade));
-        }
-
-        if (trade.EntryPrice <= 0m ||
-            trade.InitialStopPrice <= 0m ||
-            trade.CurrentStopPrice <= 0m ||
-            trade.CurrentPrice <= 0m ||
-            trade.EntryPrice == trade.InitialStopPrice)
+        if (trade.EntryPrice <= 0m || trade.InitialStopPrice <= 0m ||
+            trade.CurrentStopPrice <= 0m || trade.CurrentPrice <= 0m ||
+            trade.MinimumPriceIncrement <= 0m || trade.EntryPrice == trade.InitialStopPrice ||
+            trade.EntryCommissionPrice < 0m || trade.ExpectedExitCommissionPrice < 0m ||
+            trade.SpreadPrice < 0m || trade.SlippagePrice < 0m ||
+            trade.InitialQuantity <= 0m || trade.CurrentQuantity <= 0m ||
+            trade.CurrentQuantity > trade.InitialQuantity || trade.MinimumQuantityIncrement <= 0m ||
+            trade.MaximumFavourableExcursionR < 0m ||
+            trade.AnalysisBarsWithoutNewMfe < 0 ||
+            trade.StructuralDeteriorationReductionCount < 0 ||
+            trade.CompletedReductionStageIds is null)
         {
-            throw new ArgumentException("Trade prices and initial risk must be positive.", nameof(trade));
+            throw new ArgumentException("Trade prices, costs, quantities, and initial risk are invalid.", nameof(trade));
         }
 
         bool initialStopValid = trade.Side switch
@@ -215,8 +1267,40 @@ public sealed class StructureBasedTradeManager
             _ => false
         };
         if (!initialStopValid)
-        {
             throw new ArgumentException("The initial stop is on the wrong side of entry.", nameof(trade));
-        }
     }
+
+    private enum ProfitProtectionSource
+    {
+        ProfitFloor,
+        MaximumGiveback
+    }
+
+    private sealed record ProfitProtectionFloor(
+        decimal LockedR,
+        ProfitProtectionSource Source,
+        string Explanation);
+
+    private sealed record BreakEvenCalculation(
+        decimal CostAdjustedPrice,
+        decimal AtrBuffer,
+        decimal FinalPrice);
+
+    private sealed record StructuralCandidate(
+        decimal Level,
+        decimal StopPrice,
+        StopAmendmentReason Reason,
+        string Source);
+
+    private sealed record OpposingStructure(decimal Level, string Source);
+
+    private sealed record StopCandidate(
+        decimal Price,
+        decimal LockedR,
+        StopAmendmentReason Reason,
+        string Source,
+        string Explanation,
+        decimal? StructuralLevel = null,
+        decimal? CostAdjustedBreakEvenPrice = null,
+        decimal? AtrBuffer = null);
 }

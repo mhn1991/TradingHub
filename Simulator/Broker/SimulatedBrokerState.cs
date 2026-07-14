@@ -10,6 +10,8 @@ internal sealed class SimulatedBrokerState
     private readonly object _sync = new();
     private readonly SimulationOptions _options;
     private readonly Dictionary<string, SimulatedOrder> _orders = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SimulatedAmendmentReceipt> _stopAmendments =
+        new(StringComparer.Ordinal);
     private readonly Dictionary<InstrumentKey, MutablePosition> _positions = [];
     private readonly Dictionary<ChartKey, RingBuffer<Candle>> _candles = [];
     private readonly Dictionary<InstrumentKey, Candle> _latestCandles = [];
@@ -157,6 +159,17 @@ internal sealed class SimulatedBrokerState
         }
     }
 
+    public bool TryGetQuoteToBaseCurrencyRate(
+        InstrumentKey instrument,
+        out decimal rate,
+        out string? error)
+    {
+        lock (_sync)
+        {
+            return TryGetQuoteToBaseCurrencyRateUnsafe(instrument, out rate, out error);
+        }
+    }
+
     public bool TryCancel(string brokerOrderId, out SimulatedOrder? cancelled)
     {
         lock (_sync)
@@ -170,6 +183,73 @@ internal sealed class SimulatedBrokerState
             order.Status = "CANCELLED";
             cancelled = order.Copy();
             return true;
+        }
+    }
+
+    public SimulatedProtectiveStopReplacement AmendProtectiveStop(
+        AmendProtectiveStopRequest request,
+        DateTimeOffset acceptedAt)
+    {
+        lock (_sync)
+        {
+            if (_stopAmendments.TryGetValue(request.ClientAmendmentId, out SimulatedAmendmentReceipt? receipt))
+            {
+                if (receipt.Request == request)
+                {
+                    return new SimulatedProtectiveStopReplacement(
+                        receipt.Result,
+                        null,
+                        null,
+                        IsReplay: true);
+                }
+
+                return RejectedReplacement(
+                    request,
+                    "The amendment ID was already used with a different payload.");
+            }
+
+            string? validationError = ValidateProtectiveStopAmendmentUnsafe(request);
+            if (validationError is not null)
+            {
+                SimulatedProtectiveStopReplacement rejected = RejectedReplacement(request, validationError);
+                _stopAmendments[request.ClientAmendmentId] =
+                    new SimulatedAmendmentReceipt(request, rejected.Result);
+                return rejected;
+            }
+
+            SimulatedOrder previous = _orders[request.ExistingStopOrderId!];
+            var replacementRequest = previous.Request with
+            {
+                StopPrice = request.NewStopPrice,
+                ClientOrderId = request.ClientAmendmentId
+            };
+            SimulatedOrder current = CreateOrderUnsafe(
+                replacementRequest,
+                acceptedAt,
+                previous.OcoGroupId);
+
+            // Both mutations occur under the same state lock. The target remains in
+            // the original OCO group and there is no observable unprotected state.
+            previous.Status = "REPLACED";
+            var result = new ProtectiveStopAmendmentResult
+            {
+                Status = ProtectiveStopAmendmentStatus.Replaced,
+                ClientAmendmentId = request.ClientAmendmentId,
+                PreviousStopOrderId = previous.BrokerOrderId,
+                CurrentStopOrderId = current.BrokerOrderId,
+                RequestedStopPrice = request.NewStopPrice,
+                AcceptedStopPrice = request.NewStopPrice,
+                AcceptedAt = acceptedAt,
+                EffectiveFromExecutionSequence = request.EffectiveFromExecutionSequence,
+                Certainty = ExecutionCertainty.Accepted
+            };
+            _stopAmendments[request.ClientAmendmentId] =
+                new SimulatedAmendmentReceipt(request, result);
+            return new SimulatedProtectiveStopReplacement(
+                result,
+                previous.Copy(),
+                current.Copy(),
+                IsReplay: false);
         }
     }
 
@@ -206,12 +286,14 @@ internal sealed class SimulatedBrokerState
             IOrderedEnumerable<SimulatedOrder> ordered =
                 _options.OcoFillPolicy == OcoFillPolicy.NearestToOpenFirst
                     ? open
-                        .OrderBy(order => order.SubmittedMarketSequence)
+                        .OrderBy(GetExecutionPhasePriority)
+                        .ThenBy(order => order.SubmittedMarketSequence)
                         .ThenBy(order => GetNearestDistance(order, candleOpen))
                         .ThenBy(order => GetOcoExecutionPriority(order, candleOpen))
                         .ThenBy(order => order.BrokerOrderId, StringComparer.Ordinal)
                     : open
-                        .OrderBy(order => order.SubmittedMarketSequence)
+                        .OrderBy(GetExecutionPhasePriority)
+                        .ThenBy(order => order.SubmittedMarketSequence)
                         .ThenBy(order => GetOcoExecutionPriority(order, candleOpen))
                         .ThenBy(order => order.BrokerOrderId, StringComparer.Ordinal);
 
@@ -256,6 +338,52 @@ internal sealed class SimulatedBrokerState
                 return false;
             }
 
+            decimal remainingQuantity = order.Request.Quantity.Value - order.FilledQuantity;
+            if (quantity <= 0m || quantity > remainingQuantity)
+            {
+                rejectionReason =
+                    $"Fill quantity {quantity} exceeds the order's remaining quantity {remainingQuantity}.";
+                order.Status = "REJECTED";
+                RejectedOrders++;
+                rejectedOrder = order.Copy();
+                return false;
+            }
+
+            bool reduceOnlyClamped = false;
+            if (order.Request.ReduceOnly)
+            {
+                if (!_positions.TryGetValue(order.Request.Instrument, out MutablePosition? reducible) ||
+                    reducible.SignedQuantity == 0m)
+                {
+                    rejectionReason = "A reduce-only order requires an open position.";
+                    order.Status = "REJECTED";
+                    RejectedOrders++;
+                    rejectedOrder = order.Copy();
+                    return false;
+                }
+
+                decimal signedRequest = order.Request.Side == OrderSide.Buy ? quantity : -quantity;
+                if (Math.Sign(signedRequest) == Math.Sign(reducible.SignedQuantity))
+                {
+                    rejectionReason = "A reduce-only order cannot increase the current position.";
+                    order.Status = "REJECTED";
+                    RejectedOrders++;
+                    rejectedOrder = order.Copy();
+                    return false;
+                }
+
+                decimal reducibleQuantity = Math.Abs(reducible.SignedQuantity);
+                if (quantity > reducibleQuantity)
+                {
+                    quantity = reducibleQuantity;
+                    reduceOnlyClamped = true;
+                    decimal quoteToBaseForCommission =
+                        GetQuoteToBaseCurrencyRateUnsafe(order.Request.Instrument);
+                    commission = Math.Abs(price * quantity) * quoteToBaseForCommission *
+                        _options.CommissionRate;
+                }
+            }
+
             rejectionReason = GetMarginRejectionReasonUnsafe(order, price, quantity, commission);
             if (rejectionReason is not null)
             {
@@ -266,6 +394,12 @@ internal sealed class SimulatedBrokerState
             }
 
             order.FilledQuantity += quantity;
+            if (reduceOnlyClamped)
+            {
+                // The unfilled remainder is cancelled by reduce-only semantics because the
+                // position is now flat; represent the broker order as terminal.
+                order.FilledQuantity = order.Request.Quantity.Value;
+            }
             order.Status = order.FilledQuantity >= order.Request.Quantity.Value
                 ? "FILLED"
                 : "PARTIALLY_FILLED";
@@ -286,6 +420,13 @@ internal sealed class SimulatedBrokerState
                 order.Request.Instrument,
                 signedFill,
                 price) * quoteToBaseRate;
+            BrokerPosition? positionAfterFill = GetPositionUnsafe(order.Request.Instrument);
+            ProtectiveOrderReconciliation reconciliation = reducesExistingPosition
+                ? ReconcileProtectiveOrdersUnsafe(
+                    order.Request.Instrument,
+                    positionAfterFill,
+                    order.BrokerOrderId)
+                : ProtectiveOrderReconciliation.Empty;
 
             CashBalance += realised - commission;
             TotalCommission += commission;
@@ -314,7 +455,10 @@ internal sealed class SimulatedBrokerState
                 order.Copy(),
                 realised,
                 commission,
-                GetPositionUnsafe(order.Request.Instrument));
+                positionAfterFill,
+                reconciliation.ResizedOrders,
+                reconciliation.CancelledOrders,
+                quantity);
             return true;
         }
     }
@@ -342,6 +486,17 @@ internal sealed class SimulatedBrokerState
             }
 
             return siblings.Select(order => order.Copy()).ToArray();
+        }
+    }
+
+    internal SimulatedOrder? GetSimulatedOrder(string brokerOrderId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(brokerOrderId);
+        lock (_sync)
+        {
+            return _orders.TryGetValue(brokerOrderId, out SimulatedOrder? order)
+                ? order.Copy()
+                : null;
         }
     }
 
@@ -426,6 +581,54 @@ internal sealed class SimulatedBrokerState
         {
             return _ledger.Snapshot();
         }
+    }
+
+    private ProtectiveOrderReconciliation ReconcileProtectiveOrdersUnsafe(
+        InstrumentKey instrument,
+        BrokerPosition? remainingPosition,
+        string filledOrderId)
+    {
+        var resized = new List<SimulatedOrder>();
+        var cancelled = new List<SimulatedOrder>();
+        SimulatedOrder[] protectiveOrders = _orders.Values
+            .Where(candidate =>
+                candidate.BrokerOrderId != filledOrderId &&
+                candidate.IsOpen &&
+                candidate.Request.Instrument == instrument &&
+                !string.IsNullOrWhiteSpace(candidate.OcoGroupId) &&
+                candidate.Request.Type is StandardOrderType.Stop or StandardOrderType.Limit)
+            .ToArray();
+
+        foreach (SimulatedOrder protective in protectiveOrders)
+        {
+            if (remainingPosition is null || protective.Request.Side == remainingPosition.Side)
+            {
+                protective.Status = "CANCELLED";
+                cancelled.Add(protective.Copy());
+                continue;
+            }
+
+            if (protective.FilledQuantity != 0m)
+            {
+                // Attached protective orders in this simulator are all-or-nothing. A partially
+                // filled protective order cannot be resized safely, so keep it unchanged and let
+                // the normal reconciliation/safety path surface the mismatch.
+                continue;
+            }
+
+            if (protective.Request.Quantity.Value == remainingPosition.Quantity)
+                continue;
+
+            protective.Request = protective.Request with
+            {
+                Quantity = new OrderQuantity(
+                    remainingPosition.Quantity,
+                    protective.Request.Quantity.Unit)
+            };
+            resized.Add(protective.Copy());
+        }
+
+        return new ProtectiveOrderReconciliation(resized, cancelled);
     }
 
     private decimal ApplyPositionFillUnsafe(
@@ -529,6 +732,9 @@ internal sealed class SimulatedBrokerState
         CreatedAt = order.SubmittedAt
     };
 
+    private static int GetExecutionPhasePriority(SimulatedOrder order) =>
+        order.Request.Type == StandardOrderType.Market ? 0 : 1;
+
     private int GetOcoExecutionPriority(SimulatedOrder order, decimal? candleOpen)
     {
         if (order.OcoGroupId is null)
@@ -630,6 +836,7 @@ internal sealed class SimulatedBrokerState
         "PARTIALLY_FILLED" => OrderStatus.PartiallyFilled,
         "FILLED" => OrderStatus.Filled,
         "CANCELLED" => OrderStatus.Cancelled,
+        "REPLACED" => OrderStatus.Replaced,
         "REJECTED" => OrderStatus.Rejected,
         "EXPIRED" => OrderStatus.Expired,
         _ => OrderStatus.Unknown
@@ -726,6 +933,80 @@ internal sealed class SimulatedBrokerState
         return order.Copy();
     }
 
+    private string? ValidateProtectiveStopAmendmentUnsafe(AmendProtectiveStopRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ClientAmendmentId) ||
+            string.IsNullOrWhiteSpace(request.PositionId) ||
+            request.Instrument.IsEmpty)
+        {
+            return "Amendment ID, position ID, and instrument are required.";
+        }
+        if (request.CurrentStopPrice <= 0m || request.NewStopPrice <= 0m ||
+            request.CurrentExecutablePrice <= 0m || request.PositionQuantity <= 0m ||
+            request.MinimumPriceIncrement <= 0m)
+        {
+            return "Stop, executable price, quantity, and price increment must be positive.";
+        }
+        if (request.NewStopPrice % request.MinimumPriceIncrement != 0m)
+            return "The proposed stop does not conform to the instrument price increment.";
+        if (request.EffectiveFromExecutionSequence <= MarketSequence)
+            return "A replacement stop must become effective after the current execution sequence.";
+        if (!_positions.TryGetValue(request.Instrument, out MutablePosition? position))
+            return "The position is already closed or does not exist.";
+
+        BrokerPosition actualPosition = ToBrokerPositionUnsafe(position);
+        if (!string.Equals(actualPosition.PositionId, request.PositionId, StringComparison.Ordinal))
+            return "The amendment position ID does not match the open position.";
+        if (actualPosition.Side != request.PositionSide)
+            return "The amendment position side does not match the open position.";
+        if (actualPosition.Quantity != request.PositionQuantity)
+            return "The amendment quantity does not match the open position.";
+        if (string.IsNullOrWhiteSpace(request.ExistingStopOrderId) ||
+            !_orders.TryGetValue(request.ExistingStopOrderId, out SimulatedOrder? stop) ||
+            !stop.IsOpen)
+        {
+            return "The existing protective-stop order ID is stale or inactive.";
+        }
+        if (stop.Request.Instrument != request.Instrument ||
+            stop.Request.Type != StandardOrderType.Stop ||
+            stop.Request.Quantity.Value != request.PositionQuantity ||
+            stop.Request.Side == request.PositionSide)
+        {
+            return "The existing order does not match the position's protective stop.";
+        }
+        if (stop.Request.StopPrice != request.CurrentStopPrice)
+            return "The current stop price is stale.";
+
+        bool riskReducing = request.PositionSide switch
+        {
+            OrderSide.Buy => request.NewStopPrice > request.CurrentStopPrice &&
+                request.NewStopPrice < request.CurrentExecutablePrice,
+            OrderSide.Sell => request.NewStopPrice < request.CurrentStopPrice &&
+                request.NewStopPrice > request.CurrentExecutablePrice,
+            _ => false
+        };
+        return riskReducing
+            ? null
+            : "The proposed stop is not a risk-reducing price on the valid side of the executable market.";
+    }
+
+    private static SimulatedProtectiveStopReplacement RejectedReplacement(
+        AmendProtectiveStopRequest request,
+        string reason) => new(
+        new ProtectiveStopAmendmentResult
+        {
+            Status = ProtectiveStopAmendmentStatus.Rejected,
+            ClientAmendmentId = request.ClientAmendmentId,
+            PreviousStopOrderId = request.ExistingStopOrderId,
+            CurrentStopOrderId = request.ExistingStopOrderId,
+            RequestedStopPrice = request.NewStopPrice,
+            RejectionReason = reason,
+            Certainty = ExecutionCertainty.Rejected
+        },
+        null,
+        null,
+        IsReplay: false);
+
     private sealed class MutablePosition(
         InstrumentKey instrument,
         decimal signedQuantity,
@@ -741,7 +1022,7 @@ internal sealed class SimulatedOrder
 {
     public required string BrokerOrderId { get; init; }
     public required string ClientOrderId { get; init; }
-    public required PlaceOrderRequest Request { get; init; }
+    public required PlaceOrderRequest Request { get; set; }
     public required DateTimeOffset SubmittedAt { get; init; }
     public required long SubmittedMarketSequence { get; set; }
     public required string Status { get; set; }
@@ -757,4 +1038,24 @@ internal sealed record FillApplicationResult(
     SimulatedOrder Order,
     decimal RealisedProfitLoss,
     decimal Commission,
-    BrokerPosition? Position);
+    BrokerPosition? Position,
+    IReadOnlyList<SimulatedOrder> ResizedProtectiveOrders,
+    IReadOnlyList<SimulatedOrder> CancelledProtectiveOrders,
+    decimal FilledQuantity);
+
+internal sealed record ProtectiveOrderReconciliation(
+    IReadOnlyList<SimulatedOrder> ResizedOrders,
+    IReadOnlyList<SimulatedOrder> CancelledOrders)
+{
+    public static ProtectiveOrderReconciliation Empty { get; } = new([], []);
+}
+
+internal sealed record SimulatedProtectiveStopReplacement(
+    ProtectiveStopAmendmentResult Result,
+    SimulatedOrder? PreviousOrder,
+    SimulatedOrder? CurrentOrder,
+    bool IsReplay);
+
+internal sealed record SimulatedAmendmentReceipt(
+    AmendProtectiveStopRequest Request,
+    ProtectiveStopAmendmentResult Result);

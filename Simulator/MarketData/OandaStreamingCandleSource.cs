@@ -12,20 +12,26 @@ namespace Simulator.MarketData;
 /// Pages OANDA history and streams candles to the simulator while writing the cache.
 /// First uncached run does not wait for the full year to download before yielding.
 /// </summary>
-public sealed class OandaStreamingCandleSource : IHistoricalCandleStreamWithProgress, IPagedHistoricalCandleSource
+public sealed class OandaStreamingCandleSource :
+    IHistoricalCandleStreamWithProgress,
+    IPagedHistoricalCandleSource,
+    IAsyncDisposable
 {
     private readonly IMarketDataClient _marketData;
     private readonly BrokerEnvironment _environment;
     private readonly string _cacheDirectory;
+    private readonly IAsyncDisposable? _owner;
 
     public OandaStreamingCandleSource(
         IMarketDataClient marketData,
         BrokerEnvironment environment = BrokerEnvironment.Demo,
-        string? cacheDirectory = null)
+        string? cacheDirectory = null,
+        IAsyncDisposable? owner = null)
     {
         _marketData = marketData ?? throw new ArgumentNullException(nameof(marketData));
         _environment = environment;
         _cacheDirectory = cacheDirectory ?? Path.Combine(".cache", "oanda");
+        _owner = owner;
     }
 
     public event Action<CandleDownloadProgress>? ProgressChanged;
@@ -79,64 +85,49 @@ public sealed class OandaStreamingCandleSource : IHistoricalCandleStreamWithProg
         int pages = 0;
         DateTimeOffset? first = null;
         DateTimeOffset? last = null;
-        var hasher = System.Security.Cryptography.IncrementalHash.CreateHash(
-            System.Security.Cryptography.HashAlgorithmName.SHA256);
-        Exception? failure = null;
 
-        await foreach (MarketCandle candle in DownloadPagesAsync(request, onPage: p => pages = p, cancellationToken)
-                           .ConfigureAwait(false))
+        try
         {
-            first ??= candle.OpenTime;
-            last = candle.OpenTime;
-            downloaded++;
-
-            if (cacheWriter is not null)
+            await foreach (MarketCandle candle in DownloadPagesAsync(
+                               request,
+                               onPage: page => pages = page,
+                               cancellationToken).ConfigureAwait(false))
             {
-                try
-                {
+                first ??= candle.OpenTime;
+                last = candle.OpenTime;
+                downloaded++;
+
+                if (cacheWriter is not null)
                     await cacheWriter.AppendAsync(candle, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception exception)
-                {
-                    failure = exception;
-                    break;
-                }
+
+                if (downloaded % 500 == 0)
+                    RaiseProgress(downloaded, candle.OpenTime, "DownloadingData", fromCache: false, pages);
+
+                // Yield immediately — do not wait for the complete requested range.
+                yield return candle;
             }
 
-            string fingerprint =
-                $"{candle.OpenTime:O}|{candle.Mid.Prices.Open}|{candle.Mid.Prices.High}|{candle.Mid.Prices.Low}|{candle.Mid.Prices.Close}";
-            hasher.AppendData(System.Text.Encoding.UTF8.GetBytes(fingerprint));
+            if (cacheWriter is not null && first is not null && last is not null)
+            {
+                await cacheWriter.CommitAsync(
+                    new StreamingCacheCommitMetadata(
+                        downloaded,
+                        first.Value,
+                        last.Value,
+                        cacheWriter.CurrentHashHex!,
+                        DateTimeOffset.UtcNow),
+                    cancellationToken).ConfigureAwait(false);
+            }
 
-            if (downloaded % 500 == 0)
-                RaiseProgress(downloaded, candle.OpenTime, "DownloadingData", fromCache: false, pages);
-
-            // Yield immediately — do not wait for full-year download.
-            yield return candle;
+            RaiseProgress(downloaded, last, "DownloadComplete", fromCache: false, pages);
         }
-
-        if (failure is not null)
+        finally
         {
+            // Dispose aborts an uncommitted temporary stream. This covers cancellation,
+            // source failure, and consumers that stop enumeration early.
             if (cacheWriter is not null)
-                await cacheWriter.AbortAsync(cancellationToken).ConfigureAwait(false);
-            await (cacheWriter?.DisposeAsync() ?? ValueTask.CompletedTask).ConfigureAwait(false);
-            throw failure;
+                await cacheWriter.DisposeAsync().ConfigureAwait(false);
         }
-
-        if (cacheWriter is not null && first is not null && last is not null)
-        {
-            string hash = Convert.ToHexString(hasher.GetHashAndReset()).ToLowerInvariant();
-            await cacheWriter.CommitAsync(
-                new StreamingCacheCommitMetadata(downloaded, first.Value, last.Value, hash, DateTimeOffset.UtcNow),
-                cancellationToken).ConfigureAwait(false);
-            await cacheWriter.DisposeAsync().ConfigureAwait(false);
-        }
-        else if (cacheWriter is not null)
-        {
-            await cacheWriter.AbortAsync(cancellationToken).ConfigureAwait(false);
-            await cacheWriter.DisposeAsync().ConfigureAwait(false);
-        }
-
-        RaiseProgress(downloaded, last, "DownloadComplete", fromCache: false, pages);
     }
 
     public async ValueTask<HistoricalCandlePage> ReadPageAsync(
@@ -194,7 +185,6 @@ public sealed class OandaStreamingCandleSource : IHistoricalCandleStreamWithProg
         int pageSize = Math.Clamp(request.PageSize, 1, 5_000);
         int pageNumber = 0;
         DateTimeOffset? lastEmittedOpen = null;
-        int consecutiveEmpty = 0;
 
         while (cursor < request.To)
         {
@@ -215,14 +205,13 @@ public sealed class OandaStreamingCandleSource : IHistoricalCandleStreamWithProg
 
             if (page.Candles.Count == 0)
             {
-                consecutiveEmpty++;
-                cursor = page.NextCursor ?? request.BaseInterval.AddTo(cursor);
-                if (consecutiveEmpty > 8 || cursor >= request.To)
-                    yield break;
+                DateTimeOffset next = page.NextCursor ?? request.BaseInterval.AddTo(cursor);
+                if (next <= cursor)
+                    throw new InvalidOperationException("OANDA paging did not advance after an empty page.");
+                cursor = next;
                 continue;
             }
 
-            consecutiveEmpty = 0;
             foreach (MarketCandle candle in page.Candles)
             {
                 if (lastEmittedOpen is not null && candle.OpenTime <= lastEmittedOpen)
@@ -286,5 +275,7 @@ public sealed class OandaStreamingCandleSource : IHistoricalCandleStreamWithProg
     }
 
     private void RaiseProgress(long count, DateTimeOffset? latest, string status, bool fromCache, int pages) =>
-        ProgressChanged?.Invoke(new CandleDownloadProgress(count, latest, status, fromCache));
+        ProgressChanged?.Invoke(new CandleDownloadProgress(count, latest, status, fromCache, pages));
+
+    public ValueTask DisposeAsync() => _owner?.DisposeAsync() ?? ValueTask.CompletedTask;
 }

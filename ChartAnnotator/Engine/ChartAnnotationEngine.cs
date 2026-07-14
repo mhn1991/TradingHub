@@ -3,6 +3,7 @@ using Brokers.Models;
 using ChartAnnotator.Collections;
 using ChartAnnotator.Indicators;
 using ChartAnnotator.Models;
+using ChartAnnotator.PriceAction;
 using ChartAnnotator.Structure;
 
 namespace ChartAnnotator.Engine;
@@ -12,7 +13,7 @@ namespace ChartAnnotator.Engine;
 /// For deterministic backtests, call ProcessAsync sequentially for each ChartKey.
 /// Different ChartKeys may be processed in parallel by a higher-level coordinator.
 /// </summary>
-public sealed class ChartAnnotationEngine : IChartAnnotator
+public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartAnnotator
 {
     private readonly ChartAnnotationOptions _options;
     private readonly SupportResistanceDetector _supportResistance;
@@ -101,6 +102,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         bool atrBecameReady = !atrWasReady && state.Atr.IsReady;
         state.Rsi.Update(candleEvent.Candle.Prices.Close);
         state.Bollinger.Update(candleEvent.Candle.Prices.Close);
+        state.Adx.Update(candleEvent.Candle);
         AtrAnalysisSnapshot atrAnalysis = state.Atr.IsReady
             ? state.AtrAnalysis.Update(state.Atr.Current, candleEvent.Candle.Prices.Close)
             : AtrAnalysisSnapshot.Empty;
@@ -152,13 +154,15 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             {
                 state.Zones = _supportResistance.Detect(
                     swingSnapshot,
-                    currentAtr);
+                    currentAtr,
+                    candleEvent.Candle.Prices.Close);
 
                 state.Trendlines = _trendlineDetector.Detect(
                     swingSnapshot,
                     currentAtr,
                     state.Version,
-                    MarketStructureDirection.Unknown);
+                    structure.Direction,
+                    closeTime);
             }
 
             // Channel validation is inexpensive because the trendline collection is
@@ -185,15 +189,26 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             BollingerLower = state.Bollinger.IsReady ? state.Bollinger.Lower : null,
             AtrAnalysis = atrAnalysis,
             RsiAnalysis = rsiAnalysis,
-            BollingerAnalysis = bollingerAnalysis
+            BollingerAnalysis = bollingerAnalysis,
+            AdxAnalysis = state.Adx.Snapshot()
         };
+        PriceActionSnapshot priceAction = state.PriceAction.Update(
+            candleEvent.Candle,
+            state.Candles.Snapshot(),
+            state.SwingSnapshot,
+            state.Zones,
+            structure,
+            previousStructure,
+            indicators,
+            candleEvent.Sequence);
         ConfidenceScore confidence = _confidenceScorer.Calculate(
             candleEvent.Candle,
             indicators,
             state.Zones,
             state.Trendlines,
             state.Channels,
-            structure);
+            structure,
+            priceAction);
         AnalysisSnapshot snapshot = new()
         {
             Instrument = key.Instrument,
@@ -207,6 +222,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             Trendlines = state.Trendlines,
             Channels = state.Channels,
             MarketStructure = structure,
+            PriceAction = priceAction,
             Confidence = confidence
         };
 
@@ -280,6 +296,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             options.IndicatorCapacity < 1 ||
             options.HeavyAnalysisEveryCandles < 1 ||
             options.AtrPeriod <= 1 ||
+            options.AdxPeriod <= 1 ||
             options.AtrAnalysisHistoryPeriod < 2 ||
             options.AtrAnalysisChangeLookback < 1 ||
             options.AtrAnalysisChangeLookback >= options.AtrAnalysisHistoryPeriod ||
@@ -309,6 +326,19 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         {
             throw new ArgumentOutOfRangeException(nameof(options));
         }
+
+        options.PriceAction.Validate();
+    }
+
+    public void FreezeCalibration(DateTimeOffset frozenAt)
+    {
+        foreach (AnalysisState state in _states.Values)
+        {
+            lock (state.SyncRoot)
+            {
+                state.PriceAction.FreezeCalibration(frozenAt);
+            }
+        }
     }
 
     private sealed class AnalysisState
@@ -319,6 +349,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             Swings = new RingBuffer<SwingPoint>(options.SwingCapacity);
             IndicatorHistory = new RingBuffer<IndicatorPoint>(options.IndicatorCapacity);
             Atr = new AtrState(options.AtrPeriod);
+            Adx = new AdxState(options.AdxPeriod);
             AtrAnalysis = new AtrAnalysisState(
                 options.AtrAnalysisHistoryPeriod,
                 options.AtrAnalysisChangeLookback,
@@ -346,6 +377,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
             SwingDetector = new SwingDetector(
                 options.SwingLeftBars,
                 options.SwingRightBars);
+            PriceAction = new PriceActionAnalyzer(options.PriceAction);
         }
 
         public object SyncRoot { get; } = new();
@@ -354,12 +386,14 @@ public sealed class ChartAnnotationEngine : IChartAnnotator
         public RingBuffer<IndicatorPoint> IndicatorHistory { get; }
         public IReadOnlyList<SwingPoint> SwingSnapshot { get; set; } = [];
         public AtrState Atr { get; }
+        public AdxState Adx { get; }
         public AtrAnalysisState AtrAnalysis { get; }
         public RsiState Rsi { get; }
         public RsiAnalysisState RsiAnalysis { get; }
         public BollingerState Bollinger { get; }
         public BollingerAnalysisState BollingerAnalysis { get; }
         public SwingDetector SwingDetector { get; }
+        public PriceActionAnalyzer PriceAction { get; }
         public IReadOnlyList<PriceZone> Zones { get; set; } = [];
         public IReadOnlyList<Trendline> Trendlines { get; set; } = [];
         public IReadOnlyList<PriceChannel> Channels { get; set; } = [];

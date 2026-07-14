@@ -885,6 +885,21 @@ input:focus-visible {
   filter: drop-shadow(0 0 5px currentColor);
 }
 
+.price-action-events polygon {
+  stroke: #111827;
+  stroke-width: 1.1;
+  opacity: 0.92;
+  vector-effect: non-scaling-stroke;
+}
+
+.price-action-bullish {
+  fill: #f3c969;
+}
+
+.price-action-bearish {
+  fill: #c084fc;
+}
+
 .last-price-line {
   stroke: #d6dfdb;
   stroke-width: 0.7;
@@ -1990,6 +2005,10 @@ input:focus-visible {
 .trade-profit { stroke: #36c98f; }
 .trade-loss { stroke: #ef6a73; }
 .trade-stop-line { stroke: #ef6a73; stroke-width: 1; stroke-dasharray: 3 4; opacity: .8; }
+.trade-stop-step { fill: none; stroke-width: 1.6; stroke-dasharray: none; }
+.trade-stop-accepted { fill: #f3c969; stroke: #111827; stroke-width: 1.2; }
+.trade-partial-exit { fill: #f59e0b; stroke: #111827; stroke-width: 1.2; }
+.trade-stop-rejected { fill: none; stroke: #fb7185; stroke-width: 2; }
 .trade-target-line { stroke: #36c98f; stroke-width: 1; stroke-dasharray: 3 4; opacity: .8; }
 .trade-signal { fill: #f3c969; stroke: #111827; stroke-width: 1.5; }
 .trade-entry.buy { fill: #36c98f; stroke: #0f172a; }

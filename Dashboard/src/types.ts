@@ -62,6 +62,7 @@ export interface AnnotationParameters {
 export interface ReplayTrade {
   strategyName: string
   setupId: string
+  positionId?: string | null
   side: string
   setupStartedAt: string
   confirmationAt: string | null
@@ -71,7 +72,13 @@ export interface ReplayTrade {
   signalPrice: number | null
   entryPrice: number | null
   exitPrice: number | null
+  averageExitPrice?: number | null
+  initialQuantity?: number
+  remainingQuantity?: number
   stopLossPrice: number | null
+  initialStopLossPrice?: number | null
+  currentStopLossPrice?: number | null
+  finalStopLossPrice?: number | null
   takeProfitPrice: number | null
   quantity: number
   expectedRewardRisk: number | null
@@ -81,9 +88,78 @@ export interface ReplayTrade {
   commission: number
   netProfitLoss: number
   rMultiple: number | null
+  stopAmendmentCount?: number
+  breakEvenActivatedAt?: string | null
+  structureTrailingActivatedAt?: string | null
+  maximumLockedInR?: number
+  positionReductionCount?: number
+  runnerActivatedAt?: string | null
+  profitFloorActivatedAt?: string | null
+  maximumGivebackProtectionActivatedAt?: string | null
+  completedReductionStageIds?: string[]
+  partialExits?: PartialExitRecord[]
+  stopAmendments?: StopAmendmentRecord[]
+  maximumFavourableExcursionPrice?: number | null
+  maximumFavourableExcursionAmount?: number
+  maximumFavourableExcursionR?: number | null
+  maximumFavourableExcursionAt?: string | null
+  maximumAdverseExcursionPrice?: number | null
+  maximumAdverseExcursionAmount?: number
+  maximumAdverseExcursionR?: number | null
+  maximumAdverseExcursionAt?: string | null
   exitReason: string
   setupReason: string
   exitReasonText: string | null
+}
+
+export interface PartialExitRecord {
+  exitId: string
+  stageId: string
+  requestedSequence: number
+  executionSequence: number
+  requestedAt: string
+  executedAt: string
+  quantityBefore: number
+  quantityClosed: number
+  quantityRemaining: number
+  exitPrice: number
+  grossProfitLoss: number
+  allocatedEntryCommission: number
+  exitCommission: number
+  netProfitLoss: number
+  realizedR: number
+  openProfitRBeforeExit: number
+  reason: string
+  structureSource?: string | null
+  structuralLevel?: number | null
+  explanation: string
+  brokerOrderId?: string | null
+}
+
+export interface StopAmendmentRecord {
+  requestedSequence: number
+  effectiveSequence?: number | null
+  requestedAt: string
+  acceptedAt?: string | null
+  previousStopPrice: number
+  proposedStopPrice: number
+  acceptedStopPrice?: number | null
+  openProfitR: number
+  lockedProfitR: number
+  reason: string
+  explanation: string
+  status: string
+  previousStopOrderId?: string | null
+  currentStopOrderId?: string | null
+  rejectionReason?: string | null
+  analysisInterval?: string | null
+  analysisSnapshotVersion?: number | null
+  atr?: number | null
+  structuralLevel?: number | null
+  structureSource?: string | null
+  rawEntryPrice?: number | null
+  costAdjustedBreakEvenPrice?: number | null
+  atrBufferPrice?: number | null
 }
 
 export interface ReplayPerformanceSummary {
@@ -114,6 +190,83 @@ export interface StrategyProgressSnapshot {
   netProfit: number
   status?: string | null
   lastError?: string | null
+  performance?: StrategyRuntimePerformance | null
+  openPositionManagement?: OpenPositionManagementSnapshot | null
+}
+
+export interface OpenPositionManagementSnapshot {
+  setupId: string
+  side: string
+  entryPrice: number
+  initialQuantity: number
+  remainingQuantity: number
+  positionReductionCount: number
+  reductionPending: boolean
+  initialStop: number
+  currentStop: number
+  target?: number | null
+  currentOpenR: number
+  maximumOpenR: number
+  lockedInR: number
+  trailingMode: string
+  lastManagementAction?: string | null
+  lastManagementReason?: string | null
+  nextManagementIntervalClose?: string | null
+}
+
+export interface StrategyRuntimePerformance {
+  grossProfit: number
+  netProfit: number
+  commissions: number
+  tradeCount: number
+  wins: number
+  losses: number
+  winRatePercent: number
+  profitFactor?: number | null
+  averageR?: number | null
+  medianR?: number | null
+  expectancy: number
+  maximumDrawdown: number
+  averageHoldingSeconds?: number | null
+  averageSetupSeconds?: number | null
+  averageMfe: number
+  averageMae: number
+  mfeCapturedPercent?: number | null
+  exitReasons: Record<string, number>
+  breakEvenActivations: number
+  structureTrailingActivations: number
+  acceptedStopAmendments: number
+  rejectedStopAmendments: number
+  unsupportedStopAmendments: number
+  averageAmendmentsPerTrade: number
+  averageMaximumLockedR: number
+  averageProfitGivebackFromMfeR: number
+  trailingStopExits: number
+  breakEvenExits: number
+  positionReductions: number
+  averagePartialExitsPerTrade: number
+  partialExitNetProfit: number
+  stagnationReductions: number
+  structuralDeteriorationReductions: number
+  momentumDecayReductions: number
+  volatilityExhaustionReductions: number
+  sessionRiskReductions: number
+  executionCostStressReductions: number
+  runnerActivations: number
+  profitFloorStopExits: number
+  mfeGivebackStopExits: number
+  profitFloorExits: number
+  maximumGivebackExits: number
+}
+
+export interface ImportedDatasetMetadata {
+  datasetId: string
+  fileName: string
+  interval: string
+  rows: number
+  sizeBytes: number
+  createdAt: string
+  expiresAt: string
 }
 
 export interface SimulationJobSnapshot {
@@ -138,6 +291,7 @@ export interface SimulationJobSnapshot {
   outputDirectory?: string | null
   inputStreamId?: string | null
   inputRequestId?: string | null
+  simulationConfigurationId?: string | null
   inputHash?: string | null
   dataSourceStatus?: string | null
   sourceProgress?: {
@@ -186,6 +340,7 @@ export interface ReplayFrame {
   trendlines: Trendline[]
   channels: PriceChannel[]
   marketStructure?: MarketStructureSnapshot
+  priceAction?: PriceActionSnapshot
   confidence: ConfidenceScore
   analysisMicroseconds: number
 }
@@ -262,6 +417,116 @@ export interface RsiAnalysisSnapshot {
   sampleCount: number
 }
 
+export type PriceActionDirection = 'Neutral' | 'Bullish' | 'Bearish'
+export type PriceActionEventType =
+  | 'BullishBreakOfStructure'
+  | 'BearishBreakOfStructure'
+  | 'BullishChangeOfCharacter'
+  | 'BearishChangeOfCharacter'
+  | 'BullishRetestHeld'
+  | 'BearishRetestHeld'
+  | 'BullishRejection'
+  | 'BearishRejection'
+  | 'BullishDisplacement'
+  | 'BearishDisplacement'
+  | 'SellSideLiquiditySweep'
+  | 'BuySideLiquiditySweep'
+  | 'BullishCompressionBreakout'
+  | 'BearishCompressionBreakout'
+  | 'BullishImpulse'
+  | 'BearishImpulse'
+  | 'BullishPullback'
+  | 'BearishPullback'
+
+export type BreakRetestState =
+  | 'None'
+  | 'AwaitingRetest'
+  | 'RetestInProgress'
+  | 'RetestHeld'
+  | 'RetestFailed'
+  | 'Expired'
+
+export interface PriceActionEvent {
+  eventId: string
+  type: PriceActionEventType
+  direction: PriceActionDirection
+  confirmedAt: string
+  confirmedSequence: number
+  referenceLevel: number | null
+  brokenLevel: number | null
+  retestLevel: number | null
+  atr: number | null
+  strength: number
+  confidence: number
+  sourceSwingKey: string | null
+  sourceZoneKey: string | null
+  reasonCode: string
+  explanation: string
+}
+
+export interface PriceActionDiagnostic {
+  candidate: string
+  accepted: boolean
+  reasonCode: string
+  explanation: string
+}
+
+export interface BreakRetestSnapshot {
+  setupId: string | null
+  direction: PriceActionDirection
+  state: BreakRetestState
+  brokenLevel: number | null
+  breakConfirmedAt: string | null
+  breakSequence: number | null
+  barsSinceBreak: number
+  closestRetestDistanceAtr: number | null
+  invalidReason: string | null
+}
+
+export interface PriceLegMetrics {
+  direction: PriceActionDirection
+  startedAt: string | null
+  endedAt: string | null
+  distance: number
+  distanceAtr: number | null
+  barCount: number
+  efficiencyRatio: number
+  retracementPercent: number
+}
+
+export interface PriceActionCalibrationSnapshot {
+  sampleCount: number
+  isReady: boolean
+  isFrozen: boolean
+  frozenAt: string | null
+  medianBodyAtr: number
+  medianRangeAtr: number
+  medianWickToBodyRatio: number
+  bodyAtr70: number
+  rangeAtr70: number
+  rangeAtr90: number
+}
+
+export interface PriceActionSnapshot {
+  bias: PriceActionDirection
+  bullishScore: number
+  bearishScore: number
+  events: PriceActionEvent[]
+  diagnostics: PriceActionDiagnostic[]
+  activeRetest: BreakRetestSnapshot
+  latestLeg: PriceLegMetrics | null
+  calibration: PriceActionCalibrationSnapshot
+}
+
+export interface AdxAnalysisSnapshot {
+  adx: number | null
+  plusDi: number | null
+  minusDi: number | null
+  strengthDirection: MomentumDirection
+  directionalBias: PriceActionDirection
+  isTrendStrengthening: boolean
+}
+
 export interface IndicatorSnapshot {
   atr: number | null
   rsi: number | null
@@ -271,6 +536,7 @@ export interface IndicatorSnapshot {
   atrAnalysis?: AtrAnalysisSnapshot
   rsiAnalysis?: RsiAnalysisSnapshot
   bollingerAnalysis?: BollingerAnalysisSnapshot
+  adxAnalysis?: AdxAnalysisSnapshot
 }
 
 export type SwingType = 'High' | 'Low'
@@ -352,6 +618,7 @@ export interface ConfidenceScore {
 }
 
 export interface ChartLayers {
+  priceAction?: boolean
   bollinger: boolean
   bollingerRegimes: boolean
   rsiRelationships: boolean
@@ -499,4 +766,29 @@ export interface OrderSubmission {
   status: string
   certainty: string
   rejectionReason: string | null
+}
+
+export interface SimulationInstrumentOption {
+  symbol: string
+  displayName: string
+  instrument: string
+  assetClass: string
+}
+
+export interface SimulationBrokerOption {
+  id: string
+  displayName: string
+  environment: string
+  sourceKind: string
+  isAvailable: boolean
+  requiresCredentials: boolean
+  description: string
+  supportedExecutionIntervals: string[]
+  instruments: SimulationInstrumentOption[]
+}
+
+export interface SimulationBrokerCatalog {
+  generatedAt: string
+  brokers: SimulationBrokerOption[]
+  warning?: string | null
 }

@@ -1,12 +1,20 @@
 import { onUnmounted, ref, watch, type Ref } from 'vue'
 import * as signalR from '@microsoft/signalr'
-import type { SimulationJobSnapshot } from '../types'
+import type { ReplayTrade, SimulationJobSnapshot } from '../types'
+
+export interface CompletedTradeEnvelope {
+  simulationId: string
+  strategyId: string
+  trade: ReplayTrade
+}
 
 export function useSimulationRealtime(simulationId: Ref<string | null>) {
   const snapshot = ref<SimulationJobSnapshot | null>(null)
   const connected = ref(false)
   const usingPolling = ref(false)
   const error = ref<string | null>(null)
+  const completedTradeRevision = ref(0)
+  const completedTrade = ref<CompletedTradeEnvelope | null>(null)
 
   let connection: signalR.HubConnection | null = null
   let pollTimer: number | undefined
@@ -36,6 +44,10 @@ export function useSimulationRealtime(simulationId: Ref<string | null>) {
     connection.on('SimulationProgressChanged', apply)
     connection.on('SimulationCompleted', apply)
     connection.on('SimulationFailed', apply)
+    connection.on('TradeCompleted', (payload: CompletedTradeEnvelope) => {
+      completedTrade.value = payload
+      completedTradeRevision.value++
+    })
 
     connection.onreconnected(async () => {
       connected.value = true
@@ -121,6 +133,8 @@ export function useSimulationRealtime(simulationId: Ref<string | null>) {
     connected,
     usingPolling,
     error,
+    completedTradeRevision,
+    completedTrade,
     refreshOnce,
   }
 }

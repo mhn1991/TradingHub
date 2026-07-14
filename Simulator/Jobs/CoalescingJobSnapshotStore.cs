@@ -24,6 +24,7 @@ public sealed class CoalescingJobSnapshotStore
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         JobWriteState state;
+        Exception? previousError;
         lock (_sync)
         {
             if (!_states.TryGetValue(snapshot.Id, out state!))
@@ -35,19 +36,35 @@ public sealed class CoalescingJobSnapshotStore
             if (snapshot.Revision < state.LastAcceptedRevision)
                 return;
 
+            previousError = state.LastError;
+            state.LastError = null;
             state.LastAcceptedRevision = snapshot.Revision;
             state.Pending = snapshot;
             state.Terminal |= terminal;
+            if (state.Worker is null || state.Worker.IsCompleted)
+            {
+                state.Worker = WorkerAsync(snapshot.Id);
+            }
         }
 
         if (terminal)
         {
             await FlushAsync(snapshot.Id, cancellationToken).ConfigureAwait(false);
+            Exception? terminalError = previousError ?? GetLastError(snapshot.Id);
+            if (terminalError is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Snapshot persistence for terminal job '{snapshot.Id}' observed an earlier failure.",
+                    terminalError);
+            }
             return;
         }
 
-        // Fire a single worker if idle; it will loop while newer pending exists.
-        _ = Task.Run(() => WorkerAsync(snapshot.Id), CancellationToken.None);
+        if (previousError is not null)
+            throw new InvalidOperationException(
+                $"The previous snapshot persistence operation for job '{snapshot.Id}' failed.",
+                previousError);
+
     }
 
     public async Task FlushAsync(Guid id, CancellationToken cancellationToken = default)
@@ -85,6 +102,15 @@ public sealed class CoalescingJobSnapshotStore
             {
                 await _repository.SaveAsync(pending, cancellationToken).ConfigureAwait(false);
             }
+            catch (Exception exception)
+            {
+                lock (_sync)
+                {
+                    if (_states.TryGetValue(id, out JobWriteState? state))
+                        state.LastError = exception;
+                }
+                throw;
+            }
             finally
             {
                 lock (_sync)
@@ -92,7 +118,7 @@ public sealed class CoalescingJobSnapshotStore
                     if (_states.TryGetValue(id, out JobWriteState? state))
                     {
                         state.Writing = false;
-                        if (state.Pending is null && state.Terminal)
+                        if (state.Pending is null && state.Terminal && state.LastError is null)
                             _states.Remove(id);
                     }
                 }
@@ -108,8 +134,15 @@ public sealed class CoalescingJobSnapshotStore
         }
         catch
         {
-            // Observed via next Get/terminal flush; non-terminal progress failures are non-fatal.
+            // The error is retained in JobWriteState by FlushAsync and observed by
+            // the next actor publication or terminal flush.
         }
+    }
+
+    private Exception? GetLastError(Guid id)
+    {
+        lock (_sync)
+            return _states.TryGetValue(id, out JobWriteState? state) ? state.LastError : null;
     }
 
     private sealed class JobWriteState
@@ -118,5 +151,7 @@ public sealed class CoalescingJobSnapshotStore
         public SimulationJobSnapshot? Pending;
         public bool Writing;
         public bool Terminal;
+        public Task? Worker;
+        public Exception? LastError;
     }
 }

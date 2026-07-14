@@ -57,9 +57,37 @@ public sealed record ReplayTrade(
     decimal Commission,
     decimal NetProfitLoss,
     decimal? RMultiple,
+    decimal? MaximumFavourableExcursionPrice,
+    decimal MaximumFavourableExcursionAmount,
+    decimal? MaximumFavourableExcursionR,
+    DateTimeOffset? MaximumFavourableExcursionAt,
+    decimal? MaximumAdverseExcursionPrice,
+    decimal MaximumAdverseExcursionAmount,
+    decimal? MaximumAdverseExcursionR,
+    DateTimeOffset? MaximumAdverseExcursionAt,
     string ExitReason,
     string SetupReason,
-    string? ExitReasonText);
+    string? ExitReasonText)
+{
+    public string? PositionId { get; init; }
+    public decimal? InitialStopLossPrice { get; init; }
+    public decimal? CurrentStopLossPrice { get; init; }
+    public decimal? FinalStopLossPrice { get; init; }
+    public int StopAmendmentCount { get; init; }
+    public DateTimeOffset? BreakEvenActivatedAt { get; init; }
+    public DateTimeOffset? StructureTrailingActivatedAt { get; init; }
+    public decimal MaximumLockedInR { get; init; }
+    public decimal? AverageExitPrice { get; init; }
+    public decimal InitialQuantity { get; init; }
+    public decimal RemainingQuantity { get; init; }
+    public int PositionReductionCount { get; init; }
+    public DateTimeOffset? RunnerActivatedAt { get; init; }
+    public DateTimeOffset? ProfitFloorActivatedAt { get; init; }
+    public DateTimeOffset? MaximumGivebackProtectionActivatedAt { get; init; }
+    public IReadOnlyList<string> CompletedReductionStageIds { get; init; } = [];
+    public IReadOnlyList<Simulator.Models.PartialExitRecord> PartialExits { get; init; } = [];
+    public IReadOnlyList<Simulator.Models.StopAmendmentRecord> StopAmendments { get; init; } = [];
+}
 
 public sealed record ReplayPerformanceSummary(
     int TradeCount,
@@ -108,6 +136,7 @@ public sealed record ReplayFrame(
     IReadOnlyList<Trendline> Trendlines,
     IReadOnlyList<PriceChannel> Channels,
     MarketStructureSnapshot MarketStructure,
+    PriceActionSnapshot PriceAction,
     ConfidenceScore Confidence,
     double AnalysisMicroseconds);
 
@@ -151,6 +180,7 @@ public static class ReplayContractMapper
             Trendlines: snapshot.Trendlines,
             Channels: snapshot.Channels,
             MarketStructure: snapshot.MarketStructure,
+            PriceAction: snapshot.PriceAction,
             Confidence: snapshot.Confidence,
             AnalysisMicroseconds: analysisMicroseconds);
     }
@@ -183,9 +213,37 @@ public static class SimulationReplayMapper
             trade.Commission,
             trade.NetProfitLoss,
             trade.RMultiple,
+            trade.MaximumFavourableExcursionPrice,
+            trade.MaximumFavourableExcursionAmount,
+            trade.MaximumFavourableExcursionR,
+            trade.MaximumFavourableExcursionAt,
+            trade.MaximumAdverseExcursionPrice,
+            trade.MaximumAdverseExcursionAmount,
+            trade.MaximumAdverseExcursionR,
+            trade.MaximumAdverseExcursionAt,
             trade.ExitReason.ToString(),
             trade.SetupReason,
-            trade.ExitReasonText)).ToArray();
+            trade.ExitReasonText)
+        {
+            PositionId = trade.PositionId,
+            InitialStopLossPrice = trade.InitialStopLossPrice,
+            CurrentStopLossPrice = trade.CurrentStopLossPrice,
+            FinalStopLossPrice = trade.FinalStopLossPrice,
+            StopAmendmentCount = trade.StopAmendmentCount,
+            BreakEvenActivatedAt = trade.BreakEvenActivatedAt,
+            StructureTrailingActivatedAt = trade.StructureTrailingActivatedAt,
+            MaximumLockedInR = trade.MaximumLockedInR,
+            AverageExitPrice = trade.AverageExitPrice,
+            InitialQuantity = trade.InitialQuantity,
+            RemainingQuantity = trade.RemainingQuantity,
+            PositionReductionCount = trade.PositionReductionCount,
+            RunnerActivatedAt = trade.RunnerActivatedAt,
+            ProfitFloorActivatedAt = trade.ProfitFloorActivatedAt,
+            MaximumGivebackProtectionActivatedAt = trade.MaximumGivebackProtectionActivatedAt,
+            CompletedReductionStageIds = trade.CompletedReductionStageIds,
+            PartialExits = trade.PartialExits,
+            StopAmendments = trade.StopAmendments
+        }).ToArray();
     }
 
     public static ReplayPerformanceSummary ToPerformance(Simulator.Models.SimulationResult result)

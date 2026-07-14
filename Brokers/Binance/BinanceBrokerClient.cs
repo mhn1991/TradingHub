@@ -13,8 +13,6 @@ public sealed class BinanceBrokerClient : IBrokerClient
     public BinanceBrokerClient(BinanceOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentException.ThrowIfNullOrWhiteSpace(options.ApiKey);
-        ArgumentException.ThrowIfNullOrWhiteSpace(options.SecretKey);
         ArgumentNullException.ThrowIfNull(options.InstrumentMappings);
         ArgumentNullException.ThrowIfNull(options.TimeProvider);
 
@@ -44,11 +42,13 @@ public sealed class BinanceBrokerClient : IBrokerClient
         var instrumentMappings = new Dictionary<string, string>(
             options.InstrumentMappings,
             StringComparer.OrdinalIgnoreCase);
-        var signer = new BinanceRequestSigner(
-            options.ApiKey,
-            options.SecretKey,
-            options.ReceiveWindow,
-            options.TimeProvider);
+        bool hasApiKey = !string.IsNullOrWhiteSpace(options.ApiKey);
+        bool hasSecretKey = !string.IsNullOrWhiteSpace(options.SecretKey);
+        if (hasApiKey != hasSecretKey)
+        {
+            throw new ArgumentException(
+                "Binance API key and secret must either both be supplied or both be omitted.");
+        }
 
         Descriptor = new BrokerDescriptor(BrokerKind.Binance, options.Environment, "spot");
         MarketData = new BinanceMarketDataClient(
@@ -56,22 +56,39 @@ public sealed class BinanceBrokerClient : IBrokerClient
             RestTransportId,
             options.TimeProvider,
             instrumentMappings);
-        Accounts = new BinanceAccountClient(_runtime.Gateway, RestTransportId, signer);
-        Orders = new BinanceOrderClient(
-            _runtime.Gateway,
-            RestTransportId,
-            signer,
-            instrumentMappings);
         Positions = new UnsupportedPositionClient(BrokerKind.Binance);
-        Costs = new BinanceCostClient(
-            _runtime.Gateway,
-            RestTransportId,
-            signer,
-            instrumentMappings);
+
+        if (hasApiKey)
+        {
+            var signer = new BinanceRequestSigner(
+                options.ApiKey!,
+                options.SecretKey!,
+                options.ReceiveWindow,
+                options.TimeProvider);
+            Accounts = new BinanceAccountClient(_runtime.Gateway, RestTransportId, signer);
+            Orders = new BinanceOrderClient(
+                _runtime.Gateway,
+                RestTransportId,
+                signer,
+                instrumentMappings);
+            Costs = new BinanceCostClient(
+                _runtime.Gateway,
+                RestTransportId,
+                signer,
+                instrumentMappings);
+            Capabilities = new BrokerCapabilities(true, true, true, false, true);
+        }
+        else
+        {
+            Accounts = new UnsupportedAccountClient(BrokerKind.Binance);
+            Orders = new UnsupportedOrderClient(BrokerKind.Binance);
+            Costs = new UnsupportedCostClient(BrokerKind.Binance);
+            Capabilities = new BrokerCapabilities(true, false, false, false, false);
+        }
     }
 
     public BrokerDescriptor Descriptor { get; }
-    public BrokerCapabilities Capabilities { get; } = new(true, true, true, false, true);
+    public BrokerCapabilities Capabilities { get; }
     public IMarketDataClient MarketData { get; }
     public IAccountClient Accounts { get; }
     public IOrderClient Orders { get; }

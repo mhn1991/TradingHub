@@ -16,21 +16,25 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
 {
     private readonly ExecutionOptions _options;
     private readonly IPreTradeRiskManager _riskManager;
+    private readonly IPositionSizer _positionSizer;
     private readonly IBrokerExecutionSafety _brokerSafety;
     private readonly ITradingSafetyController? _safety;
     private readonly ITradeJournal _journal;
     private readonly ConcurrentDictionary<string, Lazy<Task<OrderSubmission?>>> _inFlight = [];
+    private readonly ConcurrentDictionary<string, AmendmentOperation> _amendments = [];
 
     public ExecutionCoordinator(
         ExecutionOptions? options = null,
         IPreTradeRiskManager? riskManager = null,
         IBrokerExecutionSafety? brokerSafety = null,
         ITradingSafetyController? safety = null,
-        ITradeJournal? journal = null)
+        ITradeJournal? journal = null,
+        IPositionSizer? positionSizer = null)
     {
         _options = options ?? new ExecutionOptions();
         ValidateOptions(_options);
         _riskManager = riskManager ?? new PreTradeRiskManager();
+        _positionSizer = positionSizer ?? new PositionSizer();
         _brokerSafety = brokerSafety ?? new BrokerExecutionSafety();
         _safety = safety;
         _journal = journal ?? NullTradeJournal.Instance;
@@ -78,6 +82,47 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
         return AwaitAndReleaseAsync(clientOrderId, operation, cancellationToken);
     }
 
+    public Task<ProtectiveStopAmendmentResult> AmendProtectiveStopAsync(
+        ProtectiveStopAmendmentCommand command,
+        ITradingBrokerClient broker,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(broker);
+        ValidateAmendmentCommand(command);
+
+        decimal normalized = NormalizeRiskReducingPrice(
+            command.ProposedStopPrice,
+            command.MinimumPriceIncrement,
+            command.PositionSide);
+        string clientAmendmentId = string.IsNullOrWhiteSpace(command.ClientAmendmentId)
+            ? CreateAmendmentId(command, normalized)
+            : command.ClientAmendmentId;
+        string fingerprint = CreateAmendmentFingerprint(command, normalized);
+
+        var candidate = new AmendmentOperation(
+            fingerprint,
+            new Lazy<Task<ProtectiveStopAmendmentResult>>(
+                () => AmendProtectiveStopCoreAsync(
+                    command,
+                    normalized,
+                    clientAmendmentId,
+                    broker,
+                    cancellationToken),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+        AmendmentOperation operation = _amendments.GetOrAdd(clientAmendmentId, candidate);
+        if (!string.Equals(operation.Fingerprint, fingerprint, StringComparison.Ordinal))
+        {
+            return Task.FromResult(RejectAmendment(
+                command,
+                clientAmendmentId,
+                normalized,
+                "The amendment ID was already used with a different payload."));
+        }
+
+        return operation.Task.Value.WaitAsync(cancellationToken);
+    }
+
     private async Task<OrderSubmission?> AwaitAndReleaseAsync(
         string clientOrderId,
         Lazy<Task<OrderSubmission?>> operation,
@@ -120,11 +165,14 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             decimal? estimatedLossAtStop = null;
             if (decision.Action == AgentAction.Close)
             {
-                foreach (BrokerOrder order in openOrders)
-                {
-                    await broker.Orders.CancelOrderAsync(order.BrokerOrderId, cancellationToken)
-                        .ConfigureAwait(false);
-                }
+                BrokerPosition position = positions.FirstOrDefault(item => item.Instrument == decision.Instrument)
+                    ?? throw new InvalidOperationException("A close decision requires an open position.");
+                quantity = Math.Min(quantity, position.Quantity);
+                // Never cancel protective orders before the close fill is confirmed. Doing so
+                // creates an unprotected interval if the close is delayed, rejected, or its
+                // result is uncertain. The broker/simulator must reconcile or cancel attached
+                // protectives atomically after the position quantity actually changes.
+                // This rule applies to both partial and full closes.
             }
             else
             {
@@ -145,12 +193,44 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                     return RejectWithoutSending(clientOrderId, brokerAssessment.Summary);
                 }
 
+                decimal quoteToAccountRate = ResolveQuoteToAccountRate(
+                    decision,
+                    broker,
+                    accounts);
+                PositionSizingResult sizing = _positionSizer.Calculate(
+                    new PositionSizingContext
+                    {
+                        Decision = decision,
+                        RequestedQuantity = quantity,
+                        Accounts = accounts,
+                        Positions = positions,
+                        QuoteToAccountCurrencyRate = quoteToAccountRate
+                    });
+                if (!sizing.Approved)
+                {
+                    AppendJournal(
+                        TradeJournalEventType.SignalRejected,
+                        decision,
+                        clientOrderId,
+                        $"Position sizing rejected the setup: {sizing.Reason}");
+                    return RejectWithoutSending(clientOrderId, sizing.Reason);
+                }
+
+                quantity = sizing.Quantity;
+                AppendJournal(
+                    TradeJournalEventType.SignalEvaluated,
+                    decision,
+                    clientOrderId,
+                    $"Position sizing [{sizing.ReasonCode}]: {sizing.Reason}",
+                    sizing.EstimatedLossAtStop);
+
                 var riskContext = new PreTradeRiskContext
                 {
                     Decision = decision,
                     Quantity = quantity,
                     Accounts = accounts,
                     Positions = positions,
+                    QuoteToAccountCurrencyRate = quoteToAccountRate > 0m ? quoteToAccountRate : 1m,
                     Safety = _safety?.Snapshot
                 };
                 RiskAssessment assessment = _riskManager.Evaluate(riskContext);
@@ -210,6 +290,180 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
         }
     }
 
+    private async Task<ProtectiveStopAmendmentResult> AmendProtectiveStopCoreAsync(
+        ProtectiveStopAmendmentCommand command,
+        decimal normalizedStop,
+        string clientAmendmentId,
+        ITradingBrokerClient broker,
+        CancellationToken cancellationToken)
+    {
+        string? priceError = ValidateRiskReduction(command, normalizedStop);
+        if (priceError is not null)
+        {
+            ProtectiveStopAmendmentResult rejected = RejectAmendment(
+                command,
+                clientAmendmentId,
+                normalizedStop,
+                priceError);
+            AppendAmendmentJournal(TradeJournalEventType.StopAmendmentRejected, command, rejected, priceError);
+            return rejected;
+        }
+
+        if (broker is not IProtectiveOrderBrokerClient protectiveBroker ||
+            (!protectiveBroker.TradingCapabilities.SupportsNativeStopAmendment &&
+             !protectiveBroker.TradingCapabilities.SupportsAtomicOrderReplacement))
+        {
+            var unsupported = new ProtectiveStopAmendmentResult
+            {
+                Status = ProtectiveStopAmendmentStatus.Unsupported,
+                ClientAmendmentId = clientAmendmentId,
+                PreviousStopOrderId = command.ExistingStopOrderId,
+                CurrentStopOrderId = command.ExistingStopOrderId,
+                RequestedStopPrice = normalizedStop,
+                RejectionReason = "The broker cannot guarantee a safe atomic protective-stop amendment.",
+                Certainty = ExecutionCertainty.NotSent
+            };
+            AppendAmendmentJournal(
+                TradeJournalEventType.StopAmendmentUnsupported,
+                command,
+                unsupported,
+                unsupported.RejectionReason!);
+            return unsupported;
+        }
+
+        Task<IReadOnlyList<BrokerPosition>> positionsTask =
+            broker.Positions.GetOpenPositionsAsync(cancellationToken);
+        Task<IReadOnlyList<BrokerOrder>> ordersTask =
+            broker.Orders.GetOpenOrdersAsync(command.Instrument, cancellationToken);
+        await Task.WhenAll(positionsTask, ordersTask).ConfigureAwait(false);
+        BrokerPosition? position = (await positionsTask.ConfigureAwait(false))
+            .FirstOrDefault(item => string.Equals(item.PositionId, command.PositionId, StringComparison.Ordinal));
+        if (position is null || position.Instrument != command.Instrument ||
+            position.Side != command.PositionSide || position.Quantity != command.PositionQuantity)
+        {
+            ProtectiveStopAmendmentResult rejected = RejectAmendment(
+                command,
+                clientAmendmentId,
+                normalizedStop,
+                "The open broker position does not match the amendment command.");
+            AppendAmendmentJournal(
+                TradeJournalEventType.StopAmendmentRejected,
+                command,
+                rejected,
+                rejected.RejectionReason!);
+            return rejected;
+        }
+
+        BrokerOrder? stopOrder = (await ordersTask.ConfigureAwait(false))
+            .FirstOrDefault(order => string.Equals(
+                order.BrokerOrderId,
+                command.ExistingStopOrderId,
+                StringComparison.Ordinal));
+        if (stopOrder is null || stopOrder.Instrument != command.Instrument ||
+            stopOrder.NormalizedStatus is not (OrderStatus.Open or OrderStatus.Pending or OrderStatus.PartiallyFilled) ||
+            !string.Equals(stopOrder.Type, StandardOrderType.Stop.ToString(), StringComparison.OrdinalIgnoreCase) ||
+            stopOrder.Quantity != command.PositionQuantity ||
+            stopOrder.Side == command.PositionSide || stopOrder.Price != command.CurrentStopPrice)
+        {
+            ProtectiveStopAmendmentResult rejected = RejectAmendment(
+                command,
+                clientAmendmentId,
+                normalizedStop,
+                "The existing protective-stop order ID or state is stale.");
+            AppendAmendmentJournal(
+                TradeJournalEventType.StopAmendmentRejected,
+                command,
+                rejected,
+                rejected.RejectionReason!);
+            return rejected;
+        }
+
+        AppendAmendmentJournal(
+            TradeJournalEventType.StopAmendmentRequested,
+            command,
+            new ProtectiveStopAmendmentResult
+            {
+                Status = ProtectiveStopAmendmentStatus.Pending,
+                ClientAmendmentId = clientAmendmentId,
+                PreviousStopOrderId = command.ExistingStopOrderId,
+                CurrentStopOrderId = command.ExistingStopOrderId,
+                RequestedStopPrice = normalizedStop,
+                Certainty = ExecutionCertainty.NotSent
+            },
+            command.Reason);
+
+        try
+        {
+            ProtectiveStopAmendmentResult result = await protectiveBroker.ProtectiveOrders
+                .AmendProtectiveStopAsync(new AmendProtectiveStopRequest
+                {
+                    Instrument = command.Instrument,
+                    PositionId = command.PositionId,
+                    ExistingStopOrderId = command.ExistingStopOrderId,
+                    CurrentStopPrice = command.CurrentStopPrice,
+                    NewStopPrice = normalizedStop,
+                    CurrentExecutablePrice = command.CurrentExecutablePrice,
+                    PositionQuantity = command.PositionQuantity,
+                    PositionSide = command.PositionSide,
+                    MinimumPriceIncrement = command.MinimumPriceIncrement,
+                    ClientAmendmentId = clientAmendmentId,
+                    Reason = command.Reason,
+                    RequestedAt = command.CreatedAt,
+                    EffectiveFromExecutionSequence = command.EffectiveFromExecutionSequence
+                }, cancellationToken).ConfigureAwait(false);
+
+            TradeJournalEventType journalType = result.Status switch
+            {
+                ProtectiveStopAmendmentStatus.Accepted or ProtectiveStopAmendmentStatus.Replaced =>
+                    TradeJournalEventType.StopAmendmentAccepted,
+                ProtectiveStopAmendmentStatus.Unsupported => TradeJournalEventType.StopAmendmentUnsupported,
+                _ => TradeJournalEventType.StopAmendmentRejected
+            };
+            AppendAmendmentJournal(
+                journalType,
+                command,
+                result,
+                result.RejectionReason ?? command.Reason);
+            if (result.Certainty == ExecutionCertainty.Unknown ||
+                result.Status == ProtectiveStopAmendmentStatus.Unknown)
+            {
+                _safety?.Trip(
+                    SafetyTripReason.ExecutionFailure,
+                    $"Protective-stop amendment certainty is unknown for {command.PositionId}.",
+                    command.CreatedAt);
+            }
+            return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // A transport failure may have occurred after broker receipt. Preserve the
+            // old local stop and trip safety so reconciliation occurs before new risk.
+            _safety?.Trip(
+                SafetyTripReason.ExecutionFailure,
+                $"Protective-stop amendment outcome is unknown: {exception.Message}",
+                command.CreatedAt);
+            AppendAmendmentJournal(
+                TradeJournalEventType.Error,
+                command,
+                new ProtectiveStopAmendmentResult
+                {
+                    Status = ProtectiveStopAmendmentStatus.Unknown,
+                    ClientAmendmentId = clientAmendmentId,
+                    PreviousStopOrderId = command.ExistingStopOrderId,
+                    CurrentStopOrderId = command.ExistingStopOrderId,
+                    RequestedStopPrice = normalizedStop,
+                    RejectionReason = exception.Message,
+                    Certainty = ExecutionCertainty.Unknown
+                },
+                exception.Message);
+            throw;
+        }
+    }
+
     private string? GetSafetyRejection()
     {
         if (_safety?.Snapshot is { CanOpenNewTrades: false } safety)
@@ -254,7 +508,8 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             TakeProfit = decision.Action == AgentAction.Close || decision.TakeProfitPrice is null
                 ? null
                 : new TakeProfitInstruction(decision.TakeProfitPrice.Value),
-            ClientOrderId = clientOrderId
+            ClientOrderId = clientOrderId,
+            ReduceOnly = decision.Action == AgentAction.Close
         };
     }
 
@@ -297,6 +552,183 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                 nameof(options),
                 "Client order ID prefix must contain only letters, digits, '-' or '_'.");
         }
+    }
+
+    private static void ValidateAmendmentCommand(ProtectiveStopAmendmentCommand command)
+    {
+        if (command.Instrument.IsEmpty ||
+            string.IsNullOrWhiteSpace(command.StrategyId) ||
+            string.IsNullOrWhiteSpace(command.SetupId) ||
+            string.IsNullOrWhiteSpace(command.PositionId) ||
+            string.IsNullOrWhiteSpace(command.Reason))
+        {
+            throw new ArgumentException(
+                "Instrument, strategy, setup, position, and reason are required.",
+                nameof(command));
+        }
+        if (command.PositionSide is not (OrderSide.Buy or OrderSide.Sell))
+            throw new ArgumentException("PositionSide must be Buy or Sell.", nameof(command));
+        if (command.PositionQuantity <= 0m || command.EntryPrice <= 0m ||
+            command.InitialStopPrice <= 0m || command.CurrentStopPrice <= 0m ||
+            command.ProposedStopPrice <= 0m || command.CurrentExecutablePrice <= 0m ||
+            command.MinimumPriceIncrement <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(command), "Amendment prices and quantity must be positive.");
+        }
+        if (command.EffectiveFromExecutionSequence <= command.RequestedSequence)
+        {
+            throw new ArgumentException(
+                "The replacement stop must become effective after its request sequence.",
+                nameof(command));
+        }
+        bool initialStopValid = command.PositionSide == OrderSide.Buy
+            ? command.InitialStopPrice < command.EntryPrice
+            : command.InitialStopPrice > command.EntryPrice;
+        if (!initialStopValid)
+            throw new ArgumentException("Initial stop is on the wrong side of entry.", nameof(command));
+    }
+
+    private static string? ValidateRiskReduction(
+        ProtectiveStopAmendmentCommand command,
+        decimal normalizedStop)
+    {
+        if (normalizedStop <= 0m)
+            return "The normalized stop price is not positive.";
+        return command.PositionSide switch
+        {
+            OrderSide.Buy when normalizedStop <= command.CurrentStopPrice =>
+                "A long protective stop must move upward.",
+            OrderSide.Buy when normalizedStop >= command.CurrentExecutablePrice =>
+                "A long protective stop must remain below the current executable bid.",
+            OrderSide.Sell when normalizedStop >= command.CurrentStopPrice =>
+                "A short protective stop must move downward.",
+            OrderSide.Sell when normalizedStop <= command.CurrentExecutablePrice =>
+                "A short protective stop must remain above the current executable ask.",
+            _ => null
+        };
+    }
+
+    private static decimal NormalizeRiskReducingPrice(
+        decimal price,
+        decimal increment,
+        OrderSide positionSide)
+    {
+        decimal units = price / increment;
+        return positionSide == OrderSide.Buy
+            ? decimal.Floor(units) * increment
+            : decimal.Ceiling(units) * increment;
+    }
+
+    private static string CreateAmendmentId(
+        ProtectiveStopAmendmentCommand command,
+        decimal normalizedStop) =>
+        $"stop-{CreateAmendmentFingerprint(command, normalizedStop)[..24]}";
+
+    private static string CreateAmendmentFingerprint(
+        ProtectiveStopAmendmentCommand command,
+        decimal normalizedStop)
+    {
+        string identity = string.Join(
+            '|',
+            command.Instrument.Value,
+            command.StrategyId,
+            command.SetupId,
+            command.PositionId,
+            command.ExistingStopOrderId,
+            command.PositionSide,
+            command.PositionQuantity.ToString(CultureInfo.InvariantCulture),
+            command.InitialStopPrice.ToString(CultureInfo.InvariantCulture),
+            command.CurrentStopPrice.ToString(CultureInfo.InvariantCulture),
+            normalizedStop.ToString(CultureInfo.InvariantCulture),
+            command.CurrentExecutablePrice.ToString(CultureInfo.InvariantCulture),
+            command.AmendmentReason,
+            command.RequestedSequence,
+            command.EffectiveFromExecutionSequence);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)))
+            .ToLowerInvariant();
+    }
+
+    private static ProtectiveStopAmendmentResult RejectAmendment(
+        ProtectiveStopAmendmentCommand command,
+        string clientAmendmentId,
+        decimal requestedStop,
+        string reason) => new()
+    {
+        Status = ProtectiveStopAmendmentStatus.Rejected,
+        ClientAmendmentId = clientAmendmentId,
+        PreviousStopOrderId = command.ExistingStopOrderId,
+        CurrentStopOrderId = command.ExistingStopOrderId,
+        RequestedStopPrice = requestedStop,
+        RejectionReason = reason,
+        Certainty = ExecutionCertainty.Rejected
+    };
+
+    private void AppendAmendmentJournal(
+        TradeJournalEventType type,
+        ProtectiveStopAmendmentCommand command,
+        ProtectiveStopAmendmentResult result,
+        string message)
+    {
+        _journal.Append(new TradeJournalEntry
+        {
+            Sequence = command.RequestedSequence,
+            Timestamp = command.CreatedAt,
+            Type = type,
+            Instrument = command.Instrument,
+            PositionId = command.PositionId,
+            ClientOrderId = result.ClientAmendmentId,
+            PreviousValue = command.CurrentStopPrice,
+            Value = result.AcceptedStopPrice ?? result.RequestedStopPrice,
+            Message = message
+        });
+    }
+
+    private static decimal ResolveQuoteToAccountRate(
+        AgentDecision decision,
+        ITradingBrokerClient broker,
+        IReadOnlyList<AccountSnapshot> accounts)
+    {
+        if (broker is IAccountCurrencyConversionProvider provider &&
+            provider.TryGetQuoteToAccountCurrencyRate(decision.Instrument, out decimal provided) &&
+            provided > 0m)
+        {
+            return provided;
+        }
+
+        string? accountCurrency = accounts
+            .Select(account => account.Currency)
+            .FirstOrDefault(currency => !string.IsNullOrWhiteSpace(currency));
+        if (string.IsNullOrWhiteSpace(accountCurrency))
+        {
+            // Fixed-quantity mode can proceed without conversion. Risk-based sizers
+            // receive zero and reject explicitly with MissingCurrencyConversion.
+            return 0m;
+        }
+
+        string value = decision.Instrument.Value;
+        int prefix = value.IndexOf(':');
+        string pair = prefix >= 0 ? value[(prefix + 1)..] : value;
+        int separator = pair.LastIndexOfAny(['/', '_', '-']);
+        if (separator <= 0 || separator >= pair.Length - 1)
+        {
+            return 0m;
+        }
+
+        string baseCurrency = pair[..separator].Trim();
+        string quoteCurrency = pair[(separator + 1)..].Trim();
+        if (string.Equals(quoteCurrency, accountCurrency, StringComparison.OrdinalIgnoreCase))
+        {
+            return 1m;
+        }
+
+        decimal reference = decision.ReferencePrice ?? decision.LimitPrice ?? decision.StopPrice ?? 0m;
+        if (reference > 0m &&
+            string.Equals(baseCurrency, accountCurrency, StringComparison.OrdinalIgnoreCase))
+        {
+            return 1m / reference;
+        }
+
+        return 0m;
     }
 
     private static string CreateClientOrderId(AgentDecision decision, string prefix)
@@ -348,4 +780,8 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
         Certainty = ExecutionCertainty.NotSent,
         RejectionReason = reason
     };
+
+    private sealed record AmendmentOperation(
+        string Fingerprint,
+        Lazy<Task<ProtectiveStopAmendmentResult>> Task);
 }

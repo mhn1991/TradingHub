@@ -13,6 +13,11 @@ public sealed class PrefetchingCandleStream : IHistoricalCandleStream
     private readonly IHistoricalCandleStream _inner;
     private readonly int _capacity;
     private readonly int _lowWatermark;
+    private long _peakUnread;
+    private long _sourceWaits;
+    private long _consumerWaits;
+    private long _currentUnread;
+    private bool _producerComplete;
 
     public PrefetchingCandleStream(
         IHistoricalCandleStream inner,
@@ -30,11 +35,26 @@ public sealed class PrefetchingCandleStream : IHistoricalCandleStream
 
     public int Capacity => _capacity;
     public int LowWatermark => _lowWatermark;
+    public PrefetchDiagnostics SnapshotDiagnostics() => new()
+    {
+        CurrentUnread = Interlocked.Read(ref _currentUnread),
+        PeakUnread = Interlocked.Read(ref _peakUnread),
+        Capacity = _capacity,
+        LowWatermark = _lowWatermark,
+        PagesRequested = 0,
+        SourceWaits = Interlocked.Read(ref _sourceWaits),
+        ConsumerWaits = Interlocked.Read(ref _consumerWaits),
+        ProducerComplete = Volatile.Read(ref _producerComplete),
+        SourceComplete = Volatile.Read(ref _producerComplete),
+        Mode = "LowWatermarkStream"
+    };
 
     public async IAsyncEnumerable<MarketCandle> StreamAsync(
         HistoricalCandleRequest request,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        using var producerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken producerToken = producerCancellation.Token;
         var channel = Channel.CreateBounded<MarketCandle>(new BoundedChannelOptions(_capacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
@@ -46,16 +66,30 @@ public sealed class PrefetchingCandleStream : IHistoricalCandleStream
         long writeSequence = 0;
         long readSequence = 0;
         Exception? producerError = null;
+        var unreadGate = new SemaphoreSlim(0, int.MaxValue);
 
         Task producer = Task.Run(async () =>
         {
             try
             {
-                await foreach (MarketCandle candle in _inner.StreamAsync(request, cancellationToken)
+                bool suspended = false;
+                await foreach (MarketCandle candle in _inner.StreamAsync(request, producerToken)
                                    .ConfigureAwait(false))
                 {
-                    writeSequence++;
-                    await channel.Writer.WriteAsync(candle, cancellationToken).ConfigureAwait(false);
+                    if (suspended)
+                    {
+                        Interlocked.Increment(ref _sourceWaits);
+                        while (Volatile.Read(ref writeSequence) - Volatile.Read(ref readSequence) > _lowWatermark)
+                            await unreadGate.WaitAsync(producerToken).ConfigureAwait(false);
+                        suspended = false;
+                    }
+
+                    await channel.Writer.WriteAsync(candle, producerToken).ConfigureAwait(false);
+                    long written = Interlocked.Increment(ref writeSequence);
+                    long unread = written - Volatile.Read(ref readSequence);
+                    Interlocked.Exchange(ref _currentUnread, unread);
+                    UpdatePeak(ref _peakUnread, unread);
+                    suspended = unread >= _capacity;
                 }
 
                 channel.Writer.TryComplete();
@@ -65,23 +99,35 @@ public sealed class PrefetchingCandleStream : IHistoricalCandleStream
                 producerError = exception;
                 channel.Writer.TryComplete(exception);
             }
-        }, cancellationToken);
+            finally
+            {
+                Volatile.Write(ref _producerComplete, true);
+            }
+        }, producerToken);
 
         try
         {
-            await foreach (MarketCandle candle in channel.Reader.ReadAllAsync(cancellationToken)
-                               .ConfigureAwait(false))
+            while (true)
             {
-                readSequence++;
-                // Unread count is derived from absolute sequences, not physical ring slots.
-                long unread = writeSequence - readSequence;
-                _ = unread; // available for diagnostics / future low-watermark hooks
-                _ = _lowWatermark;
+                if (!channel.Reader.TryRead(out MarketCandle? candle))
+                {
+                    Interlocked.Increment(ref _consumerWaits);
+                    if (!await channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+                        break;
+                    continue;
+                }
+                if (candle is null)
+                    continue;
+
+                long read = Interlocked.Increment(ref readSequence);
+                Interlocked.Exchange(ref _currentUnread, Volatile.Read(ref writeSequence) - read);
+                unreadGate.Release();
                 yield return candle;
             }
         }
         finally
         {
+            producerCancellation.Cancel();
             try
             {
                 await producer.ConfigureAwait(false);
@@ -90,9 +136,17 @@ public sealed class PrefetchingCandleStream : IHistoricalCandleStream
             {
                 // Surface via producerError / channel completion.
             }
+            unreadGate.Dispose();
         }
 
-        if (producerError is not null)
+        if (producerError is not null && !producerToken.IsCancellationRequested)
             throw producerError;
+    }
+
+    private static void UpdatePeak(ref long target, long value)
+    {
+        long peak = Interlocked.Read(ref target);
+        while (value > peak && Interlocked.CompareExchange(ref target, value, peak) != peak)
+            peak = Interlocked.Read(ref target);
     }
 }

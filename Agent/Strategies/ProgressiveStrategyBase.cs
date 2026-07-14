@@ -19,6 +19,16 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         DateTimeOffset LastTrendAt,
         DateTimeOffset? LastConfirmationAt);
 
+    private sealed record EvidenceAssessment(
+        int Aligned,
+        int Required,
+        bool StrongOpposition,
+        DateTimeOffset? LatestAlignedAt,
+        string Role)
+    {
+        public bool Satisfied => Aligned >= Required;
+    }
+
     private readonly Dictionary<InstrumentKey, ScopeState> _states = [];
     protected readonly ProgressiveStrategyOptions Options;
 
@@ -26,10 +36,7 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
     {
         Options = options ?? new ProgressiveStrategyOptions();
         Options.Validate();
-        RequiredIntervals = new HashSet<BarInterval>
-        {
-            Options.TrendInterval, Options.ConfirmationInterval, Options.EntryInterval
-        };
+        RequiredIntervals = Options.AllRequiredIntervals.ToHashSet();
     }
 
     public abstract string Name { get; }
@@ -40,7 +47,9 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
     public IReadOnlySet<BarInterval> RequiredIntervals { get; }
     public BarInterval TriggerInterval => Options.EntryInterval;
 
-    public Task<AgentDecision> EvaluateAsync(AgentMarketContext context, CancellationToken cancellationToken = default)
+    public Task<AgentDecision> EvaluateAsync(
+        AgentMarketContext context,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
@@ -48,13 +57,27 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         AnalysisSnapshot trend = context.Analysis.Get(Options.TrendInterval);
         AnalysisSnapshot confirmation = context.Analysis.Get(Options.ConfirmationInterval);
         AnalysisSnapshot entry = context.Analysis.Get(Options.EntryInterval);
+        AnalysisSnapshot[] secondaryTrend = Options.SecondaryTrendIntervals
+            .Select(context.Analysis.Get)
+            .ToArray();
+        AnalysisSnapshot[] setup = Options.SetupIntervals
+            .Select(context.Analysis.Get)
+            .ToArray();
+        AnalysisSnapshot[] confirmations = Options.ConfirmationIntervals
+            .Select(context.Analysis.Get)
+            .ToArray();
 
-        BrokerPosition? position = context.Positions.FirstOrDefault(p => p.Instrument == context.Instrument);
+        BrokerPosition? position = context.Positions
+            .FirstOrDefault(item => item.Instrument == context.Instrument);
         if (position is not null)
         {
-            // Any stale entry scope is irrelevant once a position exists.
             _states.Remove(context.Instrument);
-            return Task.FromResult(EvaluateOpenPosition(context, position, trend, confirmation, entry));
+            return Task.FromResult(EvaluateOpenPosition(
+                context,
+                position,
+                trend,
+                confirmation,
+                entry));
         }
 
         SetupSide? trendSide = DetectSide(trend, Options.MinimumTrendConfidence);
@@ -64,7 +87,12 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         {
             if (trendSide is null)
             {
-                return Task.FromResult(Observe(context, "Waiting for a valid higher-timeframe partial setup."));
+                return Task.FromResult(Observe(
+                    context,
+                    $"Waiting for a valid primary trend on {Options.TrendInterval}.") with
+                {
+                    ReasonCode = "PrimaryTrendNotReady"
+                });
             }
 
             state = StartScope(context.Instrument, trend, trendSide.Value);
@@ -77,14 +105,16 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                 if (trendSide is null)
                 {
                     _states.Remove(context.Instrument);
-                    return Task.FromResult(Observe(context, "The new trend candle invalidated the scoped setup."));
+                    return Task.FromResult(Observe(
+                        context,
+                        "The new primary-trend candle invalidated the scoped setup.") with
+                    {
+                        ReasonCode = "PrimaryTrendInvalidated"
+                    });
                 }
 
                 if (trendSide != state.Side)
                 {
-                    // A confirmed opposite higher-timeframe setup supersedes the old one
-                    // immediately. It may continue through a confirmation candle that
-                    // closed at the same timestamp, but never through older snapshots.
                     state = StartScope(context.Instrument, trend, trendSide.Value);
                 }
                 else
@@ -103,64 +133,132 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                      context.Timestamp >= state.ExpiresAt)
             {
                 _states.Remove(context.Instrument);
-                return Task.FromResult(Observe(context, "The higher-timeframe partial setup expired before confirmation."));
+                return Task.FromResult(Observe(
+                    context,
+                    "The primary-trend setup expired before confirmation.") with
+                {
+                    ReasonCode = "PrimaryTrendSetupExpired"
+                });
             }
         }
 
         if (Opposes(state.Side, trend) || HasOpposingBreak(state.Side, trend))
         {
             _states.Remove(context.Instrument);
-            return Task.FromResult(Observe(context, "Higher-timeframe structure invalidated the setup."));
+            return Task.FromResult(Observe(
+                context,
+                "Primary higher-timeframe structure invalidated the setup.") with
+            {
+                ReasonCode = "PrimaryTrendOpposition"
+            });
         }
 
-        SetupSide? confirmationSide = DetectSide(confirmation, Options.MinimumConfirmationConfidence);
+        EvidenceAssessment secondaryAssessment = AssessEvidence(
+            state.Side,
+            secondaryTrend,
+            Options.MinimumSecondaryTrendConfidence,
+            Options.MinimumSecondaryTrendAlignments,
+            "secondary trend",
+            state.StartedAt,
+            opposingDirectionIsStrong: false);
+        AgentDecision? secondaryFailure = HandleEvidenceFailure(
+            context,
+            state,
+            secondaryAssessment,
+            invalidateOnOpposition: true);
+        if (secondaryFailure is not null)
+            return Task.FromResult(secondaryFailure);
+
+        EvidenceAssessment setupAssessment = AssessEvidence(
+            state.Side,
+            setup,
+            Options.MinimumSetupConfidence,
+            Options.MinimumSetupAlignments,
+            "setup",
+            state.StartedAt,
+            opposingDirectionIsStrong: true);
+        AgentDecision? setupFailure = HandleEvidenceFailure(
+            context,
+            state,
+            setupAssessment,
+            invalidateOnOpposition: true);
+        if (setupFailure is not null)
+            return Task.FromResult(setupFailure);
+
+        EvidenceAssessment confirmationAssessment = AssessEvidence(
+            state.Side,
+            confirmations,
+            Options.MinimumConfirmationConfidence,
+            Options.MinimumConfirmationAlignments,
+            "confirmation",
+            state.StartedAt,
+            opposingDirectionIsStrong: true);
+
         if (state.Stage == SetupStage.WaitingForConfirmation)
         {
-            bool confirmationBelongsToSetup = confirmation.AvailableAt >= state.StartedAt;
-            if (!confirmationBelongsToSetup || confirmationSide != state.Side)
-            {
-                return Task.FromResult(Observe(
-                    context,
-                    $"{Options.ConfirmationInterval} has not confirmed {state.Side}."));
-            }
+            AgentDecision? confirmationFailure = HandleEvidenceFailure(
+                context,
+                state,
+                confirmationAssessment,
+                invalidateOnOpposition: true);
+            if (confirmationFailure is not null)
+                return Task.FromResult(confirmationFailure);
 
-            if (HasOpposingBreak(state.Side, confirmation))
-            {
-                _states.Remove(context.Instrument);
-                return Task.FromResult(Observe(context, "The confirmation timeframe invalidated the setup."));
-            }
-
+            DateTimeOffset confirmationAt = confirmationAssessment.LatestAlignedAt ??
+                confirmation.AvailableAt;
             state = state with
             {
                 Stage = SetupStage.WaitingForEntry,
-                LastConfirmationAt = confirmation.AvailableAt,
-                ExpiresAt = Options.ConfirmationInterval.AddTo(confirmation.AvailableAt)
+                LastConfirmationAt = confirmationAt,
+                ExpiresAt = AddBars(confirmationAt, Options.EntryInterval, Options.MaximumEntryCandles)
             };
             _states[context.Instrument] = state;
         }
         else
         {
-            bool hasFreshConfirmation = state.LastConfirmationAt is null ||
-                confirmation.AvailableAt > state.LastConfirmationAt.Value;
-            if (hasFreshConfirmation)
+            if (confirmationAssessment.StrongOpposition && Options.StrongOppositionVeto)
             {
-                if (confirmationSide != state.Side || HasOpposingBreak(state.Side, confirmation))
+                _states.Remove(context.Instrument);
+                return Task.FromResult(Observe(
+                    context,
+                    "A confirmation timeframe produced strong opposing structure.") with
                 {
-                    _states.Remove(context.Instrument);
-                    return Task.FromResult(Observe(context, "The confirmation timeframe invalidated the setup."));
-                }
+                    ReasonCode = "ConfirmationOppositionVeto"
+                });
+            }
 
+            if (!confirmationAssessment.Satisfied)
+            {
+                _states.Remove(context.Instrument);
+                return Task.FromResult(Observe(
+                    context,
+                    $"Confirmation consensus fell to {confirmationAssessment.Aligned}/" +
+                    $"{confirmationAssessment.Required}; the setup was invalidated.") with
+                {
+                    ReasonCode = "ConfirmationConsensusLost"
+                });
+            }
+
+            DateTimeOffset latestConfirmation = confirmationAssessment.LatestAlignedAt ??
+                state.LastConfirmationAt ?? confirmation.AvailableAt;
+            if (state.LastConfirmationAt is null || latestConfirmation > state.LastConfirmationAt)
+            {
                 state = state with
                 {
-                    LastConfirmationAt = confirmation.AvailableAt,
-                    ExpiresAt = Options.ConfirmationInterval.AddTo(confirmation.AvailableAt)
+                    LastConfirmationAt = latestConfirmation,
+                    ExpiresAt = AddBars(latestConfirmation, Options.EntryInterval, Options.MaximumEntryCandles)
                 };
                 _states[context.Instrument] = state;
             }
             else if (context.Timestamp >= state.ExpiresAt)
             {
                 _states.Remove(context.Instrument);
-                return Task.FromResult(Observe(context, "The lower-timeframe entry window expired."));
+                return Task.FromResult(Observe(
+                    context,
+                    "The lower-timeframe entry window expired.") with
+                {
+                    ReasonCode = "EntryWindowExpired"
+                });
             }
         }
 
@@ -173,17 +271,180 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         {
             return Task.FromResult(Observe(
                 context,
-                $"Scoped {state.Side} setup is waiting for {Options.EntryInterval} entry confirmation."));
+                $"Scoped {state.Side} setup is waiting for the {Options.EntryInterval} entry trigger.") with
+            {
+                ReasonCode = "EntryTriggerNotReady"
+            });
         }
 
-        AgentDecision decision = CreateEntryDecision(context, state, trend, confirmation, entry);
+        PriceActionDirection expectedPriceAction = state.Side == SetupSide.Buy
+            ? PriceActionDirection.Bullish
+            : PriceActionDirection.Bearish;
+        PriceActionDirection opposingPriceAction = state.Side == SetupSide.Buy
+            ? PriceActionDirection.Bearish
+            : PriceActionDirection.Bullish;
+        decimal opposingScore = opposingPriceAction == PriceActionDirection.Bullish
+            ? entry.PriceAction.BullishScore
+            : entry.PriceAction.BearishScore;
+        if (Options.PriceActionConfirmation != PriceActionConfirmationMode.Disabled &&
+            Options.RejectStrongOpposingPriceAction &&
+            entry.PriceAction.Bias == opposingPriceAction &&
+            opposingScore >= Options.MinimumPriceActionConfidence)
+        {
+            return Task.FromResult(Observe(
+                context,
+                $"The {Options.EntryInterval} price-action evidence opposes the scoped {state.Side} setup " +
+                $"with score {opposingScore:F1}.") with
+            {
+                ReasonCode = "OpposingPriceAction",
+                PriceActionConfidence = opposingScore
+            });
+        }
+
+        if (Options.PriceActionConfirmation == PriceActionConfirmationMode.Required &&
+            !entry.PriceAction.HasConfirmedTrigger(
+                expectedPriceAction,
+                Options.MinimumPriceActionConfidence))
+        {
+            string diagnostic = entry.PriceAction.Diagnostics
+                .Where(item => !item.Accepted)
+                .Select(item => item.ReasonCode)
+                .FirstOrDefault() ?? "NoConfirmedPriceActionTrigger";
+            return Task.FromResult(Observe(
+                context,
+                $"Scoped {state.Side} setup is waiting for a confirmed {Options.EntryInterval} " +
+                $"price-action trigger ({diagnostic}).") with
+            {
+                ReasonCode = diagnostic
+            });
+        }
+
+        AgentDecision decision = CreateEntryDecision(
+            context,
+            state,
+            trend,
+            confirmation,
+            entry);
         if (decision.Action is AgentAction.Buy or AgentAction.Sell)
         {
+            PriceActionEvent? trigger = entry.PriceAction.Events
+                .Where(item => item.Direction == expectedPriceAction)
+                .OrderByDescending(item => item.Confidence)
+                .FirstOrDefault();
+            if (trigger is not null)
+            {
+                decision = decision with
+                {
+                    PriceActionTrigger = trigger.Type,
+                    PriceActionConfidence = trigger.Confidence,
+                    ReasonCode = trigger.ReasonCode
+                };
+            }
+
+            decision = decision with
+            {
+                Reason = decision.Reason +
+                    $" MTF evidence: secondary {secondaryAssessment.Aligned}/" +
+                    $"{secondaryAssessment.Required}, setup {setupAssessment.Aligned}/" +
+                    $"{setupAssessment.Required}, confirmation {confirmationAssessment.Aligned}/" +
+                    $"{confirmationAssessment.Required}."
+            };
             _states.Remove(context.Instrument);
         }
 
         return Task.FromResult(decision);
     }
+
+    private AgentDecision? HandleEvidenceFailure(
+        AgentMarketContext context,
+        ScopeState state,
+        EvidenceAssessment assessment,
+        bool invalidateOnOpposition)
+    {
+        if (assessment.StrongOpposition && Options.StrongOppositionVeto)
+        {
+            if (invalidateOnOpposition)
+                _states.Remove(context.Instrument);
+            return Observe(
+                context,
+                $"The {assessment.Role} layer produced a strong opposing structural signal.") with
+            {
+                ReasonCode = $"{ToReasonPrefix(assessment.Role)}OppositionVeto"
+            };
+        }
+
+        if (!assessment.Satisfied)
+        {
+            return Observe(
+                context,
+                $"Waiting for {assessment.Role} consensus: {assessment.Aligned}/" +
+                $"{assessment.Required} aligned with {state.Side}.") with
+            {
+                ReasonCode = $"{ToReasonPrefix(assessment.Role)}ConsensusNotReady"
+            };
+        }
+
+        return null;
+    }
+
+    private EvidenceAssessment AssessEvidence(
+        SetupSide side,
+        IReadOnlyList<AnalysisSnapshot> snapshots,
+        decimal minimumConfidence,
+        int required,
+        string role,
+        DateTimeOffset notBefore,
+        bool opposingDirectionIsStrong)
+    {
+        if (snapshots.Count == 0)
+            return new EvidenceAssessment(0, required, false, null, role);
+
+        int aligned = 0;
+        bool opposition = false;
+        DateTimeOffset? latestAligned = null;
+        foreach (AnalysisSnapshot snapshot in snapshots)
+        {
+            if (snapshot.AvailableAt < notBefore)
+                continue;
+
+            SetupSide? detected = DetectSide(snapshot, minimumConfidence);
+            if (detected == side)
+            {
+                aligned++;
+                latestAligned = latestAligned is null || snapshot.AvailableAt > latestAligned
+                    ? snapshot.AvailableAt
+                    : latestAligned;
+            }
+
+            if (HasOpposingBreak(side, snapshot) ||
+                (opposingDirectionIsStrong && detected is not null && detected != side &&
+                 snapshot.Confidence.Total >= minimumConfidence))
+            {
+                opposition = true;
+            }
+        }
+
+        return new EvidenceAssessment(aligned, required, opposition, latestAligned, role);
+    }
+
+    private static DateTimeOffset AddBars(
+        DateTimeOffset start,
+        BarInterval interval,
+        int count)
+    {
+        DateTimeOffset result = start;
+        for (int index = 0; index < count; index++)
+            result = interval.AddTo(result);
+        return result;
+    }
+
+    private static string ToReasonPrefix(string role) => role switch
+    {
+        "secondary trend" => "SecondaryTrend",
+        "setup" => "Setup",
+        "confirmation" => "Confirmation",
+        _ => "Timeframe"
+    };
 
     private ScopeState StartScope(
         InstrumentKey instrument,
@@ -203,17 +464,30 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
     }
 
     protected abstract AgentDecision CreateEntryDecision(
-        AgentMarketContext context, ScopeState state, AnalysisSnapshot trend,
-        AnalysisSnapshot confirmation, AnalysisSnapshot entry);
+        AgentMarketContext context,
+        ScopeState state,
+        AnalysisSnapshot trend,
+        AnalysisSnapshot confirmation,
+        AnalysisSnapshot entry);
 
     protected abstract AgentDecision EvaluateOpenPosition(
-        AgentMarketContext context, BrokerPosition position, AnalysisSnapshot trend,
-        AnalysisSnapshot confirmation, AnalysisSnapshot entry);
+        AgentMarketContext context,
+        BrokerPosition position,
+        AnalysisSnapshot trend,
+        AnalysisSnapshot confirmation,
+        AnalysisSnapshot entry);
 
     protected AgentDecision Trade(
-        AgentMarketContext context, ScopeState state, AgentAction action, decimal confidence,
-        decimal reference, decimal? stop, decimal? target, string reason,
-        string? stopSource = null, string? targetSource = null)
+        AgentMarketContext context,
+        ScopeState state,
+        AgentAction action,
+        decimal confidence,
+        decimal reference,
+        decimal? stop,
+        decimal? target,
+        string reason,
+        string? stopSource = null,
+        string? targetSource = null)
     {
         decimal? rr = stop is not null && target is not null && stop != reference
             ? Math.Abs(target.Value - reference) / Math.Abs(reference - stop.Value)
@@ -241,7 +515,11 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         };
     }
 
-    protected AgentDecision Close(AgentMarketContext context, BrokerPosition position, decimal confidence, string reason) => new()
+    protected AgentDecision Close(
+        AgentMarketContext context,
+        BrokerPosition position,
+        decimal confidence,
+        string reason) => new()
     {
         DecisionId = $"{Name}:{context.Instrument.Value}:close:{context.Timestamp:O}",
         StrategyName = Name,
@@ -265,7 +543,36 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         Reason = reason
     };
 
-    protected static SetupSide? DetectSide(AnalysisSnapshot snapshot, decimal minimumConfidence)
+    protected decimal PriceActionConfidenceAdjustment(AnalysisSnapshot snapshot, SetupSide side)
+    {
+        if (Options.PriceActionConfirmation == PriceActionConfirmationMode.Disabled)
+            return 0m;
+        decimal aligned = side == SetupSide.Buy
+            ? snapshot.PriceAction.BullishScore
+            : snapshot.PriceAction.BearishScore;
+        decimal opposing = side == SetupSide.Buy
+            ? snapshot.PriceAction.BearishScore
+            : snapshot.PriceAction.BullishScore;
+        return Math.Clamp((aligned - opposing) * 0.10m, -10m, 10m);
+    }
+
+    protected static string PriceActionSummary(AnalysisSnapshot snapshot, SetupSide side)
+    {
+        PriceActionDirection direction = side == SetupSide.Buy
+            ? PriceActionDirection.Bullish
+            : PriceActionDirection.Bearish;
+        PriceActionEvent? strongest = snapshot.PriceAction.Events
+            .Where(item => item.Direction == direction)
+            .OrderByDescending(item => item.Confidence)
+            .FirstOrDefault();
+        return strongest is null
+            ? "no independent price-action trigger"
+            : $"{strongest.Type} ({strongest.Confidence:F1})";
+    }
+
+    protected static SetupSide? DetectSide(
+        AnalysisSnapshot snapshot,
+        decimal minimumConfidence)
     {
         if (snapshot.Confidence.Total < minimumConfidence || snapshot.Indicators.Rsi is null)
             return null;
@@ -276,8 +583,10 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             (middle is decimal bullishMiddle && close > open && close >= bullishMiddle);
         bool bearish = snapshot.MarketStructure.Direction == MarketStructureDirection.Falling ||
             (middle is decimal bearishMiddle && close < open && close <= bearishMiddle);
-        if (bullish && snapshot.Indicators.Rsi is >= 45m and < 75m) return SetupSide.Buy;
-        if (bearish && snapshot.Indicators.Rsi is <= 55m and > 25m) return SetupSide.Sell;
+        if (bullish && snapshot.Indicators.Rsi is >= 45m and < 75m)
+            return SetupSide.Buy;
+        if (bearish && snapshot.Indicators.Rsi is <= 55m and > 25m)
+            return SetupSide.Sell;
         return null;
     }
 

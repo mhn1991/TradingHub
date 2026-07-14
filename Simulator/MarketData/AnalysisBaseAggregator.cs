@@ -46,6 +46,7 @@ public sealed class AnalysisBaseAggregator
 
     public BarInterval ExecutionInterval => _executionInterval;
     public BarInterval AnalysisBaseInterval => _analysisBaseInterval;
+    public long IncompleteAggregateCount => _inner.IncompleteAggregateCount;
 
     /// <summary>
     /// Feeds one completed execution candle. Returns zero or one completed analysis-base candle.

@@ -5,6 +5,7 @@ using Dashboard.Contracts;
 using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
+using TradeManager;
 
 namespace BacktestRunner;
 
@@ -56,18 +57,64 @@ internal static class Program
                     $"{update.CandlesPerSecond:F0} c/s");
             });
 
-            Console.WriteLine(
-                $"Starting simulation {request.Instrument} {request.From:yyyy-MM-dd} → {request.To:yyyy-MM-dd} " +
-                $"({options.StrategyExecution})...");
+            var comparisonRuns = new List<(string Configuration, ComparativeSimulationResult Result)>();
+            ComparativeSimulationResult result;
+            if (options.TrailingComparison)
+            {
+                BacktestRequest disabled = request with
+                {
+                    Runtime = request.Runtime with
+                    {
+                        LegacyPositionManagement = DisableProfitProtection(
+                            request.Runtime.LegacyPositionManagement),
+                        ImprovedPositionManagement = DisableProfitProtection(
+                            request.Runtime.ImprovedPositionManagement)
+                    }
+                };
+                Console.WriteLine("Running trailing comparison baseline (Legacy/Improved disabled)...");
+                ComparativeSimulationResult baseline = await service
+                    .RunToCompletionAsync(disabled, progress, cancellation.Token)
+                    .ConfigureAwait(false);
+                comparisonRuns.Add(("trailing-disabled", baseline));
 
-            ComparativeSimulationResult result = await service
-                .RunToCompletionAsync(request, progress, cancellation.Token)
-                .ConfigureAwait(false);
+                Console.WriteLine("Running trailing comparison candidate (configured Legacy/Improved management)...");
+                result = await service
+                    .RunToCompletionAsync(request, progress, cancellation.Token)
+                    .ConfigureAwait(false);
+                comparisonRuns.Add(("trailing-configured", result));
+            }
+            else
+            {
+                Console.WriteLine(
+                    $"Starting simulation {request.Instrument} {request.From:yyyy-MM-dd} → {request.To:yyyy-MM-dd} " +
+                    $"({options.StrategyExecution})...");
+                result = await service
+                    .RunToCompletionAsync(request, progress, cancellation.Token)
+                    .ConfigureAwait(false);
+            }
 
             string dashboardOutput = Path.GetFullPath(options.OutputDirectory);
             Directory.CreateDirectory(dashboardOutput);
             await ExportDashboardCompatibleAsync(options, result, dashboardOutput, cancellation.Token)
                 .ConfigureAwait(false);
+            if (comparisonRuns.Count > 0)
+            {
+                await WriteJsonAsync(
+                    Path.Combine(dashboardOutput, "trailing-comparison.json"),
+                    new
+                    {
+                        generatedAt = DateTimeOffset.UtcNow,
+                        request.Instrument,
+                        request.From,
+                        request.To,
+                        configurations = comparisonRuns.SelectMany(run =>
+                            run.Result.Strategies.Select(strategy =>
+                                BuildTrailingComparisonRow(run.Configuration, strategy)))
+                    },
+                    cancellation.Token).ConfigureAwait(false);
+                Console.WriteLine(
+                    $"Trailing comparison: {Path.Combine(dashboardOutput, "trailing-comparison.json")}");
+            }
 
             Console.WriteLine($"Simulation {result.SimulationId:N} completed in {result.TotalDuration}.");
             Console.WriteLine($"Input hash: {result.InputHash}");
@@ -174,6 +221,72 @@ internal static class Program
             .ConfigureAwait(false);
     }
 
+
+    private static PositionManagementOptions DisableProfitProtection(
+        PositionManagementOptions options) => options with
+    {
+        Mode = TrailingStopMode.Disabled,
+        ExitOnAdverseStructureBreak = false,
+        EnableScaleOut = false,
+        EnableProfitFloor = false,
+        EnableMaximumGiveback = false,
+        EnableStagnationReduction = false,
+        EnableStructuralDeteriorationReduction = false,
+        EnableMomentumDecayReduction = false,
+        EnableVolatilityExhaustionReduction = false,
+        EnableRiskWindowReduction = false,
+        EnableExecutionCostStressReduction = false
+    };
+
+    private static object BuildTrailingComparisonRow(
+        string configuration,
+        StrategySimulationResult strategy)
+    {
+        StrategyPerformanceSnapshot performance =
+            StrategyPerformanceSnapshot.FromTrades(strategy.Result.Trades);
+        return new
+        {
+            configuration,
+            strategy.StrategyId,
+            strategy.StrategyName,
+            performance.NetProfit,
+            performance.MaximumDrawdown,
+            performance.ProfitFactor,
+            performance.WinRatePercent,
+            performance.AverageR,
+            performance.MedianR,
+            performance.AverageMfe,
+            performance.AverageMae,
+            performance.MfeCapturedPercent,
+            initialStopExits = performance.ExitReasons.GetValueOrDefault("InitialStopLoss"),
+            performance.BreakEvenExits,
+            performance.TrailingStopExits,
+            targetExits = performance.ExitReasons.GetValueOrDefault("TakeProfit"),
+            reverseExits = performance.ExitReasons.GetValueOrDefault("ReverseStrategyClose") +
+                performance.ExitReasons.GetValueOrDefault("StrategyClose"),
+            performance.AverageAmendmentsPerTrade,
+            performance.AverageMaximumLockedR,
+            performance.AverageProfitGivebackFromMfeR,
+            performance.AcceptedStopAmendments,
+            performance.RejectedStopAmendments,
+            performance.UnsupportedStopAmendments,
+            performance.PositionReductions,
+            performance.AveragePartialExitsPerTrade,
+            performance.PartialExitNetProfit,
+            performance.StagnationReductions,
+            performance.StructuralDeteriorationReductions,
+            performance.MomentumDecayReductions,
+            performance.VolatilityExhaustionReductions,
+            performance.SessionRiskReductions,
+            performance.ExecutionCostStressReductions,
+            performance.RunnerActivations,
+            performance.ProfitFloorStopExits,
+            performance.ProfitFloorExits,
+            performance.MfeGivebackStopExits,
+            performance.MaximumGivebackExits
+        };
+    }
+
     private static void PrintHelp() => Console.WriteLine("""
 TradingHub streamed dual-strategy backtest (CLI → shared application service)
 
@@ -185,7 +298,21 @@ Options:
   --from 2025-01-01
   --to 2026-01-01
   --execution-interval 1m / --base-interval 1m
+  --precision-mode fast|broker-native|high-precision
+  --source oanda|binance|imported
+  --imported-candles /server/path/to/candles.csv
+  --analysis-base-interval 1m
   --analysis-intervals 5m,15m,1h
+  --trend-interval 2h
+  --secondary-trend-intervals 1h
+  --setup-intervals 30m
+  --confirmation-interval 15m
+  --additional-confirmation-intervals 10m
+  --entry-interval 5m
+  --minimum-secondary-alignments 0
+  --minimum-setup-alignments 1
+  --minimum-confirmation-alignments 1
+  --allow-timeframe-opposition
   --environment demo|live
   --output Dashboard/public/data/backtests
   --cache .cache/oanda
@@ -194,15 +321,21 @@ Options:
   --no-cache
   --strategies legacy,improved
   --strategy-execution sequential|parallel
-  --strategy-worker task|thread
   --strategy-channel-capacity 4
   --max-parallel-strategies 4
   --strategy-failure-policy stop-all|stop-one
   --analysis-sharing shared|independent
   --ambiguous-policy stop-first|target-first|nearest-open
   --warmup-days 45
-  --seed 12345
-  --quantity 1000
+  --quantity 1000                         (manual/fixed-quantity fallback)
+  --position-sizing-mode fixed-fractional|fixed-cash|fixed-quantity
+  --risk-percent 0.5
+  --fixed-cash-risk 250
+  --minimum-quantity 1
+  --maximum-quantity 100000
+  --quantity-step 1
+  --maximum-account-margin-percent 30
+  --maximum-position-margin-percent 10
   --starting-balance 100000
   --base-currency JPY
   --leverage 20
@@ -210,7 +343,32 @@ Options:
   --spread-bps 1
   --slippage-bps 0.5
   --minimum-rr 1.5
+  --daily-equity-profit-target 3000
+  --daily-equity-giveback-activation 2500
+  --maximum-daily-equity-giveback 750
+  --price-action-mode disabled|soft|required
+  --minimum-price-action-confidence 55
+  --allow-opposing-price-action
   --progress-interval 500
+  --trailing-comparison
+  --legacy-trailing-mode disabled|break-even|structure-atr
+  --legacy-management-interval 15m        (legacy alias for main interval)
+  --legacy-fast-management-interval 5m
+  --legacy-main-management-interval 15m
+  --legacy-thesis-management-interval 1h
+  --legacy-disable-mechanical-protection
+  --legacy-break-even-r 1.0
+  --legacy-structure-r 1.5
+  --legacy-atr-buffer 0.25
+  --improved-trailing-mode disabled|break-even|structure-atr
+  --improved-management-interval 15m      (legacy alias for main interval)
+  --improved-fast-management-interval 5m
+  --improved-main-management-interval 15m
+  --improved-thesis-management-interval 1h
+  --improved-disable-mechanical-protection
+  --improved-break-even-r 1.0
+  --improved-structure-r 2.0
+  --improved-atr-buffer 0.25
 
 Credentials (only needed when downloading):
   Oanda__AccountId / OANDA_ACCOUNT_ID

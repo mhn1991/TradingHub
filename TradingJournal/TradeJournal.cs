@@ -11,6 +11,10 @@ public enum TradeJournalEventType
     OrderSubmitted,
     OrderAccepted,
     OrderRejected,
+    StopAmendmentRequested,
+    StopAmendmentAccepted,
+    StopAmendmentRejected,
+    StopAmendmentUnsupported,
     PositionMismatch,
     SafetyStateChanged,
     ClosedTradeRecorded,
@@ -26,8 +30,10 @@ public sealed record TradeJournalEntry
     public AgentAction? Action { get; init; }
     public string? DecisionId { get; init; }
     public string? ClientOrderId { get; init; }
+    public string? PositionId { get; init; }
     public decimal? Confidence { get; init; }
     public decimal? Value { get; init; }
+    public decimal? PreviousValue { get; init; }
     public required string Message { get; init; }
 }
 

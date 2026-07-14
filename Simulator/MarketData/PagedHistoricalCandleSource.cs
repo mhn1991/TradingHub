@@ -56,6 +56,8 @@ public sealed class LowWatermarkPrefetchStream : IHistoricalCandleStream
     private long _peakUnread;
     private int _pagesRequested;
     private long _sourceWaits;
+    private long _consumerWaits;
+    private long _currentUnread;
     private bool _producerComplete;
     private bool _sourceComplete;
 
@@ -73,24 +75,31 @@ public sealed class LowWatermarkPrefetchStream : IHistoricalCandleStream
         _lowWatermark = lowWatermark;
     }
 
-    public PrefetchDiagnostics SnapshotDiagnostics(long currentUnread) => new()
+    public PrefetchDiagnostics SnapshotDiagnostics() => new()
     {
-        CurrentUnread = currentUnread,
+        CurrentUnread = Interlocked.Read(ref _currentUnread),
         PeakUnread = Interlocked.Read(ref _peakUnread),
         Capacity = _capacity,
         LowWatermark = _lowWatermark,
         PagesRequested = Volatile.Read(ref _pagesRequested),
         SourceWaits = Interlocked.Read(ref _sourceWaits),
-        ConsumerWaits = 0,
+        ConsumerWaits = Interlocked.Read(ref _consumerWaits),
         ProducerComplete = Volatile.Read(ref _producerComplete),
         SourceComplete = Volatile.Read(ref _sourceComplete),
         Mode = "LowWatermarkPaged"
+    };
+
+    public PrefetchDiagnostics SnapshotDiagnostics(long currentUnread) => SnapshotDiagnostics() with
+    {
+        CurrentUnread = currentUnread
     };
 
     public async IAsyncEnumerable<MarketCandle> StreamAsync(
         HistoricalCandleRequest request,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        using var producerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken producerToken = producerCancellation.Token;
         var channel = Channel.CreateBounded<MarketCandle>(new BoundedChannelOptions(_capacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
@@ -111,18 +120,17 @@ public sealed class LowWatermarkPrefetchStream : IHistoricalCandleStream
                 DateTimeOffset cursor = request.From;
                 int pageNumber = 0;
                 bool complete = false;
+                bool suspended = false;
                 while (!complete && cursor < request.To)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
+                    producerToken.ThrowIfCancellationRequested();
 
-                    // Wait until unread is at/below low watermark (or buffer empty).
-                    while (true)
+                    if (suspended)
                     {
-                        long unread = Volatile.Read(ref writeSequence) - Volatile.Read(ref readSequence);
-                        if (unread <= _lowWatermark)
-                            break;
                         Interlocked.Increment(ref _sourceWaits);
-                        await unreadGate.WaitAsync(50, cancellationToken).ConfigureAwait(false);
+                        while (Volatile.Read(ref writeSequence) - Volatile.Read(ref readSequence) > _lowWatermark)
+                            await unreadGate.WaitAsync(producerToken).ConfigureAwait(false);
+                        suspended = false;
                     }
 
                     pageNumber++;
@@ -136,19 +144,29 @@ public sealed class LowWatermarkPrefetchStream : IHistoricalCandleStream
                             cursor,
                             request.PageSize,
                             pageNumber),
-                        cancellationToken).ConfigureAwait(false);
+                        producerToken).ConfigureAwait(false);
 
                     foreach (MarketCandle candle in page.Candles)
                     {
-                        await channel.Writer.WriteAsync(candle, cancellationToken).ConfigureAwait(false);
+                        if (suspended)
+                        {
+                            Interlocked.Increment(ref _sourceWaits);
+                            while (Volatile.Read(ref writeSequence) - Volatile.Read(ref readSequence) > _lowWatermark)
+                                await unreadGate.WaitAsync(producerToken).ConfigureAwait(false);
+                            suspended = false;
+                        }
+
+                        await channel.Writer.WriteAsync(candle, producerToken).ConfigureAwait(false);
                         long written = Interlocked.Increment(ref writeSequence);
                         long unreadNow = written - Volatile.Read(ref readSequence);
+                        Interlocked.Exchange(ref _currentUnread, unreadNow);
                         long peak = Interlocked.Read(ref _peakUnread);
                         while (unreadNow > peak &&
                                Interlocked.CompareExchange(ref _peakUnread, unreadNow, peak) != peak)
                         {
                             peak = Interlocked.Read(ref _peakUnread);
                         }
+                        suspended = unreadNow >= _capacity;
                     }
 
                     complete = page.IsComplete || page.NextCursor is null || page.NextCursor >= request.To;
@@ -170,22 +188,31 @@ public sealed class LowWatermarkPrefetchStream : IHistoricalCandleStream
             {
                 Volatile.Write(ref _producerComplete, true);
             }
-        }, cancellationToken);
+        }, producerToken);
 
         try
         {
-            await foreach (MarketCandle candle in channel.Reader.ReadAllAsync(cancellationToken)
-                               .ConfigureAwait(false))
+            while (true)
             {
-                Interlocked.Increment(ref readSequence);
-                // Signal producer that unread may now be below watermark.
-                if (unreadGate.CurrentCount == 0)
-                    unreadGate.Release();
+                if (!channel.Reader.TryRead(out MarketCandle? candle))
+                {
+                    Interlocked.Increment(ref _consumerWaits);
+                    if (!await channel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+                        break;
+                    continue;
+                }
+                if (candle is null)
+                    continue;
+
+                long read = Interlocked.Increment(ref readSequence);
+                Interlocked.Exchange(ref _currentUnread, Volatile.Read(ref writeSequence) - read);
+                unreadGate.Release();
                 yield return candle;
             }
         }
         finally
         {
+            producerCancellation.Cancel();
             try
             {
                 await producer.ConfigureAwait(false);
@@ -197,7 +224,7 @@ public sealed class LowWatermarkPrefetchStream : IHistoricalCandleStream
             unreadGate.Dispose();
         }
 
-        if (producerError is not null)
+        if (producerError is not null && !producerToken.IsCancellationRequested)
             throw producerError;
     }
 }

@@ -21,7 +21,8 @@ public sealed record CandleDownloadProgress(
     long DownloadedCandles,
     DateTimeOffset? LatestCandleOpenTime,
     string Status,
-    bool FromCache);
+    bool FromCache,
+    int PagesRead = 0);
 
 /// <summary>Adapts the legacy mid-only <see cref="IHistoricalCandleSource"/> to the streaming envelope.</summary>
 public sealed class HistoricalCandleSourceStreamAdapter(IHistoricalCandleSource source) : IHistoricalCandleStream

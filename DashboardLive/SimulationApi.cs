@@ -1,8 +1,15 @@
 using System.IO.Compression;
 using System.Text.Json;
+using Agent.Strategies;
+using Brokers.Abstractions;
 using Brokers.Models;
+using RiskManager;
+using RiskManager.Safety;
+using Simulator.MarketData;
+using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
+using TradeManager;
 
 namespace Dashboard.Live;
 
@@ -10,14 +17,184 @@ public static class SimulationApi
 {
     public static void MapSimulationEndpoints(this WebApplication app)
     {
+        string importRoot = Path.GetFullPath(Path.Combine(
+            app.Environment.ContentRootPath,
+            "..",
+            ".cache",
+            "imported-candles"));
+        CleanupExpiredImports(importRoot);
+
+        app.MapPost("/api/simulations/imports", async (
+            HttpRequest request,
+            CancellationToken cancellationToken) =>
+        {
+            if (!request.HasFormContentType)
+                return Results.BadRequest(new { error = "Expected multipart form data containing a CSV file." });
+
+            IFormCollection form = await request.ReadFormAsync(cancellationToken);
+            IFormFile? upload = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
+            if (upload is null || upload.Length == 0)
+                return Results.BadRequest(new { error = "A non-empty CSV file is required." });
+            if (upload.Length > 2L * 1024 * 1024 * 1024)
+                return Results.BadRequest(new { error = "Imported datasets are limited to 2 GiB." });
+            if (!string.Equals(Path.GetExtension(upload.FileName), ".csv", StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new { error = "Imported candle datasets must be CSV files." });
+
+            BarInterval interval;
+            try
+            {
+                interval = BarIntervalParser.Parse(form["interval"].FirstOrDefault() ?? "1s");
+                if (interval != BarInterval.Seconds(1) && interval != BarInterval.Seconds(5))
+                    throw new ArgumentException("Imported datasets support 1s or 5s intervals.");
+            }
+            catch (ArgumentException exception)
+            {
+                return Results.BadRequest(new { error = exception.Message });
+            }
+
+            Directory.CreateDirectory(importRoot);
+            string datasetId = Guid.NewGuid().ToString("N");
+            string path = Path.Combine(importRoot, datasetId + ".csv");
+            try
+            {
+                await using (FileStream output = new(
+                                 path,
+                                 FileMode.CreateNew,
+                                 FileAccess.Write,
+                                 FileShare.None,
+                                 128 * 1024,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    await upload.CopyToAsync(output, cancellationToken);
+                }
+
+                long rows = await ImportedSecondCandleSource.ValidateFileAsync(
+                    path,
+                    interval,
+                    cancellationToken);
+                DateTimeOffset createdAt = DateTimeOffset.UtcNow;
+                var metadata = new ImportedDatasetMetadata(
+                    datasetId,
+                    Path.GetFileName(upload.FileName),
+                    BarIntervalParser.Format(interval),
+                    rows,
+                    upload.Length,
+                    createdAt,
+                    createdAt.AddDays(7));
+                string metadataPath = Path.Combine(importRoot, datasetId + ".metadata.json");
+                string temporaryMetadata = metadataPath + ".tmp";
+                await File.WriteAllTextAsync(
+                    temporaryMetadata,
+                    JsonSerializer.Serialize(metadata),
+                    cancellationToken);
+                File.Move(temporaryMetadata, metadataPath, overwrite: true);
+                return Results.Created($"/api/simulations/imports/{datasetId}", new
+                {
+                    datasetId,
+                    fileName = Path.GetFileName(upload.FileName),
+                    interval = BarIntervalParser.Format(interval),
+                    rows,
+                    sizeBytes = upload.Length,
+                    expiresAt = metadata.ExpiresAt
+                });
+            }
+            catch (InvalidDataException exception)
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+                return Results.BadRequest(new { error = exception.Message });
+            }
+            catch
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+                throw;
+            }
+        });
+
+        app.MapGet("/api/simulations/imports", () =>
+        {
+            CleanupExpiredImports(importRoot);
+            if (!Directory.Exists(importRoot))
+                return Results.Ok(Array.Empty<ImportedDatasetMetadata>());
+            var datasets = new List<ImportedDatasetMetadata>();
+            foreach (string metadataPath in Directory.EnumerateFiles(importRoot, "*.metadata.json"))
+            {
+                try
+                {
+                    ImportedDatasetMetadata? metadata = JsonSerializer.Deserialize<ImportedDatasetMetadata>(
+                        File.ReadAllText(metadataPath));
+                    if (metadata is not null && metadata.ExpiresAt > DateTimeOffset.UtcNow)
+                        datasets.Add(metadata);
+                }
+                catch (JsonException)
+                {
+                    // Invalid metadata is not selectable and is removed by cleanup.
+                }
+            }
+            return Results.Ok(datasets.OrderByDescending(item => item.CreatedAt).ToArray());
+        });
+
+        app.MapDelete("/api/simulations/imports/{datasetId}", (string datasetId) =>
+        {
+            if (!Guid.TryParseExact(datasetId, "N", out Guid parsed))
+                return Results.BadRequest(new { error = "Invalid dataset ID." });
+            string canonical = parsed.ToString("N");
+            string csv = Path.Combine(importRoot, canonical + ".csv");
+            string metadata = Path.Combine(importRoot, canonical + ".metadata.json");
+            if (!File.Exists(csv) && !File.Exists(metadata))
+                return Results.NotFound();
+            if (File.Exists(csv)) File.Delete(csv);
+            if (File.Exists(metadata)) File.Delete(metadata);
+            return Results.NoContent();
+        });
+
+        app.MapGet("/api/simulations/catalog", async (
+            bool? refresh,
+            SimulationBrokerCatalogService catalog,
+            CancellationToken cancellationToken) =>
+        {
+            SimulationBrokerCatalog result = await catalog.GetAsync(refresh == true, cancellationToken);
+            return Results.Ok(result);
+        });
+
+        app.MapGet("/api/simulations/health", (ISimulationJobRepository repository) =>
+        {
+            SimulationJobRecoveryReport recovery = repository is FileSimulationJobRepository files
+                ? files.LastRecoveryReport
+                : new SimulationJobRecoveryReport();
+            bool oandaConfigured = !string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable("OANDA_ACCOUNT_ID")) &&
+                !string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable("OANDA_ACCESS_TOKEN")
+                    ?? Environment.GetEnvironmentVariable("OANDA_TOKEN"));
+            return Results.Ok(new
+            {
+                status = "Healthy",
+                jobRepository = "Healthy",
+                jobSchemaVersion = FileSimulationJobRepository.CurrentSchemaVersion,
+                recovery.ValidJobs,
+                recovery.InterruptedJobsMarkedFailed,
+                recovery.QuarantinedFiles,
+                recovery.TemporaryFilesRemoved,
+                recovery.WarningCodes,
+                oandaCredentialsConfigured = oandaConfigured
+            });
+        });
+
         app.MapPost("/api/simulations", async (
             CreateSimulationRequest body,
             IBacktestApplicationService service,
+            SimulationBrokerCatalogService catalog,
             CancellationToken cancellationToken) =>
         {
             try
             {
-                BacktestRequest request = body.ToBacktestRequest();
+                SimulationBrokerOption selectedBroker = await catalog.ValidateSelectionAsync(
+                    body.ResolveBrokerId(),
+                    body.Instrument,
+                    cancellationToken);
+                BacktestRequest request = body.ToBacktestRequest(selectedBroker);
                 SimulationJobHandle handle = await service.StartAsync(request, cancellationToken);
                 return Results.Accepted($"/api/simulations/{handle.SimulationId:N}", new
                 {
@@ -25,9 +202,36 @@ public static class SimulationApi
                     status = handle.Status.ToString()
                 });
             }
+            catch (HistoricalGranularityNotSupportedException exception)
+            {
+                return Results.BadRequest(new
+                {
+                    error = exception.Message,
+                    code = exception.ErrorCode,
+                    source = exception.SourceName,
+                    requestedInterval = BarIntervalParser.Format(exception.RequestedInterval),
+                    supportedIntervals = exception.SupportedIntervals,
+                    suggestion = exception.Suggestion
+                });
+            }
             catch (ArgumentException exception)
             {
-                return Results.BadRequest(new { error = exception.Message });
+                return Results.BadRequest(new { error = exception.Message, code = "InvalidSimulationRequest" });
+            }
+            catch (InvalidOperationException exception)
+            {
+                return Results.Conflict(new { error = exception.Message, code = "SimulationStateConflict" });
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return Results.Problem(
+                    title: "Simulation service is temporarily unavailable",
+                    detail: "The simulation job repository could not be accessed. Check the server log for the trace ID.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable,
+                    extensions: new Dictionary<string, object?>
+                    {
+                        ["code"] = "SimulationRepositoryUnavailable"
+                    });
             }
         });
 
@@ -64,6 +268,10 @@ public static class SimulationApi
             {
                 return Results.NotFound();
             }
+            catch (InvalidOperationException exception)
+            {
+                return Results.Conflict(new { error = exception.Message, code = "SimulationStateConflict" });
+            }
         });
 
         app.MapPost("/api/simulations/{id:guid}/resume", async (
@@ -79,6 +287,10 @@ public static class SimulationApi
             catch (KeyNotFoundException)
             {
                 return Results.NotFound();
+            }
+            catch (InvalidOperationException exception)
+            {
+                return Results.Conflict(new { error = exception.Message, code = "SimulationStateConflict" });
             }
         });
 
@@ -110,19 +322,32 @@ public static class SimulationApi
         app.MapGet("/api/simulations/{id:guid}/trades", async (
             Guid id,
             string? strategy,
+            string? cursor,
+            int? limit,
             IBacktestApplicationService service,
             CancellationToken cancellationToken) =>
         {
+            int take = Math.Clamp(limit ?? 100, 1, 1_000);
             SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
             if (snapshot?.OutputDirectory is null || !Directory.Exists(snapshot.OutputDirectory))
-                return snapshot is null ? Results.NotFound() : Results.Ok(Array.Empty<object>());
+                return snapshot is null
+                    ? Results.NotFound()
+                    : Results.Ok(new { items = Array.Empty<object>(), nextCursor = cursor, hasMore = false });
 
             string strategiesRoot = Path.Combine(snapshot.OutputDirectory, "strategies");
             if (!Directory.Exists(strategiesRoot))
-                return Results.Ok(Array.Empty<object>());
+                return Results.Ok(new { items = Array.Empty<object>(), nextCursor = cursor, hasMore = false });
 
-            var trades = new List<object>();
-            foreach (string directory in Directory.EnumerateDirectories(strategiesRoot))
+            int startOrdinal = 0;
+            if (!string.IsNullOrWhiteSpace(cursor) &&
+                (!cursor.StartsWith("trade:", StringComparison.OrdinalIgnoreCase) ||
+                 !int.TryParse(cursor[6..], out startOrdinal) || startOrdinal < 0))
+            {
+                return Results.BadRequest(new { error = "Invalid trade cursor." });
+            }
+
+            var indexed = new List<(string StrategyId, string DataPath, TradeIndexEntryDto Entry)>();
+            foreach (string directory in Directory.EnumerateDirectories(strategiesRoot).OrderBy(path => path))
             {
                 string strategyId = Path.GetFileName(directory);
                 if (!string.IsNullOrWhiteSpace(strategy) &&
@@ -131,20 +356,119 @@ public static class SimulationApi
                     continue;
                 }
 
-                string tradesPath = Path.Combine(directory, "trades.json.gz");
-                if (!File.Exists(tradesPath))
+                string indexPath = Path.Combine(directory, "trades.index.json");
+                string liveTradesPath = Path.Combine(directory, "trades.ndjson");
+                if (!File.Exists(indexPath) || !File.Exists(liveTradesPath))
                     continue;
-
-                await using FileStream file = File.OpenRead(tradesPath);
-                await using var gzip = new GZipStream(file, CompressionMode.Decompress);
-                JsonElement? payload = await JsonSerializer.DeserializeAsync<JsonElement>(gzip, cancellationToken: cancellationToken);
-                if (payload is JsonElement element)
+                try
                 {
-                    trades.Add(new { strategyId, trades = element });
+                    await using FileStream indexFile = new(
+                        indexPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite,
+                        16 * 1024,
+                        FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    TradeIndexDto? tradeIndex = await JsonSerializer.DeserializeAsync<TradeIndexDto>(
+                        indexFile,
+                        cancellationToken: cancellationToken);
+                    IReadOnlyList<TradeIndexEntryDto?> entries = tradeIndex?.Items ?? [];
+                    long dataLength = new FileInfo(liveTradesPath).Length;
+                    foreach (TradeIndexEntryDto? entry in entries)
+                    {
+                        if (entry is null)
+                        {
+                            app.Logger.LogWarning(
+                                "Ignoring null trade-index entry for simulation {SimulationId}, strategy {StrategyId}.",
+                                id,
+                                strategyId);
+                            continue;
+                        }
+
+                        bool valid = entry.Ordinal >= 0 &&
+                            entry.Offset >= 0 &&
+                            entry.Length > 0 &&
+                            entry.Length <= 16 * 1024 * 1024 &&
+                            entry.Offset <= dataLength &&
+                            entry.Length <= dataLength - entry.Offset &&
+                            !string.IsNullOrWhiteSpace(entry.SetupId);
+                        if (valid)
+                        {
+                            indexed.Add((strategyId, liveTradesPath, entry));
+                        }
+                        else
+                        {
+                            app.Logger.LogWarning(
+                                "Ignoring invalid trade-index entry for simulation {SimulationId}, strategy {StrategyId}, ordinal {Ordinal}.",
+                                id,
+                                strategyId,
+                                entry.Ordinal);
+                        }
+                    }
+                }
+                catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
+                {
+                    app.Logger.LogWarning(
+                        exception,
+                        "Ignoring unreadable trade index for simulation {SimulationId}, strategy {StrategyId}.",
+                        id,
+                        strategyId);
                 }
             }
 
-            return Results.Ok(trades);
+            indexed.Sort(static (left, right) =>
+            {
+                int time = Nullable.Compare(left.Entry.ClosedAt, right.Entry.ClosedAt);
+                if (time != 0) return time;
+                int strategyOrder = string.Compare(left.StrategyId, right.StrategyId, StringComparison.Ordinal);
+                return strategyOrder != 0 ? strategyOrder : left.Entry.Ordinal.CompareTo(right.Entry.Ordinal);
+            });
+
+            var items = new List<object>(take);
+            int consumedEntries = 0;
+            foreach ((string strategyId, string dataPath, TradeIndexEntryDto entry) in
+                     indexed.Skip(startOrdinal).Take(take))
+            {
+                consumedEntries++;
+                try
+                {
+                    await using FileStream data = new(
+                        dataPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite,
+                        16 * 1024,
+                        FileOptions.Asynchronous | FileOptions.RandomAccess);
+                    if (entry.Offset < 0 || entry.Length <= 0 ||
+                        entry.Offset > data.Length || entry.Length > data.Length - entry.Offset)
+                        continue;
+                    data.Seek(entry.Offset, SeekOrigin.Begin);
+                    byte[] bytes = new byte[entry.Length];
+                    await data.ReadExactlyAsync(bytes, cancellationToken);
+                    JsonElement trade = JsonSerializer.Deserialize<JsonElement>(bytes.AsSpan());
+                    items.Add(new { strategyId, trade });
+                }
+                catch (Exception exception) when (exception is JsonException or IOException or EndOfStreamException)
+                {
+                    app.Logger.LogWarning(
+                        exception,
+                        "Ignoring unreadable live trade for simulation {SimulationId}, strategy {StrategyId}, ordinal {Ordinal}.",
+                        id,
+                        strategyId,
+                        entry.Ordinal);
+                }
+            }
+
+            // Advance over every examined index entry, including a corrupt NDJSON row. Otherwise
+            // a client can become trapped retrying the same unreadable trade forever.
+            int nextOrdinal = startOrdinal + consumedEntries;
+            bool hasMore = nextOrdinal < indexed.Count;
+            return Results.Ok(new
+            {
+                items,
+                nextCursor = $"trade:{nextOrdinal}",
+                hasMore
+            });
         });
 
         app.MapGet("/api/simulations/{id:guid}/performance", async (
@@ -281,6 +605,23 @@ public static class SimulationApi
             if (!Directory.Exists(marketDir))
                 return Results.Ok(Array.Empty<object>());
 
+            string indexPath = Path.Combine(marketDir, "index.json");
+            if (File.Exists(indexPath))
+            {
+                await using FileStream indexFile = new(
+                    indexPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite,
+                    16 * 1024,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                JsonElement index = await JsonSerializer.DeserializeAsync<JsonElement>(
+                    indexFile,
+                    cancellationToken: cancellationToken);
+                if (index.TryGetProperty("chunks", out JsonElement indexedChunks))
+                    return Results.Ok(indexedChunks.Clone());
+            }
+
             var chunks = Directory.EnumerateFiles(marketDir, "chunk-*.json.gz")
                 .OrderBy(path => path)
                 .Select(path =>
@@ -336,11 +677,126 @@ public static class SimulationApi
                 cancellationToken: cancellationToken);
             return Results.Ok(payload);
         });
+
+        app.MapGet("/api/simulations/{id:guid}/replay/execution-detail", async (
+            Guid id,
+            string strategy,
+            string setupId,
+            IBacktestApplicationService service,
+            CancellationToken cancellationToken) =>
+        {
+            SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
+            if (snapshot?.OutputDirectory is null)
+                return Results.NotFound();
+            string detailRoot = Path.GetFullPath(Path.Combine(snapshot.OutputDirectory, "execution-detail"));
+            string directory = Path.GetFullPath(Path.Combine(
+                detailRoot,
+                SanitizePathSegment(strategy),
+                SanitizePathSegment(setupId)));
+            if (!directory.StartsWith(detailRoot, StringComparison.Ordinal) || !Directory.Exists(directory))
+                return Results.NotFound();
+            string indexPath = Path.Combine(directory, "index.json");
+            if (!File.Exists(indexPath))
+                return Results.NotFound();
+            await using FileStream index = new(
+                indexPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite,
+                16 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            JsonElement payload = await JsonSerializer.DeserializeAsync<JsonElement>(
+                index,
+                cancellationToken: cancellationToken);
+            return Results.Ok(payload);
+        });
+
+        app.MapGet("/api/simulations/{id:guid}/replay/execution-detail/{chunkId}", async (
+            Guid id,
+            string chunkId,
+            string strategy,
+            string setupId,
+            IBacktestApplicationService service,
+            CancellationToken cancellationToken) =>
+        {
+            if (!IsSafeChunkId(chunkId))
+                return Results.BadRequest(new { error = "Invalid chunk id." });
+            SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
+            if (snapshot?.OutputDirectory is null)
+                return Results.NotFound();
+            string detailRoot = Path.GetFullPath(Path.Combine(snapshot.OutputDirectory, "execution-detail"));
+            string directory = Path.GetFullPath(Path.Combine(
+                detailRoot,
+                SanitizePathSegment(strategy),
+                SanitizePathSegment(setupId)));
+            string path = Path.GetFullPath(Path.Combine(directory, $"{chunkId}.json.gz"));
+            if (!path.StartsWith(detailRoot, StringComparison.Ordinal) || !File.Exists(path))
+                return Results.NotFound();
+            await using FileStream file = File.OpenRead(path);
+            await using var gzip = new GZipStream(file, CompressionMode.Decompress);
+            JsonElement payload = await JsonSerializer.DeserializeAsync<JsonElement>(
+                gzip,
+                cancellationToken: cancellationToken);
+            return Results.Ok(payload);
+        });
+    }
+
+    private static string SanitizePathSegment(string value) => string.Concat(value.Select(character =>
+        char.IsLetterOrDigit(character) ? character : '_'));
+
+    private static bool IsSafeChunkId(string value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.All(character => char.IsLetterOrDigit(character) || character is '-' or '_');
+
+    private static void CleanupExpiredImports(string importRoot)
+    {
+        if (!Directory.Exists(importRoot))
+            return;
+        foreach (string metadataPath in Directory.EnumerateFiles(importRoot, "*.metadata.json"))
+        {
+            bool delete = false;
+            string fileName = Path.GetFileName(metadataPath);
+            string id = fileName[..^".metadata.json".Length];
+            if (!Guid.TryParseExact(id, "N", out _))
+            {
+                delete = true;
+            }
+            else
+            {
+                try
+                {
+                    ImportedDatasetMetadata? metadata = JsonSerializer.Deserialize<ImportedDatasetMetadata>(
+                        File.ReadAllText(metadataPath));
+                    delete = metadata is null || metadata.ExpiresAt <= DateTimeOffset.UtcNow;
+                }
+                catch (JsonException)
+                {
+                    delete = true;
+                }
+            }
+
+            if (!delete)
+                continue;
+            if (File.Exists(metadataPath)) File.Delete(metadataPath);
+            string csv = Path.Combine(importRoot, id + ".csv");
+            if (File.Exists(csv)) File.Delete(csv);
+        }
+
+        // Remove orphaned CSV files older than the retention window.
+        foreach (string csv in Directory.EnumerateFiles(importRoot, "*.csv"))
+        {
+            string id = Path.GetFileNameWithoutExtension(csv);
+            string metadata = Path.Combine(importRoot, id + ".metadata.json");
+            if (!File.Exists(metadata) && File.GetCreationTimeUtc(csv) < DateTime.UtcNow.AddDays(-7))
+                File.Delete(csv);
+        }
     }
 }
 
 public sealed record CreateSimulationRequest
 {
+    /// <summary>Catalog broker ID: oanda, binance, or imported.</summary>
+    public string? BrokerId { get; init; }
     public string Instrument { get; init; } = "FX:GBP/JPY";
     public DateTimeOffset From { get; init; }
     public DateTimeOffset To { get; init; }
@@ -351,31 +807,86 @@ public sealed record CreateSimulationRequest
     public string[] AnalysisIntervals { get; init; } = ["5m", "15m", "1h"];
     public string PrecisionMode { get; init; } = "Fast";
     public string SourceKind { get; init; } = "OandaCandles";
+    /// <summary>
+    /// Retained only so older clients receive a clear validation error. Server-local paths are never accepted.
+    /// </summary>
     public string? ImportedCandlePath { get; init; }
+    public string? ImportedDatasetId { get; init; }
     public string TrendInterval { get; init; } = "1h";
+    public string[] SecondaryTrendIntervals { get; init; } = [];
+    public string[] SetupIntervals { get; init; } = [];
     public string ConfirmationInterval { get; init; } = "15m";
+    public string[] AdditionalConfirmationIntervals { get; init; } = [];
     public string EntryInterval { get; init; } = "5m";
+    public int MinimumSecondaryTrendAlignments { get; init; }
+    public int MinimumSetupAlignments { get; init; }
+    public int MinimumConfirmationAlignments { get; init; } = 1;
+    public bool StrongOppositionVeto { get; init; } = true;
     public string[] Strategies { get; init; } = ["legacy", "improved"];
     public decimal StartingBalance { get; init; } = 100_000m;
     public decimal Quantity { get; init; } = 1_000m;
+    public string PositionSizingMode { get; init; } = "FixedFractionalRisk";
+    public decimal FixedCashRisk { get; init; } = 250m;
+    public decimal RiskPercentOfEquity { get; init; } = 0.5m;
+    public decimal MinimumQuantity { get; init; } = 1m;
+    public decimal? MaximumQuantity { get; init; }
+    public decimal QuantityStep { get; init; } = 1m;
+    public decimal MaximumAccountMarginUsagePercent { get; init; } = 30m;
+    public decimal MaximumSinglePositionMarginPercent { get; init; } = 10m;
     public decimal Leverage { get; init; } = 20m;
     public decimal CommissionRate { get; init; } = 0.00002m;
     public decimal SpreadBasisPoints { get; init; } = 1m;
     public decimal SlippageBasisPoints { get; init; } = 0.5m;
     public decimal MinimumRewardRisk { get; init; } = 1.5m;
+    public string PriceActionConfirmation { get; init; } = "Soft";
+    public decimal MinimumPriceActionConfidence { get; init; } = 55m;
+    public bool RejectStrongOpposingPriceAction { get; init; } = true;
     public int WarmupDays { get; init; } = 45;
     public string StrategyExecutionMode { get; init; } = "ParallelWorkers";
-    public string StrategyWorkerMode { get; init; } = "Task";
     public string AmbiguousIntrabarPolicy { get; init; } = "ConservativeStopFirst";
     public bool RefreshCache { get; init; }
     public bool NoCache { get; init; }
-    public int DeterministicSeed { get; init; } = 12_345;
+    public PositionManagementRequest LegacyPositionManagement { get; init; } =
+        PositionManagementRequest.LegacyDefaults;
+    public PositionManagementRequest ImprovedPositionManagement { get; init; } =
+        PositionManagementRequest.ImprovedDefaults;
 
-    public BacktestRequest ToBacktestRequest()
+    /// <summary>
+    /// Optional account-currency profit at which new entries are paused for the rest
+    /// of the UTC day. Existing positions remain managed and protected.
+    /// </summary>
+    public decimal? DailyEquityProfitTarget { get; init; }
+
+    /// <summary>
+    /// Optional daily equity-profit level that activates peak-giveback protection.
+    /// Must be supplied together with MaximumDailyEquityGiveback.
+    /// </summary>
+    public decimal? DailyEquityGivebackActivation { get; init; }
+
+    /// <summary>
+    /// Optional maximum account-currency giveback from the daily equity peak.
+    /// Must be supplied together with DailyEquityGivebackActivation.
+    /// </summary>
+    public decimal? MaximumDailyEquityGiveback { get; init; }
+
+    public string ResolveBrokerId()
     {
+        if (!string.IsNullOrWhiteSpace(BrokerId))
+            return BrokerId.Trim().ToLowerInvariant();
+        return SourceKind.ToUpperInvariant() switch
+        {
+            "BINANCECANDLES" => "binance",
+            "IMPORTEDSECONDCANDLES" or "RECORDEDQUOTES" => "imported",
+            _ => "oanda"
+        };
+    }
+
+    public BacktestRequest ToBacktestRequest(SimulationBrokerOption selectedBroker)
+    {
+        ArgumentNullException.ThrowIfNull(selectedBroker);
         string solutionRoot = FindSolutionRoot() ?? Directory.GetCurrentDirectory();
         var precision = Enum.Parse<Simulator.MarketData.SimulationPrecisionMode>(PrecisionMode, ignoreCase: true);
-        var source = Enum.Parse<Simulator.MarketData.HistoricalDataSourceKind>(SourceKind, ignoreCase: true);
+        var source = Enum.Parse<Simulator.MarketData.HistoricalDataSourceKind>(selectedBroker.SourceKind, ignoreCase: true);
         SimulationTimeframeOptions fromPrecision =
             SimulationTimeframeOptions.FromPrecision(precision, AnalysisIntervals.Select(BarIntervalParser.Parse).ToArray());
 
@@ -390,9 +901,48 @@ public sealed record CreateSimulationRequest
             ? BarIntervalParser.Parse(AnalysisBaseInterval)
             : fromPrecision.AnalysisBaseInterval;
 
+        if (!string.IsNullOrWhiteSpace(ImportedCandlePath))
+            throw new ArgumentException(
+                "ImportedCandlePath is not accepted. Upload or select a server-owned ImportedDatasetId.");
+
+        string? importedCandlePath = null;
+        if (!string.IsNullOrWhiteSpace(ImportedDatasetId))
+        {
+            if (!Guid.TryParseExact(ImportedDatasetId, "N", out Guid datasetId))
+                throw new ArgumentException("ImportedDatasetId is invalid.");
+            string importRoot = Path.Combine(solutionRoot, ".cache", "imported-candles");
+            string canonicalId = datasetId.ToString("N");
+            string metadataPath = Path.Combine(importRoot, canonicalId + ".metadata.json");
+            importedCandlePath = Path.Combine(importRoot, canonicalId + ".csv");
+            if (!File.Exists(metadataPath) || !File.Exists(importedCandlePath))
+                throw new ArgumentException("The imported dataset does not exist or has expired.");
+
+            ImportedDatasetMetadata metadata;
+            try
+            {
+                metadata = JsonSerializer.Deserialize<ImportedDatasetMetadata>(
+                               File.ReadAllText(metadataPath))
+                           ?? throw new JsonException("Dataset metadata was empty.");
+            }
+            catch (JsonException exception)
+            {
+                throw new ArgumentException("The imported dataset metadata is invalid.", exception);
+            }
+
+            if (metadata.ExpiresAt <= DateTimeOffset.UtcNow)
+                throw new ArgumentException("The imported dataset has expired.");
+            if (BarIntervalParser.Parse(metadata.Interval) != execution)
+                throw new ArgumentException(
+                    $"Imported dataset interval {metadata.Interval} does not match execution interval " +
+                    $"{BarIntervalParser.Format(execution)}.");
+        }
+
+        BrokerEnvironment environment = ResolveEnvironment(selectedBroker);
+
         return new BacktestRequest
         {
             Instrument = new InstrumentKey(Instrument),
+            Environment = environment,
             From = From,
             To = To,
             Strategies = Strategies,
@@ -403,8 +953,11 @@ public sealed record CreateSimulationRequest
             SpreadBasisPoints = SpreadBasisPoints,
             SlippageBasisPoints = SlippageBasisPoints,
             MinimumRewardRisk = MinimumRewardRisk,
+            PriceActionConfirmation = Enum.Parse<PriceActionConfirmationMode>(PriceActionConfirmation, ignoreCase: true),
+            MinimumPriceActionConfidence = MinimumPriceActionConfidence,
+            RejectStrongOpposingPriceAction = RejectStrongOpposingPriceAction,
             OutputDirectory = Path.Combine(solutionRoot, "Dashboard", "public", "data", "simulations"),
-            CacheDirectory = Path.Combine(solutionRoot, ".cache", "oanda"),
+            CacheDirectory = Path.Combine(solutionRoot, ".cache", "historical"),
             JobsDirectory = Path.Combine(solutionRoot, ".cache", "simulation-jobs"),
             Runtime = new BacktestRuntimeOptions
             {
@@ -413,23 +966,89 @@ public sealed record CreateSimulationRequest
                 AnalysisIntervals = AnalysisIntervals.Select(BarIntervalParser.Parse).ToArray(),
                 PrecisionMode = precision,
                 SourceKind = source,
-                ImportedCandlePath = ImportedCandlePath,
+                ImportedCandlePath = importedCandlePath,
                 StrategyTimeframes = new ProgressiveStrategyTimeframes
                 {
                     TrendInterval = BarIntervalParser.Parse(TrendInterval),
+                    SecondaryTrendIntervals = SecondaryTrendIntervals
+                        .Select(BarIntervalParser.Parse)
+                        .ToArray(),
+                    SetupIntervals = SetupIntervals
+                        .Select(BarIntervalParser.Parse)
+                        .ToArray(),
                     ConfirmationInterval = BarIntervalParser.Parse(ConfirmationInterval),
-                    EntryInterval = BarIntervalParser.Parse(EntryInterval)
+                    AdditionalConfirmationIntervals = AdditionalConfirmationIntervals
+                        .Select(BarIntervalParser.Parse)
+                        .ToArray(),
+                    EntryInterval = BarIntervalParser.Parse(EntryInterval),
+                    MinimumSecondaryTrendAlignments = MinimumSecondaryTrendAlignments,
+                    MinimumSetupAlignments = MinimumSetupAlignments,
+                    MinimumConfirmationAlignments = MinimumConfirmationAlignments,
+                    StrongOppositionVeto = StrongOppositionVeto
                 },
                 WarmupDays = WarmupDays,
                 StrategyExecutionMode = Enum.Parse<StrategyExecutionMode>(StrategyExecutionMode, ignoreCase: true),
-                StrategyWorkerMode = Enum.Parse<StrategyWorkerMode>(StrategyWorkerMode, ignoreCase: true),
                 AmbiguousIntrabarPolicy = Enum.Parse<AmbiguousIntrabarPolicy>(AmbiguousIntrabarPolicy, ignoreCase: true),
                 RefreshCache = RefreshCache,
                 NoCache = NoCache,
-                DeterministicSeed = DeterministicSeed,
+                LegacyPositionManagement = LegacyPositionManagement.ToOptions(
+                    EntryInterval,
+                    PositionManagementOptions.LegacyDefaults),
+                ImprovedPositionManagement = ImprovedPositionManagement.ToOptions(
+                    EntryInterval,
+                    PositionManagementOptions.ImprovedDefaults),
+                PositionSizing = new PositionSizingOptions
+                {
+                    Mode = Enum.Parse<RiskManager.PositionSizingMode>(this.PositionSizingMode, ignoreCase: true),
+                    FixedQuantity = Quantity,
+                    FixedCashRisk = FixedCashRisk,
+                    RiskPercentOfEquity = RiskPercentOfEquity,
+                    MinimumQuantity = MinimumQuantity,
+                    MaximumQuantity = MaximumQuantity is null or <= 0m ? null : MaximumQuantity,
+                    QuantityStep = QuantityStep,
+                    MaximumAccountMarginUsagePercent = MaximumAccountMarginUsagePercent,
+                    MaximumSinglePositionMarginPercent = MaximumSinglePositionMarginPercent,
+                    Leverage = Leverage,
+                    EstimatedRoundTripCostBasisPoints = SpreadBasisPoints +
+                        2m * SlippageBasisPoints +
+                        2m * CommissionRate * 10_000m
+                },
+                SafetyOptions = new TradingSafetyOptions
+                {
+                    DailyEquityProfitTarget = NormaliseOptionalPositive(
+                        DailyEquityProfitTarget,
+                        nameof(DailyEquityProfitTarget)),
+                    DailyEquityGivebackActivation = NormaliseOptionalPositive(
+                        DailyEquityGivebackActivation,
+                        nameof(DailyEquityGivebackActivation)),
+                    MaximumDailyEquityGiveback = NormaliseOptionalPositive(
+                        MaximumDailyEquityGiveback,
+                        nameof(MaximumDailyEquityGiveback))
+                },
+                ReplayChunkSize = 250,
                 ProgressPublishIntervalMilliseconds = 500
             }
         };
+    }
+
+    private static BrokerEnvironment ResolveEnvironment(SimulationBrokerOption broker)
+    {
+        if (string.Equals(broker.Id, "binance", StringComparison.OrdinalIgnoreCase))
+            return BrokerEnvironment.Live;
+        if (string.Equals(broker.Id, "imported", StringComparison.OrdinalIgnoreCase))
+            return BrokerEnvironment.Demo;
+        return Enum.TryParse(broker.Environment, ignoreCase: true, out BrokerEnvironment environment)
+            ? environment
+            : BrokerEnvironment.Demo;
+    }
+
+    private static decimal? NormaliseOptionalPositive(decimal? value, string fieldName)
+    {
+        if (value is null or 0m)
+            return null;
+        if (value < 0m)
+            throw new ArgumentOutOfRangeException(fieldName, "Value cannot be negative.");
+        return value;
     }
 
     private static string? FindSolutionRoot()
@@ -445,3 +1064,128 @@ public sealed record CreateSimulationRequest
         return null;
     }
 }
+
+public sealed record PositionManagementRequest
+{
+    public string Mode { get; init; } = "StructureAtr";
+    public string? ManagementInterval { get; init; }
+    public bool? EvaluateMechanicalProtectionOnEveryExecutionFrame { get; init; }
+    public string? FastStructureInterval { get; init; }
+    public string? MainStructureInterval { get; init; }
+    public string? ThesisInterval { get; init; }
+    public decimal BreakEvenActivationR { get; init; } = 1m;
+    public decimal StructureTrailActivationR { get; init; } = 1.5m;
+    public decimal AtrBufferMultiplier { get; init; } = 0.25m;
+    public decimal BreakEvenBufferAtr { get; init; } = 0.05m;
+    public decimal MinimumStopImprovementAtr { get; init; } = 0.05m;
+    public decimal MinimumStopImprovementTicks { get; init; } = 1m;
+    public int MinimumAnalysisBarsBetweenAmendments { get; init; } = 1;
+    public bool ExitOnAdverseStructureBreak { get; init; }
+    public bool PreserveBracketTarget { get; init; } = true;
+    public bool IncludeEstimatedExitCostsAtBreakEven { get; init; } = true;
+    public bool? EnableScaleOut { get; init; }
+    public decimal? MinimumRunnerFraction { get; init; }
+    public bool? EnableProfitFloor { get; init; }
+    public bool? EnableMaximumGiveback { get; init; }
+    public bool? EnableStagnationReduction { get; init; }
+    public bool? EnableStructuralDeteriorationReduction { get; init; }
+    public bool? EnableMomentumDecayReduction { get; init; }
+    public bool? EnableVolatilityExhaustionReduction { get; init; }
+    public bool? EnableRiskWindowReduction { get; init; }
+    public string? RiskWindowStartUtc { get; init; }
+    public string? RiskWindowEndUtc { get; init; }
+    public bool? EnableExecutionCostStressReduction { get; init; }
+
+    public static PositionManagementRequest LegacyDefaults { get; } = new()
+    {
+        StructureTrailActivationR = 1.5m,
+        PreserveBracketTarget = false
+    };
+
+    public static PositionManagementRequest ImprovedDefaults { get; } = new()
+    {
+        StructureTrailActivationR = 2m,
+        PreserveBracketTarget = true
+    };
+
+    public PositionManagementOptions ToOptions(
+        string defaultManagementInterval,
+        PositionManagementOptions defaults) => defaults with
+    {
+        Mode = Enum.Parse<TrailingStopMode>(Mode, ignoreCase: true),
+        ManagementInterval = BarIntervalParser.Parse(
+            string.IsNullOrWhiteSpace(ManagementInterval)
+                ? defaultManagementInterval
+                : ManagementInterval),
+        EvaluateMechanicalProtectionOnEveryExecutionFrame =
+            EvaluateMechanicalProtectionOnEveryExecutionFrame ??
+            defaults.EvaluateMechanicalProtectionOnEveryExecutionFrame,
+        FastStructureInterval = ParseOptionalInterval(FastStructureInterval) ??
+            defaults.FastStructureInterval ?? BarIntervalParser.Parse(defaultManagementInterval),
+        MainStructureInterval = ParseOptionalInterval(MainStructureInterval) ??
+            ParseOptionalInterval(ManagementInterval) ?? defaults.MainStructureInterval ??
+            BarIntervalParser.Parse(defaultManagementInterval),
+        ThesisInterval = ParseOptionalInterval(ThesisInterval) ?? defaults.ThesisInterval,
+        BreakEvenActivationR = BreakEvenActivationR,
+        StructureTrailActivationR = StructureTrailActivationR,
+        AtrBufferMultiplier = AtrBufferMultiplier,
+        BreakEvenBufferAtr = BreakEvenBufferAtr,
+        MinimumStopImprovementAtr = MinimumStopImprovementAtr,
+        MinimumStopImprovementTicks = MinimumStopImprovementTicks,
+        MinimumAnalysisBarsBetweenAmendments = MinimumAnalysisBarsBetweenAmendments,
+        ExitOnAdverseStructureBreak = ExitOnAdverseStructureBreak,
+        PreserveBracketTarget = PreserveBracketTarget,
+        IncludeEstimatedExitCostsAtBreakEven = IncludeEstimatedExitCostsAtBreakEven,
+        EnableScaleOut = EnableScaleOut ?? defaults.EnableScaleOut,
+        MinimumRunnerFraction = MinimumRunnerFraction ?? defaults.MinimumRunnerFraction,
+        EnableProfitFloor = EnableProfitFloor ?? defaults.EnableProfitFloor,
+        EnableMaximumGiveback = EnableMaximumGiveback ?? defaults.EnableMaximumGiveback,
+        EnableStagnationReduction =
+            EnableStagnationReduction ?? defaults.EnableStagnationReduction,
+        EnableStructuralDeteriorationReduction =
+            EnableStructuralDeteriorationReduction ?? defaults.EnableStructuralDeteriorationReduction,
+        EnableMomentumDecayReduction =
+            EnableMomentumDecayReduction ?? defaults.EnableMomentumDecayReduction,
+        EnableVolatilityExhaustionReduction =
+            EnableVolatilityExhaustionReduction ?? defaults.EnableVolatilityExhaustionReduction,
+        EnableRiskWindowReduction =
+            EnableRiskWindowReduction ?? defaults.EnableRiskWindowReduction,
+        RiskWindowStartUtc = ParseOptionalTime(RiskWindowStartUtc) ?? defaults.RiskWindowStartUtc,
+        RiskWindowEndUtc = ParseOptionalTime(RiskWindowEndUtc) ?? defaults.RiskWindowEndUtc,
+        EnableExecutionCostStressReduction =
+            EnableExecutionCostStressReduction ?? defaults.EnableExecutionCostStressReduction
+    };
+
+    private static BarInterval? ParseOptionalInterval(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : BarIntervalParser.Parse(value);
+
+    private static TimeOnly? ParseOptionalTime(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        if (!TimeOnly.TryParse(value, out TimeOnly parsed))
+            throw new ArgumentException($"Invalid UTC time '{value}'. Use HH:mm.");
+        return parsed;
+    }
+}
+
+internal sealed record TradeIndexDto(
+    int SchemaVersion,
+    string? StrategyId,
+    IReadOnlyList<TradeIndexEntryDto?>? Items);
+
+internal sealed record TradeIndexEntryDto(
+    int Ordinal,
+    long Offset,
+    int Length,
+    string SetupId,
+    DateTimeOffset? ClosedAt);
+
+public sealed record ImportedDatasetMetadata(
+    string DatasetId,
+    string FileName,
+    string Interval,
+    long Rows,
+    long SizeBytes,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset ExpiresAt);

@@ -23,9 +23,11 @@ public sealed class StreamingComparativeEngineOptions
     public required SimulationOptions SimulationOptions { get; init; }
     public required string OutputDirectory { get; init; }
     public required string InputStreamId { get; init; }
+    public string? SimulationConfigurationId { get; init; }
     public ChartAnnotationOptions? AnnotationOptions { get; init; }
     public IProgress<BacktestProgress>? Progress { get; init; }
     public Func<SimulationJobStatus, Task>? StatusChanged { get; init; }
+    public Func<string, SimulatedTradeRecord, Task>? TradeCompleted { get; init; }
     public Simulator.Jobs.IAsyncPauseGate? PauseGate { get; init; }
 }
 
@@ -59,7 +61,8 @@ public sealed class StreamingComparativeEngine
         options.Runtime.Validate(_strategies.Count);
         SimulationTimeframeOptions timeframes = options.Runtime.ToTimeframeOptions();
         IReadOnlyList<BarInterval> effectiveAnalysis = timeframes.EffectiveAnalysisIntervals(
-            _strategies.SelectMany(s => s.Agent.RequiredIntervals));
+            _strategies.SelectMany(s => s.Agent.RequiredIntervals)
+                .Concat(_strategies.SelectMany(s => options.Runtime.ResolveManagementIntervals(s.Id))));
 
         var stopwatch = Stopwatch.StartNew();
         await RaiseStatusAsync(options, SimulationJobStatus.PreparingData).ConfigureAwait(false);
@@ -87,8 +90,12 @@ public sealed class StreamingComparativeEngine
                 id,
                 agent,
                 options.SimulationOptions,
+                safetyOptions: options.Runtime.SafetyOptions,
                 analysisSharing: options.Runtime.AnalysisSharingMode,
-                annotationOptions: options.AnnotationOptions));
+                annotationOptions: options.AnnotationOptions,
+                positionManagementOptions: options.Runtime.GetPositionManagement(id),
+                managementInterval: options.Runtime.ResolveManagementInterval(id),
+                positionSizingOptions: options.Runtime.PositionSizing));
         }
 
         // Persistent workers: one task/thread per strategy for the whole simulation.
@@ -99,14 +106,15 @@ public sealed class StreamingComparativeEngine
             {
                 workerHosts.Add(new StrategyWorkerHost(
                     session,
-                    options.Runtime.StrategyChannelCapacity,
-                    options.Runtime.StrategyWorkerMode));
+                    options.Runtime.StrategyChannelCapacity));
             }
         }
 
         await using var replayWriter = new ChunkedReplayWriter(
             options.OutputDirectory,
-            options.Runtime.ReplayChunkSize);
+            options.Runtime.ReplayChunkSize,
+            options.Runtime.ExecutionDetailPreEntryFrames,
+            options.Runtime.ExecutionDetailPostExitFrames);
 
         await replayWriter.WriteManifestAsync(new SimulationManifest
         {
@@ -122,6 +130,32 @@ public sealed class StreamingComparativeEngine
                 .ToArray(),
             Strategies = _strategies.Select(item => item.Id).ToArray(),
             InputStreamId = options.InputStreamId,
+            SimulationConfigurationId = options.SimulationConfigurationId,
+            SourceKind = options.Runtime.SourceKind.ToString(),
+            PrecisionMode = options.Runtime.PrecisionMode.ToString(),
+            AnalysisBaseInterval = StreamingCandleCache.FormatInterval(options.Runtime.AnalysisBaseInterval),
+            TrendInterval = StreamingCandleCache.FormatInterval(options.Runtime.StrategyTimeframes.TrendInterval),
+            SecondaryTrendIntervals = options.Runtime.StrategyTimeframes.SecondaryTrendIntervals
+                .Select(StreamingCandleCache.FormatInterval).ToArray(),
+            SetupIntervals = options.Runtime.StrategyTimeframes.SetupIntervals
+                .Select(StreamingCandleCache.FormatInterval).ToArray(),
+            ConfirmationInterval = StreamingCandleCache.FormatInterval(options.Runtime.StrategyTimeframes.ConfirmationInterval),
+            AdditionalConfirmationIntervals = options.Runtime.StrategyTimeframes.AdditionalConfirmationIntervals
+                .Select(StreamingCandleCache.FormatInterval).ToArray(),
+            EntryInterval = StreamingCandleCache.FormatInterval(options.Runtime.StrategyTimeframes.EntryInterval),
+            MinimumSecondaryTrendAlignments = options.Runtime.StrategyTimeframes.MinimumSecondaryTrendAlignments,
+            MinimumSetupAlignments = options.Runtime.StrategyTimeframes.MinimumSetupAlignments,
+            MinimumConfirmationAlignments = options.Runtime.StrategyTimeframes.MinimumConfirmationAlignments,
+            StrongOppositionVeto = options.Runtime.StrategyTimeframes.StrongOppositionVeto,
+            PositionSizing = options.Runtime.PositionSizing,
+            LegacyPositionManagement = options.Runtime.LegacyPositionManagement,
+            ImprovedPositionManagement = options.Runtime.ImprovedPositionManagement,
+            SafetyOptions = options.Runtime.SafetyOptions,
+            SpreadBasisPoints = options.SimulationOptions.SpreadBasisPoints,
+            SlippageBasisPoints = options.SimulationOptions.SlippageBasisPoints,
+            CommissionRate = options.SimulationOptions.CommissionRate,
+            AmbiguityPolicy = options.Runtime.AmbiguousIntrabarPolicy.ToString(),
+            FillModel = FillModel.MidpointPlusConfiguredSpread.ToString(),
             CreatedAt = DateTimeOffset.UtcNow,
             Status = "Running"
         }, cancellationToken).ConfigureAwait(false);
@@ -140,6 +174,7 @@ public sealed class StreamingComparativeEngine
             Snapshots = new Dictionary<BarInterval, AnalysisSnapshot>()
         };
         IReadOnlySet<BarInterval> emptyClosed = new HashSet<BarInterval>();
+        var pendingExecutionBatch = new List<MarketFrame>();
 
         try
         {
@@ -195,6 +230,13 @@ public sealed class StreamingComparativeEngine
                 if (!isWarmup && !enteredEvaluation)
                 {
                     enteredEvaluation = true;
+                    if (sharedAnnotator is ICalibratableChartAnnotator sharedCalibration)
+                        sharedCalibration.FreezeCalibration(options.EvaluationFrom);
+                    foreach (StrategySimulationSession session in sessions)
+                    {
+                        if (session.IndependentAnnotator is ICalibratableChartAnnotator independentCalibration)
+                            independentCalibration.FreezeCalibration(options.EvaluationFrom);
+                    }
                     await RaiseStatusAsync(options, SimulationJobStatus.Running).ConfigureAwait(false);
                 }
                 else if (isWarmup && processed == 1)
@@ -206,13 +248,19 @@ public sealed class StreamingComparativeEngine
                 //   execution candle → analysis-base (e.g. 1m)
                 //   analysis-base → higher analysis intervals (3m/5m/15m/…)
                 // ChartAnnotator only sees completed analysis candles, never raw 1s/5s.
+                long incompleteBefore = analysisBaseAggregator.IncompleteAggregateCount;
                 IReadOnlyList<Candle> analysisBaseClosed =
                     analysisBaseAggregator.ApplyExecutionCandle(baseCandle);
+                quality.RecordIncompleteAggregate(
+                    analysisBaseAggregator.IncompleteAggregateCount - incompleteBefore);
 
                 var closed = new HashSet<BarInterval>();
                 foreach (Candle analysisBaseCandle in analysisBaseClosed)
                 {
+                    incompleteBefore = aggregator.IncompleteAggregateCount;
                     IReadOnlyList<CandleClosedEvent> closedEvents = aggregator.Apply(analysisBaseCandle);
+                    quality.RecordIncompleteAggregate(
+                        aggregator.IncompleteAggregateCount - incompleteBefore);
                     foreach (CandleClosedEvent closedEvent in closedEvents)
                     {
                         closed.Add(closedEvent.Interval);
@@ -255,12 +303,22 @@ public sealed class StreamingComparativeEngine
                     Sequence = sequence,
                     AvailableAt = marketCandle.AvailableAt,
                     ExecutionCandle = marketCandle,
+                    AnalysisBaseCandle = analysisBaseClosed.LastOrDefault(),
                     ClosedIntervals = closedIntervals,
                     Snapshots = snapshotSet.Snapshots,
                     InputStreamId = options.InputStreamId,
                     IsWarmup = isWarmup,
                     IsLastCandle = isLast
                 };
+
+                pendingExecutionBatch.Add(frame);
+                if (frame.AnalysisBaseCandle is null && !frame.IsLastCandle)
+                    continue;
+
+                // One worker enqueue/barrier per analysis-base bucket. Each isolated
+                // strategy still processes every execution frame in strict order.
+                MarketFrame[] executionBatch = pendingExecutionBatch.ToArray();
+                pendingExecutionBatch.Clear();
 
                 // Only active (non-failed) strategies participate in the barrier.
                 List<StrategyWorkerHost> activeHosts = workerHosts
@@ -276,15 +334,15 @@ public sealed class StreamingComparativeEngine
                         "All strategies have failed; stopping comparison.");
                 }
 
-                StrategyFrameResult[] frameResults;
+                StrategyFrameResult[][] batchResults;
                 try
                 {
-                    frameResults = options.Runtime.StrategyExecutionMode switch
+                    batchResults = options.Runtime.StrategyExecutionMode switch
                     {
                         StrategyExecutionMode.ParallelWorkers =>
-                            await ProcessParallelWorkersAsync(activeHosts, frame, cancellationToken)
+                            await ProcessParallelWorkersBatchAsync(activeHosts, executionBatch, cancellationToken)
                                 .ConfigureAwait(false),
-                        _ => await ProcessSequentialAsync(activeSessions, frame, cancellationToken)
+                        _ => await ProcessSequentialBatchAsync(activeSessions, executionBatch, cancellationToken)
                             .ConfigureAwait(false)
                     };
                 }
@@ -294,23 +352,40 @@ public sealed class StreamingComparativeEngine
                     // Sequential path: mark the first non-failed session that threw.
                     StrategySimulationSession? culprit = activeSessions.FirstOrDefault(s => s.IsFailed)
                         ?? activeSessions.FirstOrDefault();
-                    culprit?.MarkFailed(frame.Sequence, exception.ToString());
+                    culprit?.MarkFailed(executionBatch[^1].Sequence, exception.ToString());
                     if (sessions.All(s => s.IsFailed))
                         throw;
                     continue;
                 }
 
-                foreach (StrategyFrameResult result in frameResults)
+                for (int batchIndex = 0; batchIndex < executionBatch.Length; batchIndex++)
                 {
-                    if (result.Sequence != frame.Sequence)
+                    MarketFrame committedFrame = executionBatch[batchIndex];
+                    StrategyFrameResult[] frameResults = batchResults[batchIndex];
+                    foreach (StrategyFrameResult result in frameResults)
                     {
-                        throw new InvalidOperationException(
-                            $"Unexpected sequence from {result.StrategyName}: {result.Sequence} != {frame.Sequence}.");
+                        if (result.Sequence != committedFrame.Sequence)
+                        {
+                            throw new InvalidOperationException(
+                                $"Unexpected sequence from {result.StrategyName}: " +
+                                $"{result.Sequence} != {committedFrame.Sequence}.");
+                        }
+                    }
+
+                    await replayWriter.CommitFrameAsync(committedFrame, frameResults, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (options.TradeCompleted is not null)
+                    {
+                        foreach (StrategyFrameResult result in frameResults)
+                        {
+                            if (result.NewlyCompletedTrade is SimulatedTradeRecord trade)
+                            {
+                                await options.TradeCompleted(result.StrategyId, trade)
+                                    .ConfigureAwait(false);
+                            }
+                        }
                     }
                 }
-
-                await replayWriter.CommitFrameAsync(frame, frameResults, cancellationToken)
-                    .ConfigureAwait(false);
 
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 if ((now - lastProgressPublish).TotalMilliseconds >=
@@ -375,7 +450,33 @@ public sealed class StreamingComparativeEngine
                     .ToArray(),
                 Strategies = _strategies.Select(item => item.Id).ToArray(),
                 InputStreamId = options.InputStreamId,
+                SimulationConfigurationId = options.SimulationConfigurationId,
                 InputHash = qualityReport.InputHash,
+                SourceKind = options.Runtime.SourceKind.ToString(),
+                PrecisionMode = options.Runtime.PrecisionMode.ToString(),
+                AnalysisBaseInterval = StreamingCandleCache.FormatInterval(options.Runtime.AnalysisBaseInterval),
+                TrendInterval = StreamingCandleCache.FormatInterval(options.Runtime.StrategyTimeframes.TrendInterval),
+                SecondaryTrendIntervals = options.Runtime.StrategyTimeframes.SecondaryTrendIntervals
+                    .Select(StreamingCandleCache.FormatInterval).ToArray(),
+                SetupIntervals = options.Runtime.StrategyTimeframes.SetupIntervals
+                    .Select(StreamingCandleCache.FormatInterval).ToArray(),
+                ConfirmationInterval = StreamingCandleCache.FormatInterval(options.Runtime.StrategyTimeframes.ConfirmationInterval),
+                AdditionalConfirmationIntervals = options.Runtime.StrategyTimeframes.AdditionalConfirmationIntervals
+                    .Select(StreamingCandleCache.FormatInterval).ToArray(),
+                EntryInterval = StreamingCandleCache.FormatInterval(options.Runtime.StrategyTimeframes.EntryInterval),
+                MinimumSecondaryTrendAlignments = options.Runtime.StrategyTimeframes.MinimumSecondaryTrendAlignments,
+                MinimumSetupAlignments = options.Runtime.StrategyTimeframes.MinimumSetupAlignments,
+                MinimumConfirmationAlignments = options.Runtime.StrategyTimeframes.MinimumConfirmationAlignments,
+                StrongOppositionVeto = options.Runtime.StrategyTimeframes.StrongOppositionVeto,
+                PositionSizing = options.Runtime.PositionSizing,
+                LegacyPositionManagement = options.Runtime.LegacyPositionManagement,
+                ImprovedPositionManagement = options.Runtime.ImprovedPositionManagement,
+                SafetyOptions = options.Runtime.SafetyOptions,
+                SpreadBasisPoints = options.SimulationOptions.SpreadBasisPoints,
+                SlippageBasisPoints = options.SimulationOptions.SlippageBasisPoints,
+                CommissionRate = options.SimulationOptions.CommissionRate,
+                AmbiguityPolicy = options.Runtime.AmbiguousIntrabarPolicy.ToString(),
+                FillModel = FillModel.MidpointPlusConfiguredSpread.ToString(),
                 CreatedAt = DateTimeOffset.UtcNow,
                 Status = "Completed"
             }, cancellationToken).ConfigureAwait(false);
@@ -395,8 +496,8 @@ public sealed class StreamingComparativeEngine
                 TotalDuration = stopwatch.Elapsed,
                 ProcessedBaseCandles = processed,
                 FillModel = options.Runtime.UseHistoricalBidAsk
-                    ? FillModel.MidpointPlusConfiguredSpread
-                    : FillModel.SyntheticSpreadModel
+                    ? FillModel.HistoricalBidAsk
+                    : FillModel.MidpointPlusConfiguredSpread
             };
         }
         finally
@@ -445,79 +546,95 @@ public sealed class StreamingComparativeEngine
         return stream;
     }
 
-    private static async Task<StrategyFrameResult[]> ProcessSequentialAsync(
+    private static async Task<StrategyFrameResult[][]> ProcessSequentialBatchAsync(
         IReadOnlyList<StrategySimulationSession> sessions,
-        MarketFrame frame,
+        IReadOnlyList<MarketFrame> frames,
         CancellationToken cancellationToken)
     {
-        var results = new List<StrategyFrameResult>(sessions.Count);
+        var results = Enumerable.Range(0, frames.Count)
+            .Select(_ => new List<StrategyFrameResult>(sessions.Count))
+            .ToArray();
         foreach (StrategySimulationSession session in sessions)
         {
             if (session.IsFailed)
                 continue;
-            try
+            for (int frameIndex = 0; frameIndex < frames.Count; frameIndex++)
             {
-                results.Add(await session.ProcessFrameAsync(frame, cancellationToken)
-                    .ConfigureAwait(false));
-            }
-            catch (Exception exception)
-            {
-                session.MarkFailed(frame.Sequence, exception.ToString());
-                throw;
+                MarketFrame frame = frames[frameIndex];
+                try
+                {
+                    results[frameIndex].Add(await session.ProcessFrameAsync(frame, cancellationToken)
+                        .ConfigureAwait(false));
+                }
+                catch (Exception exception)
+                {
+                    session.MarkFailed(frame.Sequence, exception.ToString());
+                    throw;
+                }
             }
         }
 
-        return results.ToArray();
+        return results.Select(frameResults => frameResults.ToArray()).ToArray();
     }
 
     /// <summary>
     /// Publishes one frame to each persistent worker and awaits the barrier.
     /// Per-worker failures set session.IsFailed without aborting Task.WhenAll aggregation.
     /// </summary>
-    private static async Task<StrategyFrameResult[]> ProcessParallelWorkersAsync(
+    private static async Task<StrategyFrameResult[][]> ProcessParallelWorkersBatchAsync(
         IReadOnlyList<StrategyWorkerHost> workers,
-        MarketFrame frame,
+        IReadOnlyList<MarketFrame> frames,
         CancellationToken cancellationToken)
     {
         if (workers.Count == 0)
-            return [];
+            return frames.Select(_ => Array.Empty<StrategyFrameResult>()).ToArray();
 
-        var resultTasks = new Task<StrategyFrameResult>[workers.Count];
+        var resultTasks = new Task<StrategyFrameResult[]>[workers.Count];
         for (int i = 0; i < workers.Count; i++)
         {
-            resultTasks[i] = await workers[i].EnqueueAsync(frame, cancellationToken)
+            resultTasks[i] = await workers[i].EnqueueBatchAsync(frames, cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        StrategyFrameResult[] results = new StrategyFrameResult[workers.Count];
+        var workerResults = new StrategyFrameResult[workers.Count][];
         for (int i = 0; i < resultTasks.Length; i++)
         {
             try
             {
-                results[i] = await resultTasks[i].ConfigureAwait(false);
+                workerResults[i] = await resultTasks[i].ConfigureAwait(false);
+                if (workerResults[i].Length != frames.Count)
+                    throw new InvalidOperationException("Strategy worker returned an incomplete execution batch.");
             }
             catch (Exception exception)
             {
                 // Worker already marked session failed; synthesise a barrier placeholder.
                 StrategySimulationSession session = workers[i].Session;
                 if (!session.IsFailed)
-                    session.MarkFailed(frame.Sequence, exception.ToString());
-                results[i] = new StrategyFrameResult
-                {
-                    StrategyId = session.StrategyId,
-                    StrategyName = session.StrategyName,
-                    Sequence = frame.Sequence,
-                    Balance = 0m,
-                    Equity = 0m,
-                    UnrealizedProfitLoss = 0m,
-                    OpenPositions = 0,
-                    CompletedTrades = session.Trades.Count,
-                    ActiveSetups = 0,
-                    Status = "Failed"
-                };
+                    session.MarkFailed(frames[^1].Sequence, exception.ToString());
+                workerResults[i] = frames.Select(frame => new StrategyFrameResult
+                    {
+                        StrategyId = session.StrategyId,
+                        StrategyName = session.StrategyName,
+                        Sequence = frame.Sequence,
+                        Balance = 0m,
+                        Equity = 0m,
+                        UnrealizedProfitLoss = 0m,
+                        OpenPositions = 0,
+                        CompletedTrades = session.Trades.Count,
+                        ActiveSetups = 0,
+                        Status = "Failed"
+                    })
+                    .ToArray();
             }
         }
 
+        var results = new StrategyFrameResult[frames.Count][];
+        for (int frameIndex = 0; frameIndex < frames.Count; frameIndex++)
+        {
+            results[frameIndex] = workerResults
+                .Select(strategyResults => strategyResults[frameIndex])
+                .ToArray();
+        }
         return results;
     }
 

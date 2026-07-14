@@ -33,10 +33,12 @@ public sealed class ImprovedProgressiveAgent(ProgressiveStrategyOptions? options
         if ((buy && target <= price) || (!buy && target >= price) || rr < Options.MinimumRewardRisk)
             return Observe(context, $"The nearest valid target offers only {rr:F2}R; minimum is {Options.MinimumRewardRisk:F2}R.");
 
-        decimal confidence = entry.Confidence.Total * 0.40m + confirmation.Confidence.Total * 0.35m + trend.Confidence.Total * 0.25m;
+        decimal confidence = entry.Confidence.Total * 0.40m + confirmation.Confidence.Total * 0.35m + trend.Confidence.Total * 0.25m +
+            PriceActionConfidenceAdjustment(entry, state.Side);
         return Trade(context, state, buy ? AgentAction.Buy : AgentAction.Sell, confidence,
             price, stop, target,
-            $"Progressive setup confirmed with a structural stop and {rr:F2}R target.",
+            $"Progressive setup confirmed with a structural stop and {rr:F2}R target; " +
+            $"price action: {PriceActionSummary(entry, state.Side)}.",
             stopSource, targetSource);
     }
 

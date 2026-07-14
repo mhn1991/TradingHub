@@ -257,6 +257,7 @@ public sealed record IndicatorSnapshot
     public AtrAnalysisSnapshot AtrAnalysis { get; init; } = AtrAnalysisSnapshot.Empty;
     public RsiAnalysisSnapshot RsiAnalysis { get; init; } = RsiAnalysisSnapshot.Empty;
     public BollingerAnalysisSnapshot BollingerAnalysis { get; init; } = BollingerAnalysisSnapshot.Empty;
+    public AdxAnalysisSnapshot AdxAnalysis { get; init; } = AdxAnalysisSnapshot.Empty;
 }
 
 public sealed record IndicatorPoint(
@@ -295,5 +296,158 @@ public sealed record AnalysisSnapshot
     public required IReadOnlyList<Trendline> Trendlines { get; init; }
     public required IReadOnlyList<PriceChannel> Channels { get; init; }
     public MarketStructureSnapshot MarketStructure { get; init; } = MarketStructureSnapshot.Empty;
+    public PriceActionSnapshot PriceAction { get; init; } = PriceActionSnapshot.Empty;
     public required ConfidenceScore Confidence { get; init; }
+}
+
+public enum PriceActionDirection
+{
+    Neutral,
+    Bullish,
+    Bearish
+}
+
+public enum PriceActionEventType
+{
+    BullishBreakOfStructure,
+    BearishBreakOfStructure,
+    BullishChangeOfCharacter,
+    BearishChangeOfCharacter,
+    BullishRetestHeld,
+    BearishRetestHeld,
+    BullishRejection,
+    BearishRejection,
+    BullishDisplacement,
+    BearishDisplacement,
+    SellSideLiquiditySweep,
+    BuySideLiquiditySweep,
+    BullishCompressionBreakout,
+    BearishCompressionBreakout,
+    BullishImpulse,
+    BearishImpulse,
+    BullishPullback,
+    BearishPullback
+}
+
+public enum BreakRetestState
+{
+    None,
+    AwaitingRetest,
+    RetestInProgress,
+    RetestHeld,
+    RetestFailed,
+    Expired
+}
+
+public sealed record PriceActionEvent
+{
+    public required string EventId { get; init; }
+    public required PriceActionEventType Type { get; init; }
+    public required PriceActionDirection Direction { get; init; }
+    public required DateTimeOffset ConfirmedAt { get; init; }
+    public required long ConfirmedSequence { get; init; }
+    public decimal? ReferenceLevel { get; init; }
+    public decimal? BrokenLevel { get; init; }
+    public decimal? RetestLevel { get; init; }
+    public decimal? Atr { get; init; }
+    public required decimal Strength { get; init; }
+    public required decimal Confidence { get; init; }
+    public string? SourceSwingKey { get; init; }
+    public string? SourceZoneKey { get; init; }
+    public required string ReasonCode { get; init; }
+    public required string Explanation { get; init; }
+}
+
+public sealed record PriceActionDiagnostic
+{
+    public required string Candidate { get; init; }
+    public required bool Accepted { get; init; }
+    public required string ReasonCode { get; init; }
+    public required string Explanation { get; init; }
+}
+
+public sealed record BreakRetestSnapshot
+{
+    public static BreakRetestSnapshot Empty { get; } = new();
+
+    public string? SetupId { get; init; }
+    public PriceActionDirection Direction { get; init; }
+    public BreakRetestState State { get; init; }
+    public decimal? BrokenLevel { get; init; }
+    public DateTimeOffset? BreakConfirmedAt { get; init; }
+    public long? BreakSequence { get; init; }
+    public int BarsSinceBreak { get; init; }
+    public decimal? ClosestRetestDistanceAtr { get; init; }
+    public string? InvalidReason { get; init; }
+}
+
+public sealed record PriceLegMetrics
+{
+    public PriceActionDirection Direction { get; init; }
+    public DateTimeOffset? StartedAt { get; init; }
+    public DateTimeOffset? EndedAt { get; init; }
+    public decimal Distance { get; init; }
+    public decimal? DistanceAtr { get; init; }
+    public int BarCount { get; init; }
+    public decimal EfficiencyRatio { get; init; }
+    public decimal RetracementPercent { get; init; }
+}
+
+public sealed record PriceActionCalibrationSnapshot
+{
+    public static PriceActionCalibrationSnapshot Empty { get; } = new();
+
+    public int SampleCount { get; init; }
+    public bool IsReady { get; init; }
+    public bool IsFrozen { get; init; }
+    public DateTimeOffset? FrozenAt { get; init; }
+    public decimal MedianBodyAtr { get; init; }
+    public decimal MedianRangeAtr { get; init; }
+    public decimal MedianWickToBodyRatio { get; init; }
+    public decimal BodyAtr70 { get; init; }
+    public decimal RangeAtr70 { get; init; }
+    public decimal RangeAtr90 { get; init; }
+}
+
+public sealed record PriceActionSnapshot
+{
+    public static PriceActionSnapshot Empty { get; } = new();
+
+    public PriceActionDirection Bias { get; init; }
+    public decimal BullishScore { get; init; }
+    public decimal BearishScore { get; init; }
+    public IReadOnlyList<PriceActionEvent> Events { get; init; } = [];
+    public IReadOnlyList<PriceActionDiagnostic> Diagnostics { get; init; } = [];
+    public BreakRetestSnapshot ActiveRetest { get; init; } = BreakRetestSnapshot.Empty;
+    public PriceLegMetrics? LatestLeg { get; init; }
+    public PriceActionCalibrationSnapshot Calibration { get; init; } = PriceActionCalibrationSnapshot.Empty;
+
+    public bool HasConfirmedTrigger(PriceActionDirection direction, decimal minimumConfidence = 50m) =>
+        Events.Any(item =>
+            item.Direction == direction &&
+            item.Confidence >= minimumConfidence &&
+            (item.Type is PriceActionEventType.BullishRetestHeld or
+                PriceActionEventType.BearishRetestHeld or
+                PriceActionEventType.BullishRejection or
+                PriceActionEventType.BearishRejection or
+                PriceActionEventType.BullishDisplacement or
+                PriceActionEventType.BearishDisplacement or
+                PriceActionEventType.BullishCompressionBreakout or
+                PriceActionEventType.BearishCompressionBreakout or
+                PriceActionEventType.SellSideLiquiditySweep or
+                PriceActionEventType.BuySideLiquiditySweep or
+                PriceActionEventType.BullishChangeOfCharacter or
+                PriceActionEventType.BearishChangeOfCharacter));
+}
+
+public sealed record AdxAnalysisSnapshot
+{
+    public static AdxAnalysisSnapshot Empty { get; } = new();
+
+    public decimal? Adx { get; init; }
+    public decimal? PlusDi { get; init; }
+    public decimal? MinusDi { get; init; }
+    public MomentumDirection StrengthDirection { get; init; }
+    public PriceActionDirection DirectionalBias { get; init; }
+    public bool IsTrendStrengthening { get; init; }
 }

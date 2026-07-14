@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PROJECT_DIR="$(pwd)"
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+OUTPUT_FILE="../${PROJECT_NAME}_review.zip"
+
+echo "Creating clean review archive..."
+echo "Project: $PROJECT_DIR"
+
+rm -f "$OUTPUT_FILE"
+
+zip -r "$OUTPUT_FILE" . \
+  -x \
+  ".cache/*" \
+  "./.cache/*" \
+  "*/.cache/*" \
+  "*/bin/*" \
+  "*/obj/*" \
+  "*/node_modules/*" \
+  "*/dist/*" \
+  "*/build/*" \
+  "*/coverage/*" \
+  "*/TestResults/*" \
+  "*/.vite/*" \
+  "*/.nuxt/*" \
+  "*/.output/*" \
+  "*/.idea/*" \
+  "*/.vs/*" \
+  "*/.git/*" \
+  "*.log" \
+  "*.user" \
+  "*.suo" \
+  "*.tmp" \
+  "*.zip" \
+  ".env" \
+  "*/.env"
+
+echo
+echo "Archive created:"
+echo "$OUTPUT_FILE"

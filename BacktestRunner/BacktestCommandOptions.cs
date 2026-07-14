@@ -1,8 +1,12 @@
 using System.Globalization;
-using System.Text.RegularExpressions;
+using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
+using RiskManager;
+using RiskManager.Safety;
+using Simulator.MarketData;
 using Simulator.Models;
+using TradeManager;
 
 namespace BacktestRunner;
 
@@ -12,8 +16,22 @@ internal sealed record BacktestCommandOptions
     public DateTimeOffset From { get; init; }
     public DateTimeOffset To { get; init; }
     public BarInterval ExecutionInterval { get; init; } = BarInterval.Minutes(1);
+    public BarInterval AnalysisBaseInterval { get; init; } = BarInterval.Minutes(1);
     public IReadOnlyList<BarInterval> AnalysisIntervals { get; init; } =
         [BarInterval.Minutes(5), BarInterval.Minutes(15), BarInterval.Hours(1)];
+    public SimulationPrecisionMode PrecisionMode { get; init; } = SimulationPrecisionMode.Fast;
+    public HistoricalDataSourceKind SourceKind { get; init; } = HistoricalDataSourceKind.OandaCandles;
+    public string? ImportedCandlePath { get; init; }
+    public BarInterval TrendInterval { get; init; } = BarInterval.Hours(2);
+    public IReadOnlyList<BarInterval> SecondaryTrendIntervals { get; init; } = [BarInterval.Hours(1)];
+    public IReadOnlyList<BarInterval> SetupIntervals { get; init; } = [BarInterval.Minutes(30)];
+    public BarInterval ConfirmationInterval { get; init; } = BarInterval.Minutes(15);
+    public IReadOnlyList<BarInterval> AdditionalConfirmationIntervals { get; init; } = [];
+    public BarInterval EntryInterval { get; init; } = BarInterval.Minutes(5);
+    public int MinimumSecondaryTrendAlignments { get; init; }
+    public int MinimumSetupAlignments { get; init; }
+    public int MinimumConfirmationAlignments { get; init; } = 1;
+    public bool StrongOppositionVeto { get; init; } = true;
     public BrokerEnvironment Environment { get; init; } = BrokerEnvironment.Demo;
     public string OutputDirectory { get; init; } = Path.Combine("Dashboard", "public", "data", "backtests");
     public string CacheDirectory { get; init; } = Path.Combine(".cache", "oanda");
@@ -24,22 +42,43 @@ internal sealed record BacktestCommandOptions
     public decimal StartingBalance { get; init; } = 100_000m;
     public string? BaseCurrency { get; init; }
     public decimal Quantity { get; init; } = 1_000m;
+    public PositionSizingOptions PositionSizing { get; init; } = new()
+    {
+        Mode = PositionSizingMode.FixedFractionalRisk,
+        FixedQuantity = 1_000m,
+        FixedCashRisk = 250m,
+        RiskPercentOfEquity = 0.5m,
+        MinimumQuantity = 1m,
+        QuantityStep = 1m,
+        MaximumAccountMarginUsagePercent = 30m,
+        MaximumSinglePositionMarginPercent = 10m,
+        Leverage = 20m
+    };
     public decimal Leverage { get; init; } = 20m;
     public decimal CommissionRate { get; init; } = 0.00002m;
     public decimal SpreadBasisPoints { get; init; } = 1m;
     public decimal SlippageBasisPoints { get; init; } = 0.5m;
     public decimal MinimumRewardRisk { get; init; } = 1.5m;
+    public decimal? DailyEquityProfitTarget { get; init; }
+    public decimal? DailyEquityGivebackActivation { get; init; }
+    public decimal? MaximumDailyEquityGiveback { get; init; }
+    public PriceActionConfirmationMode PriceActionConfirmation { get; init; } = PriceActionConfirmationMode.Soft;
+    public decimal MinimumPriceActionConfidence { get; init; } = 55m;
+    public bool RejectStrongOpposingPriceAction { get; init; } = true;
     public int WarmupDays { get; init; } = 45;
-    public int DeterministicSeed { get; init; } = 12_345;
     public int ProgressIntervalMs { get; init; } = 500;
     public IReadOnlyList<string> Strategies { get; init; } = ["legacy", "improved"];
     public string StrategyExecution { get; init; } = "parallel";
-    public string StrategyWorker { get; init; } = "task";
     public int StrategyChannelCapacity { get; init; } = 4;
     public int MaxParallelStrategies { get; init; } = 4;
     public string StrategyFailurePolicy { get; init; } = "stop-all";
     public string AnalysisSharing { get; init; } = "shared";
     public string AmbiguousPolicy { get; init; } = "stop-first";
+    public bool TrailingComparison { get; init; }
+    public PositionManagementOptions LegacyPositionManagement { get; init; } =
+        PositionManagementOptions.LegacyDefaults;
+    public PositionManagementOptions ImprovedPositionManagement { get; init; } =
+        PositionManagementOptions.ImprovedDefaults;
     public bool ShowHelp { get; init; }
 
     public static BacktestCommandOptions Parse(string[] args)
@@ -61,7 +100,17 @@ internal sealed record BacktestCommandOptions
             }
 
             string key = token[2..];
-            if (key is "refresh" or "no-cache" or "full-chart-history")
+            if (key is "refresh" or "no-cache" or "full-chart-history" or "trailing-comparison" or
+                "allow-opposing-price-action" or "allow-timeframe-opposition" or
+                "legacy-disable-mechanical-protection" or "improved-disable-mechanical-protection" or
+                "legacy-no-scale-out" or "improved-no-scale-out" or
+                "legacy-no-profit-floor" or "improved-no-profit-floor" or
+                "legacy-no-giveback" or "improved-no-giveback" or
+                "legacy-no-stagnation-reduction" or "improved-no-stagnation-reduction" or
+                "legacy-no-structure-reduction" or "improved-no-structure-reduction" or
+                "legacy-no-momentum-reduction" or "improved-no-momentum-reduction" or
+                "legacy-no-volatility-reduction" or "improved-no-volatility-reduction" or
+                "legacy-enable-cost-stress-reduction" or "improved-enable-cost-stress-reduction")
             {
                 values[key] = "true";
                 continue;
@@ -82,10 +131,16 @@ internal sealed record BacktestCommandOptions
             throw new ArgumentException("--from must be earlier than --to.");
         }
 
-        string intervalRaw = values.GetValueOrDefault("base-interval")
-            ?? values.GetValueOrDefault("execution-interval")
-            ?? "1m";
-        BarInterval execution = ParseInterval(intervalRaw);
+        SimulationPrecisionMode precision = ParsePrecisionMode(values.GetValueOrDefault("precision-mode"));
+        SimulationTimeframeOptions precisionDefaults = SimulationTimeframeOptions.FromPrecision(precision);
+        string? intervalRaw = values.GetValueOrDefault("execution-interval")
+            ?? values.GetValueOrDefault("base-interval");
+        BarInterval execution = intervalRaw is null
+            ? precisionDefaults.ExecutionInterval
+            : ParseInterval(intervalRaw);
+        BarInterval analysisBase = ParseInterval(
+            values.GetValueOrDefault("analysis-base-interval") ??
+            BarIntervalParser.Format(precisionDefaults.AnalysisBaseInterval));
         BarInterval[] analysis = (values.GetValueOrDefault("analysis-intervals") ?? "5m,15m,1h")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(ParseInterval)
@@ -96,22 +151,57 @@ internal sealed record BacktestCommandOptions
             throw new ArgumentException("At least one analysis interval is required.");
         }
 
-        BarInterval[] required =
-        [
-            BarInterval.Minutes(5),
-            BarInterval.Minutes(15),
-            BarInterval.Hours(1)
-        ];
-        if (required.Any(interval => !analysis.Contains(interval)))
-        {
-            throw new ArgumentException(
-                "The current progressive agents require 5m, 15m, and 1h analysis intervals.");
-        }
+        HistoricalDataSourceKind source = ParseSourceKind(
+            values.GetValueOrDefault("source"),
+            precision);
+        string? importedPath = values.GetValueOrDefault("imported-candles");
+        if (!string.IsNullOrWhiteSpace(importedPath))
+            importedPath = ResolvePath(importedPath);
 
         string[] strategies = (values.GetValueOrDefault("strategies")
                 ?? values.GetValueOrDefault("strategy")
                 ?? "legacy,improved")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        BarInterval entryInterval = ParseInterval(values.GetValueOrDefault("entry-interval") ?? "5m");
+        BarInterval[] secondaryTrendIntervals = ParseIntervalList(
+            values.GetValueOrDefault("secondary-trend-intervals") ?? "1h");
+        BarInterval[] setupIntervals = ParseIntervalList(
+            values.GetValueOrDefault("setup-intervals") ?? "30m");
+        BarInterval[] additionalConfirmationIntervals = ParseIntervalList(
+            values.GetValueOrDefault("additional-confirmation-intervals"));
+        int minimumSecondaryAlignments = ParseInt(
+            values.GetValueOrDefault("minimum-secondary-alignments"),
+            0,
+            0,
+            secondaryTrendIntervals.Length,
+            "minimum-secondary-alignments");
+        int minimumSetupAlignments = ParseInt(
+            values.GetValueOrDefault("minimum-setup-alignments"),
+            setupIntervals.Length == 0 ? 0 : 1,
+            0,
+            setupIntervals.Length,
+            "minimum-setup-alignments");
+        int minimumConfirmationAlignments = ParseInt(
+            values.GetValueOrDefault("minimum-confirmation-alignments"),
+            1,
+            1,
+            1 + additionalConfirmationIntervals.Length,
+            "minimum-confirmation-alignments");
+        decimal leverage = ParseDecimal(values.GetValueOrDefault("leverage"), 20m, 0m, "leverage");
+        decimal quantity = ParseDecimal(values.GetValueOrDefault("quantity"), 1_000m, 0m, "quantity");
+        PositionSizingOptions positionSizing = ParsePositionSizing(values, quantity, leverage);
+        PositionManagementOptions legacyManagement = ParsePositionManagement(
+            values,
+            "legacy",
+            entryInterval,
+            structureDefault: 1.5m,
+            preserveTarget: false);
+        PositionManagementOptions improvedManagement = ParsePositionManagement(
+            values,
+            "improved",
+            entryInterval,
+            structureDefault: 2m,
+            preserveTarget: true);
 
         return new BacktestCommandOptions
         {
@@ -120,12 +210,28 @@ internal sealed record BacktestCommandOptions
             From = from,
             To = to,
             ExecutionInterval = execution,
+            AnalysisBaseInterval = analysisBase,
             AnalysisIntervals = analysis,
-            Environment = ParseEnvironment(values.GetValueOrDefault("environment")),
+            PrecisionMode = precision,
+            SourceKind = source,
+            ImportedCandlePath = importedPath,
+            TrendInterval = ParseInterval(values.GetValueOrDefault("trend-interval") ?? "2h"),
+            SecondaryTrendIntervals = secondaryTrendIntervals,
+            SetupIntervals = setupIntervals,
+            ConfirmationInterval = ParseInterval(values.GetValueOrDefault("confirmation-interval") ?? "15m"),
+            AdditionalConfirmationIntervals = additionalConfirmationIntervals,
+            EntryInterval = entryInterval,
+            MinimumSecondaryTrendAlignments = minimumSecondaryAlignments,
+            MinimumSetupAlignments = minimumSetupAlignments,
+            MinimumConfirmationAlignments = minimumConfirmationAlignments,
+            StrongOppositionVeto = !values.ContainsKey("allow-timeframe-opposition"),
+            Environment = source == HistoricalDataSourceKind.BinanceCandles
+                ? BrokerEnvironment.Live
+                : ParseEnvironment(values.GetValueOrDefault("environment")),
             OutputDirectory = ResolvePath(
                 values.GetValueOrDefault("output") ?? Path.Combine("Dashboard", "public", "data", "backtests")),
             CacheDirectory = ResolvePath(
-                values.GetValueOrDefault("cache") ?? Path.Combine(".cache", "oanda")),
+                values.GetValueOrDefault("cache") ?? Path.Combine(".cache", "historical")),
             JobsDirectory = ResolvePath(
                 values.GetValueOrDefault("jobs") ?? Path.Combine(".cache", "simulation-jobs")),
             RefreshCache = values.ContainsKey("refresh"),
@@ -133,23 +239,43 @@ internal sealed record BacktestCommandOptions
             PageSize = ParseInt(values.GetValueOrDefault("page-size"), 5_000, 1, 5_000, "page-size"),
             StartingBalance = ParseDecimal(values.GetValueOrDefault("starting-balance"), 100_000m, 0m, "starting-balance"),
             BaseCurrency = values.GetValueOrDefault("base-currency")?.Trim().ToUpperInvariant(),
-            Quantity = ParseDecimal(values.GetValueOrDefault("quantity"), 1_000m, 0m, "quantity"),
-            Leverage = ParseDecimal(values.GetValueOrDefault("leverage"), 20m, 0m, "leverage"),
+            Quantity = quantity,
+            PositionSizing = positionSizing,
+            Leverage = leverage,
             CommissionRate = ParseDecimal(values.GetValueOrDefault("commission-rate"), 0.00002m, -1m, "commission-rate", allowZero: true),
             SpreadBasisPoints = ParseDecimal(values.GetValueOrDefault("spread-bps"), 1m, -1m, "spread-bps", allowZero: true),
             SlippageBasisPoints = ParseDecimal(values.GetValueOrDefault("slippage-bps"), 0.5m, -1m, "slippage-bps", allowZero: true),
             MinimumRewardRisk = ParseDecimal(values.GetValueOrDefault("minimum-rr"), 1.5m, 0m, "minimum-rr"),
+            DailyEquityProfitTarget = ParseOptionalPositiveDecimal(
+                values.GetValueOrDefault("daily-equity-profit-target"),
+                "daily-equity-profit-target"),
+            DailyEquityGivebackActivation = ParseOptionalPositiveDecimal(
+                values.GetValueOrDefault("daily-equity-giveback-activation"),
+                "daily-equity-giveback-activation"),
+            MaximumDailyEquityGiveback = ParseOptionalPositiveDecimal(
+                values.GetValueOrDefault("maximum-daily-equity-giveback"),
+                "maximum-daily-equity-giveback"),
+            PriceActionConfirmation = ParsePriceActionConfirmation(
+                values.GetValueOrDefault("price-action-mode")),
+            MinimumPriceActionConfidence = ParseDecimal(
+                values.GetValueOrDefault("minimum-price-action-confidence"),
+                55m,
+                -1m,
+                "minimum-price-action-confidence",
+                allowZero: true),
+            RejectStrongOpposingPriceAction = !values.ContainsKey("allow-opposing-price-action"),
             WarmupDays = ParseInt(values.GetValueOrDefault("warmup-days"), 45, 0, 3650, "warmup-days"),
-            DeterministicSeed = ParseInt(values.GetValueOrDefault("seed"), 12_345, 0, int.MaxValue, "seed"),
             ProgressIntervalMs = ParseInt(values.GetValueOrDefault("progress-interval"), 500, 50, 60_000, "progress-interval"),
             Strategies = strategies,
             StrategyExecution = values.GetValueOrDefault("strategy-execution") ?? "parallel",
-            StrategyWorker = values.GetValueOrDefault("strategy-worker") ?? "task",
             StrategyChannelCapacity = ParseInt(values.GetValueOrDefault("strategy-channel-capacity"), 4, 1, 64, "strategy-channel-capacity"),
             MaxParallelStrategies = ParseInt(values.GetValueOrDefault("max-parallel-strategies"), 4, 1, 32, "max-parallel-strategies"),
             StrategyFailurePolicy = values.GetValueOrDefault("strategy-failure-policy") ?? "stop-all",
             AnalysisSharing = values.GetValueOrDefault("analysis-sharing") ?? "shared",
-            AmbiguousPolicy = values.GetValueOrDefault("ambiguous-policy") ?? "stop-first"
+            AmbiguousPolicy = values.GetValueOrDefault("ambiguous-policy") ?? "stop-first",
+            TrailingComparison = values.ContainsKey("trailing-comparison"),
+            LegacyPositionManagement = legacyManagement,
+            ImprovedPositionManagement = improvedManagement
         };
     }
 
@@ -168,19 +294,38 @@ internal sealed record BacktestCommandOptions
         SpreadBasisPoints = SpreadBasisPoints,
         SlippageBasisPoints = SlippageBasisPoints,
         MinimumRewardRisk = MinimumRewardRisk,
+        PriceActionConfirmation = PriceActionConfirmation,
+        MinimumPriceActionConfidence = MinimumPriceActionConfidence,
+        RejectStrongOpposingPriceAction = RejectStrongOpposingPriceAction,
         OutputDirectory = Path.Combine(OutputDirectory, "simulations"),
         CacheDirectory = CacheDirectory,
         JobsDirectory = JobsDirectory,
         Runtime = new BacktestRuntimeOptions
         {
-            BaseInterval = ExecutionInterval,
+            ExecutionInterval = ExecutionInterval,
+            AnalysisBaseInterval = AnalysisBaseInterval,
             AnalysisIntervals = AnalysisIntervals,
+            PrecisionMode = PrecisionMode,
+            SourceKind = SourceKind,
+            ImportedCandlePath = ImportedCandlePath,
+            StrategyTimeframes = new ProgressiveStrategyTimeframes
+            {
+                TrendInterval = TrendInterval,
+                SecondaryTrendIntervals = SecondaryTrendIntervals,
+                SetupIntervals = SetupIntervals,
+                ConfirmationInterval = ConfirmationInterval,
+                AdditionalConfirmationIntervals = AdditionalConfirmationIntervals,
+                EntryInterval = EntryInterval,
+                MinimumSecondaryTrendAlignments = MinimumSecondaryTrendAlignments,
+                MinimumSetupAlignments = MinimumSetupAlignments,
+                MinimumConfirmationAlignments = MinimumConfirmationAlignments,
+                StrongOppositionVeto = StrongOppositionVeto
+            },
             SourcePageSize = PageSize,
             PrefetchCapacity = Math.Max(PageSize * 4, 20_000),
             PrefetchLowWatermark = Math.Max(PageSize, 5_000),
             WarmupDays = WarmupDays,
             StrategyExecutionMode = ParseExecutionMode(StrategyExecution),
-            StrategyWorkerMode = ParseWorkerMode(StrategyWorker),
             StrategyChannelCapacity = StrategyChannelCapacity,
             MaximumParallelStrategies = MaxParallelStrategies,
             StrategyFailurePolicy = ParseFailurePolicy(StrategyFailurePolicy),
@@ -188,42 +333,75 @@ internal sealed record BacktestCommandOptions
             AmbiguousIntrabarPolicy = ParseAmbiguousPolicy(AmbiguousPolicy),
             RefreshCache = RefreshCache,
             NoCache = NoCache,
-            DeterministicSeed = DeterministicSeed,
+            LegacyPositionManagement = LegacyPositionManagement,
+            ImprovedPositionManagement = ImprovedPositionManagement,
+            PositionSizing = PositionSizing,
+            SafetyOptions = new TradingSafetyOptions
+            {
+                DailyEquityProfitTarget = DailyEquityProfitTarget,
+                DailyEquityGivebackActivation = DailyEquityGivebackActivation,
+                MaximumDailyEquityGiveback = MaximumDailyEquityGiveback
+            },
             ProgressPublishIntervalMilliseconds = ProgressIntervalMs
         }
     };
 
-    public static BarInterval ParseInterval(string value)
-    {
-        Match match = Regex.Match(value.Trim(), "^(?<number>[1-9][0-9]*)(?<unit>s|m|h|d|w|mo)$", RegexOptions.IgnoreCase);
-        if (!match.Success)
-        {
-            throw new ArgumentException($"Unsupported interval '{value}'. Examples: 1m, 5m, 15m, 1h.");
-        }
+    public static BarInterval ParseInterval(string value) => BarIntervalParser.Parse(value);
 
-        int number = int.Parse(match.Groups["number"].Value, CultureInfo.InvariantCulture);
-        return match.Groups["unit"].Value.ToLowerInvariant() switch
-        {
-            "s" => BarInterval.Seconds(number),
-            "m" => BarInterval.Minutes(number),
-            "h" => BarInterval.Hours(number),
-            "d" => BarInterval.Days(number),
-            "w" => BarInterval.Weeks(number),
-            "mo" => BarInterval.Months(number),
-            _ => throw new ArgumentOutOfRangeException(nameof(value))
-        };
+    public static string FormatInterval(BarInterval interval) => BarIntervalParser.Format(interval);
+
+
+    private static decimal? ParseOptionalPositiveDecimal(string? value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        decimal parsed = ParseDecimal(value, 0m, -1m, name, allowZero: true);
+        return parsed == 0m ? null : parsed;
     }
 
-    public static string FormatInterval(BarInterval interval) => interval.Unit switch
+    private static PriceActionConfirmationMode ParsePriceActionConfirmation(string? value) =>
+        value?.Trim().ToLowerInvariant() switch
+        {
+            null or "" or "soft" => PriceActionConfirmationMode.Soft,
+            "disabled" or "off" => PriceActionConfirmationMode.Disabled,
+            "required" or "strict" => PriceActionConfirmationMode.Required,
+            _ => throw new ArgumentException(
+                $"Unknown --price-action-mode '{value}'. Use disabled, soft, or required.")
+        };
+
+    private static SimulationPrecisionMode ParsePrecisionMode(string? value) =>
+        value?.Trim().ToLowerInvariant() switch
+        {
+            null or "" or "fast" => SimulationPrecisionMode.Fast,
+            "broker" or "broker-native" or "brokernativeprecision" or "5s" =>
+                SimulationPrecisionMode.BrokerNativePrecision,
+            "high" or "high-precision" or "highprecision" or "1s" =>
+                SimulationPrecisionMode.HighPrecision,
+            _ => throw new ArgumentException(
+                $"Unknown --precision-mode '{value}'. Use fast, broker-native, or high-precision.")
+        };
+
+    private static HistoricalDataSourceKind ParseSourceKind(
+        string? value,
+        SimulationPrecisionMode precision)
     {
-        BarUnit.Second => $"{interval.Value}s",
-        BarUnit.Minute => $"{interval.Value}m",
-        BarUnit.Hour => $"{interval.Value}h",
-        BarUnit.Day => $"{interval.Value}d",
-        BarUnit.Week => $"{interval.Value}w",
-        BarUnit.Month => $"{interval.Value}mo",
-        _ => interval.ToString()
-    };
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return precision == SimulationPrecisionMode.HighPrecision
+                ? HistoricalDataSourceKind.ImportedSecondCandles
+                : HistoricalDataSourceKind.OandaCandles;
+        }
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "oanda" or "oandacandles" => HistoricalDataSourceKind.OandaCandles,
+            "binance" or "binancecandles" => HistoricalDataSourceKind.BinanceCandles,
+            "imported" or "importedsecondcandles" => HistoricalDataSourceKind.ImportedSecondCandles,
+            _ => throw new ArgumentException(
+                $"Unknown --source '{value}'. Use oanda, binance, or imported.")
+        };
+    }
 
     public string ResolveBaseCurrency()
     {
@@ -243,14 +421,6 @@ internal sealed record BacktestCommandOptions
             "sequential" or "seq" => Simulator.Models.StrategyExecutionMode.Sequential,
             "parallel" or "parallelworkers" or "workers" => Simulator.Models.StrategyExecutionMode.ParallelWorkers,
             _ => throw new ArgumentException($"Unknown --strategy-execution '{value}'. Use sequential or parallel.")
-        };
-
-    private static Simulator.Models.StrategyWorkerMode ParseWorkerMode(string value) =>
-        value.Trim().ToLowerInvariant() switch
-        {
-            "task" or "tasks" => Simulator.Models.StrategyWorkerMode.Task,
-            "thread" or "dedicated" or "dedicatedthread" => Simulator.Models.StrategyWorkerMode.DedicatedThread,
-            _ => throw new ArgumentException($"Unknown --strategy-worker '{value}'. Use task or thread.")
         };
 
     private static Simulator.Models.StrategyFailurePolicy ParseFailurePolicy(string value) =>
@@ -277,6 +447,158 @@ internal sealed record BacktestCommandOptions
             "nearest-open" or "nearest" or "nearesttoopenfirst" => Simulator.Models.AmbiguousIntrabarPolicy.NearestToOpenFirst,
             _ => throw new ArgumentException($"Unknown --ambiguous-policy '{value}'.")
         };
+
+    private static BarInterval[] ParseIntervalList(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? []
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(ParseInterval)
+                .Distinct()
+                .ToArray();
+
+    private static PositionSizingOptions ParsePositionSizing(
+        IReadOnlyDictionary<string, string?> values,
+        decimal quantity,
+        decimal leverage)
+    {
+        PositionSizingMode mode = values.GetValueOrDefault("position-sizing-mode")?.Trim().ToLowerInvariant() switch
+        {
+            null or "" or "fixed-fractional" or "fixedfractionalrisk" or "fractional" =>
+                PositionSizingMode.FixedFractionalRisk,
+            "fixed-cash" or "fixedcashrisk" or "cash" => PositionSizingMode.FixedCashRisk,
+            "fixed-quantity" or "fixedquantity" or "quantity" => PositionSizingMode.FixedQuantity,
+            string invalid => throw new ArgumentException(
+                $"Unknown --position-sizing-mode '{invalid}'. Use fixed-fractional, fixed-cash, or fixed-quantity.")
+        };
+
+        decimal maximumQuantity = ParseDecimal(
+            values.GetValueOrDefault("maximum-quantity"),
+            0m,
+            -1m,
+            "maximum-quantity",
+            allowZero: true);
+        var result = new PositionSizingOptions
+        {
+            Mode = mode,
+            FixedQuantity = quantity,
+            FixedCashRisk = ParseDecimal(
+                values.GetValueOrDefault("fixed-cash-risk"), 250m, 0m, "fixed-cash-risk"),
+            RiskPercentOfEquity = ParseDecimal(
+                values.GetValueOrDefault("risk-percent"), 0.5m, 0m, "risk-percent"),
+            MinimumQuantity = ParseDecimal(
+                values.GetValueOrDefault("minimum-quantity"), 1m, 0m, "minimum-quantity"),
+            MaximumQuantity = maximumQuantity == 0m ? null : maximumQuantity,
+            QuantityStep = ParseDecimal(
+                values.GetValueOrDefault("quantity-step"), 1m, 0m, "quantity-step"),
+            MaximumAccountMarginUsagePercent = ParseDecimal(
+                values.GetValueOrDefault("maximum-account-margin-percent"),
+                30m,
+                0m,
+                "maximum-account-margin-percent"),
+            MaximumSinglePositionMarginPercent = ParseDecimal(
+                values.GetValueOrDefault("maximum-position-margin-percent"),
+                10m,
+                0m,
+                "maximum-position-margin-percent"),
+            Leverage = leverage,
+            EstimatedRoundTripCostBasisPoints =
+                ParseDecimal(values.GetValueOrDefault("spread-bps"), 1m, -1m, "spread-bps", allowZero: true) +
+                2m * ParseDecimal(values.GetValueOrDefault("slippage-bps"), 0.5m, -1m, "slippage-bps", allowZero: true) +
+                2m * ParseDecimal(values.GetValueOrDefault("commission-rate"), 0.00002m, -1m, "commission-rate", allowZero: true) * 10_000m
+        };
+        result.Validate();
+        if (result.MaximumSinglePositionMarginPercent > result.MaximumAccountMarginUsagePercent)
+        {
+            throw new ArgumentException(
+                "Maximum one-position margin percentage cannot exceed the account margin percentage.");
+        }
+        return result;
+    }
+
+    private static PositionManagementOptions ParsePositionManagement(
+        IReadOnlyDictionary<string, string?> values,
+        string prefix,
+        BarInterval defaultInterval,
+        decimal structureDefault,
+        bool preserveTarget)
+    {
+        string modeValue = values.GetValueOrDefault($"{prefix}-trailing-mode") ?? "structure-atr";
+        TrailingStopMode mode = modeValue.Trim().ToLowerInvariant() switch
+        {
+            "disabled" or "off" => TrailingStopMode.Disabled,
+            "break-even" or "breakeven" or "break-even-only" => TrailingStopMode.BreakEvenOnly,
+            "structure" or "structure-atr" or "structureatr" => TrailingStopMode.StructureAtr,
+            _ => throw new ArgumentException(
+                $"Unknown --{prefix}-trailing-mode '{modeValue}'. Use disabled, break-even, or structure-atr.")
+        };
+        decimal breakEven = ParseDecimal(
+            values.GetValueOrDefault($"{prefix}-break-even-r"), 1m, 0m, $"{prefix}-break-even-r");
+        decimal structure = ParseDecimal(
+            values.GetValueOrDefault($"{prefix}-structure-r"), structureDefault, 0m, $"{prefix}-structure-r");
+        decimal atrBuffer = ParseDecimal(
+            values.GetValueOrDefault($"{prefix}-atr-buffer"), 0.25m, -1m, $"{prefix}-atr-buffer", allowZero: true);
+        PositionManagementOptions defaults = preserveTarget
+            ? PositionManagementOptions.ImprovedDefaults
+            : PositionManagementOptions.LegacyDefaults;
+        PositionManagementOptions result = defaults with
+        {
+            Mode = mode,
+            ManagementInterval = ParseInterval(
+                values.GetValueOrDefault($"{prefix}-management-interval") ??
+                BarIntervalParser.Format(defaults.MainStructureInterval ?? defaultInterval)),
+            EvaluateMechanicalProtectionOnEveryExecutionFrame =
+                !values.ContainsKey($"{prefix}-disable-mechanical-protection"),
+            FastStructureInterval = ParseInterval(
+                values.GetValueOrDefault($"{prefix}-fast-management-interval") ??
+                BarIntervalParser.Format(defaults.FastStructureInterval ?? defaultInterval)),
+            MainStructureInterval = ParseInterval(
+                values.GetValueOrDefault($"{prefix}-main-management-interval") ??
+                values.GetValueOrDefault($"{prefix}-management-interval") ??
+                BarIntervalParser.Format(defaults.MainStructureInterval ?? defaultInterval)),
+            ThesisInterval = ParseInterval(
+                values.GetValueOrDefault($"{prefix}-thesis-management-interval") ??
+                BarIntervalParser.Format(defaults.ThesisInterval ?? BarInterval.Hours(1))),
+            BreakEvenActivationR = breakEven,
+            StructureTrailActivationR = structure,
+            AtrBufferMultiplier = atrBuffer,
+            PreserveBracketTarget = preserveTarget,
+            EnableScaleOut = !values.ContainsKey($"{prefix}-no-scale-out"),
+            EnableProfitFloor = !values.ContainsKey($"{prefix}-no-profit-floor"),
+            EnableMaximumGiveback = !values.ContainsKey($"{prefix}-no-giveback"),
+            EnableStagnationReduction = !values.ContainsKey($"{prefix}-no-stagnation-reduction"),
+            EnableStructuralDeteriorationReduction =
+                !values.ContainsKey($"{prefix}-no-structure-reduction"),
+            EnableMomentumDecayReduction =
+                !values.ContainsKey($"{prefix}-no-momentum-reduction"),
+            EnableVolatilityExhaustionReduction =
+                !values.ContainsKey($"{prefix}-no-volatility-reduction"),
+            EnableRiskWindowReduction =
+                values.ContainsKey($"{prefix}-risk-window-start") ||
+                values.ContainsKey($"{prefix}-risk-window-end"),
+            RiskWindowStartUtc = ParseOptionalTime(
+                values.GetValueOrDefault($"{prefix}-risk-window-start")),
+            RiskWindowEndUtc = ParseOptionalTime(
+                values.GetValueOrDefault($"{prefix}-risk-window-end")),
+            EnableExecutionCostStressReduction =
+                values.ContainsKey($"{prefix}-enable-cost-stress-reduction"),
+            MinimumRunnerFraction = ParseDecimal(
+                values.GetValueOrDefault($"{prefix}-minimum-runner"),
+                defaults.MinimumRunnerFraction,
+                -1m,
+                $"{prefix}-minimum-runner")
+        };
+        result.Validate();
+        return result;
+    }
+
+    private static TimeOnly? ParseOptionalTime(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        if (!TimeOnly.TryParseExact(value, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out TimeOnly parsed))
+            throw new ArgumentException($"UTC time '{value}' must use HH:mm.");
+        return parsed;
+    }
 
     private static string ResolvePath(string path)
     {

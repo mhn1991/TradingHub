@@ -32,6 +32,8 @@ public sealed record PreTradeRiskContext
     public required decimal Quantity { get; init; }
     public required IReadOnlyList<AccountSnapshot> Accounts { get; init; }
     public required IReadOnlyList<BrokerPosition> Positions { get; init; }
+    /// <summary>Value of one quote-currency unit in the account currency.</summary>
+    public decimal QuoteToAccountCurrencyRate { get; init; } = 1m;
     public TradingSafetySnapshot? Safety { get; init; }
 }
 
@@ -217,9 +219,18 @@ public sealed class PreTradeRiskManager : IPreTradeRiskManager
             }
         }
 
-        decimal? estimatedLoss = riskDistance is null
+        if (context.QuoteToAccountCurrencyRate <= 0m)
+        {
+            reasons.Add("A positive quote-to-account-currency conversion rate is required.");
+        }
+
+        decimal? estimatedLoss = riskDistance is null || context.QuoteToAccountCurrencyRate <= 0m
             ? null
-            : EstimateLoss(riskDistance.Value, context.Quantity, decision.QuantityUnit);
+            : EstimateLoss(
+                riskDistance.Value,
+                context.Quantity,
+                decision.QuantityUnit,
+                context.QuoteToAccountCurrencyRate);
         if (_options.MaximumLossPerTrade is decimal maximumLossPerTrade &&
             estimatedLoss is decimal estimated &&
             estimated > maximumLossPerTrade)
@@ -268,10 +279,11 @@ public sealed class PreTradeRiskManager : IPreTradeRiskManager
     private static decimal? EstimateLoss(
         decimal riskDistance,
         decimal quantity,
-        QuantityUnit quantityUnit) => quantityUnit switch
+        QuantityUnit quantityUnit,
+        decimal quoteToAccountCurrencyRate) => quantityUnit switch
         {
             QuantityUnit.Units or QuantityUnit.BaseAsset or QuantityUnit.Contracts =>
-                riskDistance * quantity,
+                riskDistance * quantity * quoteToAccountCurrencyRate,
             _ => null
         };
 

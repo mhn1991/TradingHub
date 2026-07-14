@@ -11,7 +11,8 @@ public sealed class ConfidenceScorer
         IReadOnlyList<PriceZone> zones,
         IReadOnlyList<Trendline> trendlines,
         IReadOnlyList<PriceChannel> channels,
-        MarketStructureSnapshot? structure = null)
+        MarketStructureSnapshot? structure = null,
+        PriceActionSnapshot? priceAction = null)
     {
         ArgumentNullException.ThrowIfNull(candle);
         ArgumentNullException.ThrowIfNull(indicators);
@@ -20,6 +21,7 @@ public sealed class ConfidenceScorer
         ArgumentNullException.ThrowIfNull(channels);
 
         structure ??= MarketStructureSnapshot.Empty;
+        priceAction ??= PriceActionSnapshot.Empty;
         var contributions = new List<ConfidenceContribution>();
         decimal close = candle.Prices.Close;
         DateTimeOffset at = candle.CloseTime ?? candle.OpenTime;
@@ -180,6 +182,47 @@ public sealed class ConfidenceScorer
                         ? "The active channel agrees with market structure."
                         : "The active channel opposes market structure."));
             }
+        }
+
+
+        AdxAnalysisSnapshot adx = indicators.AdxAnalysis;
+        if (adx.Adx is decimal adxValue)
+        {
+            decimal directionalScore = adx.IsTrendStrengthening ? 5m : 2m;
+            contributions.Add(new ConfidenceContribution(
+                "ADX/DMI",
+                directionalScore,
+                $"ADX is {adxValue:F1}; +DI {adx.PlusDi:F1}, -DI {adx.MinusDi:F1}, " +
+                $"bias {adx.DirectionalBias}, strength {adx.StrengthDirection}."));
+        }
+
+        if (priceAction.Bias is not PriceActionDirection.Neutral)
+        {
+            decimal directionalEvidence = priceAction.Bias == PriceActionDirection.Bullish
+                ? priceAction.BullishScore
+                : priceAction.BearishScore;
+            contributions.Add(new ConfidenceContribution(
+                "Price action",
+                Math.Min(12m, directionalEvidence / 8m),
+                $"Price action bias is {priceAction.Bias} with score {directionalEvidence:F1}."));
+        }
+
+        PriceActionEvent? strongestTrigger = priceAction.Events
+            .Where(item => item.Type is
+                PriceActionEventType.BullishRetestHeld or
+                PriceActionEventType.BearishRetestHeld or
+                PriceActionEventType.BullishRejection or
+                PriceActionEventType.BearishRejection or
+                PriceActionEventType.BullishDisplacement or
+                PriceActionEventType.BearishDisplacement)
+            .OrderByDescending(item => item.Confidence)
+            .FirstOrDefault();
+        if (strongestTrigger is not null)
+        {
+            contributions.Add(new ConfidenceContribution(
+                "Price-action trigger",
+                Math.Min(10m, strongestTrigger.Confidence / 10m),
+                $"{strongestTrigger.Type} confirmed with {strongestTrigger.Confidence:F1} confidence."));
         }
 
         if (structure.Direction is not MarketStructureDirection.Unknown)

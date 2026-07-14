@@ -21,3 +21,9 @@ public interface IChartAnnotator
         InstrumentKey instrument,
         BarInterval interval);
 }
+
+
+public interface ICalibratableChartAnnotator
+{
+    void FreezeCalibration(DateTimeOffset frozenAt);
+}

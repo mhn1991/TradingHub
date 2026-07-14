@@ -8,11 +8,13 @@ using ExecutionManager;
 using RiskManager;
 using RiskManager.Safety;
 using Simulator.Broker;
+using Simulator.MarketData;
 using Simulator.Models;
 using Simulator.Time;
 using TradingCore.MarketData;
 using TradingCore.Pipeline;
 using TradingJournal;
+using TradeManager;
 
 namespace Simulator.Engine;
 
@@ -26,13 +28,50 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private string? _pendingEntryBrokerOrderId;
     private SimulatedTradeRecord? _activeTrade;
     private string? _pendingExitReason;
+    private SimulatedTradeExitReason? _pendingExitReasonKind;
+    private PendingPartialExit? _pendingPartialExit;
+    private readonly HashSet<string> _completedReductionStages = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<SimulatedTradeRecord> _trades = [];
+    private readonly PositionManagementOptions _positionManagementOptions;
+    private readonly IStructureBasedTradeManager _tradeManager;
+    private readonly BarInterval _managementInterval;
+    private readonly BarInterval _fastStructureInterval;
+    private readonly BarInterval _mainStructureInterval;
+    private readonly BarInterval _thesisInterval;
+    private readonly List<StrategyReplayEvent> _frameEvents = [];
+    private long? _lastAmendmentSnapshotVersion;
+    private long? _lastReductionSnapshotVersion;
+    private readonly Dictionary<TradeManagementEvaluationScope, long>
+        _lastManagementEvaluationVersions = [];
+    private int _analysisBarsSinceLastAmendment = int.MaxValue;
+    private int _analysisBarsSinceLastReduction = int.MaxValue;
+    private int _analysisBarsWithoutNewMfe;
+    private decimal _lastObservedManagementMfeR;
+    private bool _stagnationReductionCompleted;
+    private int _structuralDeteriorationReductionCount;
+    private int _momentumDecayReductionCount;
+    private int _volatilityExhaustionReductionCount;
+    private bool _volatilityExpansionSeenSinceEntry;
+    private bool _riskWindowReductionCompleted;
+    private bool _executionCostStressReductionCompleted;
+    private string? _lastManagementAction;
+    private string? _lastManagementReason;
+    private decimal? _lastExecutablePrice;
+    private DateTimeOffset? _nextManagementIntervalClose;
+    private long _currentFrameSequence;
     private readonly List<TimeSpan> _frameDurations = [];
     private TimeSpan _totalProcessing;
     private TimeSpan _maxProcessing;
     private TimeSpan _barrierWait;
     private int _peakChannelOccupancy;
     private long _processedFrames;
+    private long _managementEvaluations;
+    private long _stopAmendmentRequests;
+    private long _acceptedStopAmendments;
+    private long _rejectedStopAmendments;
+    private long _positionReductionRequests;
+    private long _acceptedPositionReductions;
+    private long _rejectedPositionReductions;
     private DateTimeOffset? _startedAt;
     private DateTimeOffset? _endedAt;
     private bool _failed;
@@ -48,7 +87,10 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         ITradingSafetyController safety,
         IMarketDataQualityGate dataQuality,
         ITradeJournal journal,
-        IChartAnnotator? independentAnnotator = null)
+        IChartAnnotator? independentAnnotator = null,
+        PositionManagementOptions? positionManagementOptions = null,
+        IStructureBasedTradeManager? tradeManager = null,
+        BarInterval? managementInterval = null)
     {
         StrategyId = strategyId ?? throw new ArgumentNullException(nameof(strategyId));
         Strategy = strategy ?? throw new ArgumentNullException(nameof(strategy));
@@ -58,6 +100,27 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         Safety = safety ?? throw new ArgumentNullException(nameof(safety));
         Journal = journal ?? throw new ArgumentNullException(nameof(journal));
         IndependentAnnotator = independentAnnotator;
+        _positionManagementOptions = positionManagementOptions ?? new PositionManagementOptions();
+        _positionManagementOptions.Validate();
+        _fastStructureInterval = _positionManagementOptions.FastStructureInterval ??
+            strategy.TriggerInterval;
+        _mainStructureInterval = _positionManagementOptions.MainStructureInterval ??
+            managementInterval ?? _positionManagementOptions.ManagementInterval ?? strategy.TriggerInterval;
+        _thesisInterval = _positionManagementOptions.ThesisInterval ??
+            strategy.RequiredIntervals
+                .OrderByDescending(BarIntervalParser.ApproximateSeconds)
+                .First();
+        _managementInterval = _mainStructureInterval;
+        if (!_fastStructureInterval.IsValid || !_mainStructureInterval.IsValid || !_thesisInterval.IsValid)
+            throw new ArgumentException("All management intervals must be valid.", nameof(managementInterval));
+        if (BarIntervalParser.CompareDuration(_fastStructureInterval, _mainStructureInterval) > 0 ||
+            BarIntervalParser.CompareDuration(_mainStructureInterval, _thesisInterval) > 0)
+        {
+            throw new ArgumentException(
+                "Management intervals must be ordered fast <= main <= thesis.",
+                nameof(positionManagementOptions));
+        }
+        _tradeManager = tradeManager ?? new StructureBasedTradeManager(_positionManagementOptions);
         Pipeline = new SafeTradingPipeline(strategy, execution, dataQuality, safety, journal);
     }
 
@@ -72,6 +135,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     public SafeTradingPipeline Pipeline { get; }
     public HistoricalSimulationClock Clock { get; }
     public IReadOnlyList<SimulatedTradeRecord> Trades => _trades;
+    public SimulatedTradeRecord? ActiveTrade => _activeTrade;
     public bool IsFailed => _failed;
     public string? FailureMessage => _failureMessage;
     public long? FailedSequence => _failedSequence;
@@ -83,7 +147,10 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         TradingSafetyOptions? safetyOptions = null,
         MarketDataQualityOptions? dataQualityOptions = null,
         AnalysisSharingMode analysisSharing = AnalysisSharingMode.SharedImmutableSnapshots,
-        ChartAnnotationOptions? annotationOptions = null)
+        ChartAnnotationOptions? annotationOptions = null,
+        PositionManagementOptions? positionManagementOptions = null,
+        BarInterval? managementInterval = null,
+        PositionSizingOptions? positionSizingOptions = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         SimulationOptions options = simulationOptions;
@@ -130,7 +197,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             new PreTradeRiskManager(riskOptions),
             new BrokerExecutionSafety(),
             safety,
-            journal);
+            journal,
+            new PositionSizer(positionSizingOptions));
 
         IChartAnnotator? independent = analysisSharing == AnalysisSharingMode.IndependentPerStrategy
             ? new ChartAnnotationEngine(annotationOptions)
@@ -145,7 +213,9 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             safety,
             dataQuality,
             journal,
-            independent);
+            independent,
+            positionManagementOptions,
+            managementInterval: managementInterval);
     }
 
     public async Task<StrategyFrameResult> ProcessFrameAsync(
@@ -155,6 +225,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
+            _frameEvents.Clear();
+            _currentFrameSequence = frame.Sequence;
             if (_failed)
             {
                 return BuildResult(frame, sw.Elapsed);
@@ -162,6 +234,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
 
             Candle executionCandle = frame.ExecutionCandle.Mid;
             DateTimeOffset eventTime = frame.AvailableAt;
+            _lastExecutablePrice = ResolveExecutablePrice(frame.ExecutionCandle, _activeTrade?.Side);
             _startedAt ??= executionCandle.OpenTime;
             _endedAt = eventTime;
             Clock.AdvanceTo(eventTime);
@@ -169,6 +242,9 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             BrokerPosition? positionBefore = (await Broker.Positions
                 .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
                 .FirstOrDefault(position => position.Instrument == executionCandle.Instrument);
+
+            if (_activeTrade is not null)
+                UpdateExcursions(frame.ExecutionCandle);
 
             await Broker.Runtime.ProcessExecutionCandleAsync(executionCandle, cancellationToken)
                 .ConfigureAwait(false);
@@ -178,7 +254,31 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 .FirstOrDefault(position => position.Instrument == executionCandle.Instrument);
 
             CapturePositionTransition(executionCandle, positionBefore, positionAfter);
+            if (positionAfter is not null && _activeTrade is not null)
+                await SynchronizeProtectiveStopAsync(positionAfter, cancellationToken).ConfigureAwait(false);
+            if (positionBefore is null && positionAfter is not null && _activeTrade is not null)
+                UpdateExcursions(frame.ExecutionCandle);
             RecordNewClosedTrades();
+            if (!frame.IsWarmup)
+            {
+                TradingSafetySnapshot previousSafety = Safety.Snapshot;
+                AccountSnapshot safetyAccount = Broker.State.GetAccount();
+                decimal equity = (safetyAccount.Balance ?? 0m) +
+                    (safetyAccount.UnrealizedProfitLoss ?? 0m);
+                TradingSafetySnapshot currentSafety = Safety.ObserveEquity(equity, eventTime);
+                if (currentSafety.State != previousSafety.State ||
+                    currentSafety.Reason != previousSafety.Reason)
+                {
+                    AddFrameEvent(
+                        StrategyReplayEventType.SafetyStateChanged,
+                        eventTime,
+                        _activeTrade?.SetupId,
+                        _activeTrade?.PositionId,
+                        reason: currentSafety.Message,
+                        reasonCode: currentSafety.Reason.ToString());
+                }
+            }
+
             SimulatedTradeRecord? newlyCompleted = null;
             if (_trades.Count > 0)
             {
@@ -225,6 +325,56 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 CaptureDecision(pipelineResult);
             }
 
+            if (!frame.IsWarmup && _activeTrade is not null)
+            {
+                bool managementActionTaken = false;
+                managementActionTaken = await EvaluateClosedManagementLayerAsync(
+                        frame,
+                        _thesisInterval,
+                        TradeManagementEvaluationScope.Thesis,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (!managementActionTaken)
+                {
+                    managementActionTaken = await EvaluateClosedManagementLayerAsync(
+                            frame,
+                            _mainStructureInterval,
+                            TradeManagementEvaluationScope.MainStructure,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                if (!managementActionTaken)
+                {
+                    managementActionTaken = await EvaluateClosedManagementLayerAsync(
+                            frame,
+                            _fastStructureInterval,
+                            TradeManagementEvaluationScope.FastStructure,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                if (!managementActionTaken &&
+                    _positionManagementOptions.EvaluateMechanicalProtectionOnEveryExecutionFrame &&
+                    ResolveMechanicalSnapshot(frame) is AnalysisSnapshot mechanicalSnapshot)
+                {
+                    AnalysisSnapshot executionFrameSnapshot = mechanicalSnapshot with
+                    {
+                        AvailableAt = frame.AvailableAt,
+                        Version = -Math.Max(1L, frame.Sequence),
+                        LatestCandle = frame.ExecutionCandle.Mid
+                    };
+                    await EvaluatePositionManagementAsync(
+                            frame,
+                            executionFrameSnapshot,
+                            TradeManagementEvaluationScope.Mechanical,
+                            frame.ExecutionCandle.Mid.Interval,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
             if (frame.IsLastCandle &&
                 Broker.Options.CloseOpenPositionsAtEnd)
             {
@@ -234,6 +384,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 if (open is not null)
                 {
                     _pendingExitReason = "End of simulation liquidation.";
+                    _pendingExitReasonKind = SimulatedTradeExitReason.EndOfSimulation;
                     await Broker.Runtime.LiquidateAtMarketCloseAsync(executionCandle, cancellationToken)
                         .ConfigureAwait(false);
                     BrokerPosition? afterLiquidation = (await Broker.Positions
@@ -288,7 +439,14 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             MaximumFrameProcessingTime = _maxProcessing,
             AverageFrameProcessingTime = average,
             BarrierWaitTime = _barrierWait,
-            PeakChannelOccupancy = _peakChannelOccupancy
+            PeakChannelOccupancy = _peakChannelOccupancy,
+            ManagementEvaluations = _managementEvaluations,
+            StopAmendmentRequests = _stopAmendmentRequests,
+            AcceptedStopAmendments = _acceptedStopAmendments,
+            RejectedStopAmendments = _rejectedStopAmendments,
+            PositionReductionRequests = _positionReductionRequests,
+            AcceptedPositionReductions = _acceptedPositionReductions,
+            RejectedPositionReductions = _rejectedPositionReductions
         };
     }
 
@@ -303,7 +461,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             {
                 ClosedAt = ended,
                 ExitReason = SimulatedTradeExitReason.EndOfSimulation,
-                ExitReasonText = "Position remained open at the end of the requested history."
+                ExitReasonText = "Position remained open at the end of the requested history.",
+                FinalStopLossPrice = _activeTrade.CurrentStopLossPrice ?? _activeTrade.InitialStopLossPrice
             });
             _activeTrade = null;
         }
@@ -333,6 +492,47 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             // Session may not have processed any candles yet.
         }
 
+        OpenPositionManagementSnapshot? management = null;
+        if (_activeTrade?.EntryPrice is decimal entry &&
+            (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice) is decimal initialStop &&
+            (_activeTrade.CurrentStopLossPrice ?? initialStop) is decimal currentStop)
+        {
+            decimal initialRisk = Math.Abs(entry - initialStop);
+            decimal currentPrice = _lastExecutablePrice ?? entry;
+            decimal openR = initialRisk <= 0m
+                ? 0m
+                : _activeTrade.Side == OrderSide.Buy
+                    ? (currentPrice - entry) / initialRisk
+                    : (entry - currentPrice) / initialRisk;
+            decimal lockedR = initialRisk <= 0m
+                ? 0m
+                : _activeTrade.Side == OrderSide.Buy
+                    ? (currentStop - entry) / initialRisk
+                    : (entry - currentStop) / initialRisk;
+            management = new OpenPositionManagementSnapshot
+            {
+                SetupId = _activeTrade.SetupId,
+                Side = _activeTrade.Side.ToString(),
+                EntryPrice = entry,
+                InitialQuantity = _activeTrade.InitialQuantity > 0m
+                    ? _activeTrade.InitialQuantity
+                    : _activeTrade.Quantity,
+                RemainingQuantity = _activeTrade.RemainingQuantity,
+                PositionReductionCount = _activeTrade.PositionReductionCount,
+                ReductionPending = _pendingPartialExit is not null,
+                InitialStop = initialStop,
+                CurrentStop = currentStop,
+                Target = _activeTrade.TakeProfitPrice,
+                CurrentOpenR = openR,
+                MaximumOpenR = _activeTrade.MaximumFavourableExcursionR ?? 0m,
+                LockedInR = lockedR,
+                TrailingMode = _positionManagementOptions.Mode.ToString(),
+                LastManagementAction = _lastManagementAction,
+                LastManagementReason = _lastManagementReason,
+                NextManagementIntervalClose = _nextManagementIntervalClose
+            };
+        }
+
         return new StrategyProgressSnapshot
         {
             StrategyName = StrategyName,
@@ -345,7 +545,9 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             ActiveSetups = _activeTrade is null ? 0 : 1,
             NetProfit = equity - Broker.Options.StartingBalance,
             Status = _failed ? "Failed" : "Running",
-            LastError = _failureMessage
+            LastError = _failureMessage,
+            Performance = StrategyPerformanceSnapshot.FromTrades(_trades),
+            OpenPositionManagement = management
         };
     }
 
@@ -392,9 +594,56 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private void CaptureDecision(TradingPipelineResult result)
     {
         AgentDecision? decision = result.Decision;
-        if (decision is null || result.Submission is null ||
-            result.Submission.Status == SubmissionStatus.Rejected)
+        if (decision is null)
         {
+            return;
+        }
+
+        if (decision.Action == AgentAction.Observe &&
+            (!string.IsNullOrWhiteSpace(decision.ReasonCode) ||
+             decision.Reason.Contains("price-action", StringComparison.OrdinalIgnoreCase)))
+        {
+            AddFrameEvent(
+                StrategyReplayEventType.PriceActionEvaluated,
+                decision.CreatedAt,
+                decision.SetupId,
+                reason: decision.Reason,
+                reasonCode: decision.ReasonCode,
+                priceActionTrigger: decision.PriceActionTrigger,
+                priceActionConfidence: decision.PriceActionConfidence);
+        }
+
+        if (decision.Action is AgentAction.Buy or AgentAction.Sell)
+        {
+            if (decision.PriceActionTrigger is not null)
+            {
+                AddFrameEvent(
+                    StrategyReplayEventType.PriceActionConfirmed,
+                    decision.CreatedAt,
+                    decision.SetupId,
+                    reason: decision.Reason,
+                    reasonCode: decision.ReasonCode,
+                    priceActionTrigger: decision.PriceActionTrigger,
+                    priceActionConfidence: decision.PriceActionConfidence);
+            }
+            AddFrameEvent(
+                StrategyReplayEventType.SignalCreated,
+                decision.CreatedAt,
+                decision.SetupId,
+                reason: decision.Reason,
+                reasonCode: decision.ReasonCode,
+                priceActionTrigger: decision.PriceActionTrigger,
+                priceActionConfidence: decision.PriceActionConfidence);
+        }
+        if (result.Submission is null)
+            return;
+        if (result.Submission.Status == SubmissionStatus.Rejected)
+        {
+            AddFrameEvent(
+                StrategyReplayEventType.OrderRejected,
+                decision.CreatedAt,
+                decision.SetupId,
+                reason: result.Submission.RejectionReason);
             return;
         }
 
@@ -402,10 +651,26 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         {
             _pendingEntryDecision = decision;
             _pendingEntryBrokerOrderId = result.Submission.BrokerOrderId;
+            AddFrameEvent(
+                StrategyReplayEventType.OrderSubmitted,
+                decision.CreatedAt,
+                decision.SetupId,
+                reason: decision.Reason);
         }
         else if (decision.Action == AgentAction.Close)
         {
             _pendingExitReason = decision.Reason;
+            _pendingExitReasonKind = decision.Reason.Contains(
+                "Opposite trend",
+                StringComparison.OrdinalIgnoreCase)
+                ? SimulatedTradeExitReason.ReverseStrategyClose
+                : SimulatedTradeExitReason.StructuralInvalidation;
+            AddFrameEvent(
+                StrategyReplayEventType.StrategyCloseRequested,
+                decision.CreatedAt,
+                _activeTrade?.SetupId,
+                _activeTrade?.PositionId,
+                reason: decision.Reason);
         }
     }
 
@@ -428,6 +693,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             {
                 StrategyName = decision.StrategyName ?? Strategy.Name,
                 SetupId = decision.SetupId ?? decision.DecisionId ?? $"setup:{timestamp:O}",
+                PositionId = after.PositionId,
                 Instrument = decision.Instrument,
                 Side = after.Side,
                 SetupStartedAt = decision.SetupStartedAt ?? decision.CreatedAt,
@@ -437,10 +703,16 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 SignalPrice = decision.ReferencePrice,
                 EntryPrice = after.AveragePrice,
                 Quantity = after.Quantity,
+                InitialQuantity = after.Quantity,
+                RemainingQuantity = after.Quantity,
                 StopLossPrice = decision.StopLossPrice,
+                InitialStopLossPrice = decision.StopLossPrice,
+                CurrentStopLossPrice = decision.StopLossPrice,
                 TakeProfitPrice = decision.TakeProfitPrice,
                 ExpectedRewardRisk = decision.ExpectedRewardRisk,
+                EntryCommission = entryCommission,
                 Commission = entryCommission,
+                NetProfitLoss = -entryCommission,
                 StopSource = decision.StopSource,
                 TargetSource = decision.TargetSource,
                 SetupReason = decision.Reason,
@@ -448,16 +720,62 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             };
             _pendingEntryDecision = null;
             _pendingEntryBrokerOrderId = null;
+            _lastAmendmentSnapshotVersion = null;
+            _lastReductionSnapshotVersion = null;
+            _lastManagementEvaluationVersions.Clear();
+            _analysisBarsSinceLastAmendment = int.MaxValue;
+            _analysisBarsSinceLastReduction = int.MaxValue;
+            _analysisBarsWithoutNewMfe = 0;
+            _lastObservedManagementMfeR = 0m;
+            _stagnationReductionCompleted = false;
+            _structuralDeteriorationReductionCount = 0;
+            _momentumDecayReductionCount = 0;
+            _volatilityExhaustionReductionCount = 0;
+            _volatilityExpansionSeenSinceEntry = false;
+            _riskWindowReductionCompleted = false;
+            _executionCostStressReductionCompleted = false;
+            _pendingPartialExit = null;
+            _completedReductionStages.Clear();
+            AddFrameEvent(
+                StrategyReplayEventType.OrderFilled,
+                timestamp,
+                _activeTrade.SetupId,
+                after.PositionId,
+                reason: "Entry order filled.");
+            AddFrameEvent(
+                StrategyReplayEventType.PositionOpened,
+                timestamp,
+                _activeTrade.SetupId,
+                after.PositionId,
+                reason: "Position opened with its initial protective stop.");
+            return;
+        }
+
+        string? capturedPartialOrderId = null;
+        if (before is not null && _activeTrade is not null && _pendingPartialExit is not null)
+        {
+            TryCapturePendingPartialExit(
+                timestamp,
+                after,
+                out capturedPartialOrderId);
+        }
+
+        if (before is not null && after is not null && _activeTrade is not null)
+        {
+            _activeTrade = _activeTrade with { RemainingQuantity = after.Quantity };
             return;
         }
 
         if (before is not null && after is null && _activeTrade is not null)
         {
             LedgerEntry? realised = Broker.State.GetLedger()
-                .Where(entry => entry.Type == LedgerEntryType.RealisedProfitLoss && entry.Timestamp == timestamp)
+                .Where(entry =>
+                    entry.Type == LedgerEntryType.RealisedProfitLoss &&
+                    entry.Timestamp == timestamp &&
+                    (capturedPartialOrderId is null || entry.OrderId != capturedPartialOrderId))
                 .OrderByDescending(entry => entry.Sequence)
                 .FirstOrDefault();
-            decimal gross = realised?.Amount ?? 0m;
+            decimal finalGross = realised?.Amount ?? 0m;
             string? exitOrderId = realised?.OrderId;
             decimal exitCommission = -Broker.State.GetLedger()
                 .Where(entry =>
@@ -465,59 +783,396 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                     entry.Timestamp == timestamp &&
                     (exitOrderId is null || entry.OrderId == exitOrderId))
                 .Sum(entry => entry.Amount);
-            decimal totalCommission = _activeTrade.Commission + exitCommission;
             decimal entryPrice = _activeTrade.EntryPrice ?? before.AveragePrice ?? candle.Prices.Open;
+            decimal finalQuantity = _activeTrade.RemainingQuantity > 0m
+                ? _activeTrade.RemainingQuantity
+                : before.Quantity;
+            decimal initialQuantity = _activeTrade.InitialQuantity > 0m
+                ? _activeTrade.InitialQuantity
+                : _activeTrade.Quantity;
             decimal quoteToBaseRate = Broker.State.GetQuoteToBaseCurrencyRate(before.Instrument);
-            decimal quoteProfitLoss = gross / quoteToBaseRate;
+            decimal quoteProfitLoss = finalGross / quoteToBaseRate;
             decimal exitPrice = before.Side == OrderSide.Buy
-                ? entryPrice + quoteProfitLoss / Math.Max(before.Quantity, 0.00000001m)
-                : entryPrice - quoteProfitLoss / Math.Max(before.Quantity, 0.00000001m);
+                ? entryPrice + quoteProfitLoss / Math.Max(finalQuantity, 0.00000001m)
+                : entryPrice - quoteProfitLoss / Math.Max(finalQuantity, 0.00000001m);
             BrokerOrder? exitOrder = exitOrderId is null ? null : Broker.State.GetOrder(exitOrderId);
             SimulatedTradeExitReason exitReason = DetermineExitReason(
                 candle,
                 _activeTrade,
                 _pendingExitReason,
+                _pendingExitReasonKind,
                 exitOrder);
-            decimal? initialRisk = _activeTrade.StopLossPrice is decimal stop
-                ? Math.Abs(entryPrice - stop) * before.Quantity * quoteToBaseRate
+            decimal grossTotal = _activeTrade.RealizedPartialGrossProfitLoss + finalGross;
+            decimal totalCommission = _activeTrade.Commission + exitCommission;
+            decimal netTotal = grossTotal - totalCommission;
+            decimal? initialRisk = (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice) is decimal stop
+                ? Math.Abs(entryPrice - stop) * initialQuantity * quoteToBaseRate
                 : null;
-            _trades.Add(_activeTrade with
+            decimal exitedNotionalPrice = _activeTrade.PartialExits.Sum(partial =>
+                partial.ExitPrice * partial.QuantityClosed) + exitPrice * finalQuantity;
+            decimal averageExitPrice = initialQuantity > 0m
+                ? exitedNotionalPrice / initialQuantity
+                : exitPrice;
+            SimulatedTradeRecord closedTrade = _activeTrade with
             {
                 ClosedAt = timestamp,
                 ExitPrice = exitPrice,
-                GrossProfitLoss = gross,
+                AverageExitPrice = averageExitPrice,
+                RemainingQuantity = 0m,
+                GrossProfitLoss = grossTotal,
                 Commission = totalCommission,
-                NetProfitLoss = gross - totalCommission,
-                RMultiple = initialRisk is > 0m ? (gross - totalCommission) / initialRisk.Value : null,
+                NetProfitLoss = netTotal,
+                RMultiple = initialRisk is > 0m ? netTotal / initialRisk.Value : null,
                 ExitReason = exitReason,
-                ExitReasonText = _pendingExitReason ?? exitReason.ToString()
-            });
+                ExitReasonText = _pendingExitReason ?? exitReason.ToString(),
+                FinalStopLossPrice = _activeTrade.CurrentStopLossPrice ?? _activeTrade.InitialStopLossPrice
+            };
+            _trades.Add(closedTrade);
+            RecordCompletedTradeForSafety(closedTrade, timestamp);
+            StrategyReplayEventType exitEvent = exitReason switch
+            {
+                SimulatedTradeExitReason.TakeProfit => StrategyReplayEventType.TargetHit,
+                SimulatedTradeExitReason.InitialStopLoss or
+                    SimulatedTradeExitReason.BreakEvenStop or
+                    SimulatedTradeExitReason.TrailedStructureStop or
+                    SimulatedTradeExitReason.ProfitFloorStop or
+                    SimulatedTradeExitReason.MfeGivebackStop or
+                    SimulatedTradeExitReason.StopLoss => StrategyReplayEventType.StopHit,
+                _ => StrategyReplayEventType.PositionClosed
+            };
+            AddFrameEvent(
+                exitEvent,
+                timestamp,
+                closedTrade.SetupId,
+                closedTrade.PositionId,
+                reason: closedTrade.ExitReasonText);
+            AddFrameEvent(
+                StrategyReplayEventType.PositionClosed,
+                timestamp,
+                closedTrade.SetupId,
+                closedTrade.PositionId,
+                reason: closedTrade.ExitReasonText);
+            AddFrameEvent(
+                StrategyReplayEventType.TradeCompleted,
+                timestamp,
+                closedTrade.SetupId,
+                closedTrade.PositionId,
+                reason: closedTrade.ExitReasonText);
             _activeTrade = null;
+            _pendingPartialExit = null;
             _pendingExitReason = null;
+            _pendingExitReasonKind = null;
         }
+    }
+
+    private bool TryCapturePendingPartialExit(
+        DateTimeOffset timestamp,
+        BrokerPosition? positionAfter,
+        out string? capturedOrderId)
+    {
+        capturedOrderId = null;
+        if (_activeTrade is null || _pendingPartialExit is null)
+            return false;
+
+        PendingPartialExit pending = _pendingPartialExit;
+        LedgerEntry? realised = Broker.State.GetLedger()
+            .Where(entry =>
+                entry.Type == LedgerEntryType.RealisedProfitLoss &&
+                entry.Timestamp == timestamp &&
+                entry.OrderId == pending.BrokerOrderId)
+            .OrderByDescending(entry => entry.Sequence)
+            .FirstOrDefault();
+        if (realised is null)
+        {
+            BrokerOrder? pendingOrder = Broker.State.GetOrder(pending.BrokerOrderId);
+            if (pendingOrder is not null && pendingOrder.NormalizedStatus is
+                OrderStatus.Rejected or OrderStatus.Cancelled or OrderStatus.Expired)
+            {
+                _rejectedPositionReductions++;
+                AddFrameEvent(
+                    StrategyReplayEventType.PartialExitRejected,
+                    timestamp,
+                    _activeTrade.SetupId,
+                    _activeTrade.PositionId,
+                    reason: $"The partial-close order ended with status {pendingOrder.NormalizedStatus}.",
+                    reasonCode: "PartialExitNotFilled",
+                    quantityBefore: _activeTrade.RemainingQuantity,
+                    quantityChanged: pending.Recommendation.QuantityToClose,
+                    quantityRemaining: _activeTrade.RemainingQuantity,
+                    reductionStageId: pending.Recommendation.StageId,
+                    positionReductionReason: pending.Recommendation.Reason);
+                _pendingPartialExit = null;
+            }
+            return false;
+        }
+
+        decimal quantityBefore = _activeTrade.RemainingQuantity > 0m
+            ? _activeTrade.RemainingQuantity
+            : _activeTrade.InitialQuantity;
+        decimal quantityClosed = Math.Min(pending.Recommendation.QuantityToClose, quantityBefore);
+        if (quantityClosed <= 0m)
+            return false;
+
+        decimal quantityRemaining = positionAfter?.Quantity ?? Math.Max(0m, quantityBefore - quantityClosed);
+        decimal exitCommission = -Broker.State.GetLedger()
+            .Where(entry =>
+                entry.Type == LedgerEntryType.Commission &&
+                entry.Timestamp == timestamp &&
+                entry.OrderId == pending.BrokerOrderId)
+            .Sum(entry => entry.Amount);
+        decimal quoteToBaseRate = Broker.State.GetQuoteToBaseCurrencyRate(_activeTrade.Instrument);
+        decimal quoteProfitLoss = realised.Amount / quoteToBaseRate;
+        decimal entryPrice = _activeTrade.EntryPrice!.Value;
+        decimal exitPrice = _activeTrade.Side == OrderSide.Buy
+            ? entryPrice + quoteProfitLoss / quantityClosed
+            : entryPrice - quoteProfitLoss / quantityClosed;
+        decimal initialQuantity = _activeTrade.InitialQuantity > 0m
+            ? _activeTrade.InitialQuantity
+            : _activeTrade.Quantity;
+        decimal allocatedEntryCommission = initialQuantity > 0m
+            ? _activeTrade.EntryCommission * quantityClosed / initialQuantity
+            : 0m;
+        decimal net = realised.Amount - exitCommission - allocatedEntryCommission;
+        decimal initialRiskAmount = Math.Abs(
+                entryPrice - (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice)!.Value) *
+            initialQuantity * quoteToBaseRate;
+        decimal realizedR = initialRiskAmount > 0m ? net / initialRiskAmount : 0m;
+        var partial = new PartialExitRecord
+        {
+            ExitId = $"{StrategyId}:{_activeTrade.SetupId}:{pending.Recommendation.StageId}:{timestamp:O}",
+            StageId = pending.Recommendation.StageId,
+            RequestedSequence = pending.RequestedSequence,
+            ExecutionSequence = _currentFrameSequence,
+            RequestedAt = pending.RequestedAt,
+            ExecutedAt = timestamp,
+            QuantityBefore = quantityBefore,
+            QuantityClosed = quantityClosed,
+            QuantityRemaining = quantityRemaining,
+            ExitPrice = exitPrice,
+            GrossProfitLoss = realised.Amount,
+            AllocatedEntryCommission = allocatedEntryCommission,
+            ExitCommission = exitCommission,
+            NetProfitLoss = net,
+            RealizedR = realizedR,
+            OpenProfitRBeforeExit = pending.OpenProfitR,
+            Reason = MapPartialExitReason(pending.Recommendation.Reason),
+            StructureSource = pending.Recommendation.StructureSource,
+            StructuralLevel = pending.Recommendation.StructuralLevel,
+            Explanation = pending.Recommendation.Explanation,
+            BrokerOrderId = pending.BrokerOrderId
+        };
+
+        _completedReductionStages.Add(pending.Recommendation.StageId);
+        bool runnerActivated = quantityRemaining <=
+            initialQuantity * _positionManagementOptions.MinimumRunnerFraction + 0.00000001m;
+        _activeTrade = _activeTrade with
+        {
+            RemainingQuantity = quantityRemaining,
+            GrossProfitLoss = _activeTrade.RealizedPartialGrossProfitLoss + realised.Amount,
+            Commission = _activeTrade.Commission + exitCommission,
+            NetProfitLoss = (_activeTrade.RealizedPartialGrossProfitLoss + realised.Amount) -
+                (_activeTrade.Commission + exitCommission),
+            RealizedPartialGrossProfitLoss = _activeTrade.RealizedPartialGrossProfitLoss + realised.Amount,
+            RealizedPartialCommission = _activeTrade.RealizedPartialCommission + exitCommission,
+            RealizedPartialNetProfitLoss = _activeTrade.RealizedPartialNetProfitLoss + net,
+            PositionReductionCount = _activeTrade.PositionReductionCount + 1,
+            RunnerActivatedAt = runnerActivated
+                ? _activeTrade.RunnerActivatedAt ?? timestamp
+                : _activeTrade.RunnerActivatedAt,
+            CompletedReductionStageIds = _completedReductionStages.OrderBy(value => value).ToArray(),
+            PartialExits = _activeTrade.PartialExits.Append(partial).ToArray()
+        };
+        _acceptedPositionReductions++;
+        _lastReductionSnapshotVersion = pending.SnapshotVersion;
+        _analysisBarsSinceLastReduction = 0;
+        if (pending.Recommendation.Reason == PositionReductionReason.Stagnation)
+            _stagnationReductionCompleted = true;
+        if (pending.Recommendation.Reason == PositionReductionReason.StructuralDeterioration)
+            _structuralDeteriorationReductionCount++;
+        if (pending.Recommendation.Reason == PositionReductionReason.MomentumDecay)
+            _momentumDecayReductionCount++;
+        if (pending.Recommendation.Reason == PositionReductionReason.VolatilityExhaustion)
+            _volatilityExhaustionReductionCount++;
+        if (pending.Recommendation.Reason == PositionReductionReason.SessionRisk)
+            _riskWindowReductionCompleted = true;
+        if (pending.Recommendation.Reason == PositionReductionReason.ExecutionCostStress)
+            _executionCostStressReductionCompleted = true;
+
+        AddFrameEvent(
+            StrategyReplayEventType.PartialExitAccepted,
+            timestamp,
+            _activeTrade.SetupId,
+            _activeTrade.PositionId,
+            reason: pending.Recommendation.Explanation,
+            reasonCode: pending.Recommendation.Reason.ToString(),
+            quantityBefore: quantityBefore,
+            quantityChanged: quantityClosed,
+            quantityRemaining: quantityRemaining,
+            realizedProfitLoss: net,
+            realizedR: realizedR,
+            reductionStageId: pending.Recommendation.StageId);
+        AddFrameEvent(
+            StrategyReplayEventType.ProtectiveQuantityUpdated,
+            timestamp,
+            _activeTrade.SetupId,
+            _activeTrade.PositionId,
+            reason: $"Protective orders reconciled to remaining quantity {quantityRemaining}.",
+            quantityRemaining: quantityRemaining,
+            reductionStageId: pending.Recommendation.StageId);
+        if (runnerActivated && _activeTrade.RunnerActivatedAt == timestamp)
+        {
+            AddFrameEvent(
+                StrategyReplayEventType.RunnerActivated,
+                timestamp,
+                _activeTrade.SetupId,
+                _activeTrade.PositionId,
+                reason: $"Runner quantity {quantityRemaining} is now protected by dynamic management.",
+                quantityRemaining: quantityRemaining);
+        }
+
+        capturedOrderId = pending.BrokerOrderId;
+        _pendingPartialExit = null;
+        return true;
+    }
+
+    private void RecordCompletedTradeForSafety(
+        SimulatedTradeRecord trade,
+        DateTimeOffset timestamp)
+    {
+        TradingSafetySnapshot snapshot = Safety.RecordClosedTrade(trade.NetProfitLoss, timestamp);
+        Journal.Append(new TradeJournalEntry
+        {
+            Sequence = 0,
+            Timestamp = timestamp,
+            Type = TradeJournalEventType.ClosedTradeRecorded,
+            Value = trade.NetProfitLoss,
+            Message = $"Recorded net completed-trade P/L {trade.NetProfitLoss:F2}. Safety state is {snapshot.State}."
+        });
+    }
+
+    private static PartialExitReason MapPartialExitReason(PositionReductionReason reason) => reason switch
+    {
+        PositionReductionReason.ScaleOutProfit => PartialExitReason.ScaleOutProfit,
+        PositionReductionReason.OpposingStructure => PartialExitReason.OpposingStructure,
+        PositionReductionReason.Stagnation => PartialExitReason.Stagnation,
+        PositionReductionReason.StructuralDeterioration => PartialExitReason.StructuralDeterioration,
+        PositionReductionReason.MomentumDecay => PartialExitReason.MomentumDecay,
+        PositionReductionReason.VolatilityExhaustion => PartialExitReason.VolatilityExhaustion,
+        PositionReductionReason.SessionRisk => PartialExitReason.SessionRisk,
+        PositionReductionReason.ExecutionCostStress => PartialExitReason.ExecutionCostStress,
+        PositionReductionReason.RiskReduction => PartialExitReason.RiskReduction,
+        _ => PartialExitReason.Unknown
+    };
+
+    private void UpdateExcursions(MarketCandle marketCandle)
+    {
+        if (_activeTrade?.EntryPrice is not decimal entry || _activeTrade.Quantity <= 0m)
+            return;
+
+        Candle executable = _activeTrade.Side == OrderSide.Buy
+            ? marketCandle.Bid ?? marketCandle.Mid
+            : marketCandle.Ask ?? marketCandle.Mid;
+        decimal favourablePrice = _activeTrade.Side == OrderSide.Buy
+            ? executable.Prices.High
+            : executable.Prices.Low;
+        decimal adversePrice = _activeTrade.Side == OrderSide.Buy
+            ? executable.Prices.Low
+            : executable.Prices.High;
+        decimal direction = _activeTrade.Side == OrderSide.Buy ? 1m : -1m;
+        decimal quoteToBase = Broker.State.GetQuoteToBaseCurrencyRate(_activeTrade.Instrument);
+        decimal favourableAmount =
+            (favourablePrice - entry) * direction * _activeTrade.Quantity * quoteToBase;
+        decimal adverseAmount =
+            (adversePrice - entry) * direction * _activeTrade.Quantity * quoteToBase;
+        decimal? initialRisk = (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice) is decimal stop
+            ? Math.Abs(entry - stop) * _activeTrade.Quantity * quoteToBase
+            : null;
+        DateTimeOffset timestamp = executable.CloseTime ?? executable.Interval.AddTo(executable.OpenTime);
+
+        SimulatedTradeRecord updated = _activeTrade;
+        if (updated.MaximumFavourableExcursionAt is null ||
+            favourableAmount > updated.MaximumFavourableExcursionAmount)
+        {
+            updated = updated with
+            {
+                MaximumFavourableExcursionPrice = favourablePrice,
+                MaximumFavourableExcursionAmount = favourableAmount,
+                MaximumFavourableExcursionR = initialRisk is > 0m
+                    ? favourableAmount / initialRisk.Value
+                    : null,
+                MaximumFavourableExcursionAt = timestamp
+            };
+        }
+
+        if (updated.MaximumAdverseExcursionAt is null ||
+            adverseAmount < updated.MaximumAdverseExcursionAmount)
+        {
+            updated = updated with
+            {
+                MaximumAdverseExcursionPrice = adversePrice,
+                MaximumAdverseExcursionAmount = adverseAmount,
+                MaximumAdverseExcursionR = initialRisk is > 0m
+                    ? adverseAmount / initialRisk.Value
+                    : null,
+                MaximumAdverseExcursionAt = timestamp
+            };
+        }
+
+        _activeTrade = updated;
     }
 
     private static SimulatedTradeExitReason DetermineExitReason(
         Candle candle,
         SimulatedTradeRecord trade,
         string? strategyReason,
+        SimulatedTradeExitReason? strategyReasonKind,
         BrokerOrder? exitOrder)
     {
         if (!string.IsNullOrWhiteSpace(strategyReason))
         {
-            if (strategyReason.Contains("End of simulation", StringComparison.OrdinalIgnoreCase))
-                return SimulatedTradeExitReason.EndOfSimulation;
-            return strategyReason.Contains("invalid", StringComparison.OrdinalIgnoreCase)
-                ? SimulatedTradeExitReason.StructuralInvalidation
-                : SimulatedTradeExitReason.StrategyClose;
+            return strategyReasonKind ??
+                (strategyReason.Contains("End of simulation", StringComparison.OrdinalIgnoreCase)
+                    ? SimulatedTradeExitReason.EndOfSimulation
+                    : strategyReason.Contains("invalid", StringComparison.OrdinalIgnoreCase)
+                        ? SimulatedTradeExitReason.StructuralInvalidation
+                        : SimulatedTradeExitReason.StrategyClose);
         }
 
         if (string.Equals(exitOrder?.Type, StandardOrderType.Stop.ToString(), StringComparison.Ordinal))
-            return SimulatedTradeExitReason.StopLoss;
+        {
+            StopAmendmentRecord? accepted = trade.StopAmendments.LastOrDefault(amendment =>
+                amendment.Status is ProtectiveStopAmendmentStatus.Accepted or
+                    ProtectiveStopAmendmentStatus.Replaced);
+            return accepted?.Reason switch
+            {
+                StopAmendmentReason.BreakEven => SimulatedTradeExitReason.BreakEvenStop,
+                StopAmendmentReason.StructureSwing or StopAmendmentReason.StructureZone or
+                    StopAmendmentReason.StructureChannel or StopAmendmentReason.AtrFallback =>
+                    SimulatedTradeExitReason.TrailedStructureStop,
+                StopAmendmentReason.ProfitFloor => SimulatedTradeExitReason.ProfitFloorStop,
+                StopAmendmentReason.MfeGiveback => SimulatedTradeExitReason.MfeGivebackStop,
+                _ => SimulatedTradeExitReason.InitialStopLoss
+            };
+        }
         if (string.Equals(exitOrder?.Type, StandardOrderType.Limit.ToString(), StringComparison.Ordinal))
             return SimulatedTradeExitReason.TakeProfit;
-        if (trade.StopLossPrice is decimal stop && candle.Prices.Low <= stop && candle.Prices.High >= stop)
-            return SimulatedTradeExitReason.StopLoss;
+        if ((trade.CurrentStopLossPrice ?? trade.InitialStopLossPrice ?? trade.StopLossPrice) is decimal stop &&
+            candle.Prices.Low <= stop && candle.Prices.High >= stop)
+        {
+            StopAmendmentRecord? accepted = trade.StopAmendments.LastOrDefault(amendment =>
+                amendment.Status is ProtectiveStopAmendmentStatus.Accepted or
+                    ProtectiveStopAmendmentStatus.Replaced);
+            return accepted?.Reason switch
+            {
+                StopAmendmentReason.BreakEven => SimulatedTradeExitReason.BreakEvenStop,
+                StopAmendmentReason.ProfitFloor => SimulatedTradeExitReason.ProfitFloorStop,
+                StopAmendmentReason.MfeGiveback => SimulatedTradeExitReason.MfeGivebackStop,
+                StopAmendmentReason.StructureSwing or StopAmendmentReason.StructureZone or
+                    StopAmendmentReason.StructureChannel or StopAmendmentReason.AtrFallback =>
+                    SimulatedTradeExitReason.TrailedStructureStop,
+                _ => SimulatedTradeExitReason.InitialStopLoss
+            };
+        }
         if (trade.TakeProfitPrice is decimal target && candle.Prices.Low <= target && candle.Prices.High >= target)
             return SimulatedTradeExitReason.TakeProfit;
         return SimulatedTradeExitReason.Unknown;
@@ -525,32 +1180,682 @@ public sealed class StrategySimulationSession : IAsyncDisposable
 
     private void RecordNewClosedTrades()
     {
-        foreach (LedgerEntry entry in Broker.State.GetLedger()
-                     .Where(entry =>
-                         entry.Sequence > _lastProcessedLedgerSequence &&
-                         entry.Type == LedgerEntryType.RealisedProfitLoss)
-                     .OrderBy(entry => entry.Sequence))
-        {
-            _lastProcessedLedgerSequence = entry.Sequence;
-            SimulatedTradeRecord? matchingTrade = _trades.LastOrDefault(trade =>
-                trade.ClosedAt == entry.Timestamp);
-            decimal netClosedTrade = matchingTrade?.NetProfitLoss ?? entry.Amount;
-            TradingSafetySnapshot snapshot = Safety.RecordClosedTrade(netClosedTrade, entry.Timestamp);
-            Journal.Append(new TradeJournalEntry
-            {
-                Sequence = 0,
-                Timestamp = entry.Timestamp,
-                Type = TradeJournalEventType.ClosedTradeRecorded,
-                Value = netClosedTrade,
-                Message = $"Recorded net closed-trade P/L {netClosedTrade:F2}. Safety state is {snapshot.State}."
-            });
-        }
-
+        // Realised P/L entries can represent partial reductions. Safety accounting is
+        // updated exactly once when the complete trade closes in CapturePositionTransition.
+        // Here we only advance the ledger cursor so partial fills are not misclassified as
+        // separate closed trades or consecutive wins/losses.
         long latestSequence = Broker.State.GetLedger()
             .Select(entry => entry.Sequence)
             .DefaultIfEmpty(_lastProcessedLedgerSequence)
             .Max();
         _lastProcessedLedgerSequence = Math.Max(_lastProcessedLedgerSequence, latestSequence);
+    }
+
+    private async Task SynchronizeProtectiveStopAsync(
+        BrokerPosition position,
+        CancellationToken cancellationToken)
+    {
+        if (_activeTrade is null)
+            return;
+        IReadOnlyList<BrokerOrder> orders = await Broker.Orders
+            .GetOpenOrdersAsync(position.Instrument, cancellationToken)
+            .ConfigureAwait(false);
+        decimal? expectedStop = _activeTrade.CurrentStopLossPrice ??
+            _activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice;
+        BrokerOrder? stop = orders
+            .Where(order =>
+                order.NormalizedStatus is OrderStatus.Open or OrderStatus.Pending or OrderStatus.PartiallyFilled &&
+                string.Equals(order.Type, StandardOrderType.Stop.ToString(), StringComparison.OrdinalIgnoreCase) &&
+                order.Side != position.Side &&
+                order.Quantity == position.Quantity)
+            .OrderBy(order => expectedStop is decimal expected && order.Price is decimal actual
+                ? Math.Abs(actual - expected)
+                : decimal.MaxValue)
+            .FirstOrDefault();
+        if (stop is null)
+            return;
+
+        _activeTrade = _activeTrade with
+        {
+            InitialStopOrderId = _activeTrade.InitialStopOrderId ?? stop.BrokerOrderId,
+            CurrentStopOrderId = stop.BrokerOrderId,
+            CurrentStopLossPrice = stop.Price ?? expectedStop
+        };
+    }
+
+    private async Task<bool> EvaluatePositionManagementAsync(
+        MarketFrame frame,
+        AnalysisSnapshot analysis,
+        TradeManagementEvaluationScope scope,
+        BarInterval evaluationInterval,
+        CancellationToken cancellationToken)
+    {
+        if (_activeTrade?.EntryPrice is not decimal entryPrice ||
+            (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice) is not decimal initialStop ||
+            _activeTrade.PositionId is null ||
+            _lastManagementEvaluationVersions.GetValueOrDefault(scope) == analysis.Version)
+        {
+            return false;
+        }
+
+        BrokerPosition? openPosition = (await Broker.Positions
+            .GetOpenPositionsAsync(cancellationToken)
+            .ConfigureAwait(false))
+            .FirstOrDefault(item => item.PositionId == _activeTrade.PositionId);
+        if (openPosition is null)
+            return false;
+
+        _lastManagementEvaluationVersions[scope] = analysis.Version;
+        if (scope == TradeManagementEvaluationScope.MainStructure)
+        {
+            _analysisBarsSinceLastAmendment = IncrementSaturating(_analysisBarsSinceLastAmendment);
+            _analysisBarsSinceLastReduction = IncrementSaturating(_analysisBarsSinceLastReduction);
+            _nextManagementIntervalClose = _mainStructureInterval.AddTo(analysis.AvailableAt);
+        }
+        await SynchronizeProtectiveStopAsync(openPosition, cancellationToken).ConfigureAwait(false);
+
+        decimal currentStop = _activeTrade.CurrentStopLossPrice ?? initialStop;
+        decimal executablePrice = ResolveExecutablePrice(frame.ExecutionCandle, _activeTrade.Side);
+        decimal increment = ResolveMinimumPriceIncrement(_activeTrade.Instrument);
+        decimal commissionPrice = entryPrice * Broker.Options.CommissionRate;
+        decimal spreadPrice = entryPrice * Broker.Options.SpreadBasisPoints / 10_000m;
+        decimal slippagePrice = entryPrice * Broker.Options.SlippageBasisPoints / 10_000m;
+        decimal maximumFavourableR = Math.Max(0m, _activeTrade.MaximumFavourableExcursionR ?? 0m);
+        if (scope == TradeManagementEvaluationScope.MainStructure &&
+            maximumFavourableR >=
+            _lastObservedManagementMfeR + _positionManagementOptions.StagnationMinimumMfeAdvanceR)
+        {
+            _lastObservedManagementMfeR = maximumFavourableR;
+            _analysisBarsWithoutNewMfe = 0;
+        }
+        else if (scope == TradeManagementEvaluationScope.MainStructure)
+        {
+            _analysisBarsWithoutNewMfe = IncrementSaturating(_analysisBarsWithoutNewMfe);
+        }
+
+        if (scope == TradeManagementEvaluationScope.MainStructure &&
+            (analysis.Indicators.BollingerAnalysis.IsExpansion ||
+            analysis.Indicators.BollingerAnalysis.WidthRegime is
+                BollingerWidthRegime.Expansion or BollingerWidthRegime.Wide))
+        {
+            _volatilityExpansionSeenSinceEntry = true;
+        }
+
+        decimal initialQuantity = _activeTrade.InitialQuantity > 0m
+            ? _activeTrade.InitialQuantity
+            : _activeTrade.Quantity;
+        _managementEvaluations++;
+        TradeManagementRecommendation recommendation = _tradeManager.Evaluate(
+            new ManagedTradeState
+            {
+                Instrument = _activeTrade.Instrument,
+                Side = _activeTrade.Side,
+                EntryPrice = entryPrice,
+                InitialStopPrice = initialStop,
+                CurrentStopPrice = currentStop,
+                CurrentPrice = executablePrice,
+                TakeProfitPrice = _activeTrade.TakeProfitPrice ?? 0m,
+                InitialQuantity = initialQuantity,
+                CurrentQuantity = openPosition.Quantity,
+                MinimumQuantityIncrement = ResolveMinimumQuantityIncrement(_activeTrade.Instrument),
+                MaximumFavourableExcursionR = maximumFavourableR,
+                CompletedReductionStageIds = _completedReductionStages,
+                HasPendingReduction = _pendingPartialExit is not null,
+                LastReductionSnapshotVersion = null,
+                AnalysisBarsSinceLastReduction = _analysisBarsSinceLastReduction,
+                AnalysisBarsWithoutNewMfe = _analysisBarsWithoutNewMfe,
+                StagnationReductionCompleted = _stagnationReductionCompleted,
+                StructuralDeteriorationReductionCount = _structuralDeteriorationReductionCount,
+                MomentumDecayReductionCount = _momentumDecayReductionCount,
+                VolatilityExhaustionReductionCount = _volatilityExhaustionReductionCount,
+                VolatilityExpansionSeenSinceEntry = _volatilityExpansionSeenSinceEntry,
+                RiskWindowReductionCompleted = _riskWindowReductionCompleted,
+                ExecutionCostStressReductionCompleted = _executionCostStressReductionCompleted,
+                EvaluatedAt = frame.AvailableAt,
+                MinimumPriceIncrement = increment,
+                EntryCommissionPrice = commissionPrice,
+                ExpectedExitCommissionPrice = commissionPrice,
+                SpreadPrice = spreadPrice,
+                SlippagePrice = slippagePrice,
+                LastAmendmentSnapshotVersion = null,
+                AnalysisBarsSinceLastAmendment = scope == TradeManagementEvaluationScope.Mechanical
+                    ? int.MaxValue
+                    : _analysisBarsSinceLastAmendment
+            },
+            analysis,
+            scope);
+
+        _lastManagementAction = recommendation.Action.ToString();
+        _lastManagementReason = recommendation.Reason;
+        AddFrameEvent(
+            StrategyReplayEventType.TradeManagementEvaluated,
+            frame.AvailableAt,
+            _activeTrade.SetupId,
+            _activeTrade.PositionId,
+            reason: $"[{scope} @ {BarIntervalParser.Format(evaluationInterval)}] {recommendation.Reason}",
+            reasonCode: $"{scope}:{recommendation.ReasonCode}",
+            quantityBefore: openPosition.Quantity,
+            quantityChanged: recommendation.PositionReduction?.QuantityToClose,
+            quantityRemaining: recommendation.PositionReduction?.QuantityRemainingAfterReduction,
+            reductionStageId: recommendation.PositionReduction?.StageId,
+            positionReductionReason: recommendation.PositionReduction?.Reason,
+            profitFloorR: recommendation.ProfitFloorR,
+            maximumGivebackFloorR: recommendation.MaximumGivebackFloorR);
+
+        if (_pendingExitReason is not null)
+            return true;
+
+        if (recommendation.Action == TradeManagementAction.Exit)
+        {
+            await SubmitTradeManagerExitAsync(
+                    frame,
+                    analysis,
+                    openPosition,
+                    executablePrice,
+                    recommendation,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return true;
+        }
+
+        if (recommendation.PositionReduction is not null)
+        {
+            await SubmitPositionReductionAsync(
+                    frame,
+                    analysis,
+                    openPosition,
+                    executablePrice,
+                    recommendation,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (recommendation.ProposedStopPrice is decimal proposedStop)
+        {
+            // The amendment is applied to the current full position. If a partial reduction was
+            // also submitted, both become eligible on the next execution candle; the simulated
+            // broker executes the market reduction first and atomically reconciles the amended
+            // stop/target quantities to the remaining position.
+            await ApplyStopRecommendationAsync(
+                    frame,
+                    analysis,
+                    openPosition,
+                    entryPrice,
+                    initialStop,
+                    currentStop,
+                    executablePrice,
+                    increment,
+                    proposedStop,
+                    recommendation,
+                    evaluationInterval,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return recommendation.Action != TradeManagementAction.Hold;
+    }
+
+    private async Task<bool> EvaluateClosedManagementLayerAsync(
+        MarketFrame frame,
+        BarInterval interval,
+        TradeManagementEvaluationScope scope,
+        CancellationToken cancellationToken)
+    {
+        if (!frame.ClosedIntervals.Contains(interval) ||
+            !frame.Snapshots.TryGetValue(interval, out AnalysisSnapshot? snapshot) ||
+            snapshot.AvailableAt > frame.AvailableAt)
+        {
+            return false;
+        }
+
+        return await EvaluatePositionManagementAsync(
+                frame,
+                snapshot,
+                scope,
+                interval,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private AnalysisSnapshot? ResolveMechanicalSnapshot(MarketFrame frame)
+    {
+        if (frame.Snapshots.TryGetValue(Strategy.TriggerInterval, out AnalysisSnapshot? trigger) &&
+            trigger.AvailableAt <= frame.AvailableAt)
+        {
+            return trigger;
+        }
+        if (frame.Snapshots.TryGetValue(_fastStructureInterval, out AnalysisSnapshot? fast) &&
+            fast.AvailableAt <= frame.AvailableAt)
+        {
+            return fast;
+        }
+        return frame.Snapshots.Values
+            .Where(snapshot => snapshot.AvailableAt <= frame.AvailableAt)
+            .OrderByDescending(snapshot => snapshot.AvailableAt)
+            .ThenBy(snapshot => BarIntervalParser.ApproximateSeconds(snapshot.Interval))
+            .FirstOrDefault();
+    }
+
+    private async Task SubmitTradeManagerExitAsync(
+        MarketFrame frame,
+        AnalysisSnapshot analysis,
+        BrokerPosition position,
+        decimal executablePrice,
+        TradeManagementRecommendation recommendation,
+        CancellationToken cancellationToken)
+    {
+        var close = new AgentDecision
+        {
+            DecisionId = $"{StrategyId}:{_activeTrade!.SetupId}:trade-manager-close:{analysis.Version}",
+            SetupId = _activeTrade.SetupId,
+            StrategyName = StrategyName,
+            Action = AgentAction.Close,
+            Instrument = _activeTrade.Instrument,
+            SuggestedQuantity = position.Quantity,
+            QuantityUnit = QuantityUnit.Units,
+            ReferencePrice = executablePrice,
+            Confidence = 100m,
+            CreatedAt = frame.AvailableAt,
+            Reason = recommendation.Reason,
+            ReasonCode = recommendation.ReasonCode
+        };
+        OrderSubmission? submission = await Execution
+            .ProcessAsync(close, Broker, cancellationToken)
+            .ConfigureAwait(false);
+        if (submission is null || submission.Status == SubmissionStatus.Rejected)
+            return;
+
+        _pendingExitReason = recommendation.Reason;
+        _pendingExitReasonKind = recommendation.ExitReason switch
+        {
+            TradeManagementExitReason.AdverseStructure =>
+                SimulatedTradeExitReason.TradeManagerStructureExit,
+            TradeManagementExitReason.ProfitFloorBreached =>
+                SimulatedTradeExitReason.ProfitFloorExit,
+            TradeManagementExitReason.MaximumGivebackBreached =>
+                SimulatedTradeExitReason.MaximumGivebackExit,
+            _ => SimulatedTradeExitReason.StrategyClose
+        };
+        AddFrameEvent(
+            StrategyReplayEventType.StrategyCloseRequested,
+            frame.AvailableAt,
+            _activeTrade.SetupId,
+            _activeTrade.PositionId,
+            reason: recommendation.Reason,
+            reasonCode: recommendation.ReasonCode,
+            profitFloorR: recommendation.ProfitFloorR,
+            maximumGivebackFloorR: recommendation.MaximumGivebackFloorR);
+    }
+
+    private async Task SubmitPositionReductionAsync(
+        MarketFrame frame,
+        AnalysisSnapshot analysis,
+        BrokerPosition position,
+        decimal executablePrice,
+        TradeManagementRecommendation recommendation,
+        CancellationToken cancellationToken)
+    {
+        if (_activeTrade is null || _pendingPartialExit is not null ||
+            recommendation.PositionReduction is not PositionReductionRecommendation reduction)
+        {
+            return;
+        }
+
+        decimal quantity = Math.Min(reduction.QuantityToClose, position.Quantity);
+        if (quantity <= 0m || quantity >= position.Quantity)
+        {
+            _rejectedPositionReductions++;
+            AddFrameEvent(
+                StrategyReplayEventType.PartialExitRejected,
+                frame.AvailableAt,
+                _activeTrade.SetupId,
+                _activeTrade.PositionId,
+                reason: "The recommended reduction would close no quantity or the complete position.",
+                reasonCode: "InvalidReductionQuantity",
+                quantityBefore: position.Quantity,
+                quantityChanged: quantity,
+                quantityRemaining: position.Quantity,
+                reductionStageId: reduction.StageId,
+                positionReductionReason: reduction.Reason);
+            return;
+        }
+
+        AddFrameEvent(
+            StrategyReplayEventType.PartialExitRecommended,
+            frame.AvailableAt,
+            _activeTrade.SetupId,
+            _activeTrade.PositionId,
+            reason: reduction.Explanation,
+            reasonCode: reduction.Reason.ToString(),
+            quantityBefore: position.Quantity,
+            quantityChanged: quantity,
+            quantityRemaining: position.Quantity - quantity,
+            reductionStageId: reduction.StageId,
+            positionReductionReason: reduction.Reason);
+
+        var close = new AgentDecision
+        {
+            DecisionId = $"{StrategyId}:{_activeTrade.SetupId}:partial:{reduction.StageId}:{analysis.Version}",
+            SetupId = _activeTrade.SetupId,
+            StrategyName = StrategyName,
+            Action = AgentAction.Close,
+            Instrument = _activeTrade.Instrument,
+            SuggestedQuantity = quantity,
+            QuantityUnit = QuantityUnit.Units,
+            ReferencePrice = executablePrice,
+            Confidence = 100m,
+            CreatedAt = frame.AvailableAt,
+            Reason = reduction.Explanation,
+            ReasonCode = reduction.Reason.ToString()
+        };
+        _positionReductionRequests++;
+        OrderSubmission? submission = await Execution
+            .ProcessAsync(close, Broker, cancellationToken)
+            .ConfigureAwait(false);
+        if (submission is null || submission.Status == SubmissionStatus.Rejected ||
+            string.IsNullOrWhiteSpace(submission.BrokerOrderId))
+        {
+            _rejectedPositionReductions++;
+            AddFrameEvent(
+                StrategyReplayEventType.PartialExitRejected,
+                frame.AvailableAt,
+                _activeTrade.SetupId,
+                _activeTrade.PositionId,
+                reason: submission?.RejectionReason ?? "The partial-close order was not accepted.",
+                reasonCode: "PartialExitSubmissionRejected",
+                quantityBefore: position.Quantity,
+                quantityChanged: quantity,
+                quantityRemaining: position.Quantity,
+                reductionStageId: reduction.StageId,
+                positionReductionReason: reduction.Reason);
+            return;
+        }
+
+        _pendingPartialExit = new PendingPartialExit(
+            submission.BrokerOrderId,
+            reduction,
+            analysis.Version,
+            frame.Sequence,
+            frame.AvailableAt,
+            recommendation.OpenProfitR);
+        AddFrameEvent(
+            StrategyReplayEventType.PartialExitSubmitted,
+            frame.AvailableAt,
+            _activeTrade.SetupId,
+            _activeTrade.PositionId,
+            reason: reduction.Explanation,
+            reasonCode: reduction.Reason.ToString(),
+            quantityBefore: position.Quantity,
+            quantityChanged: quantity,
+            quantityRemaining: position.Quantity - quantity,
+            reductionStageId: reduction.StageId,
+            positionReductionReason: reduction.Reason);
+    }
+
+    private async Task ApplyStopRecommendationAsync(
+        MarketFrame frame,
+        AnalysisSnapshot analysis,
+        BrokerPosition openPosition,
+        decimal entryPrice,
+        decimal initialStop,
+        decimal currentStop,
+        decimal executablePrice,
+        decimal increment,
+        decimal proposedStop,
+        TradeManagementRecommendation recommendation,
+        BarInterval evaluationInterval,
+        CancellationToken cancellationToken)
+    {
+        if (_activeTrade is null || _pendingExitReason is not null)
+            return;
+
+        var command = new ProtectiveStopAmendmentCommand
+        {
+            Instrument = _activeTrade.Instrument,
+            StrategyId = StrategyId,
+            SetupId = _activeTrade.SetupId,
+            PositionId = openPosition.PositionId,
+            ExistingStopOrderId = _activeTrade.CurrentStopOrderId,
+            PositionSide = openPosition.Side,
+            PositionQuantity = openPosition.Quantity,
+            EntryPrice = entryPrice,
+            InitialStopPrice = initialStop,
+            CurrentStopPrice = currentStop,
+            ProposedStopPrice = proposedStop,
+            CurrentExecutablePrice = executablePrice,
+            MinimumPriceIncrement = increment,
+            OpenProfitR = recommendation.OpenProfitR,
+            AmendmentReason = recommendation.AmendmentReason,
+            Reason = recommendation.Reason,
+            CreatedAt = frame.AvailableAt,
+            RequestedSequence = frame.Sequence,
+            EffectiveFromExecutionSequence = frame.Sequence + 1
+        };
+        AddAmendmentEvent(
+            StrategyReplayEventType.StopAmendmentRequested,
+            command,
+            analysis,
+            proposedStop,
+            null,
+            recommendation,
+            evaluationInterval);
+
+        _stopAmendmentRequests++;
+        ProtectiveStopAmendmentResult result = await Execution
+            .AmendProtectiveStopAsync(command, Broker, cancellationToken)
+            .ConfigureAwait(false);
+        decimal lockedR = result.AcceptedStopPrice is decimal accepted
+            ? openPosition.Side == OrderSide.Buy
+                ? (accepted - entryPrice) / Math.Abs(entryPrice - initialStop)
+                : (entryPrice - accepted) / Math.Abs(entryPrice - initialStop)
+            : recommendation.LockedProfitR ?? 0m;
+        var amendment = new StopAmendmentRecord
+        {
+            RequestedSequence = frame.Sequence,
+            EffectiveSequence = result.EffectiveFromExecutionSequence,
+            RequestedAt = frame.AvailableAt,
+            AcceptedAt = result.AcceptedAt,
+            PreviousStopPrice = currentStop,
+            ProposedStopPrice = proposedStop,
+            AcceptedStopPrice = result.AcceptedStopPrice,
+            OpenProfitR = recommendation.OpenProfitR,
+            LockedProfitR = lockedR,
+            Reason = recommendation.AmendmentReason,
+            Explanation = recommendation.Reason,
+            Status = result.Status,
+            PreviousStopOrderId = result.PreviousStopOrderId,
+            CurrentStopOrderId = result.CurrentStopOrderId,
+            RejectionReason = result.RejectionReason,
+            AnalysisInterval = BarIntervalParser.Format(evaluationInterval),
+            AnalysisSnapshotVersion = analysis.Version,
+            Atr = recommendation.Atr,
+            StructuralLevel = recommendation.StructuralLevel,
+            StructureSource = recommendation.StructureSource,
+            RawEntryPrice = recommendation.RawEntryPrice,
+            CostAdjustedBreakEvenPrice = recommendation.CostAdjustedBreakEvenPrice,
+            AtrBufferPrice = recommendation.AtrBufferPrice
+        };
+        StopAmendmentRecord[] history = _activeTrade.StopAmendments.Append(amendment).ToArray();
+        bool acceptedAmendment = result.Status is
+            ProtectiveStopAmendmentStatus.Accepted or ProtectiveStopAmendmentStatus.Replaced;
+        if (acceptedAmendment)
+            _acceptedStopAmendments++;
+        else
+            _rejectedStopAmendments++;
+
+        if (acceptedAmendment && result.AcceptedStopPrice is decimal acceptedStop)
+        {
+            DateTimeOffset? breakEvenAt = recommendation.AmendmentReason == StopAmendmentReason.BreakEven
+                ? _activeTrade.BreakEvenActivatedAt ?? frame.AvailableAt
+                : _activeTrade.BreakEvenActivatedAt;
+            bool structural = recommendation.AmendmentReason is
+                StopAmendmentReason.StructureSwing or StopAmendmentReason.StructureZone or
+                StopAmendmentReason.StructureChannel or StopAmendmentReason.AtrFallback;
+            _activeTrade = _activeTrade with
+            {
+                CurrentStopLossPrice = acceptedStop,
+                CurrentStopOrderId = result.CurrentStopOrderId,
+                StopAmendmentCount = _activeTrade.StopAmendmentCount + 1,
+                BreakEvenActivatedAt = breakEvenAt,
+                StructureTrailingActivatedAt = structural
+                    ? _activeTrade.StructureTrailingActivatedAt ?? frame.AvailableAt
+                    : _activeTrade.StructureTrailingActivatedAt,
+                ProfitFloorActivatedAt = recommendation.AmendmentReason == StopAmendmentReason.ProfitFloor
+                    ? _activeTrade.ProfitFloorActivatedAt ?? frame.AvailableAt
+                    : _activeTrade.ProfitFloorActivatedAt,
+                MaximumGivebackProtectionActivatedAt =
+                    recommendation.AmendmentReason == StopAmendmentReason.MfeGiveback
+                        ? _activeTrade.MaximumGivebackProtectionActivatedAt ?? frame.AvailableAt
+                        : _activeTrade.MaximumGivebackProtectionActivatedAt,
+                MaximumLockedInR = Math.Max(_activeTrade.MaximumLockedInR, lockedR),
+                StopAmendments = history
+            };
+            _lastAmendmentSnapshotVersion = analysis.Version;
+            _analysisBarsSinceLastAmendment = 0;
+        }
+        else
+        {
+            _activeTrade = _activeTrade with { StopAmendments = history };
+        }
+
+        StrategyReplayEventType outcome = result.Status switch
+        {
+            ProtectiveStopAmendmentStatus.Accepted or ProtectiveStopAmendmentStatus.Replaced =>
+                StrategyReplayEventType.StopAmendmentAccepted,
+            ProtectiveStopAmendmentStatus.Unsupported =>
+                StrategyReplayEventType.StopAmendmentUnsupported,
+            _ => StrategyReplayEventType.StopAmendmentRejected
+        };
+        AddAmendmentEvent(
+            outcome,
+            command,
+            analysis,
+            proposedStop,
+            result.AcceptedStopPrice,
+            recommendation,
+            evaluationInterval,
+            result.RejectionReason);
+        if (!acceptedAmendment)
+            return;
+
+        StrategyReplayEventType activationEvent = recommendation.AmendmentReason switch
+        {
+            StopAmendmentReason.BreakEven => StrategyReplayEventType.BreakEvenActivated,
+            StopAmendmentReason.ProfitFloor => StrategyReplayEventType.ProfitFloorActivated,
+            StopAmendmentReason.MfeGiveback =>
+                StrategyReplayEventType.MaximumGivebackProtectionActivated,
+            _ => StrategyReplayEventType.StructureTrailActivated
+        };
+        AddFrameEvent(
+            activationEvent,
+            frame.AvailableAt,
+            _activeTrade.SetupId,
+            _activeTrade.PositionId,
+            reason: recommendation.Reason,
+            reasonCode: recommendation.ReasonCode,
+            profitFloorR: recommendation.ProfitFloorR,
+            maximumGivebackFloorR: recommendation.MaximumGivebackFloorR);
+    }
+
+    private static int IncrementSaturating(int value) =>
+        value == int.MaxValue ? int.MaxValue : value + 1;
+
+    private static decimal ResolveMinimumQuantityIncrement(InstrumentKey instrument) =>
+        instrument.Value.StartsWith("FX:", StringComparison.OrdinalIgnoreCase) ? 1m : 0.00000001m;
+
+    private void AddAmendmentEvent(
+        StrategyReplayEventType type,
+        ProtectiveStopAmendmentCommand command,
+        AnalysisSnapshot analysis,
+        decimal proposedStop,
+        decimal? acceptedStop,
+        TradeManagementRecommendation recommendation,
+        BarInterval evaluationInterval,
+        string? overrideReason = null) =>
+        _frameEvents.Add(new StrategyReplayEvent
+        {
+            Type = type,
+            StrategyId = StrategyId,
+            SetupId = command.SetupId,
+            PositionId = command.PositionId,
+            Sequence = command.RequestedSequence,
+            EventTime = command.CreatedAt,
+            PreviousStop = command.CurrentStopPrice,
+            ProposedStop = proposedStop,
+            AcceptedStop = acceptedStop,
+            AmendmentReason = command.AmendmentReason,
+            OpenProfitR = recommendation.OpenProfitR,
+            LockedProfitR = recommendation.LockedProfitR,
+            AnalysisInterval = BarIntervalParser.Format(evaluationInterval),
+            AnalysisSnapshotVersion = analysis.Version,
+            Reason = overrideReason ?? recommendation.Reason
+        });
+
+    private void AddFrameEvent(
+        StrategyReplayEventType type,
+        DateTimeOffset eventTime,
+        string? setupId = null,
+        string? positionId = null,
+        string? reason = null,
+        string? reasonCode = null,
+        PriceActionEventType? priceActionTrigger = null,
+        decimal? priceActionConfidence = null,
+        decimal? quantityBefore = null,
+        decimal? quantityChanged = null,
+        decimal? quantityRemaining = null,
+        decimal? realizedProfitLoss = null,
+        decimal? realizedR = null,
+        string? reductionStageId = null,
+        PositionReductionReason? positionReductionReason = null,
+        decimal? profitFloorR = null,
+        decimal? maximumGivebackFloorR = null) =>
+        _frameEvents.Add(new StrategyReplayEvent
+        {
+            Type = type,
+            StrategyId = StrategyId,
+            SetupId = setupId,
+            PositionId = positionId,
+            Sequence = _currentFrameSequence,
+            EventTime = eventTime,
+            Reason = reason,
+            ReasonCode = reasonCode,
+            PriceActionTrigger = priceActionTrigger,
+            PriceActionConfidence = priceActionConfidence,
+            QuantityBefore = quantityBefore,
+            QuantityChanged = quantityChanged,
+            QuantityRemaining = quantityRemaining,
+            RealizedProfitLoss = realizedProfitLoss,
+            RealizedR = realizedR,
+            ReductionStageId = reductionStageId,
+            PositionReductionReason = positionReductionReason,
+            ProfitFloorR = profitFloorR,
+            MaximumGivebackFloorR = maximumGivebackFloorR
+        });
+
+    private decimal ResolveExecutablePrice(MarketCandle candle, OrderSide? side)
+    {
+        if (side == OrderSide.Buy && candle.Bid is not null)
+            return candle.Bid.Prices.Close;
+        if (side == OrderSide.Sell && candle.Ask is not null)
+            return candle.Ask.Prices.Close;
+
+        decimal halfSpread = Broker.Options.SpreadBasisPoints / 2m / 10_000m;
+        return side == OrderSide.Buy
+            ? candle.Mid.Prices.Close * (1m - halfSpread)
+            : side == OrderSide.Sell
+                ? candle.Mid.Prices.Close * (1m + halfSpread)
+                : candle.Mid.Prices.Close;
+    }
+
+    private static decimal ResolveMinimumPriceIncrement(InstrumentKey instrument)
+    {
+        string value = instrument.Value;
+        return value.EndsWith("/JPY", StringComparison.OrdinalIgnoreCase) ||
+            value.EndsWith("_JPY", StringComparison.OrdinalIgnoreCase)
+            ? 0.001m
+            : value.StartsWith("FX:", StringComparison.OrdinalIgnoreCase)
+                ? 0.00001m
+                : 0.00000001m;
     }
 
     private void RecordTiming(TimeSpan elapsed)
@@ -576,7 +1881,20 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             CompletedTrades = progress.CompletedTrades,
             ActiveSetups = progress.ActiveSetups,
             Status = progress.Status,
-            ProcessingTime = processingTime
+            ProcessingTime = processingTime,
+            Events = _frameEvents.ToArray(),
+            ExecutionDetailSetupId =
+                _activeTrade?.SetupId ?? _pendingEntryDecision?.SetupId ??
+                _trades.LastOrDefault(trade => trade.ClosedAt == frame.AvailableAt)?.SetupId,
+            CaptureExecutionDetail = _activeTrade is not null || _pendingEntryDecision is not null
         };
     }
+    private sealed record PendingPartialExit(
+        string BrokerOrderId,
+        PositionReductionRecommendation Recommendation,
+        long SnapshotVersion,
+        long RequestedSequence,
+        DateTimeOffset RequestedAt,
+        decimal OpenProfitR);
+
 }
