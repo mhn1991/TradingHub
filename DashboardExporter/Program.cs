@@ -5,6 +5,7 @@ using Brokers.Models;
 using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 using Dashboard.Contracts;
 
 namespace DashboardExporter;
@@ -35,7 +36,17 @@ internal static class Program
             BollingerStandardDeviations = 2m,
             SwingLeftBars = 2,
             SwingRightBars = 2,
-            HeavyAnalysisEveryCandles = 6
+            HeavyAnalysisEveryCandles = 6,
+            AtrAnalysisMinimumSamples = 15,
+            BollingerWidthMinimumSamples = 15,
+            EfficiencyRatioAnalysisMinimumSamples = 15,
+            MarketRegime = new MarketRegimeOptions
+            {
+                Enabled = true,
+                MinimumConfirmationBars = 2,
+                MinimumPersistenceBars = 2,
+                AdxCalibrationMinimumSamples = 20
+            }
         };
         BarInterval[] intervals = [FiveMinutes, FifteenMinutes, OneHour];
         var aggregator = new MultiTimeframeAggregator(Instrument, intervals);

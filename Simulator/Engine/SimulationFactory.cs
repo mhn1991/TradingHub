@@ -119,7 +119,8 @@ public static class SimulationFactory
                 RequireTakeProfit = false,
                 MinimumRewardRiskRatio = null,
                 MaximumOpenPositions = 1,
-                MaximumLossPercentageOfBalance = 0.5m,
+                MaximumLossPercentageOfBalance = null,
+                MaximumOpenRiskPercentOfEquity = null,
                 AllowPyramiding = false
             },
             AgentExitManagementMode.Bracket => new PreTradeRiskOptions
@@ -128,10 +129,15 @@ public static class SimulationFactory
                 RequireTakeProfit = true,
                 MinimumRewardRiskRatio = PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
                 MaximumOpenPositions = 1,
-                MaximumLossPercentageOfBalance = 0.5m,
+                MaximumLossPercentageOfBalance = null,
+                MaximumOpenRiskPercentOfEquity = null,
                 AllowPyramiding = false
             },
-            _ => PreTradeRiskOptions.PhaseOneSafeDefaults
+            _ => PreTradeRiskOptions.PhaseOneSafeDefaults with
+            {
+                MaximumLossPercentageOfBalance = null,
+                MaximumOpenRiskPercentOfEquity = null
+            }
         };
 
         return CreatePhaseOneSafeHistorical(

@@ -34,7 +34,17 @@ Supported modes:
 - `FixedCashRisk`: risk a fixed amount in account currency.
 - `FixedQuantity`: manual/backward-compatible mode.
 
-Risk-based sizing uses the original entry-to-stop distance, estimated round-trip costs, quote-to-account conversion, available account margin, a one-position margin cap, broker quantity step, and optional maximum quantity. Quantities are rounded down so the risk budget is not exceeded.
+Risk-based sizing uses the original entry-to-stop distance, estimated round-trip costs, quote-to-account conversion, an optional `InstrumentRiskSpec` contract multiplier, available account margin, a one-position margin cap, optional portfolio open-risk heat, broker quantity step, and optional maximum quantity. Quantities are rounded down so the risk budget is not exceeded.
+
+Loss model:
+
+```text
+loss = riskDistance × quantity × ContractMultiplier × quoteToAccountRate
+```
+
+Percent fields are **percentage points**: `RiskPercentOfEquity = 0.5` and `MaximumLossPercentageOfBalance = 0.5` mean half of one percent (0.5%), not 50%.
+
+Portfolio heat (`MaximumOpenRiskPercentOfEquity`) limits existing residual open risk + the new trade. When positions lack protective stops, callers can pass `KnownOpenRiskAccountCurrency` or enable `AssumedOpenPositionRiskDistancePercentOfPrice` (percentage points of average price).
 
 Default research settings:
 
@@ -42,9 +52,10 @@ Default research settings:
 Risk per trade                 0.50% equity
 Maximum account margin usage  30%
 Maximum one-position margin   10%
+Phase-1 portfolio heat        1.50% equity (optional; simulators often leave this to the sizer)
 ```
 
-A missing currency conversion rejects risk-based sizing instead of inventing a conversion. The streamed single-instrument simulator defaults its account currency to the instrument quote currency unless the request explicitly supplies another supported conversion.
+A missing currency conversion rejects risk-based sizing instead of inventing a conversion. Pre-trade structural checks (stop side, R:R, pyramiding) no longer require a conversion rate unless monetary limits are enabled. The streamed single-instrument simulator defaults its account currency to the instrument quote currency unless the request explicitly supplies another supported conversion.
 
 ## Multi-speed position management
 

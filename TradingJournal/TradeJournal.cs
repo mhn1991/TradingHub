@@ -17,6 +17,13 @@ public enum TradeJournalEventType
     StopAmendmentUnsupported,
     PositionMismatch,
     SafetyStateChanged,
+    TradingConditionEvaluated,
+    TradingConditionRejected,
+    RiskBudgetAdjusted,
+    SetupCalibrationEvaluated,
+    SetupCalibrationRejected,
+    MetaLabelEvaluated,
+    MetaLabelRejected,
     ClosedTradeRecorded,
     Error
 }

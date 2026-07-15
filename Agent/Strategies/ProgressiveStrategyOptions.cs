@@ -1,4 +1,5 @@
 using Brokers.Models;
+using ChartAnnotator.Models;
 
 namespace Agent.Strategies;
 
@@ -6,7 +7,12 @@ public enum PriceActionConfirmationMode
 {
     Disabled,
     Soft,
-    Required
+    Required,
+    /// <summary>
+    /// Requires an LTF PA setup/trigger and an HTF context arm (see
+    /// <see cref="MultiTimeframePriceActionPolicy"/>).
+    /// </summary>
+    RequiredWithContext
 }
 
 /// <summary>
@@ -34,13 +40,64 @@ public sealed record ProgressiveStrategyOptions
     public decimal MinimumConfirmationConfidence { get; init; } = 55m;
     public decimal MinimumEntryConfidence { get; init; } = 58m;
     public decimal StopBufferAtr { get; init; } = 0.20m;
+    /// <summary>Places targets just before structural barriers to improve fill realism.</summary>
+    public decimal TargetBufferAtr { get; init; } = 0.10m;
+    /// <summary>Ignores isolated micro-swing targets closer than this many entry-timeframe ATRs.</summary>
+    public decimal MinimumSwingTargetDistanceAtr { get; init; } = 0.25m;
+    public decimal MinimumZoneStrength { get; init; } = 40m;
+    public decimal MinimumChannelConfidence { get; init; } = 40m;
     public decimal FallbackStopAtr { get; init; } = 1.5m;
     public decimal FallbackTargetAtr { get; init; } = 3m;
     public decimal MinimumRewardRisk { get; init; } = 1.5m;
-    public int MaximumEntryCandles { get; init; } = 3;
+    /// <summary>
+    /// How many entry-interval bars are allowed after confirmation before the scoped
+    /// setup expires. Default 12 (one hour on a 5m entry) — the previous default of 3
+    /// was too tight for real market fills.
+    /// </summary>
+    public int MaximumEntryCandles { get; init; } = 12;
+    /// <summary>
+    /// How many primary-trend bars may elapse while waiting for confirmation before
+    /// the progressive scope expires.
+    /// </summary>
+    public int MaximumTrendConfirmationBars { get; init; } = 3;
     public PriceActionConfirmationMode PriceActionConfirmation { get; init; } = PriceActionConfirmationMode.Soft;
     public decimal MinimumPriceActionConfidence { get; init; } = 55m;
     public bool RejectStrongOpposingPriceAction { get; init; } = true;
+    /// <summary>
+    /// Direction-aware RSI divergence/convergence and Bollinger %B/width context.
+    /// Aligned evidence can confirm an entry; strong opposing evidence vetoes it.
+    /// </summary>
+    public RsiBollingerSignalOptions RsiBollingerSignals { get; init; } = new();
+    /// <summary>
+    /// Directional support/resistance and same-timeframe relative-volume confluence.
+    /// These features strengthen an RSI relationship; neither volume nor a zone is
+    /// treated as a standalone direction signal.
+    /// </summary>
+    public ZoneVolumeSignalOptions ZoneVolumeSignals { get; init; } = new();
+    /// <summary>
+    /// Multi-timeframe PA arms/vetoes. Used when
+    /// <see cref="PriceActionConfirmation"/> is Soft, Required, or RequiredWithContext.
+    /// </summary>
+    public MultiTimeframePriceActionOptions MultiTimeframePriceAction { get; init; } = new();
+    /// <summary>
+    /// Allowed LTF composite setup types for entry gating. Empty = all core setups.
+    /// </summary>
+    public IReadOnlyList<PriceActionSetupType> AllowedPriceActionSetups { get; init; } = [];
+
+    /// <summary>
+    /// Interval whose <c>AnalysisSnapshot.MarketRegime</c> drives regime-based
+    /// routing (see <see cref="MarketRegime"/>). Defaults to <see cref="TrendInterval"/>
+    /// when unset - records cannot reference a sibling property as a default literal,
+    /// so <see cref="EffectiveRegimeInterval"/> resolves the fallback.
+    /// </summary>
+    public BarInterval? RegimeInterval { get; init; }
+    public BarInterval EffectiveRegimeInterval => RegimeInterval ?? TrendInterval;
+
+    /// <summary>
+    /// Regime-based entry gating and risk-multiplier sizing (spec §9). Disabled by
+    /// default; when disabled, routing has no effect on decisions.
+    /// </summary>
+    public MarketRegimePolicyOptions MarketRegime { get; init; } = new();
 
     public IReadOnlyList<BarInterval> ConfirmationIntervals =>
         [ConfirmationInterval, .. AdditionalConfirmationIntervals];
@@ -52,7 +109,10 @@ public sealed record ProgressiveStrategyOptions
             .. AdditionalConfirmationIntervals,
             .. SetupIntervals,
             .. SecondaryTrendIntervals,
-            TrendInterval
+            TrendInterval,
+            .. RegimeInterval is BarInterval regimeInterval && regimeInterval != TrendInterval
+                ? (BarInterval[])[regimeInterval]
+                : []
         ];
 
     public void Validate()
@@ -108,8 +168,17 @@ public sealed record ProgressiveStrategyOptions
         }
 
         if (Quantity <= 0m) throw new ArgumentOutOfRangeException(nameof(Quantity));
-        if (MinimumRewardRisk <= 0m) throw new ArgumentOutOfRangeException(nameof(MinimumRewardRisk));
+        if (MinimumRewardRisk <= 0m || StopBufferAtr < 0m || TargetBufferAtr < 0m ||
+            MinimumSwingTargetDistanceAtr < 0m ||
+            MinimumZoneStrength is < 0m or > 100m ||
+            MinimumChannelConfidence is < 0m or > 100m ||
+            FallbackStopAtr <= 0m || FallbackTargetAtr <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MinimumRewardRisk));
+        }
         if (MaximumEntryCandles < 1) throw new ArgumentOutOfRangeException(nameof(MaximumEntryCandles));
+        if (MaximumTrendConfirmationBars < 1)
+            throw new ArgumentOutOfRangeException(nameof(MaximumTrendConfirmationBars));
         if (MinimumPriceActionConfidence is < 0m or > 100m ||
             MinimumTrendConfidence is < 0m or > 100m ||
             MinimumSecondaryTrendConfidence is < 0m or > 100m ||
@@ -118,6 +187,21 @@ public sealed record ProgressiveStrategyOptions
             MinimumEntryConfidence is < 0m or > 100m)
         {
             throw new ArgumentOutOfRangeException(nameof(MinimumPriceActionConfidence));
+        }
+
+        ArgumentNullException.ThrowIfNull(MultiTimeframePriceAction);
+        ArgumentNullException.ThrowIfNull(AllowedPriceActionSetups);
+        ArgumentNullException.ThrowIfNull(RsiBollingerSignals);
+        ArgumentNullException.ThrowIfNull(ZoneVolumeSignals);
+        ArgumentNullException.ThrowIfNull(MarketRegime);
+        MultiTimeframePriceAction.Validate();
+        RsiBollingerSignals.Validate();
+        ZoneVolumeSignals.Validate();
+        MarketRegime.Validate();
+
+        if (RegimeInterval is BarInterval regimeInterval && !regimeInterval.IsValid)
+        {
+            throw new ArgumentException("The regime interval, when set, must be valid.");
         }
     }
 }

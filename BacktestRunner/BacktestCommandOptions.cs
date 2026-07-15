@@ -2,23 +2,29 @@ using System.Globalization;
 using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
+using ChartAnnotator.Engine;
 using RiskManager;
 using RiskManager.Safety;
 using Simulator.MarketData;
 using Simulator.Models;
 using TradeManager;
+using ChartAnnotator.Regime;
+using RiskManager.Conditions;
+using PortfolioManager.Risk;
+using Simulator.Execution;
+using Simulator.Financing;
 
 namespace BacktestRunner;
 
 internal sealed record BacktestCommandOptions
 {
-    public InstrumentKey Instrument { get; init; } = new("FX:GBP/JPY");
+    public InstrumentKey Instrument { get; init; } = new(RecommendedSimulationDefaults.Instrument);
     public DateTimeOffset From { get; init; }
     public DateTimeOffset To { get; init; }
     public BarInterval ExecutionInterval { get; init; } = BarInterval.Minutes(1);
     public BarInterval AnalysisBaseInterval { get; init; } = BarInterval.Minutes(1);
     public IReadOnlyList<BarInterval> AnalysisIntervals { get; init; } =
-        [BarInterval.Minutes(5), BarInterval.Minutes(15), BarInterval.Hours(1)];
+        RecommendedSimulationDefaults.AnalysisIntervals;
     public SimulationPrecisionMode PrecisionMode { get; init; } = SimulationPrecisionMode.Fast;
     public HistoricalDataSourceKind SourceKind { get; init; } = HistoricalDataSourceKind.OandaCandles;
     public string? ImportedCandlePath { get; init; }
@@ -29,7 +35,7 @@ internal sealed record BacktestCommandOptions
     public IReadOnlyList<BarInterval> AdditionalConfirmationIntervals { get; init; } = [];
     public BarInterval EntryInterval { get; init; } = BarInterval.Minutes(5);
     public int MinimumSecondaryTrendAlignments { get; init; }
-    public int MinimumSetupAlignments { get; init; }
+    public int MinimumSetupAlignments { get; init; } = 1;
     public int MinimumConfirmationAlignments { get; init; } = 1;
     public bool StrongOppositionVeto { get; init; } = true;
     public BrokerEnvironment Environment { get; init; } = BrokerEnvironment.Demo;
@@ -42,18 +48,8 @@ internal sealed record BacktestCommandOptions
     public decimal StartingBalance { get; init; } = 100_000m;
     public string? BaseCurrency { get; init; }
     public decimal Quantity { get; init; } = 1_000m;
-    public PositionSizingOptions PositionSizing { get; init; } = new()
-    {
-        Mode = PositionSizingMode.FixedFractionalRisk,
-        FixedQuantity = 1_000m,
-        FixedCashRisk = 250m,
-        RiskPercentOfEquity = 0.5m,
-        MinimumQuantity = 1m,
-        QuantityStep = 1m,
-        MaximumAccountMarginUsagePercent = 30m,
-        MaximumSinglePositionMarginPercent = 10m,
-        Leverage = 20m
-    };
+    public PositionSizingOptions PositionSizing { get; init; } =
+        RecommendedSimulationDefaults.PositionSizing;
     public decimal Leverage { get; init; } = 20m;
     public decimal CommissionRate { get; init; } = 0.00002m;
     public decimal SpreadBasisPoints { get; init; } = 1m;
@@ -62,10 +58,22 @@ internal sealed record BacktestCommandOptions
     public decimal? DailyEquityProfitTarget { get; init; }
     public decimal? DailyEquityGivebackActivation { get; init; }
     public decimal? MaximumDailyEquityGiveback { get; init; }
+    /// <summary>
+    /// Persistent (non-daily-resetting) equity-protection tier. Programmatic/JSON callers
+    /// wanting more than one tier should set BacktestRuntimeOptions.SafetyOptions.EquityProtection
+    /// directly; these scalar fields configure a single simple tier.
+    /// </summary>
+    public bool EquityProtectionEnabled { get; init; }
+    public decimal? EquityProtectionActivationProfitPercent { get; init; }
+    public decimal? EquityProtectionMaxGivebackPercent { get; init; }
+    public string EquityProtectionActionType { get; init; } = "PauseNewEntries";
+    public decimal EquityProtectionReductionFraction { get; init; } = 0.25m;
+    public decimal EquityProtectionFutureRiskMultiplier { get; init; } = 0.5m;
+    public int EquityProtectionRecoveryBars { get; init; } = 3;
     public PriceActionConfirmationMode PriceActionConfirmation { get; init; } = PriceActionConfirmationMode.Soft;
     public decimal MinimumPriceActionConfidence { get; init; } = 55m;
     public bool RejectStrongOpposingPriceAction { get; init; } = true;
-    public int WarmupDays { get; init; } = 45;
+    public int WarmupDays { get; init; } = RecommendedSimulationDefaults.WarmupDays;
     public int ProgressIntervalMs { get; init; } = 500;
     public IReadOnlyList<string> Strategies { get; init; } = ["legacy", "improved"];
     public string StrategyExecution { get; init; } = "parallel";
@@ -79,11 +87,34 @@ internal sealed record BacktestCommandOptions
         PositionManagementOptions.LegacyDefaults;
     public PositionManagementOptions ImprovedPositionManagement { get; init; } =
         PositionManagementOptions.ImprovedDefaults;
+    /// <summary>
+    /// ChartAnnotator indicator/regime-classification configuration. Programmatic/JSON
+    /// callers may set this directly; no individual --flag parsing yet.
+    /// </summary>
+    public ChartAnnotationOptions AnnotationOptions { get; init; } = new();
+    /// <summary>
+    /// Regime-based strategy routing configuration. Programmatic/JSON callers may set
+    /// this directly; no individual --flag parsing yet.
+    /// </summary>
+    public MarketRegimePolicyOptions MarketRegimeRouting { get; init; } = new();
+    public SimulationAccountMode AccountMode { get; init; } = SimulationAccountMode.IndependentStrategyAccounts;
+    public bool RegimeEnabled { get; init; }
+    public int EfficiencyRatioPeriod { get; init; } = 14;
+    public bool TradingConditionsEnabled { get; init; }
+    public bool AdaptiveRiskEnabled { get; init; }
+    public decimal MaximumPortfolioHeatPercent { get; init; } = 1.5m;
+    public SimulationFillModel ExecutionFillModel { get; init; } = SimulationFillModel.MidpointPlusConfiguredSpread;
+    public StressExecutionScenario StressScenario { get; init; } = StressExecutionScenario.Base;
+    public decimal? MaximumFillQuantityPerFrame { get; init; }
+    public bool FinancingEnabled { get; init; }
+    public decimal FinancingLongAnnualPercent { get; init; }
+    public decimal FinancingShortAnnualPercent { get; init; }
     public bool ShowHelp { get; init; }
 
     public static BacktestCommandOptions Parse(string[] args)
     {
-        DateTimeOffset defaultTo = new(DateTime.UtcNow.Date, TimeSpan.Zero);
+        (DateTimeOffset defaultFrom, DateTimeOffset defaultTo) =
+            RecommendedSimulationDefaults.PreviousFullMonth(DateTimeOffset.UtcNow);
         var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         for (int index = 0; index < args.Length; index++)
         {
@@ -110,7 +141,8 @@ internal sealed record BacktestCommandOptions
                 "legacy-no-structure-reduction" or "improved-no-structure-reduction" or
                 "legacy-no-momentum-reduction" or "improved-no-momentum-reduction" or
                 "legacy-no-volatility-reduction" or "improved-no-volatility-reduction" or
-                "legacy-enable-cost-stress-reduction" or "improved-enable-cost-stress-reduction")
+                "legacy-enable-cost-stress-reduction" or "improved-enable-cost-stress-reduction" or
+                "regime" or "trading-conditions" or "adaptive-risk" or "financing")
             {
                 values[key] = "true";
                 continue;
@@ -125,7 +157,9 @@ internal sealed record BacktestCommandOptions
         }
 
         DateTimeOffset to = ParseDate(values.GetValueOrDefault("to"), defaultTo);
-        DateTimeOffset from = ParseDate(values.GetValueOrDefault("from"), to.AddYears(-1));
+        DateTimeOffset from = ParseDate(
+            values.GetValueOrDefault("from"),
+            values.ContainsKey("to") ? to.AddMonths(-1) : defaultFrom);
         if (from >= to)
         {
             throw new ArgumentException("--from must be earlier than --to.");
@@ -141,7 +175,7 @@ internal sealed record BacktestCommandOptions
         BarInterval analysisBase = ParseInterval(
             values.GetValueOrDefault("analysis-base-interval") ??
             BarIntervalParser.Format(precisionDefaults.AnalysisBaseInterval));
-        BarInterval[] analysis = (values.GetValueOrDefault("analysis-intervals") ?? "5m,15m,1h")
+        BarInterval[] analysis = (values.GetValueOrDefault("analysis-intervals") ?? "5m,15m,30m,1h,2h")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(ParseInterval)
             .Distinct()
@@ -206,7 +240,8 @@ internal sealed record BacktestCommandOptions
         return new BacktestCommandOptions
         {
             ShowHelp = values.ContainsKey("help"),
-            Instrument = new InstrumentKey(values.GetValueOrDefault("instrument") ?? "FX:GBP/JPY"),
+            Instrument = new InstrumentKey(
+                values.GetValueOrDefault("instrument") ?? RecommendedSimulationDefaults.Instrument),
             From = from,
             To = to,
             ExecutionInterval = execution,
@@ -264,7 +299,12 @@ internal sealed record BacktestCommandOptions
                 "minimum-price-action-confidence",
                 allowZero: true),
             RejectStrongOpposingPriceAction = !values.ContainsKey("allow-opposing-price-action"),
-            WarmupDays = ParseInt(values.GetValueOrDefault("warmup-days"), 45, 0, 3650, "warmup-days"),
+            WarmupDays = ParseInt(
+                values.GetValueOrDefault("warmup-days"),
+                RecommendedSimulationDefaults.WarmupDays,
+                0,
+                3650,
+                "warmup-days"),
             ProgressIntervalMs = ParseInt(values.GetValueOrDefault("progress-interval"), 500, 50, 60_000, "progress-interval"),
             Strategies = strategies,
             StrategyExecution = values.GetValueOrDefault("strategy-execution") ?? "parallel",
@@ -276,6 +316,18 @@ internal sealed record BacktestCommandOptions
             TrailingComparison = values.ContainsKey("trailing-comparison"),
             LegacyPositionManagement = legacyManagement,
             ImprovedPositionManagement = improvedManagement
+            ,AccountMode = ParseAccountMode(values.GetValueOrDefault("account-mode"))
+            ,RegimeEnabled = values.ContainsKey("regime")
+            ,EfficiencyRatioPeriod = ParseInt(values.GetValueOrDefault("er-period"), 14, 2, 10_000, "er-period")
+            ,TradingConditionsEnabled = values.ContainsKey("trading-conditions")
+            ,AdaptiveRiskEnabled = values.ContainsKey("adaptive-risk")
+            ,MaximumPortfolioHeatPercent = ParseDecimal(values.GetValueOrDefault("maximum-portfolio-heat-percent"), 1.5m, 0m, "maximum-portfolio-heat-percent")
+            ,ExecutionFillModel = Enum.Parse<SimulationFillModel>(values.GetValueOrDefault("fill-model") ?? "MidpointPlusConfiguredSpread", true)
+            ,StressScenario = Enum.Parse<StressExecutionScenario>(values.GetValueOrDefault("stress-scenario") ?? "Base", true)
+            ,MaximumFillQuantityPerFrame = ParseOptionalPositiveDecimal(values.GetValueOrDefault("fill-capacity"), "fill-capacity")
+            ,FinancingEnabled = values.ContainsKey("financing")
+            ,FinancingLongAnnualPercent = ParseSignedDecimal(values.GetValueOrDefault("financing-long-annual-percent"), 0m, "financing-long-annual-percent")
+            ,FinancingShortAnnualPercent = ParseSignedDecimal(values.GetValueOrDefault("financing-short-annual-percent"), 0m, "financing-short-annual-percent")
         };
     }
 
@@ -302,6 +354,7 @@ internal sealed record BacktestCommandOptions
         JobsDirectory = JobsDirectory,
         Runtime = new BacktestRuntimeOptions
         {
+            AccountMode = AccountMode,
             ExecutionInterval = ExecutionInterval,
             AnalysisBaseInterval = AnalysisBaseInterval,
             AnalysisIntervals = AnalysisIntervals,
@@ -336,15 +389,83 @@ internal sealed record BacktestCommandOptions
             LegacyPositionManagement = LegacyPositionManagement,
             ImprovedPositionManagement = ImprovedPositionManagement,
             PositionSizing = PositionSizing,
+            AnnotationOptions = AnnotationOptions with
+            {
+                EfficiencyRatioPeriod = EfficiencyRatioPeriod,
+                MarketRegime = AnnotationOptions.MarketRegime with { Enabled = RegimeEnabled }
+            },
+            MarketRegimeRouting = MarketRegimeRouting with { Enabled = RegimeEnabled },
+            RegimeManagement = new RegimeManagementOptions { Enabled = RegimeEnabled },
+            TradingConditions = new TradingConditionOptions { Enabled = TradingConditionsEnabled },
+            AdaptiveRisk = new AdaptiveRiskOptions { Enabled = AdaptiveRiskEnabled },
+            PortfolioRisk = new PortfolioRiskOptions
+            {
+                MaximumTotalOpenRiskPercent = MaximumPortfolioHeatPercent,
+                MaximumPendingRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent),
+                MaximumStrategyRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent),
+                MaximumInstrumentRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent),
+                MaximumCurrencyRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent)
+            },
+            Execution = new ExecutionModelOptions
+            {
+                FillModel = ExecutionFillModel,
+                StressScenario = StressScenario,
+                FillCapacity = new FillCapacityModel
+                {
+                    MaximumQuantityPerExecutionFrame = MaximumFillQuantityPerFrame
+                }
+            },
+            Financing = new FinancingOptions
+            {
+                Enabled = FinancingEnabled,
+                InstrumentRates = FinancingEnabled
+                    ? new Dictionary<string, FinancingRate>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        [Instrument.Value] = new FinancingRate
+                        {
+                            LongAnnualPercent = FinancingLongAnnualPercent,
+                            ShortAnnualPercent = FinancingShortAnnualPercent
+                        }
+                    }
+                    : new Dictionary<string, FinancingRate>(StringComparer.OrdinalIgnoreCase)
+            },
             SafetyOptions = new TradingSafetyOptions
             {
                 DailyEquityProfitTarget = DailyEquityProfitTarget,
                 DailyEquityGivebackActivation = DailyEquityGivebackActivation,
-                MaximumDailyEquityGiveback = MaximumDailyEquityGiveback
+                MaximumDailyEquityGiveback = MaximumDailyEquityGiveback,
+                EquityProtection = ResolveEquityProtection()
             },
             ProgressPublishIntervalMilliseconds = ProgressIntervalMs
         }
     };
+
+    private EquityProtectionOptions ResolveEquityProtection()
+    {
+        if (!EquityProtectionEnabled || EquityProtectionMaxGivebackPercent is not decimal givebackPercent)
+        {
+            return new EquityProtectionOptions { Enabled = EquityProtectionEnabled };
+        }
+
+        var action = Enum.Parse<EquityProtectionAction>(EquityProtectionActionType, ignoreCase: true);
+        return new EquityProtectionOptions
+        {
+            Enabled = true,
+            RecoveryConfirmationBars = EquityProtectionRecoveryBars,
+            Tiers =
+            [
+                new EquityProtectionTier
+                {
+                    TierId = "cli-tier",
+                    ActivationProfitPercent = EquityProtectionActivationProfitPercent,
+                    MaximumGivebackPercent = givebackPercent,
+                    Action = action,
+                    ReductionFraction = EquityProtectionReductionFraction,
+                    FutureRiskMultiplier = EquityProtectionFutureRiskMultiplier
+                }
+            ]
+        };
+    }
 
     public static BarInterval ParseInterval(string value) => BarIntervalParser.Parse(value);
 
@@ -366,8 +487,10 @@ internal sealed record BacktestCommandOptions
             null or "" or "soft" => PriceActionConfirmationMode.Soft,
             "disabled" or "off" => PriceActionConfirmationMode.Disabled,
             "required" or "strict" => PriceActionConfirmationMode.Required,
+            "required-with-context" or "context" or "requiredwithcontext" or "mtf" =>
+                PriceActionConfirmationMode.RequiredWithContext,
             _ => throw new ArgumentException(
-                $"Unknown --price-action-mode '{value}'. Use disabled, soft, or required.")
+                $"Unknown --price-action-mode '{value}'. Use disabled, soft, required, or required-with-context.")
         };
 
     private static SimulationPrecisionMode ParsePrecisionMode(string? value) =>
@@ -679,4 +802,19 @@ internal sealed record BacktestCommandOptions
         }
         return parsed;
     }
+
+    private static decimal ParseSignedDecimal(string? value, decimal fallback, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return fallback;
+        if (!decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal parsed))
+            throw new ArgumentOutOfRangeException(name, $"--{name} contains an invalid numeric value.");
+        return parsed;
+    }
+
+    private static SimulationAccountMode ParseAccountMode(string? value) => value?.ToLowerInvariant() switch
+    {
+        null or "independent" or "independentstrategyaccounts" => SimulationAccountMode.IndependentStrategyAccounts,
+        "shared" or "sharedportfolioaccount" => SimulationAccountMode.SharedPortfolioAccount,
+        _ => throw new ArgumentException("--account-mode must be independent or shared.")
+    };
 }

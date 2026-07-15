@@ -600,6 +600,9 @@ public sealed record SimulationManifest
     public decimal? CommissionRate { get; init; }
     public string? AmbiguityPolicy { get; init; }
     public string? FillModel { get; init; }
+    public string? AccountMode { get; init; }
+    public BacktestRuntimeOptions? RuntimeOptions { get; init; }
+    public PortfolioPerformanceSnapshot? PortfolioPerformance { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public string? Status { get; init; }
 }

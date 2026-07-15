@@ -238,7 +238,10 @@ internal sealed class SimulatedOrderClient(
         decimal? fillPrice = null,
         decimal? fillQuantity = null,
         decimal? fee = null,
-        string? message = null) => new()
+        string? message = null,
+        decimal? appliedSpread = null,
+        decimal? appliedSlippage = null,
+        string? executionModelVersion = null) => new()
         {
             BrokerOrderId = order.BrokerOrderId,
             ClientOrderId = order.ClientOrderId,
@@ -249,6 +252,9 @@ internal sealed class SimulatedOrderClient(
             FillQuantity = fillQuantity,
             RemainingQuantity = Math.Max(0m, order.Request.Quantity.Value - order.FilledQuantity),
             Fee = fee,
+            AppliedSpread = appliedSpread,
+            AppliedSlippage = appliedSlippage,
+            ExecutionModelVersion = executionModelVersion,
             Message = message
         };
 

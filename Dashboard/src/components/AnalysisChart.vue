@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { compact, price, shortTime, timestamp } from '../format'
 import type {
   ChartLayers,
@@ -20,20 +20,28 @@ const props = defineProps<{
 }>()
 
 const width = 1240
-const height = 820
+// Shorter canvas keeps the chart full-width while leaving room for detail panels below.
+const height = 640
 const plotLeft = 24
 const plotRight = 92
 const plotWidth = width - plotLeft - plotRight
-const priceTop = 34
-const priceHeight = 390
-const volumeTop = 438
-const volumeHeight = 60
-const rsiTop = 526
-const rsiHeight = 112
-const atrTop = 666
-const atrHeight = 100
+const regimeTop = 12
+const regimeHeight = 8
+const priceTop = 24
+const priceHeight = 286
+const volumeTop = 318
+const volumeHeight = 46
+const rsiTop = 372
+const rsiHeight = 78
+const atrTop = 458
+const atrHeight = 66
+const erTop = 532
+const erHeight = 58
+const erDomain = { min: 0, max: 1 }
 const minimumWindowSize = 20
 
+const chartShell = ref<HTMLElement | null>(null)
+const chartSvg = ref<SVGSVGElement | null>(null)
 const hoveredIndex = ref<number | null>(null)
 const localWindowSize = ref(props.windowSize)
 const panOffset = ref(0)
@@ -51,6 +59,7 @@ let pendingWheelShift = false
 let wheelAnimationFrame: number | null = null
 let pendingSliderOffset: number | null = null
 let sliderAnimationFrame: number | null = null
+let resizeObserver: ResizeObserver | null = null
 
 const availableFrameCount = computed(() => Math.max(0, Math.min(props.frames.length, props.selectedIndex + 1)))
 const requestedWindowCount = computed(() => {
@@ -77,7 +86,13 @@ const visibleOpenTimes = computed(() =>
 const analysisFrame = computed(() => props.frames[viewportEndIndex.value])
 const isFollowingLatest = computed(() => panOffset.value === 0)
 const step = computed(() => plotWidth / Math.max(visibleFrames.value.length, 1))
-const candleWidth = computed(() => Math.max(1.5, Math.min(11, step.value * 0.62)))
+// Grow with zoom so candle bodies fill most of each slot instead of leaving large gaps.
+const candleWidth = computed(() => {
+  const spacing = step.value
+  if (spacing <= 1.5) return 1
+  // Keep a thin gap between neighbors; never wider than the slot itself.
+  return Math.max(1.5, Math.min(spacing * 0.78, spacing - 1.25))
+})
 const viewportLabel = computed(() => {
   if (!visibleFrames.value.length) return 'No candles'
   return `${viewportStartIndex.value + 1}–${viewportEndIndex.value + 1} of ${availableFrameCount.value}`
@@ -132,6 +147,10 @@ const priceDomain = computed(() => {
       include(frame.indicators.bollingerUpper)
       include(frame.indicators.bollingerLower)
     }
+    if (props.layers.donchian) {
+      include(frame.indicators.donchian?.upper)
+      include(frame.indicators.donchian?.lower)
+    }
   }
 
   if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 1 }
@@ -168,6 +187,14 @@ const atrTicks = computed(() =>
     const value = atrDomain.value.max -
       (atrDomain.value.max - atrDomain.value.min) * ratio
     return { value, y: atrTop + atrHeight * ratio }
+  }),
+)
+
+const erTicks = computed(() =>
+  Array.from({ length: 3 }, (_, index) => {
+    const ratio = index / 2
+    const value = erDomain.max - (erDomain.max - erDomain.min) * ratio
+    return { value, y: erTop + erHeight * ratio }
   }),
 )
 
@@ -264,6 +291,45 @@ const rsiPath = computed(() => numericPath(
 const atrPath = computed(() => numericPath(
   (frame) => frame.indicators.atrAnalysis?.normalizedPercent ?? null,
   yAtr,
+))
+
+const donchianBand = computed(() => {
+  const upper: string[] = []
+  const lower: string[] = []
+  visibleFrames.value.forEach((frame, index) => {
+    const donchianUpperValue = frame.indicators.donchian?.upper
+    const donchianLowerValue = frame.indicators.donchian?.lower
+    if (donchianUpperValue == null || donchianLowerValue == null) return
+    upper.push(`${xAt(index)},${yPrice(donchianUpperValue)}`)
+    lower.push(`${xAt(index)},${yPrice(donchianLowerValue)}`)
+  })
+  if (upper.length < 2) return ''
+  lower.reverse()
+  return [...upper, ...lower].join(' ')
+})
+const donchianUpper = computed(() => numericPath(
+  (frame) => frame.indicators.donchian?.upper ?? null,
+  yPrice,
+))
+const donchianLower = computed(() => numericPath(
+  (frame) => frame.indicators.donchian?.lower ?? null,
+  yPrice,
+))
+
+const erPath = computed(() => numericPath(
+  (frame) => frame.indicators.efficiencyRatio,
+  yEr,
+))
+const erStatePaths = computed(() => groupedRectanglePaths(
+  (frame) => frame.indicators.efficiencyAnalysis?.state ?? 'Unknown',
+  erTop,
+  erHeight,
+))
+
+const regimeBandPaths = computed(() => groupedRectanglePaths(
+  (frame) => frame.marketRegime?.regime ?? 'Unknown',
+  regimeTop,
+  regimeHeight,
 ))
 
 const narrowSpans = computed(() => buildSpans((frame) =>
@@ -507,15 +573,96 @@ const tradeVisuals = computed(() => (props.trades ?? [])
     profitable: trade.netProfitLoss >= 0,
   })))
 
-const displayedHoverIndex = computed(() =>
+const isHovering = computed(() => hoveredIndex.value != null)
+const focusIndex = computed(() =>
   hoveredIndex.value ?? Math.max(0, visibleFrames.value.length - 1),
 )
-const hoveredFrame = computed(() => visibleFrames.value[displayedHoverIndex.value])
-const hoverX = computed(() => xAt(displayedHoverIndex.value))
-const tooltipX = computed(() => Math.min(
-  plotLeft + plotWidth - 228,
-  Math.max(plotLeft + 8, hoverX.value + 14),
-))
+const focusFrame = computed(() => visibleFrames.value[focusIndex.value] ?? null)
+const hoverX = computed(() => xAt(focusIndex.value))
+const lastPrice = computed(() => analysisFrame.value?.candle.close ?? null)
+const lastPriceY = computed(() => lastPrice.value == null ? null : yPrice(lastPrice.value))
+const focusCandle = computed(() => focusFrame.value?.candle ?? null)
+const focusChange = computed(() => {
+  const candle = focusCandle.value
+  if (!candle || !Number.isFinite(candle.open) || candle.open === 0) {
+    return { delta: 0, percent: 0, bullish: true, label: '—' }
+  }
+  const delta = candle.close - candle.open
+  const percent = (delta / candle.open) * 100
+  const sign = percent >= 0 ? '+' : ''
+  return {
+    delta,
+    percent,
+    bullish: delta >= 0,
+    label: `${sign}${percent.toFixed(3)}%`,
+  }
+})
+const viewportRange = computed(() => {
+  const frames = visibleFrames.value
+  if (!frames.length) return null
+  let high = Number.NEGATIVE_INFINITY
+  let low = Number.POSITIVE_INFINITY
+  let highIndex = 0
+  let lowIndex = 0
+  frames.forEach((frame, index) => {
+    if (frame.candle.high > high) {
+      high = frame.candle.high
+      highIndex = index
+    }
+    if (frame.candle.low < low) {
+      low = frame.candle.low
+      lowIndex = index
+    }
+  })
+  if (!Number.isFinite(high) || !Number.isFinite(low)) return null
+  const open = frames[0].candle.open
+  const close = frames.at(-1)!.candle.close
+  const movePercent = open !== 0 ? ((close - open) / open) * 100 : 0
+  return {
+    high,
+    low,
+    highIndex,
+    lowIndex,
+    open,
+    close,
+    movePercent,
+    moveLabel: `${movePercent >= 0 ? '+' : ''}${movePercent.toFixed(3)}%`,
+    bullish: movePercent >= 0,
+  }
+})
+const focusIndicators = computed(() => {
+  const frame = focusFrame.value
+  if (!frame) return null
+  const donchian = frame.indicators.donchian
+  return {
+    time: timestamp(frame.availableAt),
+    rsi: frame.indicators.rsi?.toFixed(1) ?? '—',
+    atr: frame.indicators.atrAnalysis?.normalizedPercent?.toFixed(3) ?? '—',
+    atrRegime: frame.indicators.atrAnalysis?.regime ?? 'Unknown',
+    bb: frame.indicators.bollingerAnalysis?.widthRegime ?? '—',
+    bbDirection: frame.indicators.bollingerAnalysis?.widthDirection ?? '—',
+    adx: frame.indicators.adxAnalysis?.adx?.toFixed(1) ?? '—',
+    er: frame.indicators.efficiencyRatio?.toFixed(2) ?? '—',
+    erState: frame.indicators.efficiencyAnalysis?.state ?? 'Unknown',
+    pa: frame.priceAction?.bias ?? 'Neutral',
+    regime: frame.marketRegime?.regime ?? 'Unknown',
+    regimeConfidence: frame.marketRegime?.confidence?.toFixed(0) ?? '0',
+    structure: frame.marketStructure?.direction ?? 'Unknown',
+    donchian: donchian?.upper != null && donchian.lower != null
+      ? `${price(donchian.lower)}–${price(donchian.upper)}`
+      : '—',
+  }
+})
+const panelBadges = computed(() => {
+  const frame = analysisFrame.value
+  if (!frame) return null
+  return {
+    rsi: frame.indicators.rsi?.toFixed(1) ?? null,
+    atr: frame.indicators.atrAnalysis?.normalizedPercent?.toFixed(3) ?? null,
+    er: frame.indicators.efficiencyRatio?.toFixed(2) ?? null,
+    volume: compact(frame.candle.volume),
+  }
+})
 
 function clampPanOffset() {
   panOffset.value = Math.max(0, Math.min(panOffset.value, maximumPanOffset.value))
@@ -567,6 +714,7 @@ function handleWheel(event: WheelEvent) {
     pendingWheelY = 0
     pendingWheelShift = false
 
+    // Horizontal wheel / shift+wheel pans; vertical wheel zooms candle count.
     if (shiftKey || Math.abs(deltaX) > Math.abs(deltaY)) {
       const delta = deltaX !== 0 ? deltaX : deltaY
       if (delta === 0) return
@@ -578,14 +726,27 @@ function handleWheel(event: WheelEvent) {
   })
 }
 
-function refreshSvgBounds(target: SVGSVGElement) {
-  const bounds = target.getBoundingClientRect()
+function refreshSvgBounds(target?: SVGSVGElement | null) {
+  const element = target ?? chartSvg.value
+  if (!element) return
+  const bounds = element.getBoundingClientRect()
   svgBoundsLeft = bounds.left
   svgBoundsWidth = Math.max(bounds.width, 1)
 }
 
 function handlePointerEnter(event: PointerEvent) {
   refreshSvgBounds(event.currentTarget as SVGSVGElement)
+}
+
+function handlePointerDown(event: PointerEvent) {
+  if (event.button !== 0 || visibleFrames.value.length <= 1) return
+  const target = event.currentTarget as SVGSVGElement
+  refreshSvgBounds(target)
+  cancelPendingPointerMove()
+  dragging.value = true
+  dragStartClientX = event.clientX
+  dragStartOffset = panOffset.value
+  target.setPointerCapture(event.pointerId)
 }
 
 function applyPointerPosition(clientX: number) {
@@ -623,17 +784,6 @@ function handlePointerLeave() {
   hoveredIndex.value = null
 }
 
-function handlePointerDown(event: PointerEvent) {
-  if (event.button !== 0 || visibleFrames.value.length <= 1) return
-  const target = event.currentTarget as SVGSVGElement
-  refreshSvgBounds(target)
-  cancelPendingPointerMove()
-  dragging.value = true
-  dragStartClientX = event.clientX
-  dragStartOffset = panOffset.value
-  target.setPointerCapture(event.pointerId)
-}
-
 function handlePointerMove(event: PointerEvent) {
   pendingPointerX = event.clientX
   if (pointerAnimationFrame != null) return
@@ -654,10 +804,25 @@ function handlePointerUp(event: PointerEvent) {
   if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
 }
 
+onMounted(() => {
+  refreshSvgBounds()
+  // Non-passive so wheel zoom/pan can preventDefault without browser scroll interference.
+  chartSvg.value?.addEventListener('wheel', handleWheel, { passive: false })
+  if (typeof ResizeObserver === 'undefined') return
+  resizeObserver = new ResizeObserver(() => {
+    refreshSvgBounds()
+  })
+  if (chartSvg.value) resizeObserver.observe(chartSvg.value)
+  else if (chartShell.value) resizeObserver.observe(chartShell.value)
+})
+
 onBeforeUnmount(() => {
+  chartSvg.value?.removeEventListener('wheel', handleWheel)
   cancelPendingPointerMove()
   if (wheelAnimationFrame != null) cancelAnimationFrame(wheelAnimationFrame)
   if (sliderAnimationFrame != null) cancelAnimationFrame(sliderAnimationFrame)
+  resizeObserver?.disconnect()
+  resizeObserver = null
 })
 
 function xAt(index: number): number {
@@ -723,6 +888,10 @@ function yRsi(value: number): number {
 function yAtr(value: number): number {
   const domain = atrDomain.value
   return atrTop + ((domain.max - value) / (domain.max - domain.min)) * atrHeight
+}
+
+function yEr(value: number): number {
+  return erTop + ((erDomain.max - value) / (erDomain.max - erDomain.min)) * erHeight
 }
 
 function numericPath(
@@ -894,7 +1063,7 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
 </script>
 
 <template>
-  <div class="chart-shell">
+  <div ref="chartShell" class="chart-shell">
     <div class="chart-navigation" aria-label="Chart navigation">
       <div class="chart-navigation-buttons">
         <button type="button" title="Older candles" :disabled="maximumPanOffset === 0 || panOffset >= maximumPanOffset" @click="panPage('older')">‹ Older</button>
@@ -908,9 +1077,50 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       <div class="chart-viewport-status">
         <strong>{{ viewportLabel }}</strong>
         <span>{{ isFollowingLatest ? 'Following latest' : 'Historical viewport' }}</span>
-        <small>Drag horizontally to pan · use the mouse wheel to zoom</small>
+        <small>Drag to pan · mouse wheel zooms · shift+wheel pans</small>
       </div>
     </div>
+
+    <div
+      v-if="focusFrame && focusCandle && focusIndicators"
+      class="chart-readout"
+      :class="{ hovering: isHovering, bullish: focusChange.bullish, bearish: !focusChange.bullish }"
+      aria-live="polite"
+    >
+      <div class="chart-readout-primary">
+        <span class="chart-readout-mode">{{ isHovering ? 'Hover' : 'Latest' }}</span>
+        <time class="chart-readout-time">{{ focusIndicators.time }} UTC</time>
+        <dl class="chart-ohlc">
+          <div><dt>O</dt><dd>{{ price(focusCandle.open) }}</dd></div>
+          <div><dt>H</dt><dd>{{ price(focusCandle.high) }}</dd></div>
+          <div><dt>L</dt><dd>{{ price(focusCandle.low) }}</dd></div>
+          <div><dt>C</dt><dd :class="focusChange.bullish ? 'positive-text' : 'negative-text'">{{ price(focusCandle.close) }}</dd></div>
+        </dl>
+        <span class="chart-readout-change" :class="focusChange.bullish ? 'positive-text' : 'negative-text'">
+          {{ focusChange.label }}
+        </span>
+        <span class="chart-readout-volume">Vol {{ compact(focusCandle.volume) }}</span>
+        <span
+          v-if="viewportRange"
+          class="chart-readout-range"
+          :class="viewportRange.bullish ? 'positive-text' : 'negative-text'"
+          :title="`Viewport open ${price(viewportRange.open)} → close ${price(viewportRange.close)}`"
+        >
+          View {{ viewportRange.moveLabel }}
+        </span>
+      </div>
+      <div class="chart-readout-metrics">
+        <span><em>RSI</em>{{ focusIndicators.rsi }}</span>
+        <span><em>ATR%</em>{{ focusIndicators.atr }}</span>
+        <span><em>BB</em>{{ focusIndicators.bb }}</span>
+        <span><em>ADX</em>{{ focusIndicators.adx }}</span>
+        <span><em>ER</em>{{ focusIndicators.er }}</span>
+        <span><em>PA</em>{{ focusIndicators.pa }}</span>
+        <span><em>Struct</em>{{ focusIndicators.structure }}</span>
+        <span><em>Regime</em>{{ focusIndicators.regime }} {{ focusIndicators.regimeConfidence }}%</span>
+      </div>
+    </div>
+
     <label class="chart-pan-control">
       <span>Older</span>
       <input
@@ -927,17 +1137,18 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
     </label>
 
     <svg
-      :class="['analysis-chart', { 'is-dragging': dragging }]"
+      ref="chartSvg"
+      :class="['analysis-chart', { 'is-dragging': dragging, 'is-hovering': isHovering }]"
       :viewBox="`0 0 ${width} ${height}`"
+      preserveAspectRatio="xMidYMid meet"
       role="img"
-      aria-label="Interactive candlestick chart with Bollinger regimes, RSI relationships, ATR context, price action and market structure annotations"
+      aria-label="Interactive candlestick chart with Bollinger and Donchian regimes, RSI relationships, ATR and Efficiency Ratio context, price action, market structure and market regime annotations"
       @pointerdown="handlePointerDown"
       @pointerenter="handlePointerEnter"
       @pointermove="handlePointerMove"
       @pointerup="handlePointerUp"
       @pointercancel="handlePointerUp"
       @pointerleave="handlePointerLeave"
-      @wheel="handleWheel"
     >
       <defs>
         <linearGradient id="band-fill" x1="0" y1="0" x2="0" y2="1">
@@ -948,6 +1159,10 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           <stop offset="0%" stop-color="#47d7ac" stop-opacity="0.035" />
           <stop offset="100%" stop-color="#47d7ac" stop-opacity="0.13" />
         </linearGradient>
+        <linearGradient id="donchian-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#efb85b" stop-opacity="0.14" />
+          <stop offset="100%" stop-color="#efb85b" stop-opacity="0.02" />
+        </linearGradient>
         <clipPath id="price-clip">
           <rect :x="plotLeft" :y="priceTop" :width="plotWidth" :height="priceHeight" />
         </clipPath>
@@ -957,12 +1172,28 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <clipPath id="atr-clip">
           <rect :x="plotLeft" :y="atrTop" :width="plotWidth" :height="atrHeight" />
         </clipPath>
+        <clipPath id="er-clip">
+          <rect :x="plotLeft" :y="erTop" :width="plotWidth" :height="erHeight" />
+        </clipPath>
+        <clipPath id="regime-clip">
+          <rect :x="plotLeft" :y="regimeTop" :width="plotWidth" :height="regimeHeight" />
+        </clipPath>
       </defs>
 
       <rect class="chart-panel" :x="plotLeft" :y="priceTop" :width="plotWidth" :height="priceHeight" rx="4" />
       <rect class="chart-panel" :x="plotLeft" :y="volumeTop" :width="plotWidth" :height="volumeHeight" rx="4" />
       <rect class="chart-panel" :x="plotLeft" :y="rsiTop" :width="plotWidth" :height="rsiHeight" rx="4" />
       <rect class="chart-panel" :x="plotLeft" :y="atrTop" :width="plotWidth" :height="atrHeight" rx="4" />
+      <rect class="chart-panel" :x="plotLeft" :y="erTop" :width="plotWidth" :height="erHeight" rx="4" />
+
+      <g v-if="layers.marketRegime" clip-path="url(#regime-clip)" class="regime-band">
+        <path
+          v-for="item in regimeBandPaths"
+          :key="`regime-${item.className}`"
+          :class="`regime regime-${item.className}`"
+          :d="item.path"
+        />
+      </g>
 
       <g class="grid-lines">
         <line
@@ -979,7 +1210,7 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           :x1="tick.x"
           :x2="tick.x"
           :y1="priceTop"
-          :y2="atrTop + atrHeight"
+          :y2="erTop + erHeight"
         />
       </g>
 
@@ -997,6 +1228,12 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           :y="tick.y + 4"
         >{{ tick.value.toFixed(3) }}%</text>
         <text
+          v-for="tick in erTicks"
+          :key="`er-${tick.value}`"
+          :x="plotLeft + plotWidth + 10"
+          :y="tick.y + 4"
+        >{{ tick.value.toFixed(2) }}</text>
+        <text
           v-for="tick in timeTicks"
           :key="`time-${tick.index}`"
           :x="tick.x"
@@ -1004,8 +1241,13 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           text-anchor="middle"
         >{{ tick.label }}</text>
         <text :x="plotLeft + 10" :y="rsiTop + 15" class="panel-label">RSI · 14</text>
+        <text v-if="panelBadges?.rsi" :x="plotLeft + plotWidth - 8" :y="rsiTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.rsi }}</text>
         <text :x="plotLeft + 10" :y="volumeTop + 15" class="panel-label">TICK VOLUME</text>
+        <text v-if="panelBadges?.volume" :x="plotLeft + plotWidth - 8" :y="volumeTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.volume }}</text>
         <text :x="plotLeft + 10" :y="atrTop + 15" class="panel-label">ATR · NORMALIZED %</text>
+        <text v-if="panelBadges?.atr" :x="plotLeft + plotWidth - 8" :y="atrTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.atr }}%</text>
+        <text :x="plotLeft + 10" :y="erTop + 15" class="panel-label">EFFICIENCY RATIO</text>
+        <text v-if="panelBadges?.er" :x="plotLeft + plotWidth - 8" :y="erTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.er }}</text>
       </g>
 
       <g clip-path="url(#price-clip)">
@@ -1115,6 +1357,14 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <path v-if="layers.bollinger" :d="bollingerMiddle" class="indicator-line bollinger-middle" />
         <path v-if="layers.bollinger" :d="bollingerLower" class="indicator-line bollinger-edge" />
 
+        <polygon
+          v-if="layers.donchian && donchianBand"
+          :points="donchianBand"
+          fill="url(#donchian-fill)"
+        />
+        <path v-if="layers.donchian" :d="donchianUpper" class="indicator-line donchian-edge" />
+        <path v-if="layers.donchian" :d="donchianLower" class="indicator-line donchian-edge" />
+
         <g v-if="layers.trendlines" class="trend-lines">
           <g v-for="item in trendVisuals" :key="item.key">
             <line
@@ -1193,14 +1443,62 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           </polygon>
         </g>
 
+        <g v-if="viewportRange" class="viewport-extremes" pointer-events="none">
+          <line
+            class="viewport-extreme-line high"
+            :x1="xAt(viewportRange.highIndex)"
+            :x2="plotLeft + plotWidth"
+            :y1="yPrice(viewportRange.high)"
+            :y2="yPrice(viewportRange.high)"
+          />
+          <text
+            class="viewport-extreme-label high"
+            :x="plotLeft + plotWidth - 6"
+            :y="yPrice(viewportRange.high) - 5"
+            text-anchor="end"
+          >H {{ price(viewportRange.high) }}</text>
+          <line
+            class="viewport-extreme-line low"
+            :x1="xAt(viewportRange.lowIndex)"
+            :x2="plotLeft + plotWidth"
+            :y1="yPrice(viewportRange.low)"
+            :y2="yPrice(viewportRange.low)"
+          />
+          <text
+            class="viewport-extreme-label low"
+            :x="plotLeft + plotWidth - 6"
+            :y="yPrice(viewportRange.low) + 12"
+            text-anchor="end"
+          >L {{ price(viewportRange.low) }}</text>
+        </g>
+
         <line
-          v-if="analysisFrame"
+          v-if="analysisFrame && lastPriceY != null"
           class="last-price-line"
           :x1="plotLeft"
           :x2="plotLeft + plotWidth"
-          :y1="yPrice(analysisFrame.candle.close)"
-          :y2="yPrice(analysisFrame.candle.close)"
+          :y1="lastPriceY"
+          :y2="lastPriceY"
         />
+      </g>
+
+      <g
+        v-if="analysisFrame && lastPrice != null && lastPriceY != null"
+        class="last-price-tag"
+        pointer-events="none"
+      >
+        <rect
+          :x="plotLeft + plotWidth + 2"
+          :y="lastPriceY - 10"
+          width="84"
+          height="20"
+          rx="3"
+        />
+        <text
+          :x="plotLeft + plotWidth + 44"
+          :y="lastPriceY + 4"
+          text-anchor="middle"
+        >{{ price(lastPrice) }}</text>
       </g>
 
       <g v-if="layers.volume" class="volume-bars">
@@ -1234,23 +1532,21 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <path :d="atrPath" class="atr-line" />
       </g>
 
-      <g v-if="hoveredFrame" class="chart-hover">
-        <line :x1="hoverX" :x2="hoverX" :y1="priceTop" :y2="atrTop + atrHeight" />
-        <circle :cx="hoverX" :cy="yPrice(hoveredFrame.candle.close)" r="4" />
-        <g :transform="`translate(${tooltipX}, ${priceTop + 10})`" class="hover-card">
-          <rect width="216" height="130" rx="7" />
-          <text x="12" y="19" class="hover-time">{{ timestamp(hoveredFrame.availableAt) }} UTC</text>
-          <text x="12" y="40">O <tspan>{{ price(hoveredFrame.candle.open) }}</tspan></text>
-          <text x="112" y="40">H <tspan>{{ price(hoveredFrame.candle.high) }}</tspan></text>
-          <text x="12" y="60">L <tspan>{{ price(hoveredFrame.candle.low) }}</tspan></text>
-          <text x="112" y="60">C <tspan>{{ price(hoveredFrame.candle.close) }}</tspan></text>
-          <text x="12" y="80">VOL <tspan>{{ compact(hoveredFrame.candle.volume) }}</tspan></text>
-          <text x="112" y="80">RSI <tspan>{{ hoveredFrame.indicators.rsi?.toFixed(1) ?? 'warm-up' }}</tspan></text>
-          <text x="12" y="100">ATR% <tspan>{{ hoveredFrame.indicators.atrAnalysis?.normalizedPercent?.toFixed(3) ?? 'warm-up' }}</tspan></text>
-          <text x="112" y="100">BB <tspan>{{ hoveredFrame.indicators.bollingerAnalysis?.widthRegime ?? 'warm-up' }}</tspan></text>
-          <text x="12" y="120">ADX <tspan>{{ hoveredFrame.indicators.adxAnalysis?.adx?.toFixed(1) ?? 'warm-up' }}</tspan></text>
-          <text x="112" y="120">PA <tspan>{{ hoveredFrame.priceAction?.bias ?? 'Neutral' }}</tspan></text>
-        </g>
+      <g v-if="layers.efficiencyRatio" clip-path="url(#er-clip)" class="er-panel">
+        <path
+          v-for="item in erStatePaths"
+          :key="`er-state-${item.className}`"
+          :class="`efficiency efficiency-${item.className}`"
+          :d="item.path"
+        />
+        <path :d="erPath" class="er-line" />
+      </g>
+
+      <g v-if="isHovering && focusFrame" class="chart-hover" pointer-events="none">
+        <line :x1="hoverX" :x2="hoverX" :y1="priceTop" :y2="erTop + erHeight" />
+        <circle :cx="hoverX" :cy="yPrice(focusFrame.candle.close)" r="4" />
+        <circle :cx="hoverX" :cy="yPrice(focusFrame.candle.high)" r="2.5" class="hover-extreme" />
+        <circle :cx="hoverX" :cy="yPrice(focusFrame.candle.low)" r="2.5" class="hover-extreme" />
       </g>
 
       <g class="trade-overlays" clip-path="url(#price-clip)">

@@ -2,6 +2,7 @@ using Brokers.Models;
 using ChartAnnotator.Collections;
 using ChartAnnotator.Models;
 using Simulator.Models;
+using Simulator.Execution;
 
 namespace Simulator.Broker;
 
@@ -18,6 +19,14 @@ internal sealed class SimulatedBrokerState
     private readonly RingBuffer<LedgerEntry> _ledger;
     private long _ledgerSequence;
     private long _orderSequence;
+    private long _executionFillCount;
+    private decimal _totalSpreadPrice;
+    private decimal _totalSlippagePrice;
+    private long _stopFillCount;
+    private decimal _totalStopSlippagePrice;
+    private int _gapFills;
+    private int _partialFills;
+    private int _rejectedAmendments;
 
     public SimulatedBrokerState(SimulationOptions options)
     {
@@ -107,6 +116,36 @@ internal sealed class SimulatedBrokerState
     {
         lock (_sync)
         {
+            if (_options.ExecutionModel.StressScenario == StressExecutionScenario.CombinedStress &&
+                request.ReduceOnly &&
+                (MarketSequence + _options.ExecutionModel.DeterministicSeed) % 13 == 0)
+            {
+                order = null;
+                error = "OperationFaultInjected: deterministic close rejection.";
+                return false;
+            }
+            if (_options.ExecutionModel.StressScenario is
+                    StressExecutionScenario.ConnectionLoss or StressExecutionScenario.CombinedStress &&
+                (MarketSequence + _options.ExecutionModel.DeterministicSeed) % 17 == 0)
+            {
+                order = null;
+                error = "OperationFaultInjected: deterministic simulated connection loss.";
+                return false;
+            }
+            if (_options.ExecutionModel.StressScenario == StressExecutionScenario.CombinedStress &&
+                (MarketSequence + _options.ExecutionModel.DeterministicSeed) % 19 == 0)
+            {
+                order = null;
+                error = "OperationFaultInjected: deterministic simulated rate limit.";
+                return false;
+            }
+            if (_options.ExecutionModel.StressScenario == StressExecutionScenario.CombinedStress &&
+                (MarketSequence + _options.ExecutionModel.DeterministicSeed) % 23 == 0)
+            {
+                order = null;
+                error = "OperationFaultInjected: deterministic stale quote rejection.";
+                return false;
+            }
             if (request.ClientOrderId is not null && _orders.Values.Any(existing =>
                     string.Equals(
                         existing.ClientOrderId,
@@ -192,6 +231,12 @@ internal sealed class SimulatedBrokerState
     {
         lock (_sync)
         {
+            if (_options.ExecutionModel.StressScenario is
+                StressExecutionScenario.StopAmendmentFailure or StressExecutionScenario.CombinedStress)
+            {
+                return RejectedReplacement(request,
+                    "OperationFaultInjected: deterministic stop-amendment failure.");
+            }
             if (_stopAmendments.TryGetValue(request.ClientAmendmentId, out SimulatedAmendmentReceipt? receipt))
             {
                 if (receipt.Request == request)
@@ -417,7 +462,7 @@ internal sealed class SimulatedBrokerState
                 Math.Sign(existingPosition.SignedQuantity) != Math.Sign(signedFill);
             decimal quoteToBaseRate = GetQuoteToBaseCurrencyRateUnsafe(order.Request.Instrument);
             decimal realised = ApplyPositionFillUnsafe(
-                order.Request.Instrument,
+                order.Request,
                 signedFill,
                 price) * quoteToBaseRate;
             BrokerPosition? positionAfterFill = GetPositionUnsafe(order.Request.Instrument);
@@ -486,6 +531,32 @@ internal sealed class SimulatedBrokerState
             }
 
             return siblings.Select(order => order.Copy()).ToArray();
+        }
+    }
+
+    public IReadOnlyList<SimulatedOrder> ResizeOpenOcoGroupQuantities(
+        string ocoGroupId,
+        decimal totalQuantity)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ocoGroupId);
+        if (totalQuantity <= 0m) throw new ArgumentOutOfRangeException(nameof(totalQuantity));
+        lock (_sync)
+        {
+            SimulatedOrder[] orders = _orders.Values
+                .Where(order => order.IsOpen &&
+                    string.Equals(order.OcoGroupId, ocoGroupId, StringComparison.Ordinal))
+                .OrderBy(order => order.BrokerOrderId, StringComparer.Ordinal)
+                .ToArray();
+            foreach (SimulatedOrder order in orders)
+            {
+                if (totalQuantity < order.FilledQuantity)
+                    throw new InvalidOperationException("A protective order cannot be resized below its filled quantity.");
+                order.Request = order.Request with
+                {
+                    Quantity = new OrderQuantity(totalQuantity, order.Request.Quantity.Unit)
+                };
+            }
+            return orders.Select(order => order.Copy()).ToArray();
         }
     }
 
@@ -570,7 +641,17 @@ internal sealed class SimulatedBrokerState
                 FilledOrders = FilledOrders,
                 RejectedOrders = RejectedOrders,
                 OpenPositions = _positions.Values.Select(ToBrokerPositionUnsafe).ToArray(),
-                Ledger = _ledger.Snapshot()
+                Ledger = _ledger.Snapshot(),
+                ExecutionPerformance = new SimulationExecutionPerformance
+                {
+                    AverageSpreadPrice = _executionFillCount == 0 ? 0m : _totalSpreadPrice / _executionFillCount,
+                    AverageSlippagePrice = _executionFillCount == 0 ? 0m : _totalSlippagePrice / _executionFillCount,
+                    AverageStopSlippagePrice = _stopFillCount == 0 ? 0m : _totalStopSlippagePrice / _stopFillCount,
+                    GapFills = _gapFills,
+                    PartialFills = _partialFills,
+                    RejectedAmendments = _rejectedAmendments,
+                    FinancingTotal = _ledger.Where(item => item.Type == LedgerEntryType.Financing).Sum(item => item.Amount)
+                }
             };
         }
     }
@@ -580,6 +661,35 @@ internal sealed class SimulatedBrokerState
         lock (_sync)
         {
             return _ledger.Snapshot();
+        }
+    }
+
+    public void ApplyFinancing(DateTimeOffset timestamp, decimal amount, string description)
+    {
+        lock (_sync)
+        {
+            CashBalance += amount;
+            AddLedgerUnsafe(timestamp, LedgerEntryType.Financing, amount, null, description);
+        }
+    }
+
+    public void RecordExecutionFill(
+        StandardOrderType orderType,
+        FillEvaluation evaluation)
+    {
+        ArgumentNullException.ThrowIfNull(evaluation);
+        lock (_sync)
+        {
+            _executionFillCount++;
+            _totalSpreadPrice += evaluation.AppliedSpreadPrice;
+            _totalSlippagePrice += evaluation.AppliedSlippagePrice;
+            if (orderType is StandardOrderType.Stop or StandardOrderType.StopLimit)
+            {
+                _stopFillCount++;
+                _totalStopSlippagePrice += evaluation.AppliedSlippagePrice;
+            }
+            if (evaluation.GapThroughStop) _gapFills++;
+            if (evaluation.IsPartialFill) _partialFills++;
         }
     }
 
@@ -632,13 +742,14 @@ internal sealed class SimulatedBrokerState
     }
 
     private decimal ApplyPositionFillUnsafe(
-        InstrumentKey instrument,
+        PlaceOrderRequest request,
         decimal signedFill,
         decimal fillPrice)
     {
+        InstrumentKey instrument = request.Instrument;
         if (!_positions.TryGetValue(instrument, out MutablePosition? position))
         {
-            _positions[instrument] = new MutablePosition(instrument, signedFill, fillPrice);
+            _positions[instrument] = new MutablePosition(request, signedFill, fillPrice);
             return 0m;
         }
 
@@ -667,6 +778,7 @@ internal sealed class SimulatedBrokerState
         {
             position.SignedQuantity = remaining;
             position.AveragePrice = fillPrice;
+            position.AssignOwnership(request);
         }
         else
         {
@@ -684,6 +796,11 @@ internal sealed class SimulatedBrokerState
     private BrokerPosition ToBrokerPositionUnsafe(MutablePosition position) => new()
     {
         PositionId = $"SIM-POS-{position.Instrument.Value}",
+        StrategyId = position.StrategyId,
+        DecisionId = position.DecisionId,
+        SetupId = position.SetupId,
+        PortfolioReservationId = position.PortfolioReservationId,
+        RiskClusterId = position.RiskClusterId,
         Instrument = position.Instrument,
         Side = position.SignedQuantity >= 0m ? OrderSide.Buy : OrderSide.Sell,
         Quantity = Math.Abs(position.SignedQuantity),
@@ -721,6 +838,12 @@ internal sealed class SimulatedBrokerState
     {
         BrokerOrderId = order.BrokerOrderId,
         ClientOrderId = order.ClientOrderId,
+        StrategyId = order.Request.StrategyId,
+        DecisionId = order.Request.DecisionId,
+        SetupId = order.Request.SetupId,
+        PortfolioReservationId = order.Request.PortfolioReservationId,
+        RiskClusterId = order.Request.RiskClusterId,
+        ReduceOnly = order.Request.ReduceOnly,
         Instrument = order.Request.Instrument,
         Side = order.Request.Side,
         Type = order.Request.Type.ToString(),
@@ -990,9 +1113,12 @@ internal sealed class SimulatedBrokerState
             : "The proposed stop is not a risk-reducing price on the valid side of the executable market.";
     }
 
-    private static SimulatedProtectiveStopReplacement RejectedReplacement(
+    private SimulatedProtectiveStopReplacement RejectedReplacement(
         AmendProtectiveStopRequest request,
-        string reason) => new(
+        string reason)
+    {
+        _rejectedAmendments++;
+        return new SimulatedProtectiveStopReplacement(
         new ProtectiveStopAmendmentResult
         {
             Status = ProtectiveStopAmendmentStatus.Rejected,
@@ -1006,19 +1132,34 @@ internal sealed class SimulatedBrokerState
         null,
         null,
         IsReplay: false);
+    }
 
     private sealed class MutablePosition(
-        InstrumentKey instrument,
+        PlaceOrderRequest request,
         decimal signedQuantity,
         decimal averagePrice)
     {
-        public InstrumentKey Instrument { get; } = instrument;
+        public InstrumentKey Instrument { get; } = request.Instrument;
         public decimal SignedQuantity { get; set; } = signedQuantity;
         public decimal AveragePrice { get; set; } = averagePrice;
+        public string? StrategyId { get; private set; } = request.StrategyId;
+        public string? DecisionId { get; private set; } = request.DecisionId;
+        public string? SetupId { get; private set; } = request.SetupId;
+        public string? PortfolioReservationId { get; private set; } = request.PortfolioReservationId;
+        public string? RiskClusterId { get; private set; } = request.RiskClusterId;
+
+        public void AssignOwnership(PlaceOrderRequest replacement)
+        {
+            StrategyId = replacement.StrategyId;
+            DecisionId = replacement.DecisionId;
+            SetupId = replacement.SetupId;
+            PortfolioReservationId = replacement.PortfolioReservationId;
+            RiskClusterId = replacement.RiskClusterId;
+        }
     }
 }
 
-internal sealed class SimulatedOrder
+public sealed class SimulatedOrder
 {
     public required string BrokerOrderId { get; init; }
     public required string ClientOrderId { get; init; }

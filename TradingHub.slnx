@@ -8,6 +8,8 @@
   <Project Path="DashboardExporter/DashboardExporter.csproj" />
   <Project Path="DashboardLive/DashboardLive.csproj" />
   <Project Path="Networking/Networking.csproj" />
+  <Project Path="PortfolioManager/PortfolioManager.csproj" />
+  <Project Path="QuantResearch/QuantResearch.csproj" />
   <Project Path="Simulator.AotSmoke/Simulator.AotSmoke.csproj" />
   <Project Path="Simulator.Tests/Simulator.Tests.csproj" />
   <Project Path="Simulator/Simulator.csproj" />

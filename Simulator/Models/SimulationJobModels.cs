@@ -22,6 +22,54 @@ public sealed record StrategyProgressSnapshot
     public string? LastError { get; init; }
     public StrategyPerformanceSnapshot? Performance { get; init; }
     public OpenPositionManagementSnapshot? OpenPositionManagement { get; init; }
+    public EquityProtectionStatusSnapshot? EquityProtection { get; init; }
+    public PortfolioRiskStatusSnapshot? PortfolioRisk { get; init; }
+}
+
+public sealed record PortfolioRiskStatusSnapshot
+{
+    public required decimal OpenHeat { get; init; }
+    public required decimal PendingHeat { get; init; }
+    public required decimal TotalHeat { get; init; }
+    public required decimal TotalHeatPercent { get; init; }
+    public required decimal StrategyHeat { get; init; }
+    public required decimal InstrumentHeat { get; init; }
+    public required IReadOnlyDictionary<string, decimal> CurrencyRisk { get; init; }
+    public required IReadOnlyDictionary<string, decimal> ClusterHeat { get; init; }
+    public required decimal MarginUsed { get; init; }
+    public required decimal ReservedMargin { get; init; }
+    public required decimal UnallocatedMargin { get; init; }
+    public required decimal AccountPeakEquity { get; init; }
+    public required decimal AccountProtectedFloor { get; init; }
+    public required IReadOnlyList<string> AccountActivatedTierIds { get; init; }
+}
+
+public sealed record PortfolioPerformanceSnapshot
+{
+    public decimal FinalHeat { get; init; }
+    public decimal PeakHeat { get; init; }
+    public decimal AverageMarginUsed { get; init; }
+    public decimal PeakMarginUsed { get; init; }
+    public int Opportunities { get; init; }
+    public int RejectedOpportunities { get; init; }
+    public int ResizedOpportunities { get; init; }
+    public decimal OpportunityCostScore { get; init; }
+    public IReadOnlyDictionary<string, decimal> PeakCurrencyRisk { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyDictionary<string, decimal> PeakClusterHeat { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.Ordinal);
+    public decimal MaximumAccountGiveback { get; init; }
+    public int ProtectionActivations { get; init; }
+}
+
+/// <summary>Live persistent equity-protection state for the Dashboard's runtime panel.</summary>
+public sealed record EquityProtectionStatusSnapshot
+{
+    public required decimal PeakEquity { get; init; }
+    public required decimal DrawdownPercent { get; init; }
+    public required decimal CurrentRiskMultiplier { get; init; }
+    public required IReadOnlyList<string> ActivatedTierIds { get; init; }
+    public required bool NewEntriesPaused { get; init; }
 }
 
 public sealed record OpenPositionManagementSnapshot
@@ -43,6 +91,19 @@ public sealed record OpenPositionManagementSnapshot
     public string? LastManagementAction { get; init; }
     public string? LastManagementReason { get; init; }
     public DateTimeOffset? NextManagementIntervalClose { get; init; }
+    public string? EntryRegime { get; init; }
+    public string? CurrentRegime { get; init; }
+    public decimal? RegimeConfidence { get; init; }
+    public decimal? BaseRiskBudget { get; init; }
+    public decimal? FinalRiskBudget { get; init; }
+    public decimal? FinalRiskMultiplier { get; init; }
+    public IReadOnlyDictionary<string, decimal> RiskMultipliers { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.Ordinal);
+    public decimal? RawQuantity { get; init; }
+    public decimal? AllocatedQuantity { get; init; }
+    public decimal? PlannedStopRisk { get; init; }
+    public string? PortfolioReservationId { get; init; }
+    public string? CorrelationClusterId { get; init; }
 }
 
 public sealed record StrategyPerformanceSnapshot
@@ -92,6 +153,11 @@ public sealed record StrategyPerformanceSnapshot
     public int MfeGivebackStopExits { get; init; }
     public int ProfitFloorExits { get; init; }
     public int MaximumGivebackExits { get; init; }
+    public decimal Financing { get; init; }
+    public IReadOnlyDictionary<string, int> TradesByEntryRegime { get; init; } =
+        new Dictionary<string, int>(StringComparer.Ordinal);
+    public IReadOnlyDictionary<string, decimal> ExpectancyByEntryRegime { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.Ordinal);
 
     public static StrategyPerformanceSnapshot FromTrades(
         IReadOnlyList<SimulatedTradeRecord> trades)
@@ -212,7 +278,17 @@ public sealed record StrategyPerformanceSnapshot
             ProfitFloorExits = closed.Count(trade =>
                 trade.ExitReason == SimulatedTradeExitReason.ProfitFloorExit),
             MaximumGivebackExits = closed.Count(trade =>
-                trade.ExitReason == SimulatedTradeExitReason.MaximumGivebackExit)
+                trade.ExitReason == SimulatedTradeExitReason.MaximumGivebackExit),
+            Financing = closed.Sum(trade => trade.TotalFinancing),
+            TradesByEntryRegime = closed
+                .GroupBy(trade => trade.EntryRegime.ToString())
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal),
+            ExpectancyByEntryRegime = closed
+                .GroupBy(trade => trade.EntryRegime.ToString())
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Average(trade => trade.NetProfitLoss),
+                    StringComparer.Ordinal)
         };
     }
 }
@@ -249,6 +325,7 @@ public sealed record SimulationJobSnapshot
     public BacktestRequest? Request { get; init; }
     public MarketDataQualityReport? DataQuality { get; init; }
     public IReadOnlyList<StrategyWorkerMetrics>? WorkerMetrics { get; init; }
+    public PortfolioPerformanceSnapshot? PortfolioPerformance { get; init; }
 }
 
 public sealed record BacktestProgress
@@ -337,6 +414,7 @@ public sealed record ComparativeSimulationResult
     public required TimeSpan TotalDuration { get; init; }
     public required long ProcessedBaseCandles { get; init; }
     public required FillModel FillModel { get; init; }
+    public PortfolioPerformanceSnapshot? PortfolioPerformance { get; init; }
 }
 
 public sealed record StrategyFailureRecord

@@ -17,6 +17,7 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
     private readonly ExecutionOptions _options;
     private readonly IPreTradeRiskManager _riskManager;
     private readonly IPositionSizer _positionSizer;
+    private readonly IRiskBudgetPolicy _riskBudgetPolicy;
     private readonly IBrokerExecutionSafety _brokerSafety;
     private readonly ITradingSafetyController? _safety;
     private readonly ITradeJournal _journal;
@@ -29,12 +30,14 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
         IBrokerExecutionSafety? brokerSafety = null,
         ITradingSafetyController? safety = null,
         ITradeJournal? journal = null,
-        IPositionSizer? positionSizer = null)
+        IPositionSizer? positionSizer = null,
+        IRiskBudgetPolicy? riskBudgetPolicy = null)
     {
         _options = options ?? new ExecutionOptions();
         ValidateOptions(_options);
         _riskManager = riskManager ?? new PreTradeRiskManager();
         _positionSizer = positionSizer ?? new PositionSizer();
+        _riskBudgetPolicy = riskBudgetPolicy ?? new RiskBudgetPolicy();
         _brokerSafety = brokerSafety ?? new BrokerExecutionSafety();
         _safety = safety;
         _journal = journal ?? NullTradeJournal.Instance;
@@ -197,6 +200,39 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                     decision,
                     broker,
                     accounts);
+                InstrumentRiskSpec instrumentSpec = InstrumentRiskSpec.ForInstrument(decision.Instrument);
+                AccountSnapshot? sizingAccount = accounts.FirstOrDefault(item => item.Balance is > 0m);
+                decimal accountEquity = (sizingAccount?.Balance ?? 0m) +
+                    (sizingAccount?.UnrealizedProfitLoss ?? 0m);
+                RiskBudgetDecision riskBudget = _riskBudgetPolicy.Evaluate(new RiskBudgetContext
+                {
+                    AccountEquity = accountEquity,
+                    DrawdownPercent = _safety?.Snapshot.EquityProtection.DrawdownPercent ?? 0m,
+                    VolatilityPercentile = decision.AtrPercentile,
+                    RegimeMultiplier = decision.RegimeRiskMultiplier ?? 1m,
+                    LiquidityMultiplier = decision.TradingConditionRiskMultiplier ?? 1m,
+                    CorrelationMultiplier = decision.CorrelationRiskMultiplier ?? 1m,
+                    StrategyAllocationMultiplier = decision.StrategyAllocationRiskMultiplier ?? 1m,
+                    EquityProtectionMultiplier = decision.EquityProtectionRiskMultiplier ??
+                        _safety?.Snapshot.EquityProtection.CurrentRiskMultiplier ?? 1m,
+                    CalibrationMultiplier = decision.SetupCalibrationRiskMultiplier ?? 1m,
+                    MetaLabelMultiplier = decision.MetaLabelRiskMultiplier ?? 1m
+                });
+                if (riskBudget.CombinedMultiplier <= 0m)
+                {
+                    AppendJournal(
+                        TradeJournalEventType.SignalRejected,
+                        decision,
+                        clientOrderId,
+                        $"[{riskBudget.ReasonCode}] {riskBudget.Explanation}");
+                    return RejectWithoutSending(clientOrderId, riskBudget.Explanation);
+                }
+                AppendJournal(
+                    TradeJournalEventType.RiskBudgetAdjusted,
+                    decision,
+                    clientOrderId,
+                    $"[{riskBudget.ReasonCode}] {riskBudget.Explanation}",
+                    riskBudget.CombinedMultiplier);
                 PositionSizingResult sizing = _positionSizer.Calculate(
                     new PositionSizingContext
                     {
@@ -204,19 +240,31 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                         RequestedQuantity = quantity,
                         Accounts = accounts,
                         Positions = positions,
-                        QuoteToAccountCurrencyRate = quoteToAccountRate
+                        QuoteToAccountCurrencyRate = quoteToAccountRate,
+                        InstrumentSpec = instrumentSpec,
+                        RiskBudgetMultiplier = riskBudget.CombinedMultiplier,
+                        RiskBudgetDecision = riskBudget
                     });
                 if (!sizing.Approved)
                 {
+                    // Fail closed. Falling back to the strategy's requested quantity after a
+                    // missing conversion, invalid stop, margin cap, or below-minimum result
+                    // bypasses the very risk budget the selected sizing mode is meant to own.
+                    // Fixed-quantity behavior remains available explicitly through
+                    // PositionSizingMode.FixedQuantity.
                     AppendJournal(
                         TradeJournalEventType.SignalRejected,
                         decision,
                         clientOrderId,
-                        $"Position sizing rejected the setup: {sizing.Reason}");
+                        $"Position sizing rejected the setup [{sizing.ReasonCode}]: {sizing.Reason}");
                     return RejectWithoutSending(clientOrderId, sizing.Reason);
                 }
 
-                quantity = sizing.Quantity;
+                quantity = decision.PortfolioAllocatedQuantity is decimal allocation
+                    ? Math.Min(sizing.Quantity, allocation)
+                    : sizing.Quantity;
+                if (quantity <= 0m)
+                    return RejectWithoutSending(clientOrderId, "The portfolio allocation did not leave an executable quantity.");
                 AppendJournal(
                     TradeJournalEventType.SignalEvaluated,
                     decision,
@@ -231,6 +279,7 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                     Accounts = accounts,
                     Positions = positions,
                     QuoteToAccountCurrencyRate = quoteToAccountRate > 0m ? quoteToAccountRate : 1m,
+                    InstrumentSpec = instrumentSpec,
                     Safety = _safety?.Snapshot
                 };
                 RiskAssessment assessment = _riskManager.Evaluate(riskContext);
@@ -509,6 +558,11 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                 ? null
                 : new TakeProfitInstruction(decision.TakeProfitPrice.Value),
             ClientOrderId = clientOrderId,
+            StrategyId = decision.StrategyId,
+            DecisionId = decision.DecisionId,
+            SetupId = decision.SetupId,
+            PortfolioReservationId = decision.PortfolioReservationId,
+            RiskClusterId = decision.RiskClusterId,
             ReduceOnly = decision.Action == AgentAction.Close
         };
     }

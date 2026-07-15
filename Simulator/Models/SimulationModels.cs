@@ -1,6 +1,9 @@
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.MarketData;
+using ChartAnnotator.Regime;
+using Simulator.Execution;
+using Simulator.Financing;
 
 namespace Simulator.Models;
 
@@ -30,6 +33,8 @@ public sealed record SimulationOptions
     public int CandleCapacity { get; init; } = 2_000;
     public int LedgerCapacity { get; init; } = 20_000;
     public int OrderEventCapacity { get; init; } = 4_096;
+    public ExecutionModelOptions ExecutionModel { get; init; } = new();
+    public FinancingOptions Financing { get; init; } = new();
 }
 
 public enum LedgerEntryType
@@ -38,7 +43,8 @@ public enum LedgerEntryType
     Commission,
     RealisedProfitLoss,
     MarginReserved,
-    MarginReleased
+    MarginReleased,
+    Financing
 }
 
 public sealed record LedgerEntry
@@ -111,6 +117,7 @@ public enum PartialExitReason
     SessionRisk,
     ExecutionCostStress,
     RiskReduction,
+    RegimeDegradation,
     Manual,
     Unknown
 }
@@ -142,6 +149,7 @@ public sealed record PartialExitRecord
 
 public sealed record SimulatedTradeRecord
 {
+    public string StrategyId { get; init; } = "unknown";
     public required string StrategyName { get; init; }
     public required string SetupId { get; init; }
     public string? PositionId { get; init; }
@@ -201,6 +209,31 @@ public sealed record SimulatedTradeRecord
     public string? TargetSource { get; init; }
     public required string SetupReason { get; init; }
     public string? ExitReasonText { get; init; }
+    public decimal TotalFinancing { get; init; }
+    public decimal NetProfitAfterFinancing { get; init; }
+    public MarketRegime EntryRegime { get; init; } = MarketRegime.Unknown;
+    public MarketRegime CurrentRegime { get; init; } = MarketRegime.Unknown;
+    public string EntryManagementProfileId { get; init; } = "default";
+    public string CurrentManagementProfileId { get; init; } = "default";
+    public string? ManagementProfileSwitchReason { get; init; }
+    public decimal EntryConfidence { get; init; }
+    public string EntrySetupType { get; init; } = "Unknown";
+    public string EntrySession { get; init; } = "Unknown";
+    public string EntryVolatilityBucket { get; init; } = "Unknown";
+    public decimal? EntryRegimeConfidence { get; init; }
+    public decimal? BaseRequestedQuantity { get; init; }
+    public decimal? AllocatedQuantity { get; init; }
+    public decimal? PlannedStopRiskAccountCurrency { get; init; }
+    public string? PortfolioReservationId { get; init; }
+    public string? CorrelationClusterId { get; init; }
+    public decimal? RegimeRiskMultiplier { get; init; }
+    public decimal? TradingConditionRiskMultiplier { get; init; }
+    public decimal? CorrelationRiskMultiplier { get; init; }
+    public decimal? StrategyAllocationRiskMultiplier { get; init; }
+    public decimal? EquityProtectionRiskMultiplier { get; init; }
+    public decimal? SetupCalibrationRiskMultiplier { get; init; }
+    public decimal? MetaLabelRiskMultiplier { get; init; }
+    public decimal? FinalRiskBudgetMultiplier { get; init; }
 }
 
 public sealed record SimulationResult
@@ -219,4 +252,22 @@ public sealed record SimulationResult
     public required IReadOnlyList<BrokerPosition> OpenPositions { get; init; }
     public required IReadOnlyList<LedgerEntry> Ledger { get; init; }
     public IReadOnlyList<SimulatedTradeRecord> Trades { get; init; } = [];
+    public SimulationExecutionPerformance ExecutionPerformance { get; init; } = new();
+
+    /// <summary>Persistent equity-protection peak equity for the run; 0 when the feature was disabled.</summary>
+    public decimal EquityProtectionPeakEquity { get; init; }
+
+    /// <summary>Distinct equity-protection tiers activated at least once during the run.</summary>
+    public int EquityProtectionActivationCount { get; init; }
+}
+
+public sealed record SimulationExecutionPerformance
+{
+    public decimal AverageSpreadPrice { get; init; }
+    public decimal AverageSlippagePrice { get; init; }
+    public decimal AverageStopSlippagePrice { get; init; }
+    public int GapFills { get; init; }
+    public int PartialFills { get; init; }
+    public int RejectedAmendments { get; init; }
+    public decimal FinancingTotal { get; init; }
 }

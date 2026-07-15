@@ -13,8 +13,10 @@ npm run dev
 ```
 
 1. Open the app and choose **Simulator**.
-2. Set instrument, dates, strategies, costs, warm-up, sequential/parallel mode.
-   Configure Legacy and Improved trailing independently; the behavior summary shows thresholds before launch.
+2. The balanced research preset is ready to run: EUR/USD, previous full UTC month,
+   0.5% equity risk, 2h→1h→30m→15m→5m role stack, conservative fills, and a
+   21-day warm-up. Usually you only need to change the instrument or dates.
+   Expand **Advanced** to tune strategy, cost, sizing, and management controls.
 3. Click **Run Simulation**.
 4. Watch job status, candles/sec, balances, and strategy comparison update live.
 5. Use **Pause compute** / **Resume compute** for the backend clock; use playback controls for the UI only.
@@ -27,16 +29,16 @@ API quick-start:
 curl -s -X POST http://localhost:5XXX/api/simulations \
   -H 'content-type: application/json' \
   -d '{
-    "instrument":"FX:GBP/JPY",
-    "from":"2025-01-01T00:00:00Z",
-    "to":"2025-02-01T00:00:00Z",
+    "instrument":"FX:EUR/USD",
+    "from":"2026-06-01T00:00:00Z",
+    "to":"2026-07-01T00:00:00Z",
     "strategies":["legacy","improved"],
     "legacyPositionManagement":{"mode":"StructureAtr","managementInterval":"5m","breakEvenActivationR":1.0,"structureTrailActivationR":1.5,"atrBufferMultiplier":0.25,"enableScaleOut":true,"enableProfitFloor":true,"enableMaximumGiveback":true,"minimumRunnerFraction":0.40},
     "improvedPositionManagement":{"mode":"StructureAtr","managementInterval":"5m","breakEvenActivationR":1.0,"structureTrailActivationR":2.0,"atrBufferMultiplier":0.25,"enableScaleOut":true,"enableProfitFloor":true,"enableMaximumGiveback":true,"minimumRunnerFraction":0.50,"preserveBracketTarget":true},
     "dailyEquityProfitTarget":3000,
     "dailyEquityGivebackActivation":2500,
     "maximumDailyEquityGiveback":750,
-    "warmupDays":5,
+    "warmupDays":21,
     "strategyExecutionMode":"ParallelWorkers"
   }'
 ```
@@ -48,12 +50,12 @@ export Oanda__AccountId='YOUR_PRACTICE_ACCOUNT_ID'
 export Oanda__AccessToken='YOUR_PRACTICE_ACCESS_TOKEN'
 
 dotnet run -c Release --project BacktestRunner/BacktestRunner.csproj -- \
-  --instrument FX:GBP/JPY \
-  --from 2025-01-01 \
-  --to 2026-01-01 \
+  --instrument FX:EUR/USD \
+  --from 2026-06-01 \
+  --to 2026-07-01 \
   --base-interval 1m \
-  --analysis-intervals 5m,15m,1h \
-  --warmup-days 45 \
+  --analysis-intervals 5m,15m,30m,1h,2h \
+  --warmup-days 21 \
   --strategies legacy,improved \
   --strategy-execution parallel \
   --quantity 1000 \

@@ -7,6 +7,8 @@ using ChartAnnotator.Models;
 using ExecutionManager;
 using RiskManager;
 using RiskManager.Safety;
+using RiskManager.Conditions;
+using RiskManager.Calibration;
 using Simulator.Broker;
 using Simulator.MarketData;
 using Simulator.Models;
@@ -24,6 +26,7 @@ namespace Simulator.Engine;
 public sealed class StrategySimulationSession : IAsyncDisposable
 {
     private long _lastProcessedLedgerSequence;
+    private long _lastProcessedOrderEventSequence;
     private AgentDecision? _pendingEntryDecision;
     private string? _pendingEntryBrokerOrderId;
     private SimulatedTradeRecord? _activeTrade;
@@ -51,6 +54,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private int _structuralDeteriorationReductionCount;
     private int _momentumDecayReductionCount;
     private int _volatilityExhaustionReductionCount;
+    private int _regimeDegradationReductionCount;
     private bool _volatilityExpansionSeenSinceEntry;
     private bool _riskWindowReductionCompleted;
     private bool _executionCostStressReductionCompleted;
@@ -77,6 +81,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private bool _failed;
     private string? _failureMessage;
     private long? _failedSequence;
+    private EquityProtectionDirective? _sharedEquityProtectionDirective;
+    private PortfolioRiskStatusSnapshot? _sharedPortfolioRiskStatus;
 
     public StrategySimulationSession(
         string strategyId,
@@ -90,7 +96,13 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         IChartAnnotator? independentAnnotator = null,
         PositionManagementOptions? positionManagementOptions = null,
         IStructureBasedTradeManager? tradeManager = null,
-        BarInterval? managementInterval = null)
+        BarInterval? managementInterval = null,
+        ITradingConditionFilter? tradingConditions = null,
+        RegimeManagementOptions? regimeManagement = null,
+        ISetupCalibrationPolicy? setupCalibration = null,
+        ISetupMetaModel? metaModel = null,
+        TradeManagementCalibrationOptions? managementCalibrationOptions = null,
+        TradeManagementCalibration? managementCalibrationArtifact = null)
     {
         StrategyId = strategyId ?? throw new ArgumentNullException(nameof(strategyId));
         Strategy = strategy ?? throw new ArgumentNullException(nameof(strategy));
@@ -120,8 +132,25 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 "Management intervals must be ordered fast <= main <= thesis.",
                 nameof(positionManagementOptions));
         }
-        _tradeManager = tradeManager ?? new StructureBasedTradeManager(_positionManagementOptions);
-        Pipeline = new SafeTradingPipeline(strategy, execution, dataQuality, safety, journal);
+        _tradeManager = tradeManager ?? (managementCalibrationOptions is { Enabled: true }
+            ? new CalibratedStructureBasedTradeManager(
+                _positionManagementOptions,
+                managementCalibrationArtifact ?? throw new ArgumentException(
+                    "Enabled management calibration requires an artifact.", nameof(managementCalibrationArtifact)),
+                managementCalibrationOptions,
+                regimeManagement)
+            : regimeManagement is { Enabled: true }
+                ? new RegimeAwareStructureBasedTradeManager(_positionManagementOptions, regimeManagement)
+                : new StructureBasedTradeManager(_positionManagementOptions));
+        Pipeline = new SafeTradingPipeline(
+            strategy,
+            execution,
+            dataQuality,
+            safety,
+            journal,
+            tradingConditions,
+            setupCalibration,
+            metaModel);
     }
 
     public string StrategyId { get; }
@@ -136,9 +165,29 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     public HistoricalSimulationClock Clock { get; }
     public IReadOnlyList<SimulatedTradeRecord> Trades => _trades;
     public SimulatedTradeRecord? ActiveTrade => _activeTrade;
+    internal decimal? LastExecutablePrice => _lastExecutablePrice;
     public bool IsFailed => _failed;
     public string? FailureMessage => _failureMessage;
     public long? FailedSequence => _failedSequence;
+
+    internal void SetSharedEquityProtectionDirective(EquityHighWatermarkSnapshot snapshot)
+    {
+        _sharedEquityProtectionDirective = snapshot.PendingPositionAction is
+                RiskManager.Safety.EquityProtectionAction action &&
+            snapshot.PendingPositionTierId is string tierId
+            ? new EquityProtectionDirective
+            {
+                TierId = $"account:{tierId}",
+                Action = action == RiskManager.Safety.EquityProtectionAction.FlattenAllPositions
+                    ? EquityProtectionPositionAction.FlattenAllPositions
+                    : EquityProtectionPositionAction.ReduceOpenPositions,
+                ReductionFraction = snapshot.PendingPositionReductionFraction
+            }
+            : null;
+    }
+
+    internal void SetSharedPortfolioRiskStatus(PortfolioRiskStatusSnapshot snapshot) =>
+        _sharedPortfolioRiskStatus = snapshot;
 
     public static StrategySimulationSession Create(
         string strategyId,
@@ -150,7 +199,17 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         ChartAnnotationOptions? annotationOptions = null,
         PositionManagementOptions? positionManagementOptions = null,
         BarInterval? managementInterval = null,
-        PositionSizingOptions? positionSizingOptions = null)
+        PositionSizingOptions? positionSizingOptions = null,
+        AdaptiveRiskOptions? adaptiveRiskOptions = null,
+        TradingConditionOptions? tradingConditionOptions = null,
+        IEconomicEventProvider? economicEventProvider = null,
+        RegimeManagementOptions? regimeManagementOptions = null,
+        SetupCalibrationPolicyOptions? setupCalibrationOptions = null,
+        SetupCalibrationArtifact? setupCalibrationArtifact = null,
+        ISetupMetaModel? metaModel = null,
+        TradeManagementCalibrationOptions? managementCalibrationOptions = null,
+        TradeManagementCalibration? managementCalibrationArtifact = null,
+        Func<string, IExecutionCoordinator, IExecutionCoordinator>? executionDecorator = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         SimulationOptions options = simulationOptions;
@@ -169,6 +228,10 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             RejectGaps = false
         });
 
+        // Risk budget is primarily owned by PositionSizer (fixed-fractional / cash risk).
+        // A second hard 0.5%-of-balance clamp / portfolio-heat gate here rejected many
+        // otherwise-valid entries when sizing fell back to fixed quantity or conversion
+        // rates were approximate.
         PreTradeRiskOptions riskOptions = agent.ExitManagementMode switch
         {
             AgentExitManagementMode.ProtectiveStopAndStrategyExit => new PreTradeRiskOptions
@@ -177,7 +240,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 RequireTakeProfit = false,
                 MinimumRewardRiskRatio = null,
                 MaximumOpenPositions = 1,
-                MaximumLossPercentageOfBalance = 0.5m,
+                MaximumLossPercentageOfBalance = null,
+                MaximumOpenRiskPercentOfEquity = null,
                 AllowPyramiding = false
             },
             AgentExitManagementMode.Bracket => new PreTradeRiskOptions
@@ -186,10 +250,15 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 RequireTakeProfit = true,
                 MinimumRewardRiskRatio = PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
                 MaximumOpenPositions = 1,
-                MaximumLossPercentageOfBalance = 0.5m,
+                MaximumLossPercentageOfBalance = null,
+                MaximumOpenRiskPercentOfEquity = null,
                 AllowPyramiding = false
             },
-            _ => PreTradeRiskOptions.PhaseOneSafeDefaults
+            _ => PreTradeRiskOptions.PhaseOneSafeDefaults with
+            {
+                MaximumLossPercentageOfBalance = null,
+                MaximumOpenRiskPercentOfEquity = null
+            }
         };
 
         var execution = new ExecutionCoordinator(
@@ -198,10 +267,17 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             new BrokerExecutionSafety(),
             safety,
             journal,
-            new PositionSizer(positionSizingOptions));
+            new PositionSizer(positionSizingOptions),
+            new RiskBudgetPolicy(adaptiveRiskOptions));
+        IExecutionCoordinator sessionExecution = executionDecorator is null
+            ? execution
+            : executionDecorator(strategyId, execution);
 
         IChartAnnotator? independent = analysisSharing == AnalysisSharingMode.IndependentPerStrategy
             ? new ChartAnnotationEngine(annotationOptions)
+            : null;
+        ISetupCalibrationPolicy? setupCalibration = setupCalibrationOptions is { Enabled: true }
+            ? new SetupCalibrationPolicy(setupCalibrationArtifact, setupCalibrationOptions)
             : null;
 
         return new StrategySimulationSession(
@@ -209,13 +285,21 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             agent,
             broker,
             clock,
-            execution,
+            sessionExecution,
             safety,
             dataQuality,
             journal,
             independent,
             positionManagementOptions,
-            managementInterval: managementInterval);
+            managementInterval: managementInterval,
+            tradingConditions: tradingConditionOptions is null
+                ? null
+                : new TradingConditionFilter(tradingConditionOptions, economicEventProvider),
+            regimeManagement: regimeManagementOptions,
+            setupCalibration: setupCalibration,
+            metaModel: metaModel,
+            managementCalibrationOptions: managementCalibrationOptions,
+            managementCalibrationArtifact: managementCalibrationArtifact);
     }
 
     public async Task<StrategyFrameResult> ProcessFrameAsync(
@@ -248,6 +332,11 @@ public sealed class StrategySimulationSession : IAsyncDisposable
 
             await Broker.Runtime.ProcessExecutionCandleAsync(executionCandle, cancellationToken)
                 .ConfigureAwait(false);
+            CaptureExecutionEvents();
+            // Financing is posted before fills on the execution frame. Attribute it
+            // while the strategy-owned trade is still active, including a rollover
+            // frame that also closes the position.
+            RecordNewClosedTrades();
 
             BrokerPosition? positionAfter = (await Broker.Positions
                 .GetOpenPositionsAsync(cancellationToken).ConfigureAwait(false))
@@ -258,7 +347,6 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 await SynchronizeProtectiveStopAsync(positionAfter, cancellationToken).ConfigureAwait(false);
             if (positionBefore is null && positionAfter is not null && _activeTrade is not null)
                 UpdateExcursions(frame.ExecutionCandle);
-            RecordNewClosedTrades();
             if (!frame.IsWarmup)
             {
                 TradingSafetySnapshot previousSafety = Safety.Snapshot;
@@ -266,6 +354,49 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 decimal equity = (safetyAccount.Balance ?? 0m) +
                     (safetyAccount.UnrealizedProfitLoss ?? 0m);
                 TradingSafetySnapshot currentSafety = Safety.ObserveEquity(equity, eventTime);
+                EquityHighWatermarkSnapshot previousWatermark = previousSafety.EquityProtection;
+                EquityHighWatermarkSnapshot currentWatermark = currentSafety.EquityProtection;
+                if (currentWatermark.PeakEquity > previousWatermark.PeakEquity ||
+                    currentWatermark.CurrentRiskMultiplier != previousWatermark.CurrentRiskMultiplier)
+                {
+                    AddFrameEvent(
+                        StrategyReplayEventType.StrategyHighWatermarkUpdated,
+                        eventTime,
+                        _activeTrade?.SetupId,
+                        _activeTrade?.PositionId,
+                        reason: $"Strategy equity={currentWatermark.CurrentEquity:F2}; peak={currentWatermark.PeakEquity:F2}; drawdown={currentWatermark.DrawdownPercent:F3}%.",
+                        reasonCode: "StrategyHighWatermarkUpdated",
+                        previousValue: previousWatermark.PeakEquity,
+                        newValue: currentWatermark.PeakEquity,
+                        optionOrModelVersion: "strategy-equity-protection-v1");
+                }
+                HashSet<string> previousTiers = previousWatermark.ActivatedTierIds
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (string tier in currentWatermark.ActivatedTierIds
+                             .Where(tier => !previousTiers.Contains(tier))
+                             .OrderBy(tier => tier, StringComparer.Ordinal))
+                {
+                    AddFrameEvent(
+                        StrategyReplayEventType.EquityProtectionTierActivated,
+                        eventTime,
+                        _activeTrade?.SetupId,
+                        _activeTrade?.PositionId,
+                        reason: $"Strategy equity-protection tier '{tier}' activated.",
+                        reasonCode: tier,
+                        optionOrModelVersion: "strategy-equity-protection-v1");
+                }
+                if (previousWatermark.ActivatedTierIds.Count > 0 &&
+                    currentWatermark.ActivatedTierIds.Count == 0)
+                {
+                    AddFrameEvent(
+                        StrategyReplayEventType.EquityProtectionRecovered,
+                        eventTime,
+                        _activeTrade?.SetupId,
+                        _activeTrade?.PositionId,
+                        reason: "Strategy equity protection recovered after the configured confirmation period.",
+                        reasonCode: "StrategyEquityProtectionRecovered",
+                        optionOrModelVersion: "strategy-equity-protection-v1");
+                }
                 if (currentSafety.State != previousSafety.State ||
                     currentSafety.Reason != previousSafety.Reason)
                 {
@@ -316,13 +447,17 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                     Analysis = analysis,
                     Account = account,
                     Positions = positions,
-                    OpenOrders = openOrders
+                    OpenOrders = openOrders,
+                    ExecutableSpread = executionCandle.Prices.Close * Broker.Options.SpreadBasisPoints / 10_000m,
+                    MarketDataAvailableAt = frame.AvailableAt,
+                    StrategyId = StrategyId
                 };
 
                 TradingPipelineResult pipelineResult = await Pipeline
                     .ProcessAsync(context, Broker, cancellationToken)
                     .ConfigureAwait(false);
                 CaptureDecision(pipelineResult);
+                CaptureExecutionEvents();
             }
 
             if (!frame.IsWarmup && _activeTrade is not null)
@@ -468,7 +603,13 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         }
 
         await Task.CompletedTask.ConfigureAwait(false);
-        return result with { Trades = _trades.ToArray() };
+        EquityHighWatermarkSnapshot equityProtection = Safety.Snapshot.EquityProtection;
+        return result with
+        {
+            Trades = _trades.ToArray(),
+            EquityProtectionPeakEquity = equityProtection.PeakEquity,
+            EquityProtectionActivationCount = equityProtection.TotalActivatedTierCount
+        };
     }
 
     public StrategyProgressSnapshot ToProgressSnapshot()
@@ -529,9 +670,37 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 TrailingMode = _positionManagementOptions.Mode.ToString(),
                 LastManagementAction = _lastManagementAction,
                 LastManagementReason = _lastManagementReason,
-                NextManagementIntervalClose = _nextManagementIntervalClose
+                NextManagementIntervalClose = _nextManagementIntervalClose,
+                EntryRegime = _activeTrade.EntryRegime.ToString(),
+                CurrentRegime = _activeTrade.CurrentRegime.ToString(),
+                RegimeConfidence = _activeTrade.EntryRegimeConfidence,
+                BaseRiskBudget = _activeTrade.FinalRiskBudgetMultiplier is > 0m &&
+                    _activeTrade.PlannedStopRiskAccountCurrency is decimal plannedRisk
+                    ? plannedRisk / _activeTrade.FinalRiskBudgetMultiplier.Value
+                    : _activeTrade.PlannedStopRiskAccountCurrency,
+                FinalRiskBudget = _activeTrade.PlannedStopRiskAccountCurrency,
+                FinalRiskMultiplier = _activeTrade.FinalRiskBudgetMultiplier,
+                RiskMultipliers = RiskMultipliers(_activeTrade),
+                RawQuantity = _activeTrade.BaseRequestedQuantity,
+                AllocatedQuantity = _activeTrade.AllocatedQuantity,
+                PlannedStopRisk = _activeTrade.PlannedStopRiskAccountCurrency,
+                PortfolioReservationId = _activeTrade.PortfolioReservationId,
+                CorrelationClusterId = _activeTrade.CorrelationClusterId
             };
         }
+
+        EquityHighWatermarkSnapshot equityProtectionState = Safety.Snapshot.EquityProtection;
+        EquityProtectionStatusSnapshot? equityProtectionSnapshot = equityProtectionState.PeakEquity > 0m
+            ? new EquityProtectionStatusSnapshot
+            {
+                PeakEquity = equityProtectionState.PeakEquity,
+                DrawdownPercent = equityProtectionState.DrawdownPercent,
+                CurrentRiskMultiplier = equityProtectionState.CurrentRiskMultiplier,
+                ActivatedTierIds = equityProtectionState.ActivatedTierIds.OrderBy(id => id, StringComparer.OrdinalIgnoreCase).ToArray(),
+                NewEntriesPaused = !Safety.CanOpenNewTrades &&
+                    Safety.Snapshot.Reason == SafetyTripReason.EquityProtectionTier
+            }
+            : null;
 
         return new StrategyProgressSnapshot
         {
@@ -547,11 +716,29 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             Status = _failed ? "Failed" : "Running",
             LastError = _failureMessage,
             Performance = StrategyPerformanceSnapshot.FromTrades(_trades),
-            OpenPositionManagement = management
+            OpenPositionManagement = management,
+            EquityProtection = equityProtectionSnapshot,
+            PortfolioRisk = _sharedPortfolioRiskStatus
         };
     }
 
     public ValueTask DisposeAsync() => Broker.DisposeAsync();
+
+    internal void ApplyPortfolioAdmission(AgentDecision decision, OrderSubmission submission)
+    {
+        _pendingEntryDecision = decision;
+        _pendingEntryBrokerOrderId = submission.BrokerOrderId;
+    }
+
+    internal void RejectPortfolioAdmission(AgentDecision decision, string? reason)
+    {
+        if (_pendingEntryDecision?.DecisionId == decision.DecisionId)
+        {
+            _pendingEntryDecision = null;
+            _pendingEntryBrokerOrderId = null;
+        }
+        _lastManagementReason = reason;
+    }
 
     private Dictionary<BarInterval, AnalysisSnapshot> FilterSnapshots(MarketFrame frame)
     {
@@ -597,6 +784,48 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         if (decision is null)
         {
             return;
+        }
+
+        if (result.TradingCondition is TradingConditionDecision tradingCondition)
+        {
+            AddFrameEvent(
+                tradingCondition.Action is TradingConditionAction.DelayEntry or TradingConditionAction.RejectEntry
+                    ? StrategyReplayEventType.TradingConditionRejected
+                    : StrategyReplayEventType.TradingConditionEvaluated,
+                decision.CreatedAt,
+                decision.SetupId,
+                reason: tradingCondition.Explanation,
+                reasonCode: tradingCondition.ReasonCode);
+        }
+
+        if (result.SetupCalibration is SetupCalibrationDecision calibration)
+        {
+            AddFrameEvent(
+                calibration.Trade
+                    ? StrategyReplayEventType.SetupCalibrationEvaluated
+                    : StrategyReplayEventType.SetupCalibrationRejected,
+                decision.CreatedAt,
+                decision.SetupId,
+                reason: calibration.Explanation,
+                reasonCode: calibration.ReasonCode,
+                decisionId: decision.DecisionId,
+                newValue: calibration.RiskMultiplier,
+                optionOrModelVersion: calibration.CalibrationId);
+        }
+
+        if (result.MetaLabel is MetaLabelDecision metaLabel)
+        {
+            AddFrameEvent(
+                metaLabel.Trade
+                    ? StrategyReplayEventType.MetaLabelEvaluated
+                    : StrategyReplayEventType.MetaLabelRejected,
+                decision.CreatedAt,
+                decision.SetupId,
+                reason: $"probability={metaLabel.Probability:F4}; risk={metaLabel.RiskMultiplier:F3}",
+                reasonCode: metaLabel.ReasonCode,
+                decisionId: decision.DecisionId,
+                newValue: metaLabel.Probability,
+                optionOrModelVersion: metaLabel.ModelVersion);
         }
 
         if (decision.Action == AgentAction.Observe &&
@@ -683,6 +912,16 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         if (before is null && after is not null && _pendingEntryDecision is not null)
         {
             AgentDecision decision = _pendingEntryDecision;
+            decimal conversion = Broker.TryGetQuoteToAccountCurrencyRate(
+                decision.Instrument,
+                out decimal resolvedConversion)
+                ? resolvedConversion
+                : 0m;
+            decimal? plannedStopRisk = after.AveragePrice is decimal filledEntry &&
+                decision.StopLossPrice is decimal plannedStop && conversion > 0m
+                ? Math.Abs(filledEntry - plannedStop) * after.Quantity * conversion
+                : null;
+            decimal finalRiskMultiplier = CombinedRiskMultiplier(decision);
             decimal entryCommission = -Broker.State.GetLedger()
                 .Where(entry =>
                     entry.Type == LedgerEntryType.Commission &&
@@ -691,6 +930,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 .Sum(entry => entry.Amount);
             _activeTrade = new SimulatedTradeRecord
             {
+                StrategyId = StrategyId,
                 StrategyName = decision.StrategyName ?? Strategy.Name,
                 SetupId = decision.SetupId ?? decision.DecisionId ?? $"setup:{timestamp:O}",
                 PositionId = after.PositionId,
@@ -716,7 +956,29 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 StopSource = decision.StopSource,
                 TargetSource = decision.TargetSource,
                 SetupReason = decision.Reason,
-                ExitReason = SimulatedTradeExitReason.Unknown
+                ExitReason = SimulatedTradeExitReason.Unknown,
+                EntryRegime = decision.RegimeLabel ?? ChartAnnotator.Regime.MarketRegime.Unknown,
+                CurrentRegime = decision.RegimeLabel ?? ChartAnnotator.Regime.MarketRegime.Unknown,
+                EntryManagementProfileId = decision.RegimeManagementProfileId ?? "default",
+                CurrentManagementProfileId = decision.RegimeManagementProfileId ?? "default",
+                EntryConfidence = decision.Confidence,
+                EntrySetupType = decision.PriceActionSetupType?.ToString() ?? decision.ReasonCode ?? "Unknown",
+                EntrySession = SessionName(timestamp),
+                EntryVolatilityBucket = VolatilityBucket(decision.AtrPercentile),
+                EntryRegimeConfidence = decision.RegimeConfidence,
+                BaseRequestedQuantity = decision.PortfolioOriginalQuantity ?? decision.SuggestedQuantity,
+                AllocatedQuantity = decision.PortfolioAllocatedQuantity ?? after.Quantity,
+                PlannedStopRiskAccountCurrency = plannedStopRisk,
+                PortfolioReservationId = decision.PortfolioReservationId,
+                CorrelationClusterId = decision.RiskClusterId,
+                RegimeRiskMultiplier = decision.RegimeRiskMultiplier,
+                TradingConditionRiskMultiplier = decision.TradingConditionRiskMultiplier,
+                CorrelationRiskMultiplier = decision.CorrelationRiskMultiplier,
+                StrategyAllocationRiskMultiplier = decision.StrategyAllocationRiskMultiplier,
+                EquityProtectionRiskMultiplier = decision.EquityProtectionRiskMultiplier,
+                SetupCalibrationRiskMultiplier = decision.SetupCalibrationRiskMultiplier,
+                MetaLabelRiskMultiplier = decision.MetaLabelRiskMultiplier,
+                FinalRiskBudgetMultiplier = finalRiskMultiplier
             };
             _pendingEntryDecision = null;
             _pendingEntryBrokerOrderId = null;
@@ -731,6 +993,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             _structuralDeteriorationReductionCount = 0;
             _momentumDecayReductionCount = 0;
             _volatilityExhaustionReductionCount = 0;
+            _regimeDegradationReductionCount = 0;
             _volatilityExpansionSeenSinceEntry = false;
             _riskWindowReductionCompleted = false;
             _executionCostStressReductionCompleted = false;
@@ -804,7 +1067,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 exitOrder);
             decimal grossTotal = _activeTrade.RealizedPartialGrossProfitLoss + finalGross;
             decimal totalCommission = _activeTrade.Commission + exitCommission;
-            decimal netTotal = grossTotal - totalCommission;
+            decimal netTotal = grossTotal - totalCommission + _activeTrade.TotalFinancing;
             decimal? initialRisk = (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice) is decimal stop
                 ? Math.Abs(entryPrice - stop) * initialQuantity * quoteToBaseRate
                 : null;
@@ -822,6 +1085,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 GrossProfitLoss = grossTotal,
                 Commission = totalCommission,
                 NetProfitLoss = netTotal,
+                NetProfitAfterFinancing = netTotal,
                 RMultiple = initialRisk is > 0m ? netTotal / initialRisk.Value : null,
                 ExitReason = exitReason,
                 ExitReasonText = _pendingExitReason ?? exitReason.ToString(),
@@ -993,6 +1257,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             _momentumDecayReductionCount++;
         if (pending.Recommendation.Reason == PositionReductionReason.VolatilityExhaustion)
             _volatilityExhaustionReductionCount++;
+        if (pending.Recommendation.Reason == PositionReductionReason.RegimeDegradation)
+            _regimeDegradationReductionCount++;
         if (pending.Recommendation.Reason == PositionReductionReason.SessionRisk)
             _riskWindowReductionCompleted = true;
         if (pending.Recommendation.Reason == PositionReductionReason.ExecutionCostStress)
@@ -1061,6 +1327,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         PositionReductionReason.SessionRisk => PartialExitReason.SessionRisk,
         PositionReductionReason.ExecutionCostStress => PartialExitReason.ExecutionCostStress,
         PositionReductionReason.RiskReduction => PartialExitReason.RiskReduction,
+        PositionReductionReason.RegimeDegradation => PartialExitReason.RegimeDegradation,
         _ => PartialExitReason.Unknown
     };
 
@@ -1184,11 +1451,116 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         // updated exactly once when the complete trade closes in CapturePositionTransition.
         // Here we only advance the ledger cursor so partial fills are not misclassified as
         // separate closed trades or consecutive wins/losses.
-        long latestSequence = Broker.State.GetLedger()
+        LedgerEntry[] newLedger = Broker.State.GetLedger()
+            .Where(entry => entry.Sequence > _lastProcessedLedgerSequence)
+            .OrderBy(entry => entry.Sequence)
+            .ToArray();
+        if (_activeTrade is not null)
+        {
+            decimal financing = newLedger
+                .Where(entry => entry.Type == LedgerEntryType.Financing)
+                .Sum(entry => entry.Amount);
+            if (financing != 0m)
+            {
+                _activeTrade = _activeTrade with
+                {
+                    TotalFinancing = _activeTrade.TotalFinancing + financing,
+                    NetProfitLoss = _activeTrade.NetProfitLoss + financing,
+                    NetProfitAfterFinancing = _activeTrade.NetProfitAfterFinancing + financing
+                };
+                foreach (LedgerEntry entry in newLedger.Where(item => item.Type == LedgerEntryType.Financing))
+                {
+                    AddFrameEvent(
+                        StrategyReplayEventType.FinancingCharged,
+                        entry.Timestamp,
+                        _activeTrade.SetupId,
+                        _activeTrade.PositionId,
+                        reason: entry.Description,
+                        reasonCode: "SyntheticFinancingPosted",
+                        orderId: entry.OrderId,
+                        newValue: entry.Amount,
+                        optionOrModelVersion: Broker.Options.Financing.ModelVersion);
+                }
+            }
+        }
+        long latestSequence = newLedger
             .Select(entry => entry.Sequence)
             .DefaultIfEmpty(_lastProcessedLedgerSequence)
             .Max();
         _lastProcessedLedgerSequence = Math.Max(_lastProcessedLedgerSequence, latestSequence);
+    }
+
+    private void CaptureExecutionEvents()
+    {
+        foreach ((long sequence, OrderEvent item) in Broker.GetOrderEventsAfter(_lastProcessedOrderEventSequence))
+        {
+            _lastProcessedOrderEventSequence = sequence;
+            if (item.AppliedSpread is decimal spread && spread != 0m)
+            {
+                AddFrameEvent(
+                    StrategyReplayEventType.ExecutionSpreadAdjusted,
+                    item.Timestamp,
+                    _activeTrade?.SetupId ?? _pendingEntryDecision?.SetupId,
+                    _activeTrade?.PositionId,
+                    reason: item.Message,
+                    reasonCode: "ExecutionSpreadApplied",
+                    orderId: item.BrokerOrderId,
+                    newValue: spread,
+                    optionOrModelVersion: item.ExecutionModelVersion);
+            }
+            if (item.AppliedSlippage is decimal slippage && slippage != 0m)
+            {
+                AddFrameEvent(
+                    StrategyReplayEventType.ExecutionSlippageApplied,
+                    item.Timestamp,
+                    _activeTrade?.SetupId ?? _pendingEntryDecision?.SetupId,
+                    _activeTrade?.PositionId,
+                    reason: item.Message,
+                    reasonCode: "AdverseSlippageApplied",
+                    orderId: item.BrokerOrderId,
+                    newValue: slippage,
+                    optionOrModelVersion: item.ExecutionModelVersion);
+            }
+            if (item.Type == OrderEventType.PartiallyFilled)
+            {
+                AddFrameEvent(
+                    StrategyReplayEventType.PartialFill,
+                    item.Timestamp,
+                    _activeTrade?.SetupId ?? _pendingEntryDecision?.SetupId,
+                    _activeTrade?.PositionId,
+                    reason: item.Message,
+                    reasonCode: "SyntheticCapacityPartialFill",
+                    orderId: item.BrokerOrderId,
+                    quantityChanged: item.FillQuantity,
+                    quantityRemaining: item.RemainingQuantity,
+                    optionOrModelVersion: item.ExecutionModelVersion);
+            }
+            if (item.Message?.Contains("GapThroughStop", StringComparison.Ordinal) == true)
+            {
+                AddFrameEvent(
+                    StrategyReplayEventType.GapThroughStop,
+                    item.Timestamp,
+                    _activeTrade?.SetupId,
+                    _activeTrade?.PositionId,
+                    reason: item.Message,
+                    reasonCode: "AdverseGapFill",
+                    orderId: item.BrokerOrderId,
+                    newValue: item.FillPrice,
+                    optionOrModelVersion: item.ExecutionModelVersion);
+            }
+            if (item.Message?.Contains("OperationFaultInjected", StringComparison.Ordinal) == true)
+            {
+                AddFrameEvent(
+                    StrategyReplayEventType.OperationFaultInjected,
+                    item.Timestamp,
+                    _activeTrade?.SetupId ?? _pendingEntryDecision?.SetupId,
+                    _activeTrade?.PositionId,
+                    reason: item.Message,
+                    reasonCode: "DeterministicExecutionFault",
+                    orderId: item.BrokerOrderId,
+                    optionOrModelVersion: item.ExecutionModelVersion);
+            }
+        }
     }
 
     private async Task SynchronizeProtectiveStopAsync(
@@ -1284,10 +1656,49 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         decimal initialQuantity = _activeTrade.InitialQuantity > 0m
             ? _activeTrade.InitialQuantity
             : _activeTrade.Quantity;
+        string selectedManagementProfile = _tradeManager is IManagementProfileResolver profileResolver
+            ? profileResolver.ResolveProfileId(analysis.MarketRegime.Regime)
+            : _activeTrade.CurrentManagementProfileId;
+        if (_activeTrade.CurrentRegime != analysis.MarketRegime.Regime ||
+            !string.Equals(_activeTrade.CurrentManagementProfileId, selectedManagementProfile, StringComparison.Ordinal))
+        {
+            _activeTrade = _activeTrade with
+            {
+                CurrentRegime = analysis.MarketRegime.Regime,
+                CurrentManagementProfileId = selectedManagementProfile,
+                ManagementProfileSwitchReason =
+                    $"Regime changed to {analysis.MarketRegime.Regime} ({analysis.MarketRegime.ReasonCode})."
+            };
+        }
         _managementEvaluations++;
+        TradeManager.EquityProtectionDirective? equityProtectionDirective = null;
+        EquityHighWatermarkSnapshot equityProtectionSnapshot = Safety.Snapshot.EquityProtection;
+        if (equityProtectionSnapshot.PendingPositionAction is
+            RiskManager.Safety.EquityProtectionAction pendingAction &&
+            equityProtectionSnapshot.PendingPositionTierId is string pendingTierId)
+        {
+            equityProtectionDirective = new TradeManager.EquityProtectionDirective
+            {
+                TierId = pendingTierId,
+                Action = pendingAction == RiskManager.Safety.EquityProtectionAction.FlattenAllPositions
+                    ? TradeManager.EquityProtectionPositionAction.FlattenAllPositions
+                    : TradeManager.EquityProtectionPositionAction.ReduceOpenPositions,
+                ReductionFraction = equityProtectionSnapshot.PendingPositionReductionFraction
+            };
+        }
+        equityProtectionDirective = MergeEquityProtectionDirectives(
+            equityProtectionDirective,
+            _sharedEquityProtectionDirective);
+
         TradeManagementRecommendation recommendation = _tradeManager.Evaluate(
             new ManagedTradeState
             {
+                StrategyId = _activeTrade.StrategyId,
+                InstrumentGroup = InstrumentGroup(_activeTrade.Instrument),
+                SetupType = _activeTrade.EntrySetupType,
+                EntrySession = _activeTrade.EntrySession,
+                EntryVolatilityBucket = _activeTrade.EntryVolatilityBucket,
+                EntryConfidence = _activeTrade.EntryConfidence,
                 Instrument = _activeTrade.Instrument,
                 Side = _activeTrade.Side,
                 EntryPrice = entryPrice,
@@ -1308,6 +1719,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 StructuralDeteriorationReductionCount = _structuralDeteriorationReductionCount,
                 MomentumDecayReductionCount = _momentumDecayReductionCount,
                 VolatilityExhaustionReductionCount = _volatilityExhaustionReductionCount,
+                RegimeDegradationReductionCount = _regimeDegradationReductionCount,
                 VolatilityExpansionSeenSinceEntry = _volatilityExpansionSeenSinceEntry,
                 RiskWindowReductionCompleted = _riskWindowReductionCompleted,
                 ExecutionCostStressReductionCompleted = _executionCostStressReductionCompleted,
@@ -1320,10 +1732,13 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 LastAmendmentSnapshotVersion = null,
                 AnalysisBarsSinceLastAmendment = scope == TradeManagementEvaluationScope.Mechanical
                     ? int.MaxValue
-                    : _analysisBarsSinceLastAmendment
+                    : _analysisBarsSinceLastAmendment,
+                EntryRegime = _activeTrade.EntryRegime,
+                EntryManagementProfileId = _activeTrade.EntryManagementProfileId
             },
             analysis,
-            scope);
+            scope,
+            equityProtectionDirective);
 
         _lastManagementAction = recommendation.Action.ToString();
         _lastManagementReason = recommendation.Reason;
@@ -1757,11 +2172,77 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             maximumGivebackFloorR: recommendation.MaximumGivebackFloorR);
     }
 
+    private static EquityProtectionDirective? MergeEquityProtectionDirectives(
+        EquityProtectionDirective? strategy,
+        EquityProtectionDirective? account)
+    {
+        if (strategy is null) return account;
+        if (account is null) return strategy;
+        EquityProtectionPositionAction action = strategy.Action == EquityProtectionPositionAction.FlattenAllPositions ||
+            account.Action == EquityProtectionPositionAction.FlattenAllPositions
+            ? EquityProtectionPositionAction.FlattenAllPositions
+            : EquityProtectionPositionAction.ReduceOpenPositions;
+        return new EquityProtectionDirective
+        {
+            TierId = $"{strategy.TierId}+{account.TierId}",
+            Action = action,
+            ReductionFraction = Math.Max(strategy.ReductionFraction, account.ReductionFraction)
+        };
+    }
+
+    private static decimal CombinedRiskMultiplier(AgentDecision decision) => Math.Clamp(
+        (decision.RegimeRiskMultiplier ?? 1m) *
+        (decision.TradingConditionRiskMultiplier ?? 1m) *
+        (decision.CorrelationRiskMultiplier ?? 1m) *
+        (decision.StrategyAllocationRiskMultiplier ?? 1m) *
+        (decision.EquityProtectionRiskMultiplier ?? 1m) *
+        (decision.SetupCalibrationRiskMultiplier ?? 1m) *
+        (decision.MetaLabelRiskMultiplier ?? 1m),
+        0m,
+        1m);
+
+    private static IReadOnlyDictionary<string, decimal> RiskMultipliers(SimulatedTradeRecord trade) =>
+        new Dictionary<string, decimal>(StringComparer.Ordinal)
+        {
+            ["regime"] = trade.RegimeRiskMultiplier ?? 1m,
+            ["tradingCondition"] = trade.TradingConditionRiskMultiplier ?? 1m,
+            ["correlation"] = trade.CorrelationRiskMultiplier ?? 1m,
+            ["strategyAllocation"] = trade.StrategyAllocationRiskMultiplier ?? 1m,
+            ["equityProtection"] = trade.EquityProtectionRiskMultiplier ?? 1m,
+            ["setupCalibration"] = trade.SetupCalibrationRiskMultiplier ?? 1m,
+            ["metaLabel"] = trade.MetaLabelRiskMultiplier ?? 1m
+        };
+
     private static int IncrementSaturating(int value) =>
         value == int.MaxValue ? int.MaxValue : value + 1;
 
     private static decimal ResolveMinimumQuantityIncrement(InstrumentKey instrument) =>
         instrument.Value.StartsWith("FX:", StringComparison.OrdinalIgnoreCase) ? 1m : 0.00000001m;
+
+    private static string InstrumentGroup(InstrumentKey instrument)
+    {
+        int separator = instrument.Value.IndexOf(':');
+        return separator > 0 ? instrument.Value[..separator].ToUpperInvariant() : "Unknown";
+    }
+
+    private static string SessionName(DateTimeOffset timestamp) => timestamp.UtcDateTime.Hour switch
+    {
+        >= 7 and < 12 => "London",
+        >= 12 and < 16 => "LondonNewYorkOverlap",
+        >= 16 and < 21 => "NewYork",
+        >= 21 and < 23 => "Rollover",
+        _ => "Asia"
+    };
+
+    private static string VolatilityBucket(decimal? percentile) => percentile switch
+    {
+        null => "Unknown",
+        < 20m => "VeryLow",
+        < 40m => "Low",
+        < 70m => "Normal",
+        < 90m => "High",
+        _ => "VeryHigh"
+    };
 
     private void AddAmendmentEvent(
         StrategyReplayEventType type,
@@ -1808,17 +2289,29 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         string? reductionStageId = null,
         PositionReductionReason? positionReductionReason = null,
         decimal? profitFloorR = null,
-        decimal? maximumGivebackFloorR = null) =>
+        decimal? maximumGivebackFloorR = null,
+        string? decisionId = null,
+        string? orderId = null,
+        string? reservationId = null,
+        decimal? previousValue = null,
+        decimal? newValue = null,
+        string? optionOrModelVersion = null) =>
         _frameEvents.Add(new StrategyReplayEvent
         {
             Type = type,
             StrategyId = StrategyId,
             SetupId = setupId,
             PositionId = positionId,
+            DecisionId = decisionId,
+            OrderId = orderId,
+            ReservationId = reservationId,
             Sequence = _currentFrameSequence,
             EventTime = eventTime,
             Reason = reason,
             ReasonCode = reasonCode,
+            PreviousValue = previousValue,
+            NewValue = newValue,
+            OptionOrModelVersion = optionOrModelVersion,
             PriceActionTrigger = priceActionTrigger,
             PriceActionConfidence = priceActionConfidence,
             QuantityBefore = quantityBefore,

@@ -20,16 +20,34 @@ public sealed record PositionSizingOptions
     public PositionSizingMode Mode { get; init; } = PositionSizingMode.FixedQuantity;
     public decimal FixedQuantity { get; init; } = 1_000m;
     public decimal FixedCashRisk { get; init; } = 250m;
-    /// <summary>Percentage points, so 0.5 means one half of one percent.</summary>
+    /// <summary>
+    /// Risk budget as percentage points of equity.
+    /// Example: 0.5 means half of one percent (0.5% of equity), not 50%.
+    /// </summary>
     public decimal RiskPercentOfEquity { get; init; } = 0.5m;
     public decimal MinimumQuantity { get; init; } = 1m;
     public decimal? MaximumQuantity { get; init; }
     public decimal QuantityStep { get; init; } = 1m;
+    /// <summary>Percentage points of equity (30 = 30%).</summary>
     public decimal MaximumAccountMarginUsagePercent { get; init; } = 30m;
+    /// <summary>Percentage points of equity (10 = 10%).</summary>
     public decimal MaximumSinglePositionMarginPercent { get; init; } = 10m;
     public decimal Leverage { get; init; } = 20m;
     /// <summary>Spread, entry/exit slippage and commissions expressed as total basis points.</summary>
     public decimal EstimatedRoundTripCostBasisPoints { get; init; }
+
+    /// <summary>
+    /// Maximum combined residual open risk (existing positions + this trade) as percentage
+    /// points of equity. Example: 1.5 means 1.5% of equity. Null disables heat capping.
+    /// </summary>
+    public decimal? MaximumOpenRiskPercentOfEquity { get; init; }
+
+    /// <summary>
+    /// When open positions lack an explicit residual-risk total, assume each position's stop
+    /// distance is this many percentage points of its average price (0.5 = half a percent).
+    /// Null disables auto-estimation of open-book risk.
+    /// </summary>
+    public decimal? AssumedOpenPositionRiskDistancePercentOfPrice { get; init; }
 
     public void Validate()
     {
@@ -45,7 +63,9 @@ public sealed record PositionSizingOptions
             MaximumSinglePositionMarginPercent is <= 0m or > 100m ||
             MaximumSinglePositionMarginPercent > MaximumAccountMarginUsagePercent ||
             Leverage <= 0m ||
-            EstimatedRoundTripCostBasisPoints < 0m)
+            EstimatedRoundTripCostBasisPoints < 0m ||
+            MaximumOpenRiskPercentOfEquity is <= 0m or > 100m ||
+            AssumedOpenPositionRiskDistancePercentOfPrice is <= 0m or > 100m)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(PositionSizingOptions),
@@ -62,6 +82,18 @@ public sealed record PositionSizingContext
     public required IReadOnlyList<BrokerPosition> Positions { get; init; }
     /// <summary>Value of one quote-currency unit in the account currency.</summary>
     public required decimal QuoteToAccountCurrencyRate { get; init; }
+    /// <summary>Contract / pip model for the decision instrument. Defaults to unit notional.</summary>
+    public InstrumentRiskSpec InstrumentSpec { get; init; } = InstrumentRiskSpec.UnitNotional;
+    /// <summary>
+    /// Explicit residual open-book risk in account currency (excluding the new trade).
+    /// When null, may be auto-estimated from open positions.
+    /// </summary>
+    public decimal? KnownOpenRiskAccountCurrency { get; init; }
+    public IReadOnlyDictionary<InstrumentKey, InstrumentRiskSpec>? InstrumentSpecs { get; init; }
+    public IReadOnlyDictionary<InstrumentKey, decimal>? QuoteToAccountRatesByInstrument { get; init; }
+    /// <summary>Final composed risk-budget multiplier, always within 0..1.</summary>
+    public decimal RiskBudgetMultiplier { get; init; } = 1m;
+    public RiskBudgetDecision? RiskBudgetDecision { get; init; }
 }
 
 public sealed record PositionSizingResult
@@ -71,6 +103,8 @@ public sealed record PositionSizingResult
     public decimal? RiskBudget { get; init; }
     public decimal? EstimatedLossAtStop { get; init; }
     public decimal? EstimatedMargin { get; init; }
+    public decimal? OpenRiskAccountCurrency { get; init; }
+    public decimal? ProjectedOpenRiskAccountCurrency { get; init; }
     public required string ReasonCode { get; init; }
     public required string Reason { get; init; }
 }
@@ -96,6 +130,10 @@ public sealed class PositionSizer : IPositionSizer
         ArgumentNullException.ThrowIfNull(context.Decision);
         ArgumentNullException.ThrowIfNull(context.Accounts);
         ArgumentNullException.ThrowIfNull(context.Positions);
+        InstrumentRiskSpec spec = context.InstrumentSpec ?? InstrumentRiskSpec.UnitNotional;
+        spec.Validate();
+        if (context.RiskBudgetMultiplier is < 0m or > 1m)
+            throw new ArgumentOutOfRangeException(nameof(context.RiskBudgetMultiplier));
 
         AgentDecision decision = context.Decision;
         if (decision.Action is not (AgentAction.Buy or AgentAction.Sell))
@@ -103,7 +141,7 @@ public sealed class PositionSizer : IPositionSizer
             return Reject("SizingNotApplicable", "Position sizing is only applicable to opening buy/sell decisions.");
         }
 
-        if (decision.QuantityUnit is not (QuantityUnit.Units or QuantityUnit.BaseAsset))
+        if (decision.QuantityUnit is not (QuantityUnit.Units or QuantityUnit.BaseAsset or QuantityUnit.Contracts))
         {
             return Reject(
                 "UnsupportedQuantityUnit",
@@ -120,6 +158,7 @@ public sealed class PositionSizer : IPositionSizer
             decimal fixedQuantity = context.RequestedQuantity > 0m
                 ? context.RequestedQuantity
                 : _options.FixedQuantity;
+            fixedQuantity *= context.RiskBudgetMultiplier;
             if (_options.MaximumQuantity is decimal fixedMaximum)
                 fixedQuantity = Math.Min(fixedQuantity, fixedMaximum);
             fixedQuantity = RoundDown(fixedQuantity, _options.QuantityStep);
@@ -179,11 +218,14 @@ public sealed class PositionSizer : IPositionSizer
             riskBudget = _options.Mode == PositionSizingMode.FixedCashRisk
                 ? _options.FixedCashRisk
                 : equity * _options.RiskPercentOfEquity / 100m;
+            riskBudget *= context.RiskBudgetMultiplier;
 
             decimal estimatedCostDistance =
                 reference * _options.EstimatedRoundTripCostBasisPoints / 10_000m;
-            perUnitLoss = (riskDistance + estimatedCostDistance) *
-                context.QuoteToAccountCurrencyRate;
+            perUnitLoss = spec.EstimateStopLossAccountCurrency(
+                riskDistance + estimatedCostDistance,
+                quantity: 1m,
+                context.QuoteToAccountCurrencyRate);
             if (perUnitLoss <= 0m)
             {
                 return Reject("InvalidPerUnitRisk", "Calculated per-unit account risk is not positive.");
@@ -197,7 +239,11 @@ public sealed class PositionSizer : IPositionSizer
             return Reject("MissingReferencePrice", "A positive reference price is required to enforce margin limits.");
         }
 
-        decimal marginPerUnit = reference * context.QuoteToAccountCurrencyRate / _options.Leverage;
+        decimal marginPerUnit = spec.EstimateMarginAccountCurrency(
+            reference,
+            quantity: 1m,
+            _options.Leverage,
+            context.QuoteToAccountCurrencyRate);
         if (marginPerUnit <= 0m)
         {
             return Reject("InvalidMarginRate", "Calculated margin per unit is not positive.");
@@ -213,6 +259,23 @@ public sealed class PositionSizer : IPositionSizer
             maximumSinglePositionMargin / marginPerUnit);
         quantity = Math.Min(quantity, marginCappedQuantity);
 
+        decimal openRisk = PortfolioOpenRisk.EstimateAccountCurrency(
+            context.Positions,
+            spec,
+            context.QuoteToAccountCurrencyRate,
+            context.KnownOpenRiskAccountCurrency,
+            _options.AssumedOpenPositionRiskDistancePercentOfPrice,
+            context.InstrumentSpecs,
+            context.QuoteToAccountRatesByInstrument);
+
+        if (_options.MaximumOpenRiskPercentOfEquity is decimal maxOpenRiskPercent &&
+            perUnitLoss is decimal heatPerUnit)
+        {
+            decimal maxOpenRisk = equity * maxOpenRiskPercent / 100m;
+            decimal remainingHeatBudget = Math.Max(0m, maxOpenRisk - openRisk);
+            quantity = Math.Min(quantity, remainingHeatBudget / heatPerUnit);
+        }
+
         if (_options.MaximumQuantity is decimal maximumQuantity)
         {
             quantity = Math.Min(quantity, maximumQuantity);
@@ -223,15 +286,20 @@ public sealed class PositionSizer : IPositionSizer
         {
             return Reject(
                 "QuantityBelowMinimum",
-                $"Risk and margin limits allow {quantity:F8}, below the minimum {_options.MinimumQuantity:F8}.");
+                $"Risk, margin, and open-risk heat limits allow {quantity:F8}, below the minimum " +
+                $"{_options.MinimumQuantity:F8}.");
         }
 
         decimal estimatedLoss = perUnitLoss is decimal lossPerUnit
             ? lossPerUnit * quantity
             : decision.StopLossPrice is decimal fixedStop
-                ? Math.Abs(reference - fixedStop) * quantity * context.QuoteToAccountCurrencyRate
+                ? spec.EstimateStopLossAccountCurrency(
+                    Math.Abs(reference - fixedStop),
+                    quantity,
+                    context.QuoteToAccountCurrencyRate)
                 : 0m;
         decimal estimatedMargin = marginPerUnit * quantity;
+        decimal projectedOpenRisk = openRisk + estimatedLoss;
 
         return new PositionSizingResult
         {
@@ -240,9 +308,12 @@ public sealed class PositionSizer : IPositionSizer
             RiskBudget = riskBudget,
             EstimatedLossAtStop = estimatedLoss,
             EstimatedMargin = estimatedMargin,
+            OpenRiskAccountCurrency = openRisk,
+            ProjectedOpenRiskAccountCurrency = projectedOpenRisk,
             ReasonCode = _options.Mode.ToString(),
             Reason = $"Sized {quantity:F8} units from a {riskBudget:F2} risk budget; " +
-                $"estimated stop loss {estimatedLoss:F2} and margin {estimatedMargin:F2}."
+                $"estimated stop loss {estimatedLoss:F2}, margin {estimatedMargin:F2}, " +
+                $"projected open risk {projectedOpenRisk:F2}."
         };
     }
 

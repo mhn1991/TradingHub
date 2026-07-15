@@ -81,7 +81,36 @@ public enum StrategyReplayEventType
     StrategyCloseRequested,
     PositionClosed,
     TradeCompleted,
-    StrategyFailed
+    StrategyFailed,
+    TradingConditionEvaluated,
+    TradingConditionRejected,
+    MarketRegimeChanged,
+    MarketRegimeConfirmed,
+    RiskBudgetAdjusted,
+    PortfolioOpportunityCreated,
+    PortfolioOpportunityRanked,
+    PortfolioRiskReserved,
+    PortfolioRiskReservationRejected,
+    PortfolioRiskReservationReleased,
+    PortfolioQuantityReduced,
+    CurrencyExposureLimitReached,
+    CorrelationPenaltyApplied,
+    AccountHighWatermarkUpdated,
+    StrategyHighWatermarkUpdated,
+    EquityProtectionTierActivated,
+    EquityProtectionReductionRequested,
+    EquityProtectionFlattenRequested,
+    EquityProtectionRecovered,
+    FinancingCharged,
+    ExecutionSpreadAdjusted,
+    ExecutionSlippageApplied,
+    GapThroughStop,
+    PartialFill,
+    OperationFaultInjected,
+    SetupCalibrationEvaluated,
+    SetupCalibrationRejected,
+    MetaLabelEvaluated,
+    MetaLabelRejected
 }
 
 public sealed record StrategyReplayEvent
@@ -90,6 +119,9 @@ public sealed record StrategyReplayEvent
     public required string StrategyId { get; init; }
     public string? SetupId { get; init; }
     public string? PositionId { get; init; }
+    public string? DecisionId { get; init; }
+    public string? OrderId { get; init; }
+    public string? ReservationId { get; init; }
     public required long Sequence { get; init; }
     public required DateTimeOffset EventTime { get; init; }
     public decimal? PreviousStop { get; init; }
@@ -102,6 +134,9 @@ public sealed record StrategyReplayEvent
     public long? AnalysisSnapshotVersion { get; init; }
     public string? Reason { get; init; }
     public string? ReasonCode { get; init; }
+    public decimal? PreviousValue { get; init; }
+    public decimal? NewValue { get; init; }
+    public string? OptionOrModelVersion { get; init; }
     public PriceActionEventType? PriceActionTrigger { get; init; }
     public decimal? PriceActionConfidence { get; init; }
     public decimal? QuantityBefore { get; init; }

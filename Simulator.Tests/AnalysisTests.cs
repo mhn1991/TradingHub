@@ -526,6 +526,60 @@ public sealed class AnalysisTests
     }
 
     [Test]
+    public void ConfidenceScorer_LowAdxPenalizesRatherThanRewardsTrendConfidence()
+    {
+        Candle candle = TestCandles.Create(
+            new InstrumentKey("FX:EUR/USD"),
+            new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            BarInterval.Minutes(5),
+            100m,
+            101m,
+            99m,
+            100m);
+        var scorer = new ConfidenceScorer();
+
+        ConfidenceScore low = scorer.Calculate(
+            candle,
+            new IndicatorSnapshot
+            {
+                AdxAnalysis = new AdxAnalysisSnapshot
+                {
+                    Adx = 10m,
+                    PlusDi = 12m,
+                    MinusDi = 11m,
+                    DirectionalBias = PriceActionDirection.Bullish
+                }
+            },
+            [],
+            [],
+            []);
+        ConfidenceScore strong = scorer.Calculate(
+            candle,
+            new IndicatorSnapshot
+            {
+                AdxAnalysis = new AdxAnalysisSnapshot
+                {
+                    Adx = 30m,
+                    PlusDi = 30m,
+                    MinusDi = 10m,
+                    DirectionalBias = PriceActionDirection.Bullish,
+                    StrengthDirection = MomentumDirection.Rising,
+                    IsTrendStrengthening = true
+                }
+            },
+            [],
+            [],
+            []);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(low.Contributions.Single(item => item.Rule == "ADX/DMI").Score, Is.Negative);
+            Assert.That(strong.Contributions.Single(item => item.Rule == "ADX/DMI").Score, Is.Positive);
+            Assert.That(strong.Total, Is.GreaterThan(low.Total));
+        });
+    }
+
+    [Test]
     public async Task AnnotationEngine_KeepsOnlyConfiguredCandleCapacity()
     {
         InstrumentKey instrument = new("CRYPTO:BTC/USDT");

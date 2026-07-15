@@ -1,5 +1,6 @@
 using Brokers.Models;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 
 namespace TradeManager;
 
@@ -26,7 +27,31 @@ public enum TradeManagementExitReason
     None,
     AdverseStructure,
     ProfitFloorBreached,
-    MaximumGivebackBreached
+    MaximumGivebackBreached,
+    EquityProtectionBreach
+}
+
+/// <summary>
+/// The two position-level equity-protection actions this manager can act on
+/// (PauseNewEntries/ReduceFutureRisk have no position visibility and are enforced
+/// entirely inside the account/strategy safety controller, one layer up).
+/// </summary>
+public enum EquityProtectionPositionAction
+{
+    ReduceOpenPositions,
+    FlattenAllPositions
+}
+
+/// <summary>
+/// An account/strategy-safety-driven override, evaluated ahead of every other rule.
+/// Deliberately decoupled from RiskManager's richer equity-protection tier type so
+/// TradeManager stays free of a RiskManager project reference; the caller translates.
+/// </summary>
+public sealed record EquityProtectionDirective
+{
+    public required string TierId { get; init; }
+    public required EquityProtectionPositionAction Action { get; init; }
+    public decimal ReductionFraction { get; init; }
 }
 
 public enum TrailingStopMode
@@ -46,7 +71,8 @@ public enum PositionReductionReason
     VolatilityExhaustion,
     SessionRisk,
     ExecutionCostStress,
-    RiskReduction
+    RiskReduction,
+    RegimeDegradation
 }
 
 public enum ScaleOutTriggerMode
@@ -103,6 +129,40 @@ public record PositionManagementOptions
     public decimal OpposingStructureProximityAtr { get; init; } = 0.35m;
     public int MinimumAnalysisBarsBetweenReductions { get; init; } = 1;
 
+    /// <summary>
+    /// Structural trail levels closer than this (in ATR) are treated as micro-noise.
+    /// </summary>
+    public decimal MinimumStructuralTrailDistanceAtr { get; init; } = 0.35m;
+
+    /// <summary>
+    /// Structural trail levels farther than this (in ATR) are ignored in favour of
+    /// nearer meaningful structure or mechanical protection.
+    /// </summary>
+    public decimal MaximumStructuralTrailDistanceAtr { get; init; } = 2.50m;
+
+    /// <summary>Minimum price-zone strength required for trail / opposing-structure use.</summary>
+    public decimal MinimumZoneStrengthForManagement { get; init; } = 40m;
+
+    /// <summary>Minimum channel confidence required for trail / opposing-structure use.</summary>
+    public decimal MinimumChannelConfidenceForManagement { get; init; } = 40m;
+
+    /// <summary>
+    /// When true, prefer structural levels whose pivot/zone activity is at or after entry.
+    /// </summary>
+    public bool PreferPostEntryStructure { get; init; } = true;
+
+    /// <summary>
+    /// When true, R-threshold scale-outs fire only on fast/main management bars, not on
+    /// pure mechanical execution frames.
+    /// </summary>
+    public bool ScaleOutRThresholdRequiresManagementBar { get; init; } = true;
+
+    /// <summary>
+    /// When true, profit-floor / giveback breaches prefer advancing the stop first and
+    /// only hard-exit when the floor stop is already in place or can no longer be placed.
+    /// </summary>
+    public bool PreferFloorStopBeforeHardExit { get; init; } = true;
+
     public bool EnableProfitFloor { get; init; }
     public IReadOnlyList<ProfitFloorRule> ProfitFloorRules { get; init; } = [];
     public bool EnableMaximumGiveback { get; init; }
@@ -127,6 +187,18 @@ public record PositionManagementOptions
     public decimal VolatilityExhaustionMinimumOpenProfitR { get; init; } = 1.50m;
     public decimal VolatilityExhaustionReductionFraction { get; init; } = 0.15m;
     public int MaximumVolatilityExhaustionReductions { get; init; } = 1;
+
+    /// <summary>
+    /// Protective reduction when the position's current-timeframe market regime
+    /// degrades to a not-tradeable state (HighVolatilityDisorder/IlliquidUnsafe).
+    /// Cannot fire while regime classification is disabled, since
+    /// AnalysisSnapshot.MarketRegime then stays MarketRegimeSnapshot.Unknown
+    /// (IsTradeable == true), so this is safe to default-enable.
+    /// </summary>
+    public bool EnableRegimeDegradationReduction { get; init; }
+    public decimal RegimeDegradationMinimumOpenProfitR { get; init; } = 1.0m;
+    public decimal RegimeDegradationReductionFraction { get; init; } = 0.25m;
+    public int MaximumRegimeDegradationReductions { get; init; } = 1;
 
     /// <summary>
     /// Optional broker/session risk window in UTC. Both values must be supplied together.
@@ -202,6 +274,9 @@ public record PositionManagementOptions
         EnableVolatilityExhaustionReduction = true,
         VolatilityExhaustionMinimumOpenProfitR = 1.50m,
         VolatilityExhaustionReductionFraction = 0.15m,
+        EnableRegimeDegradationReduction = true,
+        RegimeDegradationMinimumOpenProfitR = 1.0m,
+        RegimeDegradationReductionFraction = 0.25m,
         // Session/rollover timing is broker and DST specific, so it is deliberately opt-in.
         EnableRiskWindowReduction = false,
         EnableExecutionCostStressReduction = false
@@ -265,6 +340,9 @@ public record PositionManagementOptions
         EnableVolatilityExhaustionReduction = true,
         VolatilityExhaustionMinimumOpenProfitR = 2.00m,
         VolatilityExhaustionReductionFraction = 0.10m,
+        EnableRegimeDegradationReduction = true,
+        RegimeDegradationMinimumOpenProfitR = 1.25m,
+        RegimeDegradationReductionFraction = 0.20m,
         EnableRiskWindowReduction = false,
         EnableExecutionCostStressReduction = false
     };
@@ -284,6 +362,10 @@ public record PositionManagementOptions
             MinimumRunnerFraction is < 0m or >= 1m ||
             OpposingStructureProximityAtr < 0m ||
             MinimumAnalysisBarsBetweenReductions < 1 ||
+            MinimumStructuralTrailDistanceAtr < 0m ||
+            MaximumStructuralTrailDistanceAtr < MinimumStructuralTrailDistanceAtr ||
+            MinimumZoneStrengthForManagement is < 0m or > 100m ||
+            MinimumChannelConfidenceForManagement is < 0m or > 100m ||
             StagnationMinimumOpenProfitR < 0m || StagnationBars < 1 ||
             StagnationMinimumMfeAdvanceR < 0m ||
             StagnationReductionFraction is <= 0m or >= 1m ||
@@ -295,6 +377,9 @@ public record PositionManagementOptions
             VolatilityExhaustionMinimumOpenProfitR < 0m ||
             VolatilityExhaustionReductionFraction is <= 0m or >= 1m ||
             MaximumVolatilityExhaustionReductions < 0 ||
+            RegimeDegradationMinimumOpenProfitR < 0m ||
+            RegimeDegradationReductionFraction is <= 0m or >= 1m ||
+            MaximumRegimeDegradationReductions < 0 ||
             RiskWindowMinimumOpenProfitR < 0m ||
             RiskWindowReductionFraction is <= 0m or >= 1m ||
             MaximumSpreadToAtrRatio <= 0m ||
@@ -365,6 +450,12 @@ public sealed record StructureBasedTradeManagementOptions : PositionManagementOp
 
 public sealed record ManagedTradeState
 {
+    public string StrategyId { get; init; } = "unknown";
+    public string InstrumentGroup { get; init; } = "Unknown";
+    public string SetupType { get; init; } = "Unknown";
+    public string EntrySession { get; init; } = "Unknown";
+    public string EntryVolatilityBucket { get; init; } = "Unknown";
+    public decimal EntryConfidence { get; init; }
     public required InstrumentKey Instrument { get; init; }
     public required OrderSide Side { get; init; }
     public required decimal EntryPrice { get; init; }
@@ -386,6 +477,7 @@ public sealed record ManagedTradeState
     public int StructuralDeteriorationReductionCount { get; init; }
     public int MomentumDecayReductionCount { get; init; }
     public int VolatilityExhaustionReductionCount { get; init; }
+    public int RegimeDegradationReductionCount { get; init; }
     public bool VolatilityExpansionSeenSinceEntry { get; init; }
     public bool RiskWindowReductionCompleted { get; init; }
     public bool ExecutionCostStressReductionCompleted { get; init; }
@@ -397,6 +489,8 @@ public sealed record ManagedTradeState
     public decimal SlippagePrice { get; init; }
     public long? LastAmendmentSnapshotVersion { get; init; }
     public int AnalysisBarsSinceLastAmendment { get; init; } = int.MaxValue;
+    public MarketRegime EntryRegime { get; init; } = MarketRegime.Unknown;
+    public string EntryManagementProfileId { get; init; } = "default";
 }
 
 public sealed record PositionReductionRecommendation
@@ -439,7 +533,8 @@ public interface IStructureBasedTradeManager
     TradeManagementRecommendation Evaluate(
         ManagedTradeState trade,
         AnalysisSnapshot analysis,
-        TradeManagementEvaluationScope scope);
+        TradeManagementEvaluationScope scope,
+        EquityProtectionDirective? equityProtection = null);
 }
 
 /// <summary>
@@ -466,7 +561,8 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
     public TradeManagementRecommendation Evaluate(
         ManagedTradeState trade,
         AnalysisSnapshot analysis,
-        TradeManagementEvaluationScope scope)
+        TradeManagementEvaluationScope scope,
+        EquityProtectionDirective? equityProtection = null)
     {
         ArgumentNullException.ThrowIfNull(trade);
         ArgumentNullException.ThrowIfNull(analysis);
@@ -497,6 +593,42 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         decimal maximumFavourableR = Math.Max(openProfitR, trade.MaximumFavourableExcursionR);
         bool adverseBreak = IsAdverseBreak(trade.Side, analysis.MarketStructure.Break);
 
+        // Account/strategy-level equity protection overrides every other rule below,
+        // regardless of scope - it's a safety escalation, not a technical management rule.
+        if (equityProtection is not null)
+        {
+            if (equityProtection.Action == EquityProtectionPositionAction.FlattenAllPositions)
+            {
+                return Exit(
+                    openProfitR,
+                    TradeManagementExitReason.EquityProtectionBreach,
+                    "EquityProtectionFlatten",
+                    $"Equity protection tier '{equityProtection.TierId}' requires flattening this position.");
+            }
+
+            string reductionStageId = $"equity-protection-{equityProtection.TierId}";
+            if (!trade.CompletedReductionStageIds.Contains(reductionStageId))
+            {
+                PositionReductionRecommendation? equityReduction = CreateReduction(
+                    trade,
+                    reductionStageId,
+                    equityProtection.ReductionFraction,
+                    PositionReductionReason.RiskReduction,
+                    $"Equity protection tier '{equityProtection.TierId}' requires reducing open exposure.");
+                if (equityReduction is not null)
+                {
+                    return new TradeManagementRecommendation
+                    {
+                        Action = TradeManagementAction.ReducePosition,
+                        PositionReduction = equityReduction,
+                        OpenProfitR = openProfitR,
+                        ReasonCode = "EquityProtectionReduce",
+                        Reason = equityReduction.Explanation
+                    };
+                }
+            }
+        }
+
         if (includeThesis && _options.ExitOnAdverseStructureBreak && adverseBreak)
         {
             return Exit(
@@ -509,23 +641,46 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         ProfitProtectionFloor? floor = includeMechanical
             ? FindProfitProtectionFloor(maximumFavourableR)
             : null;
-        if (floor is not null && openProfitR <= floor.LockedR)
-        {
-            return Exit(
-                openProfitR,
-                floor.Source == ProfitProtectionSource.MaximumGiveback
-                    ? TradeManagementExitReason.MaximumGivebackBreached
-                    : TradeManagementExitReason.ProfitFloorBreached,
-                floor.Source == ProfitProtectionSource.MaximumGiveback
-                    ? "MaximumGivebackBreached"
-                    : "ProfitFloorBreached",
-                $"Open profit fell to {openProfitR:F2}R after protection had locked {floor.LockedR:F2}R.",
-                floor);
-        }
 
         decimal? atr = analysis.Indicators.Atr is decimal atrValue && atrValue > 0m
             ? atrValue
             : null;
+
+        // P2: profit-floor / giveback prefer stop advancement first. Hard exit is only a
+        // safety net when the floor stop is already protecting or can no longer be placed
+        // (price has already traded through the floor level).
+        if (floor is not null && openProfitR <= floor.LockedR)
+        {
+            decimal floorPrice = PriceForLockedR(
+                trade.Side,
+                trade.EntryPrice,
+                initialRisk,
+                floor.LockedR);
+            bool stopAlreadyAtFloor = trade.Side == OrderSide.Buy
+                ? trade.CurrentStopPrice + trade.MinimumPriceIncrement >= floorPrice
+                : trade.CurrentStopPrice - trade.MinimumPriceIncrement <= floorPrice;
+            bool floorStopPlaceable = IsBeforeCurrentPrice(
+                trade.Side,
+                floorPrice,
+                trade.CurrentPrice);
+
+            if (!_options.PreferFloorStopBeforeHardExit ||
+                stopAlreadyAtFloor ||
+                !floorStopPlaceable)
+            {
+                return Exit(
+                    openProfitR,
+                    floor.Source == ProfitProtectionSource.MaximumGiveback
+                        ? TradeManagementExitReason.MaximumGivebackBreached
+                        : TradeManagementExitReason.ProfitFloorBreached,
+                    floor.Source == ProfitProtectionSource.MaximumGiveback
+                        ? "MaximumGivebackBreached"
+                        : "ProfitFloorBreached",
+                    $"Open profit fell to {openProfitR:F2}R after protection had locked {floor.LockedR:F2}R.",
+                    floor);
+            }
+        }
+
         StopCandidate? stopCandidate = BuildStopCandidate(
             trade,
             analysis,
@@ -736,6 +891,20 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                 volatilityExplanation);
         }
 
+        if (mainStructure && _options.EnableRegimeDegradationReduction &&
+            !analysis.MarketRegime.IsTradeable &&
+            openProfitR >= _options.RegimeDegradationMinimumOpenProfitR &&
+            trade.RegimeDegradationReductionCount < _options.MaximumRegimeDegradationReductions)
+        {
+            return CreateReduction(
+                trade,
+                $"regime-degradation-{trade.RegimeDegradationReductionCount + 1}",
+                _options.RegimeDegradationReductionFraction,
+                PositionReductionReason.RegimeDegradation,
+                $"Reduced exposure after the regime degraded to {analysis.MarketRegime.Regime} " +
+                $"({analysis.MarketRegime.ReasonCode}).");
+        }
+
         if (mechanical && _options.EnableRiskWindowReduction &&
             !trade.RiskWindowReductionCompleted &&
             openProfitR >= _options.RiskWindowMinimumOpenProfitR &&
@@ -768,6 +937,13 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
 
         if (_options.EnableScaleOut)
         {
+            // P2: R-threshold scale-outs require a management-bar scope (fast/main), not a
+            // pure mechanical execution frame, so 1s/5s noise does not fire partials.
+            bool managementBar = fastStructure || mainStructure ||
+                scope == TradeManagementEvaluationScope.Combined;
+            bool allowRThresholdScaleOut = !_options.ScaleOutRThresholdRequiresManagementBar ||
+                managementBar;
+
             OpposingStructure? opposing = (fastStructure || mainStructure) && atr is > 0m
                 ? FindOpposingStructure(trade, analysis, atr.Value)
                 : null;
@@ -780,11 +956,12 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                 bool structureTriggered = opposing is not null && openProfitR >= rule.MinimumOpenProfitR;
                 bool triggered = rule.TriggerMode switch
                 {
-                    ScaleOutTriggerMode.RThreshold => mechanical && rTriggered,
+                    ScaleOutTriggerMode.RThreshold =>
+                        allowRThresholdScaleOut && rTriggered,
                     ScaleOutTriggerMode.OpposingStructure =>
                         (fastStructure || mainStructure) && structureTriggered,
                     ScaleOutTriggerMode.RThresholdOrOpposingStructure =>
-                        (mechanical && rTriggered) ||
+                        (allowRThresholdScaleOut && rTriggered) ||
                         ((fastStructure || mainStructure) && structureTriggered),
                     _ => false
                 };
@@ -996,7 +1173,9 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         if (trade.Side == OrderSide.Buy)
         {
             candidates.AddRange(analysis.PriceZones
-                .Where(zone => zone.Type is PriceZoneType.Resistance or PriceZoneType.Mixed)
+                .Where(zone =>
+                    (zone.Type is PriceZoneType.Resistance or PriceZoneType.Mixed) &&
+                    zone.Strength >= _options.MinimumZoneStrengthForManagement)
                 .Select(zone => new
                 {
                     Zone = zone,
@@ -1009,6 +1188,7 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                     item.Zone.LowerPrice,
                     $"{item.Zone.Type.ToString().ToLowerInvariant()} zone")));
             candidates.AddRange(analysis.Channels
+                .Where(channel => channel.Confidence >= _options.MinimumChannelConfidenceForManagement)
                 .Select(channel => new
                 {
                     Level = channel.UpperLine.PriceAt(analysis.AvailableAt),
@@ -1020,7 +1200,9 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         }
 
         candidates.AddRange(analysis.PriceZones
-            .Where(zone => zone.Type is PriceZoneType.Support or PriceZoneType.Mixed)
+            .Where(zone =>
+                (zone.Type is PriceZoneType.Support or PriceZoneType.Mixed) &&
+                zone.Strength >= _options.MinimumZoneStrengthForManagement)
             .Select(zone => new
             {
                 Zone = zone,
@@ -1033,6 +1215,7 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                 item.Zone.UpperPrice,
                 $"{item.Zone.Type.ToString().ToLowerInvariant()} zone")));
         candidates.AddRange(analysis.Channels
+            .Where(channel => channel.Confidence >= _options.MinimumChannelConfidenceForManagement)
             .Select(channel => new
             {
                 Level = channel.LowerLine.PriceAt(analysis.AvailableAt),
@@ -1064,75 +1247,151 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         decimal atr)
     {
         decimal buffer = atr * _options.AtrBufferMultiplier;
-        var candidates = new List<StructuralCandidate>();
-        if (trade.Side == OrderSide.Buy)
+        decimal minDistance = atr * _options.MinimumStructuralTrailDistanceAtr;
+        decimal maxDistance = atr * _options.MaximumStructuralTrailDistanceAtr;
+        var scored = new List<(StructuralCandidate Candidate, decimal Score, decimal Distance)>();
+
+        void Consider(decimal level, StopAmendmentReason reason, string source, bool postEntry, decimal quality)
         {
-            candidates.AddRange(analysis.Swings
-                .Where(swing => swing.Type == SwingType.Low &&
-                    swing.Price < trade.CurrentPrice &&
-                    swing.ConfirmedAt <= analysis.AvailableAt)
-                .Select(swing => new StructuralCandidate(
-                    swing.Price,
-                    swing.Price - buffer,
-                    StopAmendmentReason.StructureSwing,
-                    $"confirmed swing low ({swing.PivotTime:O})")));
-            candidates.AddRange(analysis.PriceZones
-                .Where(zone => zone.Type is PriceZoneType.Support or PriceZoneType.Mixed &&
-                    zone.UpperPrice < trade.CurrentPrice)
-                .Select(zone => new StructuralCandidate(
-                    zone.LowerPrice,
-                    zone.LowerPrice - buffer,
-                    StopAmendmentReason.StructureZone,
-                    $"confirmed {zone.Type.ToString().ToLowerInvariant()} zone")));
-            candidates.AddRange(analysis.Channels
-                .Select(channel => new
-                {
-                    Level = channel.LowerLine.PriceAt(analysis.AvailableAt),
-                    channel.Confidence
-                })
-                .Where(item => item.Level < trade.CurrentPrice)
-                .Select(item => new StructuralCandidate(
-                    item.Level,
-                    item.Level - buffer,
-                    StopAmendmentReason.StructureChannel,
-                    $"lower structural channel ({item.Confidence:F0}% confidence)")));
-            return candidates.OrderByDescending(candidate => candidate.Level)
-                .ThenBy(candidate => candidate.Reason)
-                .FirstOrDefault();
+            if (trade.Side == OrderSide.Buy ? level >= trade.CurrentPrice : level <= trade.CurrentPrice)
+                return;
+
+            decimal stopPrice = trade.Side == OrderSide.Buy ? level - buffer : level + buffer;
+            if (!IsBeforeCurrentPrice(trade.Side, stopPrice, trade.CurrentPrice))
+                return;
+
+            decimal distance = Math.Abs(trade.CurrentPrice - level);
+            if (distance < minDistance || distance > maxDistance)
+                return;
+
+            // Prefer post-entry structure, confirmed swings over zones/channels,
+            // stronger quality, and a moderate ~1 ATR distance.
+            decimal distanceScore = 1m - Math.Abs(distance / atr - 1m) / 2m;
+            distanceScore = Math.Clamp(distanceScore, 0m, 1m);
+            decimal typeBonus = reason switch
+            {
+                StopAmendmentReason.StructureSwing => 18m,
+                StopAmendmentReason.StructureZone => 6m,
+                StopAmendmentReason.StructureChannel => 0m,
+                _ => 0m
+            };
+            decimal score =
+                (postEntry || !_options.PreferPostEntryStructure ? 40m : 10m) +
+                typeBonus +
+                quality * 0.30m +
+                distanceScore * 25m;
+
+            scored.Add((
+                new StructuralCandidate(level, stopPrice, reason, source),
+                score,
+                distance));
         }
 
-        candidates.AddRange(analysis.Swings
-            .Where(swing => swing.Type == SwingType.High &&
-                swing.Price > trade.CurrentPrice &&
-                swing.ConfirmedAt <= analysis.AvailableAt)
-            .Select(swing => new StructuralCandidate(
-                swing.Price,
-                swing.Price + buffer,
-                StopAmendmentReason.StructureSwing,
-                $"confirmed swing high ({swing.PivotTime:O})")));
-        candidates.AddRange(analysis.PriceZones
-            .Where(zone => zone.Type is PriceZoneType.Resistance or PriceZoneType.Mixed &&
-                zone.LowerPrice > trade.CurrentPrice)
-            .Select(zone => new StructuralCandidate(
-                zone.UpperPrice,
-                zone.UpperPrice + buffer,
-                StopAmendmentReason.StructureZone,
-                $"confirmed {zone.Type.ToString().ToLowerInvariant()} zone")));
-        candidates.AddRange(analysis.Channels
-            .Select(channel => new
+        if (trade.Side == OrderSide.Buy)
+        {
+            foreach (SwingPoint swing in analysis.Swings.Where(swing =>
+                         swing.Type == SwingType.Low &&
+                         swing.Price < trade.CurrentPrice &&
+                         swing.ConfirmedAt <= analysis.AvailableAt))
             {
-                Level = channel.UpperLine.PriceAt(analysis.AvailableAt),
-                channel.Confidence
-            })
-            .Where(item => item.Level > trade.CurrentPrice)
-            .Select(item => new StructuralCandidate(
-                item.Level,
-                item.Level + buffer,
-                StopAmendmentReason.StructureChannel,
-                $"upper structural channel ({item.Confidence:F0}% confidence)")));
-        return candidates.OrderBy(candidate => candidate.Level)
-            .ThenBy(candidate => candidate.Reason)
-            .FirstOrDefault();
+                // ManagedTradeState has no open time; treat levels beyond the initial stop
+                // as in-trade structure (formed/held after the original risk definition).
+                bool postEntry = swing.Price > trade.InitialStopPrice;
+                decimal quality = Math.Clamp(swing.Strength * 20m, 0m, 100m);
+                Consider(
+                    swing.Price,
+                    StopAmendmentReason.StructureSwing,
+                    $"confirmed swing low ({swing.PivotTime:O})",
+                    postEntry,
+                    quality);
+            }
+
+            foreach (PriceZone zone in analysis.PriceZones.Where(zone =>
+                         (zone.Type is PriceZoneType.Support or PriceZoneType.Mixed) &&
+                         zone.Strength >= _options.MinimumZoneStrengthForManagement &&
+                         zone.UpperPrice < trade.CurrentPrice))
+            {
+                bool postEntry = zone.UpperPrice > trade.InitialStopPrice;
+                Consider(
+                    zone.LowerPrice,
+                    StopAmendmentReason.StructureZone,
+                    $"confirmed {zone.Type.ToString().ToLowerInvariant()} zone",
+                    postEntry,
+                    zone.Strength);
+            }
+
+            foreach (PriceChannel channel in analysis.Channels.Where(channel =>
+                         channel.Confidence >= _options.MinimumChannelConfidenceForManagement))
+            {
+                decimal level = channel.LowerLine.PriceAt(analysis.AvailableAt);
+                if (level >= trade.CurrentPrice)
+                    continue;
+                bool postEntry = level > trade.InitialStopPrice;
+                Consider(
+                    level,
+                    StopAmendmentReason.StructureChannel,
+                    $"lower structural channel ({channel.Confidence:F0}% confidence)",
+                    postEntry,
+                    channel.Confidence);
+            }
+        }
+        else
+        {
+            foreach (SwingPoint swing in analysis.Swings.Where(swing =>
+                         swing.Type == SwingType.High &&
+                         swing.Price > trade.CurrentPrice &&
+                         swing.ConfirmedAt <= analysis.AvailableAt))
+            {
+                bool postEntry = swing.Price < trade.InitialStopPrice;
+                decimal quality = Math.Clamp(swing.Strength * 20m, 0m, 100m);
+                Consider(
+                    swing.Price,
+                    StopAmendmentReason.StructureSwing,
+                    $"confirmed swing high ({swing.PivotTime:O})",
+                    postEntry,
+                    quality);
+            }
+
+            foreach (PriceZone zone in analysis.PriceZones.Where(zone =>
+                         (zone.Type is PriceZoneType.Resistance or PriceZoneType.Mixed) &&
+                         zone.Strength >= _options.MinimumZoneStrengthForManagement &&
+                         zone.LowerPrice > trade.CurrentPrice))
+            {
+                bool postEntry = zone.LowerPrice < trade.InitialStopPrice;
+                Consider(
+                    zone.UpperPrice,
+                    StopAmendmentReason.StructureZone,
+                    $"confirmed {zone.Type.ToString().ToLowerInvariant()} zone",
+                    postEntry,
+                    zone.Strength);
+            }
+
+            foreach (PriceChannel channel in analysis.Channels.Where(channel =>
+                         channel.Confidence >= _options.MinimumChannelConfidenceForManagement))
+            {
+                decimal level = channel.UpperLine.PriceAt(analysis.AvailableAt);
+                if (level <= trade.CurrentPrice)
+                    continue;
+                bool postEntry = level < trade.InitialStopPrice;
+                Consider(
+                    level,
+                    StopAmendmentReason.StructureChannel,
+                    $"upper structural channel ({channel.Confidence:F0}% confidence)",
+                    postEntry,
+                    channel.Confidence);
+            }
+        }
+
+        if (scored.Count == 0)
+            return null;
+
+        // Highest score, then tightest protective stop (highest low / lowest high).
+        return scored
+            .OrderByDescending(item => item.Score)
+            .ThenByDescending(item =>
+                trade.Side == OrderSide.Buy ? item.Candidate.StopPrice : -item.Candidate.StopPrice)
+            .Select(item => item.Candidate)
+            .First();
     }
 
     private static bool IsAdverseBreak(OrderSide side, MarketStructureBreak structureBreak) =>

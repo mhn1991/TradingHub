@@ -1,6 +1,7 @@
 using Brokers.Models;
 using ChartAnnotator.Engine;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 
 namespace Dashboard.Contracts;
 
@@ -102,7 +103,9 @@ public sealed record ReplayPerformanceSummary(
     decimal StartingBalance,
     decimal FinalBalance,
     decimal FinalEquity,
-    decimal TotalCommission);
+    decimal TotalCommission,
+    decimal PeakEquity = 0m,
+    int EquityProtectionActivationCount = 0);
 
 public sealed record BacktestManifest(
     int SchemaVersion,
@@ -137,8 +140,10 @@ public sealed record ReplayFrame(
     IReadOnlyList<PriceChannel> Channels,
     MarketStructureSnapshot MarketStructure,
     PriceActionSnapshot PriceAction,
+    MarketRegimeSnapshot MarketRegime,
     ConfidenceScore Confidence,
-    double AnalysisMicroseconds);
+    double AnalysisMicroseconds,
+    IReadOnlyList<AnchoredValueReference>? ValueReferences = null);
 
 public sealed record ReplayCandle(
     DateTimeOffset OpenTime,
@@ -181,8 +186,10 @@ public static class ReplayContractMapper
             Channels: snapshot.Channels,
             MarketStructure: snapshot.MarketStructure,
             PriceAction: snapshot.PriceAction,
+            MarketRegime: snapshot.MarketRegime,
             Confidence: snapshot.Confidence,
-            AnalysisMicroseconds: analysisMicroseconds);
+            AnalysisMicroseconds: analysisMicroseconds,
+            ValueReferences: snapshot.ValueReferences);
     }
 }
 
@@ -280,6 +287,8 @@ public static class SimulationReplayMapper
             result.StartingBalance,
             result.FinalBalance,
             result.FinalEquity,
-            result.TotalCommission);
+            result.TotalCommission,
+            result.EquityProtectionPeakEquity,
+            result.EquityProtectionActivationCount);
     }
 }

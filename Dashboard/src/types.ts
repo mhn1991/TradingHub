@@ -60,6 +60,7 @@ export interface AnnotationParameters {
 
 
 export interface ReplayTrade {
+  strategyId?: string
   strategyName: string
   setupId: string
   positionId?: string | null
@@ -110,6 +111,13 @@ export interface ReplayTrade {
   exitReason: string
   setupReason: string
   exitReasonText: string | null
+  totalFinancing?: number
+  netProfitAfterFinancing?: number
+  entryRegime?: string
+  currentRegime?: string
+  entryManagementProfileId?: string
+  currentManagementProfileId?: string
+  managementProfileSwitchReason?: string | null
 }
 
 export interface PartialExitRecord {
@@ -176,6 +184,16 @@ export interface ReplayPerformanceSummary {
   finalBalance: number
   finalEquity: number
   totalCommission: number
+  peakEquity: number
+  equityProtectionActivationCount: number
+}
+
+export interface EquityProtectionStatusSnapshot {
+  peakEquity: number
+  drawdownPercent: number
+  currentRiskMultiplier: number
+  activatedTierIds: string[]
+  newEntriesPaused: boolean
 }
 
 export interface StrategyProgressSnapshot {
@@ -192,6 +210,25 @@ export interface StrategyProgressSnapshot {
   lastError?: string | null
   performance?: StrategyRuntimePerformance | null
   openPositionManagement?: OpenPositionManagementSnapshot | null
+  equityProtection?: EquityProtectionStatusSnapshot | null
+  portfolioRisk?: PortfolioRiskStatusSnapshot | null
+}
+
+export interface PortfolioRiskStatusSnapshot {
+  openHeat: number
+  pendingHeat: number
+  totalHeat: number
+  totalHeatPercent: number
+  strategyHeat: number
+  instrumentHeat: number
+  currencyRisk: Record<string, number>
+  clusterHeat: Record<string, number>
+  marginUsed: number
+  reservedMargin: number
+  unallocatedMargin: number
+  accountPeakEquity: number
+  accountProtectedFloor: number
+  accountActivatedTierIds: string[]
 }
 
 export interface OpenPositionManagementSnapshot {
@@ -212,6 +249,18 @@ export interface OpenPositionManagementSnapshot {
   lastManagementAction?: string | null
   lastManagementReason?: string | null
   nextManagementIntervalClose?: string | null
+  entryRegime?: string | null
+  currentRegime?: string | null
+  regimeConfidence?: number | null
+  baseRiskBudget?: number | null
+  finalRiskBudget?: number | null
+  finalRiskMultiplier?: number | null
+  riskMultipliers: Record<string, number>
+  rawQuantity?: number | null
+  allocatedQuantity?: number | null
+  plannedStopRisk?: number | null
+  portfolioReservationId?: string | null
+  correlationClusterId?: string | null
 }
 
 export interface StrategyRuntimePerformance {
@@ -257,6 +306,9 @@ export interface StrategyRuntimePerformance {
   mfeGivebackStopExits: number
   profitFloorExits: number
   maximumGivebackExits: number
+  financing?: number
+  tradesByEntryRegime?: Record<string, number>
+  expectancyByEntryRegime?: Record<string, number>
 }
 
 export interface ImportedDatasetMetadata {
@@ -341,6 +393,7 @@ export interface ReplayFrame {
   channels: PriceChannel[]
   marketStructure?: MarketStructureSnapshot
   priceAction?: PriceActionSnapshot
+  marketRegime?: MarketRegimeSnapshot
   confidence: ConfidenceScore
   analysisMicroseconds: number
 }
@@ -389,6 +442,33 @@ export interface BollingerAnalysisSnapshot {
   isExpansion: boolean
   squeezeReleased: boolean
   sampleCount: number
+}
+
+export type MarketEfficiencyState =
+  | 'Unknown'
+  | 'HighlyChoppy'
+  | 'Choppy'
+  | 'Transitional'
+  | 'Efficient'
+  | 'HighlyEfficient'
+
+export interface EfficiencyAnalysisSnapshot {
+  percentile: number | null
+  direction: MomentumDirection
+  state: MarketEfficiencyState
+  sampleCount: number
+}
+
+export interface DonchianSnapshot {
+  upper: number | null
+  lower: number | null
+  middle: number | null
+  width: number | null
+  widthAtr: number | null
+  closedAbovePreviousUpper: boolean
+  closedBelowPreviousLower: boolean
+  barsSinceUpperBreak: number
+  barsSinceLowerBreak: number
 }
 
 export interface RsiRelationshipSnapshot {
@@ -533,10 +613,13 @@ export interface IndicatorSnapshot {
   bollingerMiddle: number | null
   bollingerUpper: number | null
   bollingerLower: number | null
+  efficiencyRatio: number | null
   atrAnalysis?: AtrAnalysisSnapshot
   rsiAnalysis?: RsiAnalysisSnapshot
   bollingerAnalysis?: BollingerAnalysisSnapshot
   adxAnalysis?: AdxAnalysisSnapshot
+  efficiencyAnalysis?: EfficiencyAnalysisSnapshot
+  donchian?: DonchianSnapshot
 }
 
 export type SwingType = 'High' | 'Low'
@@ -593,6 +676,33 @@ export interface MarketStructureSnapshot {
   strength: number
 }
 
+export type MarketRegimeValue =
+  | 'Unknown'
+  | 'TrendingUp'
+  | 'TrendingDown'
+  | 'Range'
+  | 'Compression'
+  | 'BreakoutExpansionUp'
+  | 'BreakoutExpansionDown'
+  | 'HighVolatilityDisorder'
+  | 'IlliquidUnsafe'
+
+export interface RegimeContribution {
+  rule: string
+  score: number
+  explanation: string
+}
+
+export interface MarketRegimeSnapshot {
+  regime: MarketRegimeValue
+  confidence: number
+  confirmedAt: string
+  ageCandles: number
+  contributions: RegimeContribution[]
+  reasonCode: string
+  isTradeable: boolean
+}
+
 export type ChannelDirection = 'Falling' | 'Sideways' | 'Rising'
 
 export interface PriceChannel {
@@ -628,6 +738,9 @@ export interface ChartLayers {
   zones: boolean
   trendlines: boolean
   channels: boolean
+  donchian: boolean
+  efficiencyRatio: boolean
+  marketRegime: boolean
 }
 
 export type LiveConnectionState =

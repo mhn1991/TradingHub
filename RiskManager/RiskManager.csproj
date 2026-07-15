@@ -10,5 +10,6 @@
   <ItemGroup>
     <ProjectReference Include="../Agent/Agent.csproj" />
     <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
   </ItemGroup>
 </Project>

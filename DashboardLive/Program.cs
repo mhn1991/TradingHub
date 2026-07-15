@@ -67,7 +67,11 @@ builder.Services.AddSingleton<IBacktestApplicationService>(services =>
     services.GetRequiredService<BacktestApplicationService>());
 builder.Services.AddSingleton<SimulationRealtimePublisher>();
 builder.Services.AddHostedService<SimulationRealtimeBridge>();
-builder.Services.AddSignalR();
+builder.Services.AddSignalR().AddJsonProtocol(options =>
+{
+    // Match HTTP JSON so clients receive "WarmingUp" / "Cancelled" instead of 4 / 8.
+    options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 builder.Services.AddProblemDetails();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy
     .SetIsOriginAllowed(origin =>

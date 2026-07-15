@@ -145,9 +145,12 @@ public sealed class ExecutionCoordinatorTests
             Assert.That(request.Side, Is.EqualTo(OrderSide.Sell));
             Assert.That(request.Type, Is.EqualTo(StandardOrderType.Market));
             Assert.That(request.Quantity.Value, Is.EqualTo(2m));
+            Assert.That(request.ReduceOnly, Is.True);
             Assert.That(request.StopLoss, Is.Null);
             Assert.That(request.TakeProfit, Is.Null);
-            Assert.That(broker.CancelledOrderIds, Is.EquivalentTo(new[] { "order" }));
+            // Protective orders stay live until the close fill is confirmed so the
+            // position is never left naked if the close is delayed or rejected.
+            Assert.That(broker.CancelledOrderIds, Is.Empty);
         });
     }
 
@@ -274,13 +277,15 @@ public sealed class ExecutionCoordinatorTests
     }
 
     [TestCase(2, 2, true)]
-    [TestCase(2, 2.0001, false)]
+    [TestCase(2, 3, false)]
     public async Task MaximumPositionBoundary_IsEnforced(
         decimal maximum,
         decimal quantity,
         bool expectedAccepted)
     {
         var broker = new FakeTradingBroker();
+        // Default FixedQuantity sizing rounds to QuantityStep (1). Use whole-unit quantities
+        // so the position-cap check sees the same size the broker would receive.
         var coordinator = new ExecutionCoordinator(
             riskManager: new PreTradeRiskManager(new PreTradeRiskOptions
             {
@@ -310,6 +315,48 @@ public sealed class ExecutionCoordinatorTests
         {
             Assert.That(result.Certainty, Is.EqualTo(ExecutionCertainty.NotSent));
             Assert.That(result.RejectionReason, Does.Contain("below"));
+        });
+    }
+
+    [Test]
+    public async Task RiskBasedSizingFailure_FailsClosedWithoutFixedQuantityFallback()
+    {
+        var broker = new FakeTradingBroker
+        {
+            Accounts =
+            [
+                new AccountSnapshot
+                {
+                    AccountId = "account",
+                    Currency = "EUR",
+                    Balance = 100_000m,
+                    MarginUsed = 0m,
+                    CanTrade = true
+                }
+            ]
+        };
+        var coordinator = new ExecutionCoordinator(
+            positionSizer: new PositionSizer(new PositionSizingOptions
+            {
+                Mode = PositionSizingMode.FixedFractionalRisk,
+                RiskPercentOfEquity = 0.5m
+            }));
+        AgentDecision decision = BuyDecision() with
+        {
+            ReferencePrice = 100m,
+            StopLossPrice = 99m,
+            TakeProfitPrice = 102m,
+            SuggestedQuantity = 10_000m
+        };
+
+        OrderSubmission result = (await coordinator.ProcessAsync(decision, broker))!;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Status, Is.EqualTo(SubmissionStatus.Rejected));
+            Assert.That(result.Certainty, Is.EqualTo(ExecutionCertainty.NotSent));
+            Assert.That(result.RejectionReason, Does.Contain("conversion"));
+            Assert.That(broker.PlacedRequests, Is.Empty);
         });
     }
 

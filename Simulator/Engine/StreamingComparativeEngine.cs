@@ -8,6 +8,7 @@ using Simulator.Abstractions;
 using Simulator.MarketData;
 using Simulator.Models;
 using Simulator.Replay;
+using RiskManager.Calibration;
 
 namespace Simulator.Engine;
 
@@ -28,6 +29,7 @@ public sealed class StreamingComparativeEngineOptions
     public IProgress<BacktestProgress>? Progress { get; init; }
     public Func<SimulationJobStatus, Task>? StatusChanged { get; init; }
     public Func<string, SimulatedTradeRecord, Task>? TradeCompleted { get; init; }
+    public ISetupMetaModel? MetaLabelModel { get; init; }
     public Simulator.Jobs.IAsyncPauseGate? PauseGate { get; init; }
 }
 
@@ -84,9 +86,17 @@ public sealed class StreamingComparativeEngine
         var latestSnapshots = new Dictionary<BarInterval, AnalysisSnapshot>();
 
         var sessions = new List<StrategySimulationSession>(_strategies.Count);
+        SharedPortfolioRuntime? sharedPortfolio = options.Runtime.AccountMode == SimulationAccountMode.SharedPortfolioAccount
+            ? new SharedPortfolioRuntime(
+                options.SimulationOptions,
+                options.Runtime.PortfolioRisk,
+                options.Runtime.PositionSizing,
+                options.Runtime.AdaptiveRisk,
+                options.Runtime.SafetyOptions)
+            : null;
         foreach ((string id, ITradingAgent agent) in _strategies)
         {
-            sessions.Add(StrategySimulationSession.Create(
+            StrategySimulationSession session = StrategySimulationSession.Create(
                 id,
                 agent,
                 options.SimulationOptions,
@@ -95,7 +105,18 @@ public sealed class StreamingComparativeEngine
                 annotationOptions: options.AnnotationOptions,
                 positionManagementOptions: options.Runtime.GetPositionManagement(id),
                 managementInterval: options.Runtime.ResolveManagementInterval(id),
-                positionSizingOptions: options.Runtime.PositionSizing));
+                positionSizingOptions: options.Runtime.PositionSizing,
+                adaptiveRiskOptions: options.Runtime.AdaptiveRisk,
+                tradingConditionOptions: options.Runtime.TradingConditions,
+                regimeManagementOptions: options.Runtime.RegimeManagement,
+                setupCalibrationOptions: options.Runtime.SetupCalibration,
+                setupCalibrationArtifact: options.Runtime.SetupCalibrationArtifact,
+                metaModel: options.MetaLabelModel,
+                managementCalibrationOptions: options.Runtime.ManagementCalibration,
+                managementCalibrationArtifact: options.Runtime.ManagementCalibrationArtifact,
+                executionDecorator: sharedPortfolio is null ? null : sharedPortfolio.Decorate);
+            sessions.Add(session);
+            sharedPortfolio?.Register(session);
         }
 
         // Persistent workers: one task/thread per strategy for the whole simulation.
@@ -119,7 +140,7 @@ public sealed class StreamingComparativeEngine
         await replayWriter.WriteManifestAsync(new SimulationManifest
         {
             SimulationId = options.SimulationId,
-            SchemaVersion = 1,
+            SchemaVersion = 2,
             Instrument = options.Instrument.Value,
             From = options.EvaluationFrom,
             To = options.EvaluationTo,
@@ -155,7 +176,9 @@ public sealed class StreamingComparativeEngine
             SlippageBasisPoints = options.SimulationOptions.SlippageBasisPoints,
             CommissionRate = options.SimulationOptions.CommissionRate,
             AmbiguityPolicy = options.Runtime.AmbiguousIntrabarPolicy.ToString(),
-            FillModel = FillModel.MidpointPlusConfiguredSpread.ToString(),
+            FillModel = options.Runtime.Execution.FillModel.ToString(),
+            AccountMode = options.Runtime.AccountMode.ToString(),
+            RuntimeOptions = options.Runtime,
             CreatedAt = DateTimeOffset.UtcNow,
             Status = "Running"
         }, cancellationToken).ConfigureAwait(false);
@@ -337,14 +360,55 @@ public sealed class StreamingComparativeEngine
                 StrategyFrameResult[][] batchResults;
                 try
                 {
-                    batchResults = options.Runtime.StrategyExecutionMode switch
+                    if (sharedPortfolio is null)
                     {
-                        StrategyExecutionMode.ParallelWorkers =>
-                            await ProcessParallelWorkersBatchAsync(activeHosts, executionBatch, cancellationToken)
-                                .ConfigureAwait(false),
-                        _ => await ProcessSequentialBatchAsync(activeSessions, executionBatch, cancellationToken)
-                            .ConfigureAwait(false)
-                    };
+                        batchResults = options.Runtime.StrategyExecutionMode switch
+                        {
+                            StrategyExecutionMode.ParallelWorkers =>
+                                await ProcessParallelWorkersBatchAsync(activeHosts, executionBatch, cancellationToken)
+                                    .ConfigureAwait(false),
+                            _ => await ProcessSequentialBatchAsync(activeSessions, executionBatch, cancellationToken)
+                                .ConfigureAwait(false)
+                        };
+                    }
+                    else
+                    {
+                        // Shared admission is a per-execution-frame barrier. Processing
+                        // a whole analysis-base bucket before flushing would let later
+                        // candles run before orders from the first candle were ranked.
+                        batchResults = new StrategyFrameResult[executionBatch.Length][];
+                        for (int batchIndex = 0; batchIndex < executionBatch.Length; batchIndex++)
+                        {
+                            MarketFrame admissionFrame = executionBatch[batchIndex];
+                            StrategyFrameResult[][] oneFrameResults = options.Runtime.StrategyExecutionMode switch
+                            {
+                                StrategyExecutionMode.ParallelWorkers =>
+                                    await ProcessParallelWorkersBatchAsync(activeHosts, [admissionFrame], cancellationToken)
+                                        .ConfigureAwait(false),
+                                _ => await ProcessSequentialBatchAsync(activeSessions, [admissionFrame], cancellationToken)
+                                    .ConfigureAwait(false)
+                            };
+                            StrategyFrameResult[] frameResults = oneFrameResults[0];
+                            IReadOnlyList<StrategyReplayEvent> portfolioEvents = await sharedPortfolio
+                                .FlushAsync(admissionFrame.Sequence, admissionFrame.AvailableAt, cancellationToken)
+                                .ConfigureAwait(false);
+                            for (int strategyIndex = 0; strategyIndex < frameResults.Length; strategyIndex++)
+                            {
+                                StrategyFrameResult result = frameResults[strategyIndex];
+                                StrategyReplayEvent[] additions = portfolioEvents
+                                    .Where(item => item.StrategyId == result.StrategyId)
+                                    .ToArray();
+                                if (additions.Length > 0)
+                                {
+                                    frameResults[strategyIndex] = result with
+                                    {
+                                        Events = result.Events.Concat(additions).ToArray()
+                                    };
+                                }
+                            }
+                            batchResults[batchIndex] = frameResults;
+                        }
+                    }
                 }
                 catch (Exception exception) when (
                     options.Runtime.StrategyFailurePolicy == StrategyFailurePolicy.StopFailedStrategyOnly)
@@ -439,7 +503,7 @@ public sealed class StreamingComparativeEngine
             await replayWriter.WriteManifestAsync(new SimulationManifest
             {
                 SimulationId = options.SimulationId,
-                SchemaVersion = 1,
+                SchemaVersion = 2,
                 Instrument = options.Instrument.Value,
                 From = options.EvaluationFrom,
                 To = options.EvaluationTo,
@@ -476,7 +540,10 @@ public sealed class StreamingComparativeEngine
                 SlippageBasisPoints = options.SimulationOptions.SlippageBasisPoints,
                 CommissionRate = options.SimulationOptions.CommissionRate,
                 AmbiguityPolicy = options.Runtime.AmbiguousIntrabarPolicy.ToString(),
-                FillModel = FillModel.MidpointPlusConfiguredSpread.ToString(),
+                FillModel = options.Runtime.Execution.FillModel.ToString(),
+                AccountMode = options.Runtime.AccountMode.ToString(),
+                RuntimeOptions = options.Runtime,
+                PortfolioPerformance = sharedPortfolio?.Performance,
                 CreatedAt = DateTimeOffset.UtcNow,
                 Status = "Completed"
             }, cancellationToken).ConfigureAwait(false);
@@ -495,9 +562,14 @@ public sealed class StreamingComparativeEngine
                 OutputDirectory = options.OutputDirectory,
                 TotalDuration = stopwatch.Elapsed,
                 ProcessedBaseCandles = processed,
-                FillModel = options.Runtime.UseHistoricalBidAsk
-                    ? FillModel.HistoricalBidAsk
-                    : FillModel.MidpointPlusConfiguredSpread
+                PortfolioPerformance = sharedPortfolio?.Performance,
+                FillModel = options.Runtime.Execution.FillModel switch
+                {
+                    Simulator.Execution.SimulationFillModel.VariableSyntheticSpread => FillModel.VariableSyntheticSpread,
+                    Simulator.Execution.SimulationFillModel.StressExecution => FillModel.StressExecution,
+                    Simulator.Execution.SimulationFillModel.HistoricalBidAsk => FillModel.HistoricalBidAsk,
+                    _ => FillModel.MidpointPlusConfiguredSpread
+                }
             };
         }
         finally

@@ -16,13 +16,17 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
     private readonly BarInterval _trendInterval;
     private readonly decimal _quantity;
     private readonly decimal _minimumConfidence;
+    private readonly RsiBollingerSignalOptions _indicatorOptions;
+    private readonly ZoneVolumeSignalOptions _zoneVolumeOptions;
 
     public RuleBasedMultiTimeframeAgent(
         BarInterval entryInterval,
         BarInterval confirmationInterval,
         BarInterval trendInterval,
         decimal quantity,
-        decimal minimumConfidence = 60m)
+        decimal minimumConfidence = 60m,
+        RsiBollingerSignalOptions? indicatorOptions = null,
+        ZoneVolumeSignalOptions? zoneVolumeOptions = null)
     {
         if (quantity <= 0m)
         {
@@ -34,6 +38,16 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
             !trendInterval.IsValid)
         {
             throw new ArgumentException("Every strategy interval must be valid.");
+        }
+
+        if (entryInterval == confirmationInterval ||
+            entryInterval == trendInterval ||
+            confirmationInterval == trendInterval ||
+            BarIntervalParser.CompareDuration(entryInterval, confirmationInterval) >= 0 ||
+            BarIntervalParser.CompareDuration(confirmationInterval, trendInterval) >= 0)
+        {
+            throw new ArgumentException(
+                "Entry, confirmation, and trend intervals must be unique and ordered from finest to coarsest.");
         }
 
         if (minimumConfidence is < 0m or > 100m)
@@ -48,6 +62,10 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
         _trendInterval = trendInterval;
         _quantity = quantity;
         _minimumConfidence = minimumConfidence;
+        _indicatorOptions = indicatorOptions ?? new RsiBollingerSignalOptions();
+        _indicatorOptions.Validate();
+        _zoneVolumeOptions = zoneVolumeOptions ?? new ZoneVolumeSignalOptions();
+        _zoneVolumeOptions.Validate();
         RequiredIntervals = new HashSet<BarInterval>
         {
             entryInterval,
@@ -71,6 +89,14 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
         AnalysisSnapshot confirmation = context.Analysis.Get(_confirmationInterval);
         AnalysisSnapshot trend = context.Analysis.Get(_trendInterval);
 
+        if (context.Positions.Any(position =>
+                position.Instrument == context.Instrument && position.Quantity > 0m))
+        {
+            return Task.FromResult(Observe(
+                context,
+                "An open position already exists; bracket orders own its exit."));
+        }
+
         if (!IsReady(entry) || !IsReady(confirmation) || !IsReady(trend))
         {
             return Task.FromResult(Observe(context, "Indicators are still warming up."));
@@ -81,13 +107,6 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
             confirmation.Confidence.Total * 0.30m +
             trend.Confidence.Total * 0.25m;
 
-        if (combinedConfidence < _minimumConfidence)
-        {
-            return Task.FromResult(Observe(
-                context,
-                $"Combined confidence {combinedConfidence:F1} is below {_minimumConfidence:F1}."));
-        }
-
         bool bullishTrend = IsBullish(trend);
         bool bearishTrend = IsBearish(trend);
         bool bullishEntry = IsBullish(entry) && entry.Indicators.Rsi is >= 50m and < 75m;
@@ -95,22 +114,107 @@ public sealed class RuleBasedMultiTimeframeAgent : ITradingAgent
 
         if (bullishTrend && bullishEntry && IsBullish(confirmation))
         {
+            RsiBollingerSignalAssessment indicators = RsiBollingerSignalPolicy.Evaluate(
+                entry,
+                PriceActionDirection.Bullish,
+                _indicatorOptions);
+            if (indicators.IsVetoed)
+            {
+                return Task.FromResult(Observe(
+                    context,
+                    $"Bullish entry was vetoed: {indicators.Explanation}"));
+            }
+            ZoneVolumeSignalAssessment zoneVolume = ZoneVolumeSignalPolicy.Evaluate(
+                entry,
+                PriceActionDirection.Bullish,
+                indicators,
+                _zoneVolumeOptions);
+            if (zoneVolume.IsVetoed)
+            {
+                return Task.FromResult(Observe(
+                    context,
+                    $"Bullish entry was vetoed: {zoneVolume.Explanation}"));
+            }
+
+            decimal adjustedConfidence = Math.Clamp(
+                combinedConfidence +
+                indicators.ConfidenceAdjustment +
+                zoneVolume.ConfidenceAdjustment,
+                0m,
+                100m);
+            if (adjustedConfidence < _minimumConfidence)
+            {
+                return Task.FromResult(Observe(
+                    context,
+                    $"Bullish confidence {adjustedConfidence:F1} is below " +
+                    $"{_minimumConfidence:F1}; {indicators.Explanation} " +
+                    zoneVolume.Explanation));
+            }
+
             return Task.FromResult(CreateTrade(
                 context,
                 AgentAction.Buy,
-                combinedConfidence,
+                adjustedConfidence,
                 entry.Indicators.Atr,
-                "Trend, confirmation and entry timeframes are bullish."));
+                "Trend, confirmation and entry timeframes are bullish. " +
+                $"Indicator context: {indicators.Explanation} " +
+                $"Structure/volume context: {zoneVolume.Explanation}"));
         }
 
         if (bearishTrend && bearishEntry && IsBearish(confirmation))
         {
+            RsiBollingerSignalAssessment indicators = RsiBollingerSignalPolicy.Evaluate(
+                entry,
+                PriceActionDirection.Bearish,
+                _indicatorOptions);
+            if (indicators.IsVetoed)
+            {
+                return Task.FromResult(Observe(
+                    context,
+                    $"Bearish entry was vetoed: {indicators.Explanation}"));
+            }
+            ZoneVolumeSignalAssessment zoneVolume = ZoneVolumeSignalPolicy.Evaluate(
+                entry,
+                PriceActionDirection.Bearish,
+                indicators,
+                _zoneVolumeOptions);
+            if (zoneVolume.IsVetoed)
+            {
+                return Task.FromResult(Observe(
+                    context,
+                    $"Bearish entry was vetoed: {zoneVolume.Explanation}"));
+            }
+
+            decimal adjustedConfidence = Math.Clamp(
+                combinedConfidence +
+                indicators.ConfidenceAdjustment +
+                zoneVolume.ConfidenceAdjustment,
+                0m,
+                100m);
+            if (adjustedConfidence < _minimumConfidence)
+            {
+                return Task.FromResult(Observe(
+                    context,
+                    $"Bearish confidence {adjustedConfidence:F1} is below " +
+                    $"{_minimumConfidence:F1}; {indicators.Explanation} " +
+                    zoneVolume.Explanation));
+            }
+
             return Task.FromResult(CreateTrade(
                 context,
                 AgentAction.Sell,
-                combinedConfidence,
+                adjustedConfidence,
                 entry.Indicators.Atr,
-                "Trend, confirmation and entry timeframes are bearish."));
+                "Trend, confirmation and entry timeframes are bearish. " +
+                $"Indicator context: {indicators.Explanation} " +
+                $"Structure/volume context: {zoneVolume.Explanation}"));
+        }
+
+        if (combinedConfidence < _minimumConfidence)
+        {
+            return Task.FromResult(Observe(
+                context,
+                $"Combined confidence {combinedConfidence:F1} is below {_minimumConfidence:F1}."));
         }
 
         return Task.FromResult(Observe(context, "The timeframes are not aligned."));

@@ -1,5 +1,8 @@
 using Simulator.Jobs;
 using Simulator.Models;
+using Brokers.Models;
+using RiskManager.Conditions;
+using Simulator.Financing;
 
 namespace Simulator.Tests;
 
@@ -169,6 +172,71 @@ public sealed class FileSimulationJobRepositoryCompatibilityTests
                 Assert.That(loaded, Is.Not.Null);
                 Assert.That(loaded!.Id, Is.EqualTo(valid.Id));
                 Assert.That(repository.LastRecoveryReport.QuarantinedFiles, Is.EqualTo(1));
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task CurrentSchema_RoundTripsConstructibleQuantitativeConfigurationCollections()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            $"tradinghub-current-jobs-{Guid.NewGuid():N}");
+        var repository = new FileSimulationJobRepository(directory);
+        Guid id = Guid.NewGuid();
+        DateTimeOffset now = new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero);
+        SimulationJobSnapshot snapshot = CreateQueuedSnapshot(id) with
+        {
+            Request = new BacktestRequest
+            {
+                Instrument = new InstrumentKey("FX:GBP/USD"),
+                From = now.AddDays(-2),
+                To = now,
+                Runtime = new BacktestRuntimeOptions
+                {
+                    TradingConditions = new TradingConditionOptions
+                    {
+                        Enabled = true,
+                        AllowedSessions = [TradingSession.London, TradingSession.LondonNewYorkOverlap],
+                        InstrumentAllowedSessions = new Dictionary<string, IReadOnlyList<TradingSession>>
+                        {
+                            ["FX:GBP/USD"] = [TradingSession.London]
+                        }
+                    },
+                    Financing = new FinancingOptions
+                    {
+                        Enabled = true,
+                        InstrumentRates = new Dictionary<string, FinancingRate>
+                        {
+                            ["FX:GBP/USD"] = new() { LongAnnualPercent = -2m, ShortAnnualPercent = 1m }
+                        },
+                        Holidays = [new DateOnly(2026, 12, 25)]
+                    }
+                }
+            }
+        };
+
+        try
+        {
+            await repository.SaveAsync(snapshot);
+            SimulationJobSnapshot? loaded = await repository.GetAsync(id);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(loaded, Is.Not.Null);
+                Assert.That(loaded!.Request!.Runtime.TradingConditions.AllowedSessions,
+                    Is.EqualTo(new[] { TradingSession.London, TradingSession.LondonNewYorkOverlap }));
+                Assert.That(loaded.Request.Runtime.TradingConditions
+                    .InstrumentAllowedSessions["FX:GBP/USD"],
+                    Is.EqualTo(new[] { TradingSession.London }));
+                Assert.That(loaded.Request.Runtime.Financing.Holidays,
+                    Is.EqualTo(new[] { new DateOnly(2026, 12, 25) }));
+                Assert.That(Directory.EnumerateFiles(Path.Combine(directory, "quarantine"), "*.json"), Is.Empty);
             });
         }
         finally

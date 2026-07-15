@@ -20,11 +20,7 @@ public sealed record SimulationTimeframeOptions
         IReadOnlyList<BarInterval>? analysisIntervals = null)
     {
         IReadOnlyList<BarInterval> analysis = analysisIntervals ??
-        [
-            BarInterval.Minutes(5),
-            BarInterval.Minutes(15),
-            BarInterval.Hours(1)
-        ];
+            RecommendedSimulationDefaults.AnalysisIntervals;
 
         return mode switch
         {

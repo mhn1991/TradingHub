@@ -159,6 +159,28 @@ public sealed class PriceActionAnalyzer
                 $"efficiency {latestLeg.EfficiencyRatio:F2}."));
         }
 
+        // MinimumTriggerConfidence was previously validated but had no effect. Keep
+        // non-trigger context such as BOS and measured legs, while preventing weak
+        // rejection/displacement/sweep/CHOCH events from arming entries or composites.
+        PriceActionEvent[] weakTriggers = events
+            .Where(item => IsEntryTrigger(item.Type) &&
+                item.Confidence < _options.MinimumTriggerConfidence)
+            .ToArray();
+        foreach (PriceActionEvent weak in weakTriggers)
+        {
+            AddRejected(
+                diagnostics,
+                weak.Type.ToString(),
+                "TriggerConfidenceBelowMinimum",
+                $"Trigger confidence {weak.Confidence:F1} is below " +
+                $"{_options.MinimumTriggerConfidence:F1}.");
+        }
+        if (weakTriggers.Length > 0)
+        {
+            var rejectedIds = weakTriggers.Select(item => item.EventId).ToHashSet(StringComparer.Ordinal);
+            events.RemoveAll(item => rejectedIds.Contains(item.EventId));
+        }
+
         decimal bullish = events.Where(item => item.Direction == PriceActionDirection.Bullish)
             .Sum(ScoreEvent);
         decimal bearish = events.Where(item => item.Direction == PriceActionDirection.Bearish)
@@ -870,6 +892,20 @@ public sealed class PriceActionAnalyzer
         };
         return item.Confidence * weight;
     }
+
+    private static bool IsEntryTrigger(PriceActionEventType type) => type is
+        PriceActionEventType.BullishRetestHeld or
+        PriceActionEventType.BearishRetestHeld or
+        PriceActionEventType.BullishRejection or
+        PriceActionEventType.BearishRejection or
+        PriceActionEventType.BullishDisplacement or
+        PriceActionEventType.BearishDisplacement or
+        PriceActionEventType.BullishCompressionBreakout or
+        PriceActionEventType.BearishCompressionBreakout or
+        PriceActionEventType.SellSideLiquiditySweep or
+        PriceActionEventType.BuySideLiquiditySweep or
+        PriceActionEventType.BullishChangeOfCharacter or
+        PriceActionEventType.BearishChangeOfCharacter;
 
     private static BreakRetestSnapshot ToSnapshot(ActiveRetest? state) => state is null
         ? BreakRetestSnapshot.Empty

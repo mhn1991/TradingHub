@@ -2,6 +2,7 @@ using Agent.Abstractions;
 using Agent.Models;
 using Brokers.Models;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 
 namespace Agent.Strategies;
 
@@ -47,13 +48,56 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
     public IReadOnlySet<BarInterval> RequiredIntervals { get; }
     public BarInterval TriggerInterval => Options.EntryInterval;
 
-    public Task<AgentDecision> EvaluateAsync(
+    public async Task<AgentDecision> EvaluateAsync(
         AgentMarketContext context,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
 
+        MarketRegimeSnapshot regime = context.Analysis.Get(Options.EffectiveRegimeInterval).MarketRegime;
+        RegimeGateResult regimeGate = RegimeRoutingPolicy.Evaluate(regime, Options.MarketRegime);
+        bool hasOpenPosition = context.Positions.Any(item => item.Instrument == context.Instrument);
+
+        AgentDecision decision;
+        if (!hasOpenPosition && regimeGate.RoutingEnabled && !regimeGate.AllowNewEntries)
+        {
+            decision = Observe(context, regimeGate.Explanation) with { ReasonCode = regimeGate.ReasonCode };
+        }
+        else
+        {
+            decision = await EvaluateCoreAsync(context, cancellationToken).ConfigureAwait(false);
+            if (regimeGate.RoutingEnabled && decision.Action is AgentAction.Buy or AgentAction.Sell)
+            {
+                decision = decision with
+                {
+                    Confidence = Math.Clamp(
+                        decision.Confidence + regimeGate.Policy.MinimumConfidenceAdjustment,
+                        0m,
+                        100m)
+                };
+            }
+        }
+
+        return regimeGate.RoutingEnabled
+            ? decision with
+            {
+                RegimeLabel = regime.Regime,
+                RegimeConfidence = regime.Confidence,
+                RegimePolicyId = regimeGate.Policy.Regime.ToString(),
+                RegimeEntryProfileId = regimeGate.Policy.EntryProfileId,
+                RegimeManagementProfileId = regimeGate.Policy.ManagementProfileId,
+                RegimeRiskMultiplier = regimeGate.Policy.RiskMultiplier,
+                AtrPercentile = context.Analysis.Get(Options.EntryInterval).Indicators.AtrAnalysis.Percentile,
+                ReasonCode = decision.ReasonCode ?? regimeGate.ReasonCode
+            }
+            : decision;
+    }
+
+    private Task<AgentDecision> EvaluateCoreAsync(
+        AgentMarketContext context,
+        CancellationToken cancellationToken)
+    {
         AnalysisSnapshot trend = context.Analysis.Get(Options.TrendInterval);
         AnalysisSnapshot confirmation = context.Analysis.Get(Options.ConfirmationInterval);
         AnalysisSnapshot entry = context.Analysis.Get(Options.EntryInterval);
@@ -123,7 +167,10 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                     {
                         LastTrendAt = trend.AvailableAt,
                         ExpiresAt = state.Stage == SetupStage.WaitingForConfirmation
-                            ? Options.TrendInterval.AddTo(trend.AvailableAt)
+                            ? AddBars(
+                                trend.AvailableAt,
+                                Options.TrendInterval,
+                                Options.MaximumTrendConfirmationBars)
                             : state.ExpiresAt
                     };
                     _states[context.Instrument] = state;
@@ -262,12 +309,9 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             }
         }
 
-        SetupSide? entrySide = DetectSide(entry, Options.MinimumEntryConfidence);
         bool entryBelongsToConfirmation = state.LastConfirmationAt is DateTimeOffset confirmedAt &&
             entry.AvailableAt >= confirmedAt;
-        if (state.Stage != SetupStage.WaitingForEntry ||
-            !entryBelongsToConfirmation ||
-            entrySide != state.Side)
+        if (state.Stage != SetupStage.WaitingForEntry || !entryBelongsToConfirmation)
         {
             return Task.FromResult(Observe(
                 context,
@@ -286,10 +330,17 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         decimal opposingScore = opposingPriceAction == PriceActionDirection.Bullish
             ? entry.PriceAction.BullishScore
             : entry.PriceAction.BearishScore;
+        decimal alignedPaScore = expectedPriceAction == PriceActionDirection.Bullish
+            ? entry.PriceAction.BullishScore
+            : entry.PriceAction.BearishScore;
+
+        // Only reject when opposing evidence is both above the confidence floor and
+        // meaningfully stronger than aligned evidence (avoids vetoing weak opposing noise).
         if (Options.PriceActionConfirmation != PriceActionConfirmationMode.Disabled &&
             Options.RejectStrongOpposingPriceAction &&
             entry.PriceAction.Bias == opposingPriceAction &&
-            opposingScore >= Options.MinimumPriceActionConfidence)
+            opposingScore >= Options.MinimumPriceActionConfidence &&
+            opposingScore >= alignedPaScore + 10m)
         {
             return Task.FromResult(Observe(
                 context,
@@ -301,21 +352,108 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             });
         }
 
-        if (Options.PriceActionConfirmation == PriceActionConfirmationMode.Required &&
-            !entry.PriceAction.HasConfirmedTrigger(
-                expectedPriceAction,
-                Options.MinimumPriceActionConfidence))
+        IReadOnlyCollection<PriceActionSetupType> allowedSetups =
+            Options.AllowedPriceActionSetups.Count == 0
+                ? MultiTimeframePriceActionPolicy.AllCoreSetups
+                : Options.AllowedPriceActionSetups;
+
+        // Align MTF gate confidence floor with strategy PA confidence when possible.
+        MultiTimeframePriceActionOptions mtfOptions = Options.MultiTimeframePriceAction with
         {
-            string diagnostic = entry.PriceAction.Diagnostics
-                .Where(item => !item.Accepted)
-                .Select(item => item.ReasonCode)
-                .FirstOrDefault() ?? "NoConfirmedPriceActionTrigger";
+            MinimumLtfSetupConfidence = Math.Max(
+                Options.MultiTimeframePriceAction.MinimumLtfSetupConfidence,
+                Options.MinimumPriceActionConfidence),
+            MinimumHtfSetupConfidence = Math.Max(
+                Options.MultiTimeframePriceAction.MinimumHtfSetupConfidence,
+                Options.MinimumPriceActionConfidence * 0.9m)
+        };
+
+        PriceActionGateResult paGate = MultiTimeframePriceActionPolicy.EvaluateEntry(
+            trend,
+            entry,
+            expectedPriceAction,
+            Options.PriceActionConfirmation,
+            mtfOptions,
+            allowedSetups);
+
+        if (!paGate.Allowed)
+        {
             return Task.FromResult(Observe(
                 context,
-                $"Scoped {state.Side} setup is waiting for a confirmed {Options.EntryInterval} " +
-                $"price-action trigger ({diagnostic}).") with
+                paGate.Explanation) with
             {
-                ReasonCode = diagnostic
+                ReasonCode = paGate.ReasonCode,
+                PriceActionConfidence = paGate.TriggeredSetup?.Confidence
+            });
+        }
+
+        RsiBollingerSignalAssessment indicatorGate =
+            RsiBollingerSignalPolicy.Evaluate(
+                entry,
+                expectedPriceAction,
+                Options.RsiBollingerSignals);
+        if (indicatorGate.IsVetoed)
+        {
+            return Task.FromResult(Observe(
+                context,
+                $"The {Options.EntryInterval} RSI/Bollinger context vetoed the scoped " +
+                $"{state.Side} entry: {indicatorGate.Explanation}") with
+            {
+                ReasonCode = indicatorGate.VetoReasonCode
+            });
+        }
+        ZoneVolumeSignalAssessment zoneVolumeGate = ZoneVolumeSignalPolicy.Evaluate(
+            entry,
+            expectedPriceAction,
+            indicatorGate,
+            Options.ZoneVolumeSignals);
+
+        // Entry trigger: classic structure, same-direction PA, or a directionally
+        // confirmed RSI relationship / Bollinger squeeze release.
+        SetupSide? entrySide = DetectSide(entry, Options.MinimumEntryConfidence);
+        bool structuralEntry = entrySide == state.Side;
+        bool priceActionEntry =
+            paGate.TriggeredSetup is not null ||
+            entry.PriceAction.HasTriggeredSetup(
+                expectedPriceAction,
+                Options.MinimumPriceActionConfidence,
+                allowedSetups) ||
+            entry.PriceAction.HasConfirmedTrigger(
+                expectedPriceAction,
+                Options.MinimumPriceActionConfidence) ||
+            entry.PriceAction.Bias == expectedPriceAction &&
+            alignedPaScore >= Options.MinimumPriceActionConfidence;
+        bool indicatorEntry = indicatorGate.HasEntryTrigger ||
+            zoneVolumeGate.HasConfluenceTrigger;
+
+        // A nearby barrier is already handled more precisely by the progressive
+        // strategy's stop/target and minimum-R validation.  It should veto only an
+        // entry that relies on indicator confluence alone; otherwise it would hide
+        // the structural reward decision and double-count the same zone.  An
+        // opposing participation spike remains a universal entry veto.
+        bool zoneVolumeVetoApplies = zoneVolumeGate.IsVetoed &&
+            (zoneVolumeGate.VetoReasonCode == "OpposingVolumeSpike" ||
+             !structuralEntry && !priceActionEntry);
+        if (zoneVolumeVetoApplies)
+        {
+            return Task.FromResult(Observe(
+                context,
+                $"The {Options.EntryInterval} structure/volume context vetoed the scoped " +
+                $"{state.Side} entry: {zoneVolumeGate.Explanation}") with
+            {
+                ReasonCode = zoneVolumeGate.VetoReasonCode
+            });
+        }
+
+        if (!structuralEntry && !priceActionEntry && !indicatorEntry)
+        {
+            return Task.FromResult(Observe(
+                context,
+                $"Scoped {state.Side} setup is waiting for the {Options.EntryInterval} entry trigger " +
+                $"(structure, price action, or aligned indicator/zone/volume confluence). " +
+                $"{indicatorGate.Explanation} {zoneVolumeGate.Explanation}") with
+            {
+                ReasonCode = "EntryTriggerNotReady"
             });
         }
 
@@ -324,36 +462,99 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             state,
             trend,
             confirmation,
-            entry);
+            entry,
+            paGate.TriggeredSetup);
         if (decision.Action is AgentAction.Buy or AgentAction.Sell)
         {
-            PriceActionEvent? trigger = entry.PriceAction.Events
-                .Where(item => item.Direction == expectedPriceAction)
-                .OrderByDescending(item => item.Confidence)
-                .FirstOrDefault();
-            if (trigger is not null)
+            // Prefer composite setup annotation for order lineage; fall back to atomic event.
+            if (paGate.TriggeredSetup is PriceActionSetup triggeredSetup)
             {
                 decision = decision with
                 {
-                    PriceActionTrigger = trigger.Type,
-                    PriceActionConfidence = trigger.Confidence,
-                    ReasonCode = trigger.ReasonCode
+                    PriceActionSetupType = triggeredSetup.Type,
+                    PriceActionSetupId = triggeredSetup.SetupId,
+                    PriceActionSetupReferenceLevel =
+                        triggeredSetup.ReferenceLevel ?? triggeredSetup.EntryReference,
+                    PriceActionConfidence = triggeredSetup.Confidence,
+                    ReasonCode = triggeredSetup.ReasonCode,
+                    Confidence = Math.Clamp(decision.Confidence + paGate.ConfidenceBoost, 0m, 100m),
+                    Reason = decision.Reason +
+                        $" PA setup: {triggeredSetup.Type} ({triggeredSetup.Phase}) @ " +
+                        $"{triggeredSetup.ReferenceLevel?.ToString("F5") ?? "n/a"};" +
+                        $" HTF context: {paGate.Context.ContextReason ?? "n/a"}."
+                };
+            }
+            else
+            {
+                PriceActionEvent? trigger = entry.PriceAction.Events
+                    .Where(item => item.Direction == expectedPriceAction)
+                    .OrderByDescending(item => item.Confidence)
+                    .FirstOrDefault();
+                if (trigger is not null)
+                {
+                    decision = decision with
+                    {
+                        PriceActionTrigger = trigger.Type,
+                        PriceActionConfidence = trigger.Confidence,
+                        ReasonCode = trigger.ReasonCode,
+                        Confidence = Math.Clamp(decision.Confidence + paGate.ConfidenceBoost, 0m, 100m)
+                    };
+                }
+                else if (paGate.ConfidenceBoost > 0m)
+                {
+                    decision = decision with
+                    {
+                        Confidence = Math.Clamp(decision.Confidence + paGate.ConfidenceBoost, 0m, 100m)
+                    };
+                }
+            }
+
+            // Map atomic trigger type when setup has a clear atomic source.
+            if (decision.PriceActionTrigger is null &&
+                paGate.TriggeredSetup is not null)
+            {
+                decision = decision with
+                {
+                    PriceActionTrigger = MapSetupToEventType(paGate.TriggeredSetup.Type)
                 };
             }
 
             decision = decision with
             {
+                Confidence = Math.Clamp(
+                    decision.Confidence +
+                    indicatorGate.ConfidenceAdjustment +
+                    zoneVolumeGate.ConfidenceAdjustment,
+                    0m,
+                    100m),
+                ReasonCode = decision.ReasonCode ??
+                    (indicatorEntry ? "RsiBollingerTrigger" : null),
                 Reason = decision.Reason +
                     $" MTF evidence: secondary {secondaryAssessment.Aligned}/" +
                     $"{secondaryAssessment.Required}, setup {setupAssessment.Aligned}/" +
                     $"{setupAssessment.Required}, confirmation {confirmationAssessment.Aligned}/" +
-                    $"{confirmationAssessment.Required}."
+                    $"{confirmationAssessment.Required}. Indicator context: " +
+                    $"{indicatorGate.Explanation} Structure/volume context: " +
+                    zoneVolumeGate.Explanation
             };
             _states.Remove(context.Instrument);
         }
 
         return Task.FromResult(decision);
     }
+
+    private static PriceActionEventType? MapSetupToEventType(PriceActionSetupType type) => type switch
+    {
+        PriceActionSetupType.BullishBreakRetestHold or
+            PriceActionSetupType.BullishChoChRetestHold => PriceActionEventType.BullishRetestHeld,
+        PriceActionSetupType.BearishBreakRetestHold or
+            PriceActionSetupType.BearishChoChRetestHold => PriceActionEventType.BearishRetestHeld,
+        PriceActionSetupType.BullishSweepDisplacement => PriceActionEventType.BullishDisplacement,
+        PriceActionSetupType.BearishSweepDisplacement => PriceActionEventType.BearishDisplacement,
+        PriceActionSetupType.BullishSweepChoCh => PriceActionEventType.BullishChangeOfCharacter,
+        PriceActionSetupType.BearishSweepChoCh => PriceActionEventType.BearishChangeOfCharacter,
+        _ => null
+    };
 
     private AgentDecision? HandleEvidenceFailure(
         AgentMarketContext context,
@@ -416,9 +617,11 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                     : latestAligned;
             }
 
-            if (HasOpposingBreak(side, snapshot) ||
-                (opposingDirectionIsStrong && detected is not null && detected != side &&
-                 snapshot.Confidence.Total >= minimumConfidence))
+            // Require confidence on opposing evidence so a weak/noisy structure break
+            // does not immediately destroy an otherwise valid progressive scope.
+            if (snapshot.Confidence.Total >= minimumConfidence &&
+                (HasOpposingBreak(side, snapshot) ||
+                 opposingDirectionIsStrong && detected is not null && detected != side))
             {
                 opposition = true;
             }
@@ -456,7 +659,10 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             Side: side,
             Stage: SetupStage.WaitingForConfirmation,
             StartedAt: trend.AvailableAt,
-            ExpiresAt: Options.TrendInterval.AddTo(trend.AvailableAt),
+            ExpiresAt: AddBars(
+                trend.AvailableAt,
+                Options.TrendInterval,
+                Options.MaximumTrendConfirmationBars),
             LastTrendAt: trend.AvailableAt,
             LastConfirmationAt: null);
         _states[instrument] = state;
@@ -468,7 +674,8 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         ScopeState state,
         AnalysisSnapshot trend,
         AnalysisSnapshot confirmation,
-        AnalysisSnapshot entry);
+        AnalysisSnapshot entry,
+        PriceActionSetup? priceActionSetup);
 
     protected abstract AgentDecision EvaluateOpenPosition(
         AgentMarketContext context,
@@ -570,25 +777,94 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             : $"{strongest.Type} ({strongest.Confidence:F1})";
     }
 
-    protected static SetupSide? DetectSide(
+    protected SetupSide? DetectSide(
         AnalysisSnapshot snapshot,
         decimal minimumConfidence)
     {
-        if (snapshot.Confidence.Total < minimumConfidence || snapshot.Indicators.Rsi is null)
+        if (snapshot.Indicators.Rsi is null)
             return null;
         decimal close = snapshot.LatestCandle.Prices.Close;
         decimal open = snapshot.LatestCandle.Prices.Open;
         decimal? middle = snapshot.Indicators.BollingerMiddle;
-        bool bullish = snapshot.MarketStructure.Direction == MarketStructureDirection.Rising ||
-            (middle is decimal bullishMiddle && close > open && close >= bullishMiddle);
-        bool bearish = snapshot.MarketStructure.Direction == MarketStructureDirection.Falling ||
-            (middle is decimal bearishMiddle && close < open && close <= bearishMiddle);
-        if (bullish && snapshot.Indicators.Rsi is >= 45m and < 75m)
+        SetupSide? structuralSide = snapshot.MarketStructure.Direction switch
+        {
+            MarketStructureDirection.Rising => SetupSide.Buy,
+            MarketStructureDirection.Falling => SetupSide.Sell,
+            _ => null
+        };
+        SetupSide? tacticalSide = middle switch
+        {
+            decimal value when close > open && close >= value => SetupSide.Buy,
+            decimal value when close < open && close <= value => SetupSide.Sell,
+            _ => null
+        };
+
+        SetupSide? candidate;
+        if (structuralSide is not null && tacticalSide is not null &&
+            structuralSide != tacticalSide)
+        {
+            // Contradictory structure and candle evidence used to fall through to the
+            // bullish branch first. Only let a strong, directionally agreeing DMI reading
+            // resolve that conflict; otherwise wait for confirmation.
+            candidate = DmiSupports(snapshot, structuralSide.Value, minimumAdx: 25m)
+                ? structuralSide
+                : null;
+        }
+        else
+        {
+            candidate = structuralSide ?? tacticalSide;
+        }
+
+        if (candidate is null || DmiOpposes(snapshot, candidate.Value, minimumAdx: 20m))
+            return null;
+
+        RsiBollingerSignalAssessment indicators = RsiBollingerSignalPolicy.Evaluate(
+            snapshot,
+            ToPriceActionDirection(candidate.Value),
+            Options.RsiBollingerSignals);
+        ZoneVolumeSignalAssessment zoneVolume = ZoneVolumeSignalPolicy.Evaluate(
+            snapshot,
+            ToPriceActionDirection(candidate.Value),
+            indicators,
+            Options.ZoneVolumeSignals);
+        // Nearby zones adjust trend evidence but do not erase an otherwise valid
+        // higher-timeframe side.  Final-entry structural reward validation owns the
+        // hard barrier decision; only an opposing volume spike is an immediate veto.
+        if (indicators.IsVetoed ||
+            zoneVolume.VetoReasonCode == "OpposingVolumeSpike" ||
+            snapshot.Confidence.Total +
+            indicators.ConfidenceAdjustment +
+            zoneVolume.ConfidenceAdjustment < minimumConfidence)
+        {
+            return null;
+        }
+
+        if (candidate == SetupSide.Buy && snapshot.Indicators.Rsi is >= 45m and < 75m)
             return SetupSide.Buy;
-        if (bearish && snapshot.Indicators.Rsi is <= 55m and > 25m)
+        if (candidate == SetupSide.Sell && snapshot.Indicators.Rsi is <= 55m and > 25m)
             return SetupSide.Sell;
         return null;
     }
+
+    private static bool DmiSupports(
+        AnalysisSnapshot snapshot,
+        SetupSide side,
+        decimal minimumAdx) =>
+        snapshot.Indicators.AdxAnalysis.Adx is decimal adx && adx >= minimumAdx &&
+        snapshot.Indicators.AdxAnalysis.DirectionalBias == ToPriceActionDirection(side);
+
+    private static bool DmiOpposes(
+        AnalysisSnapshot snapshot,
+        SetupSide side,
+        decimal minimumAdx) =>
+        snapshot.Indicators.AdxAnalysis.Adx is decimal adx && adx >= minimumAdx &&
+        snapshot.Indicators.AdxAnalysis.DirectionalBias is not PriceActionDirection.Neutral &&
+        snapshot.Indicators.AdxAnalysis.DirectionalBias != ToPriceActionDirection(side);
+
+    private static PriceActionDirection ToPriceActionDirection(SetupSide side) =>
+        side == SetupSide.Buy
+            ? PriceActionDirection.Bullish
+            : PriceActionDirection.Bearish;
 
     protected static bool Opposes(SetupSide side, AnalysisSnapshot snapshot) =>
         side == SetupSide.Buy

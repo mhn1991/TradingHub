@@ -10,6 +10,13 @@ using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
 using TradeManager;
+using ChartAnnotator.Engine;
+using ChartAnnotator.Regime;
+using RiskManager.Conditions;
+using PortfolioManager.Risk;
+using PortfolioManager.Correlation;
+using Simulator.Execution;
+using Simulator.Financing;
 
 namespace Dashboard.Live;
 
@@ -795,16 +802,21 @@ public static class SimulationApi
 
 public sealed record CreateSimulationRequest
 {
+    public CreateSimulationRequest()
+    {
+        (From, To) = RecommendedSimulationDefaults.PreviousFullMonth(DateTimeOffset.UtcNow);
+    }
+
     /// <summary>Catalog broker ID: oanda, binance, or imported.</summary>
     public string? BrokerId { get; init; }
-    public string Instrument { get; init; } = "FX:GBP/JPY";
+    public string Instrument { get; init; } = RecommendedSimulationDefaults.Instrument;
     public DateTimeOffset From { get; init; }
     public DateTimeOffset To { get; init; }
     /// <summary>Legacy field; prefer ExecutionInterval / PrecisionMode.</summary>
     public string BaseInterval { get; init; } = "1m";
     public string? ExecutionInterval { get; init; }
     public string AnalysisBaseInterval { get; init; } = "1m";
-    public string[] AnalysisIntervals { get; init; } = ["5m", "15m", "1h"];
+    public string[] AnalysisIntervals { get; init; } = ["5m", "15m", "30m", "1h", "2h"];
     public string PrecisionMode { get; init; } = "Fast";
     public string SourceKind { get; init; } = "OandaCandles";
     /// <summary>
@@ -812,14 +824,14 @@ public sealed record CreateSimulationRequest
     /// </summary>
     public string? ImportedCandlePath { get; init; }
     public string? ImportedDatasetId { get; init; }
-    public string TrendInterval { get; init; } = "1h";
-    public string[] SecondaryTrendIntervals { get; init; } = [];
-    public string[] SetupIntervals { get; init; } = [];
+    public string TrendInterval { get; init; } = "2h";
+    public string[] SecondaryTrendIntervals { get; init; } = ["1h"];
+    public string[] SetupIntervals { get; init; } = ["30m"];
     public string ConfirmationInterval { get; init; } = "15m";
     public string[] AdditionalConfirmationIntervals { get; init; } = [];
     public string EntryInterval { get; init; } = "5m";
     public int MinimumSecondaryTrendAlignments { get; init; }
-    public int MinimumSetupAlignments { get; init; }
+    public int MinimumSetupAlignments { get; init; } = 1;
     public int MinimumConfirmationAlignments { get; init; } = 1;
     public bool StrongOppositionVeto { get; init; } = true;
     public string[] Strategies { get; init; } = ["legacy", "improved"];
@@ -827,7 +839,8 @@ public sealed record CreateSimulationRequest
     public decimal Quantity { get; init; } = 1_000m;
     public string PositionSizingMode { get; init; } = "FixedFractionalRisk";
     public decimal FixedCashRisk { get; init; } = 250m;
-    public decimal RiskPercentOfEquity { get; init; } = 0.5m;
+    public decimal RiskPercentOfEquity { get; init; } =
+        RecommendedSimulationDefaults.PositionSizing.RiskPercentOfEquity;
     public decimal MinimumQuantity { get; init; } = 1m;
     public decimal? MaximumQuantity { get; init; }
     public decimal QuantityStep { get; init; } = 1m;
@@ -841,9 +854,46 @@ public sealed record CreateSimulationRequest
     public string PriceActionConfirmation { get; init; } = "Soft";
     public decimal MinimumPriceActionConfidence { get; init; } = 55m;
     public bool RejectStrongOpposingPriceAction { get; init; } = true;
-    public int WarmupDays { get; init; } = 45;
+    public int WarmupDays { get; init; } = RecommendedSimulationDefaults.WarmupDays;
     public string StrategyExecutionMode { get; init; } = "ParallelWorkers";
     public string AmbiguousIntrabarPolicy { get; init; } = "ConservativeStopFirst";
+    public string AccountMode { get; init; } = "IndependentStrategyAccounts";
+    public bool RegimeEnabled { get; init; }
+    public int EfficiencyRatioPeriod { get; init; } = 14;
+    public int RegimeConfirmationBars { get; init; } = 2;
+    public int RegimePersistenceBars { get; init; } = 3;
+    public decimal RegimeSoftSpreadAtr { get; init; } = 0.15m;
+    public decimal RegimeHardSpreadAtr { get; init; } = 0.30m;
+    public bool TradingConditionsEnabled { get; init; }
+    public string[] AllowedSessions { get; init; } = ["Asian", "London", "NewYork", "LondonNewYorkOverlap"];
+    public int RolloverBlackoutMinutesBefore { get; init; } = 15;
+    public int RolloverBlackoutMinutesAfter { get; init; } = 15;
+    public decimal ConditionSoftSpreadAtr { get; init; } = 0.15m;
+    public decimal ConditionHardSpreadAtr { get; init; } = 0.30m;
+    public bool EconomicEventFilterEnabled { get; init; }
+    public decimal MaximumTotalPortfolioHeatPercent { get; init; } = 1.5m;
+    public decimal MaximumPendingRiskPercent { get; init; } = 0.75m;
+    public decimal MaximumStrategyRiskPercent { get; init; } = 0.75m;
+    public decimal MaximumInstrumentRiskPercent { get; init; } = 0.75m;
+    public decimal MaximumCurrencyRiskPercent { get; init; } = 0.75m;
+    public decimal MinimumUnallocatedMarginReservePercent { get; init; } = 30m;
+    public int MaximumOpenPositions { get; init; } = 3;
+    public int CorrelationLookbackBars { get; init; } = 120;
+    public int CorrelationMinimumSamples { get; init; } = 60;
+    public decimal CorrelationSoftThreshold { get; init; } = 0.50m;
+    public decimal CorrelationHardThreshold { get; init; } = 0.75m;
+    public bool AdaptiveRiskEnabled { get; init; }
+    public string ExecutionFillModel { get; init; } = "MidpointPlusConfiguredSpread";
+    public string StressExecutionScenario { get; init; } = "Base";
+    public decimal? MaximumFillQuantityPerFrame { get; init; }
+    public decimal MaximumFillParticipationFraction { get; init; } = 1m;
+    public decimal AsianSessionSpreadMultiplier { get; init; } = 1.20m;
+    public decimal RolloverSpreadMultiplier { get; init; } = 3m;
+    public decimal VolatilitySlippageFraction { get; init; }
+    public decimal GapSlippageFraction { get; init; }
+    public bool FinancingEnabled { get; init; }
+    public IReadOnlyDictionary<string, FinancingRate> FinancingRates { get; init; } =
+        new Dictionary<string, FinancingRate>(StringComparer.OrdinalIgnoreCase);
     public bool RefreshCache { get; init; }
     public bool NoCache { get; init; }
     public PositionManagementRequest LegacyPositionManagement { get; init; } =
@@ -868,6 +918,18 @@ public sealed record CreateSimulationRequest
     /// Must be supplied together with DailyEquityGivebackActivation.
     /// </summary>
     public decimal? MaximumDailyEquityGiveback { get; init; }
+
+    /// <summary>
+    /// Persistent (non-daily-resetting) equity-protection tier. Configures a single
+    /// simple tier; multi-tier setups remain programmatic/JSON-only.
+    /// </summary>
+    public bool EquityProtectionEnabled { get; init; }
+    public decimal? EquityProtectionActivationProfitPercent { get; init; }
+    public decimal? EquityProtectionMaxGivebackPercent { get; init; }
+    public string EquityProtectionActionType { get; init; } = "PauseNewEntries";
+    public decimal EquityProtectionReductionFraction { get; init; } = 0.25m;
+    public decimal EquityProtectionFutureRiskMultiplier { get; init; } = 0.5m;
+    public int EquityProtectionRecoveryBars { get; init; } = 3;
 
     public string ResolveBrokerId()
     {
@@ -961,6 +1023,7 @@ public sealed record CreateSimulationRequest
             JobsDirectory = Path.Combine(solutionRoot, ".cache", "simulation-jobs"),
             Runtime = new BacktestRuntimeOptions
             {
+                AccountMode = Enum.Parse<SimulationAccountMode>(AccountMode, ignoreCase: true),
                 ExecutionInterval = execution,
                 AnalysisBaseInterval = analysisBase,
                 AnalysisIntervals = AnalysisIntervals.Select(BarIntervalParser.Parse).ToArray(),
@@ -1023,7 +1086,74 @@ public sealed record CreateSimulationRequest
                         nameof(DailyEquityGivebackActivation)),
                     MaximumDailyEquityGiveback = NormaliseOptionalPositive(
                         MaximumDailyEquityGiveback,
-                        nameof(MaximumDailyEquityGiveback))
+                        nameof(MaximumDailyEquityGiveback)),
+                    EquityProtection = ResolveEquityProtection()
+                },
+                AnnotationOptions = new ChartAnnotationOptions
+                {
+                    EfficiencyRatioPeriod = EfficiencyRatioPeriod,
+                    MarketRegime = new MarketRegimeOptions
+                    {
+                        Enabled = RegimeEnabled,
+                        MinimumConfirmationBars = RegimeConfirmationBars,
+                        MinimumPersistenceBars = RegimePersistenceBars,
+                        MaximumTradeableSpreadAtr = RegimeSoftSpreadAtr,
+                        HardMaximumSpreadAtr = RegimeHardSpreadAtr
+                    }
+                },
+                MarketRegimeRouting = new MarketRegimePolicyOptions { Enabled = RegimeEnabled },
+                RegimeManagement = new RegimeManagementOptions { Enabled = RegimeEnabled },
+                TradingConditions = new TradingConditionOptions
+                {
+                    Enabled = TradingConditionsEnabled,
+                    AllowedSessions = AllowedSessions
+                        .Select(value => Enum.Parse<TradingSession>(value, ignoreCase: true))
+                        .Distinct()
+                        .ToArray(),
+                    RolloverBlackoutMinutesBefore = RolloverBlackoutMinutesBefore,
+                    RolloverBlackoutMinutesAfter = RolloverBlackoutMinutesAfter,
+                    SoftMaximumSpreadAtr = ConditionSoftSpreadAtr,
+                    HardMaximumSpreadAtr = ConditionHardSpreadAtr,
+                    EconomicEventFilterEnabled = EconomicEventFilterEnabled
+                },
+                PortfolioRisk = new PortfolioRiskOptions
+                {
+                    MaximumTotalOpenRiskPercent = MaximumTotalPortfolioHeatPercent,
+                    MaximumPendingRiskPercent = MaximumPendingRiskPercent,
+                    MaximumStrategyRiskPercent = MaximumStrategyRiskPercent,
+                    MaximumInstrumentRiskPercent = MaximumInstrumentRiskPercent,
+                    MaximumCurrencyRiskPercent = MaximumCurrencyRiskPercent,
+                    MaximumMarginUsagePercent = MaximumAccountMarginUsagePercent,
+                    MaximumSinglePositionMarginPercent = MaximumSinglePositionMarginPercent,
+                    MinimumUnallocatedMarginReservePercent = MinimumUnallocatedMarginReservePercent,
+                    MaximumOpenPositions = MaximumOpenPositions
+                },
+                CorrelationRisk = new CorrelationRiskOptions
+                {
+                    LookbackBars = CorrelationLookbackBars,
+                    MinimumSamples = CorrelationMinimumSamples,
+                    SoftCorrelationThreshold = CorrelationSoftThreshold,
+                    HardCorrelationThreshold = CorrelationHardThreshold
+                },
+                AdaptiveRisk = new AdaptiveRiskOptions { Enabled = AdaptiveRiskEnabled },
+                Execution = new ExecutionModelOptions
+                {
+                    FillModel = Enum.Parse<SimulationFillModel>(ExecutionFillModel, ignoreCase: true),
+                    StressScenario = Enum.Parse<StressExecutionScenario>(StressExecutionScenario, ignoreCase: true),
+                    FillCapacity = new FillCapacityModel
+                    {
+                        MaximumQuantityPerExecutionFrame = MaximumFillQuantityPerFrame,
+                        MaximumParticipationFraction = MaximumFillParticipationFraction
+                    },
+                    AsianSessionSpreadMultiplier = AsianSessionSpreadMultiplier,
+                    RolloverSpreadMultiplier = RolloverSpreadMultiplier,
+                    VolatilitySlippageFraction = VolatilitySlippageFraction,
+                    GapSlippageFraction = GapSlippageFraction
+                },
+                Financing = new FinancingOptions
+                {
+                    Enabled = FinancingEnabled,
+                    InstrumentRates = FinancingRates
                 },
                 ReplayChunkSize = 250,
                 ProgressPublishIntervalMilliseconds = 500
@@ -1049,6 +1179,33 @@ public sealed record CreateSimulationRequest
         if (value < 0m)
             throw new ArgumentOutOfRangeException(fieldName, "Value cannot be negative.");
         return value;
+    }
+
+    private EquityProtectionOptions ResolveEquityProtection()
+    {
+        if (!EquityProtectionEnabled || EquityProtectionMaxGivebackPercent is not decimal givebackPercent)
+        {
+            return new EquityProtectionOptions { Enabled = EquityProtectionEnabled };
+        }
+
+        var action = Enum.Parse<EquityProtectionAction>(EquityProtectionActionType, ignoreCase: true);
+        return new EquityProtectionOptions
+        {
+            Enabled = true,
+            RecoveryConfirmationBars = EquityProtectionRecoveryBars,
+            Tiers =
+            [
+                new EquityProtectionTier
+                {
+                    TierId = "dashboard-tier",
+                    ActivationProfitPercent = EquityProtectionActivationProfitPercent,
+                    MaximumGivebackPercent = givebackPercent,
+                    Action = action,
+                    ReductionFraction = EquityProtectionReductionFraction,
+                    FutureRiskMultiplier = EquityProtectionFutureRiskMultiplier
+                }
+            ]
+        };
     }
 
     private static string? FindSolutionRoot()

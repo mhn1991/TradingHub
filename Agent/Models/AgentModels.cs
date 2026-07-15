@@ -1,5 +1,6 @@
 using Brokers.Models;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 
 namespace Agent.Models;
 
@@ -17,6 +18,7 @@ public sealed record AgentDecision
     public string? DecisionId { get; init; }
     public string? SetupId { get; init; }
     public string? StrategyName { get; init; }
+    public string? StrategyId { get; init; }
     public DateTimeOffset? SetupStartedAt { get; init; }
     public DateTimeOffset? ConfirmationAt { get; init; }
     public BarInterval? SignalInterval { get; init; }
@@ -39,6 +41,44 @@ public sealed record AgentDecision
     public string? ReasonCode { get; init; }
     public PriceActionEventType? PriceActionTrigger { get; init; }
     public decimal? PriceActionConfidence { get; init; }
+    /// <summary>Composite setup type that gated/annotated the entry, when present.</summary>
+    public PriceActionSetupType? PriceActionSetupType { get; init; }
+    public string? PriceActionSetupId { get; init; }
+    public decimal? PriceActionSetupReferenceLevel { get; init; }
+
+    /// <summary>
+    /// Regime-routing diagnostics (spec §9.3). All null when regime routing is
+    /// disabled, so disabled behaviour stays byte-identical to before this feature.
+    /// </summary>
+    public MarketRegime? RegimeLabel { get; init; }
+    public decimal? RegimeConfidence { get; init; }
+    public string? RegimePolicyId { get; init; }
+    public string? RegimeEntryProfileId { get; init; }
+    public string? RegimeManagementProfileId { get; init; }
+    public decimal? RegimeRiskMultiplier { get; init; }
+
+    /// <summary>
+    /// Equity high-watermark protection diagnostics (spec §18). Null when the feature
+    /// is disabled, so disabled behaviour stays byte-identical to before this feature.
+    /// </summary>
+    public decimal? EquityProtectionRiskMultiplier { get; init; }
+    public string? EquityProtectionActivatedTierIds { get; init; }
+    public decimal? TradingConditionRiskMultiplier { get; init; }
+    public string? TradingConditionReasonCode { get; init; }
+    public decimal? SpreadAtr { get; init; }
+    public decimal? AtrPercentile { get; init; }
+    public decimal? CorrelationRiskMultiplier { get; init; }
+    public decimal? StrategyAllocationRiskMultiplier { get; init; }
+    public decimal? SetupCalibrationRiskMultiplier { get; init; }
+    public decimal? MetaLabelRiskMultiplier { get; init; }
+    public decimal? MetaLabelProbability { get; init; }
+    public string? MetaLabelModelVersion { get; init; }
+    public string? MetaLabelReasonCode { get; init; }
+    public string? PortfolioReservationId { get; init; }
+    public string? RiskClusterId { get; init; }
+    public decimal? PortfolioOriginalQuantity { get; init; }
+    public decimal? PortfolioAllocatedQuantity { get; init; }
+    public decimal? FinalRiskBudgetMultiplier { get; init; }
 }
 
 public sealed class MultiTimeframeAnalysis
@@ -76,4 +116,7 @@ public sealed record AgentMarketContext
     public required AccountSnapshot Account { get; init; }
     public required IReadOnlyList<BrokerPosition> Positions { get; init; }
     public required IReadOnlyList<BrokerOrder> OpenOrders { get; init; }
+    public decimal? ExecutableSpread { get; init; }
+    public DateTimeOffset? MarketDataAvailableAt { get; init; }
+    public string? StrategyId { get; init; }
 }

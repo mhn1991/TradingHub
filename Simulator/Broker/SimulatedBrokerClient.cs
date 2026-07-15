@@ -67,6 +67,8 @@ public sealed class SimulatedBrokerClient : IProtectiveOrderBrokerClient, IAccou
     }
 
     internal SimulatedBrokerState State => _state;
+    internal IReadOnlyList<(long Sequence, OrderEvent Item)> GetOrderEventsAfter(long sequence) =>
+        _orderEvents.SnapshotAfter(sequence);
 
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
@@ -108,5 +110,7 @@ public sealed class SimulatedBrokerClient : IProtectiveOrderBrokerClient, IAccou
         {
             throw new ArgumentOutOfRangeException(nameof(options));
         }
+        options.ExecutionModel.Validate();
+        options.Financing.Validate();
     }
 }

@@ -16,20 +16,46 @@ public sealed class LegacyProgressiveAgent(ProgressiveStrategyOptions? options =
         AgentExitManagementMode.ProtectiveStopAndStrategyExit;
 
     protected override AgentDecision CreateEntryDecision(
-        AgentMarketContext context, ScopeState state, AnalysisSnapshot trend,
-        AnalysisSnapshot confirmation, AnalysisSnapshot entry)
+        AgentMarketContext context,
+        ScopeState state,
+        AnalysisSnapshot trend,
+        AnalysisSnapshot confirmation,
+        AnalysisSnapshot entry,
+        PriceActionSetup? priceActionSetup)
     {
         decimal price = entry.LatestCandle.Prices.Close;
         decimal atr = entry.Indicators.Atr ?? price * 0.002m;
         bool buy = state.Side == SetupSide.Buy;
-        decimal stop = buy ? price - atr * Options.FallbackStopAtr : price + atr * Options.FallbackStopAtr;
+        PriceActionSetup? paSetup = priceActionSetup ??
+            entry.PriceAction.GetBestTriggeredSetup(
+                buy ? PriceActionDirection.Bullish : PriceActionDirection.Bearish,
+                Options.MinimumPriceActionConfidence);
+        decimal stop;
+        string stopSource;
+        if (paSetup?.ReferenceLevel is decimal setupLevel &&
+            (buy ? setupLevel < price : setupLevel > price))
+        {
+            stop = buy
+                ? setupLevel - atr * Options.StopBufferAtr
+                : setupLevel + atr * Options.StopBufferAtr;
+            stopSource = $"PA setup {paSetup.Type} reference plus ATR buffer";
+        }
+        else
+        {
+            stop = buy ? price - atr * Options.FallbackStopAtr : price + atr * Options.FallbackStopAtr;
+            stopSource = "Entry ATR safety stop";
+        }
+
         decimal confidence = entry.Confidence.Total * 0.45m + confirmation.Confidence.Total * 0.30m + trend.Confidence.Total * 0.25m +
             PriceActionConfidenceAdjustment(entry, state.Side);
+        string setupNote = paSetup is null
+            ? PriceActionSummary(entry, state.Side)
+            : $"{paSetup.Type} ({paSetup.Confidence:F0})";
         return Trade(context, state, buy ? AgentAction.Buy : AgentAction.Sell, confidence,
             price, stop, null,
             $"Progressive higher-timeframe partial setup confirmed on the entry timeframe; " +
-            $"price action: {PriceActionSummary(entry, state.Side)}; exit waits for reversal.",
-            "Entry ATR safety stop", "Reverse setup exit");
+            $"price action: {setupNote}; exit waits for reversal.",
+            stopSource, "Reverse setup exit");
     }
 
     protected override AgentDecision EvaluateOpenPosition(

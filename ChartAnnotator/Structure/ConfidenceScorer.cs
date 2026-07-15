@@ -48,15 +48,18 @@ public sealed class ConfidenceScorer
             indicators.RsiAnalysis.LatestRelationship;
         if (relationship is not null && relationship.AgeCandles <= 10)
         {
-            decimal score = Math.Min(8m, relationship.Strength / 12.5m);
+            // The aggregate chart confidence has no candidate direction. Rewarding
+            // every relationship here let a bearish divergence raise a bullish
+            // setup's score (and vice versa). Keep it visible for diagnostics; agents
+            // apply the direction-aware contribution through RsiBollingerSignalPolicy.
             contributions.Add(new ConfidenceContribution(
                 relationship.IsDivergence
                     ? "RSI divergence"
                     : "RSI convergence",
-                score,
+                0m,
                 $"{relationship.Type} was confirmed " +
                 $"{relationship.AgeCandles} candles ago with strength " +
-                $"{relationship.Strength:F1}."));
+                $"{relationship.Strength:F1}; direction is scored by the agent."));
         }
 
         BollingerAnalysisSnapshot bollinger = indicators.BollingerAnalysis;
@@ -64,23 +67,23 @@ public sealed class ConfidenceScorer
         {
             contributions.Add(new ConfidenceContribution(
                 "Bollinger squeeze release",
-                6m,
-                "Bollinger bandwidth is expanding after a squeeze."));
+                2m,
+                "Bandwidth is expanding after a squeeze; the agent scores %B direction separately."));
         }
         else if (bollinger.IsSqueeze)
         {
             contributions.Add(new ConfidenceContribution(
                 "Bollinger squeeze",
-                4m,
+                0m,
                 $"Bandwidth is in the {bollinger.WidthPercentile:F1}th " +
-                "historical percentile."));
+                "historical percentile; compression alone has no direction."));
         }
         else if (bollinger.IsExpansion)
         {
             contributions.Add(new ConfidenceContribution(
                 "Bollinger expansion",
-                3m,
-                "Bollinger bandwidth is wide and still expanding."));
+                1m,
+                "Bandwidth is wide and expanding; the agent scores %B direction separately."));
         }
 
         AtrAnalysisSnapshot atrContext = indicators.AtrAnalysis;
@@ -122,11 +125,15 @@ public sealed class ConfidenceScorer
                 decimal distanceAtr = DistanceToZone(close, nearestZone) / atr;
                 if (distanceAtr <= 0.5m)
                 {
+                    // The aggregate chart score has no candidate direction. A nearby
+                    // support and a nearby resistance cannot both be positive evidence
+                    // for every trade side. Preserve the diagnostic here; agents score
+                    // zone role/proximity through ZoneVolumeSignalPolicy.
                     contributions.Add(new ConfidenceContribution(
                         "Nearby price zone",
-                        Math.Min(15m, nearestZone.Strength / 5m),
+                        0m,
                         $"Price is {distanceAtr:F2} ATR from a " +
-                        $"{nearestZone.Type} zone."));
+                        $"{nearestZone.Type} zone; direction is scored by the agent."));
                 }
             }
 
@@ -188,7 +195,15 @@ public sealed class ConfidenceScorer
         AdxAnalysisSnapshot adx = indicators.AdxAnalysis;
         if (adx.Adx is decimal adxValue)
         {
-            decimal directionalScore = adx.IsTrendStrengthening ? 5m : 2m;
+            // ADX measures trend strength, not direction. A ready but very low ADX is
+            // evidence against a directional setup and must not receive a positive score.
+            decimal directionalScore = adxValue switch
+            {
+                < 15m => -4m,
+                < 20m => -1m,
+                < 25m => adx.IsTrendStrengthening ? 2m : 1m,
+                _ => adx.IsTrendStrengthening ? 5m : 3m
+            };
             contributions.Add(new ConfidenceContribution(
                 "ADX/DMI",
                 directionalScore,

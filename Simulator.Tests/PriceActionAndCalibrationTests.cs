@@ -296,6 +296,44 @@ public sealed class PriceActionAndCalibrationTests
     }
 
     [Test]
+    public void MinimumTriggerConfidence_FiltersWeakTriggerAndExplainsRejection()
+    {
+        var analyzer = new PriceActionAnalyzer(new PriceActionOptions
+        {
+            CalibrationMinimumSamples = 50,
+            DisplacementBodyAtrFallback = 0.40m,
+            MinimumDisplacementRangeAtr = 0.50m,
+            MinimumDisplacementClosePosition = 0.70m,
+            MinimumTriggerConfidence = 90m
+        });
+        MarketStructureSnapshot structure = Structure(direction: MarketStructureDirection.Sideways);
+        Candle prior = CandleAt(0, 100m, 100.3m, 99.9m, 100.1m);
+        Candle impulse = CandleAt(1, 100.1m, 101.4m, 100.05m, 101.3m);
+
+        analyzer.Update(prior, [prior], [], [], structure, structure, Indicators(1m), 1);
+        PriceActionSnapshot result = analyzer.Update(
+            impulse,
+            [prior, impulse],
+            [],
+            [],
+            structure,
+            structure,
+            Indicators(1m),
+            2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(
+                result.Events.Any(item => item.Type == PriceActionEventType.BullishDisplacement),
+                Is.False);
+            Assert.That(
+                result.Diagnostics.Any(item =>
+                    item.ReasonCode == "TriggerConfidenceBelowMinimum" && !item.Accepted),
+                Is.True);
+        });
+    }
+
+    [Test]
     public void HasConfirmedTrigger_IncludesLiquiditySweepAndChoCH()
     {
         var snapshot = new PriceActionSnapshot

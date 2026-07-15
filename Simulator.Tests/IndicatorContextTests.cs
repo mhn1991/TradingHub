@@ -90,6 +90,58 @@ public sealed class IndicatorContextTests
     }
 
     [Test]
+    public void VolumeAnalysis_UsesSameKindRollingBaselineAndDetectsSpike()
+    {
+        var analysis = new VolumeAnalysisState(
+            historyPeriod: 8,
+            minimumSamples: 4,
+            lowRelativeThreshold: 0.70m,
+            highRelativeThreshold: 1.25m,
+            spikeRelativeThreshold: 2m);
+
+        for (int index = 0; index < 4; index++)
+            analysis.Update(new MarketVolume(100m, VolumeKind.TickCount));
+
+        VolumeAnalysisSnapshot spike = analysis.Update(
+            new MarketVolume(250m, VolumeKind.TickCount));
+        VolumeAnalysisSnapshot reset = analysis.Update(
+            new MarketVolume(10m, VolumeKind.BaseAssetQuantity));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(spike.BaselineMedian, Is.EqualTo(100m));
+            Assert.That(spike.RelativeToBaseline, Is.EqualTo(2.5m));
+            Assert.That(spike.Regime, Is.EqualTo(VolumeRegime.Spike));
+            Assert.That(spike.IsReliable, Is.True);
+            Assert.That(spike.IsActivityProxy, Is.True);
+
+            Assert.That(reset.SampleCount, Is.EqualTo(1));
+            Assert.That(reset.Regime, Is.EqualTo(VolumeRegime.Unknown));
+            Assert.That(reset.IsReliable, Is.False);
+        });
+    }
+
+    [Test]
+    public void VolumeAnalysis_DoesNotCallTinyHighPercentileMoveASpike()
+    {
+        var analysis = new VolumeAnalysisState(
+            historyPeriod: 30,
+            minimumSamples: 20);
+        for (int index = 0; index < 20; index++)
+            analysis.Update(new MarketVolume(100m, VolumeKind.TickCount));
+
+        VolumeAnalysisSnapshot result = analysis.Update(
+            new MarketVolume(101m, VolumeKind.TickCount));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Percentile, Is.GreaterThanOrEqualTo(95m));
+            Assert.That(result.RelativeToBaseline, Is.EqualTo(1.01m));
+            Assert.That(result.Regime, Is.EqualTo(VolumeRegime.Normal));
+        });
+    }
+
+    [Test]
     public void RsiAnalysis_DetectsRegularBullishDivergenceOnlyAfterSwingConfirmation()
     {
         var analysis = new RsiAnalysisState(
@@ -202,6 +254,8 @@ public sealed class IndicatorContextTests
             AtrAnalysisHistoryPeriod = 8,
             AtrAnalysisChangeLookback = 1,
             AtrAnalysisMinimumSamples = 4,
+            VolumeHistoryPeriod = 8,
+            VolumeMinimumSamples = 4,
             RsiPeriod = 3,
             RsiMomentumLookback = 1,
             BollingerPeriod = 3,
@@ -230,9 +284,12 @@ public sealed class IndicatorContextTests
             Assert.That(latest.Indicators.AtrAnalysis.SampleCount, Is.GreaterThan(0));
             Assert.That(latest.Indicators.BollingerAnalysis.BandwidthPercent, Is.Not.Null);
             Assert.That(latest.Indicators.RsiAnalysis.Zone, Is.Not.EqualTo(RsiZone.Unknown));
+            Assert.That(latest.Indicators.VolumeAnalysis.RelativeToBaseline, Is.Not.Null);
+            Assert.That(latest.Indicators.VolumeAnalysis.IsReliable, Is.True);
             Assert.That(history[^1].AtrAnalysis, Is.Not.Null);
             Assert.That(history[^1].RsiAnalysis, Is.Not.Null);
             Assert.That(history[^1].BollingerAnalysis, Is.Not.Null);
+            Assert.That(history[^1].VolumeAnalysis, Is.Not.Null);
         });
     }
 

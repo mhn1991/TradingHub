@@ -1,4 +1,5 @@
 using Brokers.Models;
+using ChartAnnotator.Regime;
 
 namespace ChartAnnotator.Models;
 
@@ -188,6 +189,37 @@ public sealed record AtrAnalysisSnapshot
     public int SampleCount { get; init; }
 }
 
+public enum VolumeRegime
+{
+    Unknown,
+    VeryLow,
+    Low,
+    Normal,
+    High,
+    Spike
+}
+
+public sealed record VolumeAnalysisSnapshot
+{
+    public static VolumeAnalysisSnapshot Empty { get; } = new();
+
+    public decimal? Value { get; init; }
+    public VolumeKind Kind { get; init; }
+    public decimal? BaselineMedian { get; init; }
+    public decimal? RelativeToBaseline { get; init; }
+    public decimal? Percentile { get; init; }
+    public VolumeRegime Regime { get; init; }
+    public int SampleCount { get; init; }
+
+    /// <summary>
+    /// True when the feed identifies the volume semantics. TickCount is a relative
+    /// activity proxy, while quantity kinds represent traded/reported quantity.
+    /// </summary>
+    public bool IsReliable { get; init; }
+    public bool IsActivityProxy => Kind == VolumeKind.TickCount;
+    public bool IsElevated => Regime is VolumeRegime.High or VolumeRegime.Spike;
+}
+
 public enum RsiZone
 {
     Unknown,
@@ -247,6 +279,74 @@ public sealed record RsiAnalysisSnapshot
     public int SampleCount { get; init; }
 }
 
+public enum MarketEfficiencyState
+{
+    Unknown,
+    HighlyChoppy,
+    Choppy,
+    Transitional,
+    Efficient,
+    HighlyEfficient
+}
+
+public sealed record EfficiencyAnalysisSnapshot
+{
+    public static EfficiencyAnalysisSnapshot Empty { get; } = new();
+
+    public decimal? Percentile { get; init; }
+    public MomentumDirection Direction { get; init; }
+    public MarketEfficiencyState State { get; init; }
+    public int SampleCount { get; init; }
+}
+
+public sealed record DonchianSnapshot
+{
+    public static DonchianSnapshot Empty { get; } = new();
+
+    public decimal? Upper { get; init; }
+    public decimal? Lower { get; init; }
+    public decimal? Middle { get; init; }
+    public decimal? Width { get; init; }
+    public decimal? WidthAtr { get; init; }
+    public bool ClosedAbovePreviousUpper { get; init; }
+    public bool ClosedBelowPreviousLower { get; init; }
+    public int BarsSinceUpperBreak { get; init; } = -1;
+    public int BarsSinceLowerBreak { get; init; } = -1;
+}
+
+public enum ValueReferenceKind
+{
+    Unavailable,
+    AnchoredTwap,
+    BrokerTickVolumeVwap,
+    ExchangeVolumeVwap
+}
+
+public enum ValueAnchorType
+{
+    SessionOpen,
+    WeekOpen,
+    MajorSwing,
+    StructureBreak,
+    SetupStart
+}
+
+/// <summary>
+/// A causal anchored value estimate. Tick-count weighting is deliberately labelled
+/// separately from traded-volume VWAP so feed semantics remain honest.
+/// </summary>
+public sealed record AnchoredValueReference
+{
+    public required string AnchorId { get; init; }
+    public required ValueAnchorType AnchorType { get; init; }
+    public required DateTimeOffset AnchoredAt { get; init; }
+    public required ValueReferenceKind Kind { get; init; }
+    public required decimal Value { get; init; }
+    public decimal? StandardDeviation { get; init; }
+    public decimal? DistanceAtr { get; init; }
+    public decimal? DataCoveragePercent { get; init; }
+}
+
 public sealed record IndicatorSnapshot
 {
     public decimal? Atr { get; init; }
@@ -254,7 +354,16 @@ public sealed record IndicatorSnapshot
     public decimal? BollingerMiddle { get; init; }
     public decimal? BollingerUpper { get; init; }
     public decimal? BollingerLower { get; init; }
+
+    /// <summary>
+    /// Incremental Kaufman-style Efficiency Ratio for the current bar. Distinct
+    /// from the swing-leg-scoped <see cref="PriceLegMetrics.EfficiencyRatio"/>.
+    /// </summary>
+    public decimal? EfficiencyRatio { get; init; }
+    public EfficiencyAnalysisSnapshot EfficiencyAnalysis { get; init; } = EfficiencyAnalysisSnapshot.Empty;
+    public DonchianSnapshot Donchian { get; init; } = DonchianSnapshot.Empty;
     public AtrAnalysisSnapshot AtrAnalysis { get; init; } = AtrAnalysisSnapshot.Empty;
+    public VolumeAnalysisSnapshot VolumeAnalysis { get; init; } = VolumeAnalysisSnapshot.Empty;
     public RsiAnalysisSnapshot RsiAnalysis { get; init; } = RsiAnalysisSnapshot.Empty;
     public BollingerAnalysisSnapshot BollingerAnalysis { get; init; } = BollingerAnalysisSnapshot.Empty;
     public AdxAnalysisSnapshot AdxAnalysis { get; init; } = AdxAnalysisSnapshot.Empty;
@@ -270,7 +379,8 @@ public sealed record IndicatorPoint(
     decimal Confidence,
     AtrAnalysisSnapshot? AtrAnalysis = null,
     RsiAnalysisSnapshot? RsiAnalysis = null,
-    BollingerAnalysisSnapshot? BollingerAnalysis = null);
+    BollingerAnalysisSnapshot? BollingerAnalysis = null,
+    VolumeAnalysisSnapshot? VolumeAnalysis = null);
 
 public sealed record ConfidenceContribution(
     string Rule,
@@ -297,6 +407,8 @@ public sealed record AnalysisSnapshot
     public required IReadOnlyList<PriceChannel> Channels { get; init; }
     public MarketStructureSnapshot MarketStructure { get; init; } = MarketStructureSnapshot.Empty;
     public PriceActionSnapshot PriceAction { get; init; } = PriceActionSnapshot.Empty;
+    public MarketRegimeSnapshot MarketRegime { get; init; } = MarketRegimeSnapshot.Unknown;
+    public IReadOnlyList<AnchoredValueReference> ValueReferences { get; init; } = [];
     public required ConfidenceScore Confidence { get; init; }
 }
 
@@ -389,6 +501,11 @@ public sealed record PriceLegMetrics
     public decimal Distance { get; init; }
     public decimal? DistanceAtr { get; init; }
     public int BarCount { get; init; }
+
+    /// <summary>
+    /// Path efficiency of this specific swing leg (distance/path, clamped 0-1).
+    /// Distinct from the bar-by-bar <see cref="IndicatorSnapshot.EfficiencyRatio"/>.
+    /// </summary>
     public decimal EfficiencyRatio { get; init; }
     public decimal RetracementPercent { get; init; }
 }
@@ -409,6 +526,44 @@ public sealed record PriceActionCalibrationSnapshot
     public decimal RangeAtr90 { get; init; }
 }
 
+public enum PriceActionSetupType
+{
+    BullishBreakRetestHold,
+    BearishBreakRetestHold,
+    BullishChoChRetestHold,
+    BearishChoChRetestHold,
+    BullishSweepDisplacement,
+    BearishSweepDisplacement,
+    BullishSweepChoCh,
+    BearishSweepChoCh
+}
+
+public enum PriceActionSetupPhase
+{
+    Armed,
+    Triggered,
+    Invalidated,
+    Expired
+}
+
+public sealed record PriceActionSetup
+{
+    public required string SetupId { get; init; }
+    public required PriceActionSetupType Type { get; init; }
+    public required PriceActionDirection Direction { get; init; }
+    public required PriceActionSetupPhase Phase { get; init; }
+    public required DateTimeOffset ArmedAt { get; init; }
+    public DateTimeOffset? TriggeredAt { get; init; }
+    public required long ArmedSequence { get; init; }
+    public long? TriggeredSequence { get; init; }
+    public required decimal Confidence { get; init; }
+    public decimal? ReferenceLevel { get; init; }
+    public decimal? EntryReference { get; init; }
+    public required string ReasonCode { get; init; }
+    public required string Explanation { get; init; }
+    public IReadOnlyList<string> SourceEventIds { get; init; } = [];
+}
+
 public sealed record PriceActionSnapshot
 {
     public static PriceActionSnapshot Empty { get; } = new();
@@ -421,6 +576,12 @@ public sealed record PriceActionSnapshot
     public BreakRetestSnapshot ActiveRetest { get; init; } = BreakRetestSnapshot.Empty;
     public PriceLegMetrics? LatestLeg { get; init; }
     public PriceActionCalibrationSnapshot Calibration { get; init; } = PriceActionCalibrationSnapshot.Empty;
+    /// <summary>
+    /// Composite setups derived from atomic events (same timeframe). Terminal
+    /// Triggered/Invalidated/Expired rows for this bar are included alongside any
+    /// still-Armed setups.
+    /// </summary>
+    public IReadOnlyList<PriceActionSetup> Setups { get; init; } = [];
 
     public bool HasConfirmedTrigger(PriceActionDirection direction, decimal minimumConfidence = 50m) =>
         Events.Any(item =>
@@ -438,6 +599,30 @@ public sealed record PriceActionSnapshot
                 PriceActionEventType.BuySideLiquiditySweep or
                 PriceActionEventType.BullishChangeOfCharacter or
                 PriceActionEventType.BearishChangeOfCharacter));
+
+    public bool HasTriggeredSetup(
+        PriceActionDirection direction,
+        decimal minimumConfidence = 50m,
+        IReadOnlyCollection<PriceActionSetupType>? allowedTypes = null) =>
+        Setups.Any(setup =>
+            setup.Phase == PriceActionSetupPhase.Triggered &&
+            setup.Direction == direction &&
+            setup.Confidence >= minimumConfidence &&
+            (allowedTypes is null || allowedTypes.Count == 0 || allowedTypes.Contains(setup.Type)));
+
+    public PriceActionSetup? GetBestTriggeredSetup(
+        PriceActionDirection direction,
+        decimal minimumConfidence = 50m,
+        IReadOnlyCollection<PriceActionSetupType>? allowedTypes = null) =>
+        Setups
+            .Where(setup =>
+                setup.Phase == PriceActionSetupPhase.Triggered &&
+                setup.Direction == direction &&
+                setup.Confidence >= minimumConfidence &&
+                (allowedTypes is null || allowedTypes.Count == 0 || allowedTypes.Contains(setup.Type)))
+            .OrderByDescending(setup => setup.Confidence)
+            .ThenByDescending(setup => setup.TriggeredAt)
+            .FirstOrDefault();
 }
 
 public sealed record AdxAnalysisSnapshot

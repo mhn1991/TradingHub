@@ -4,7 +4,9 @@ using ChartAnnotator.Collections;
 using ChartAnnotator.Indicators;
 using ChartAnnotator.Models;
 using ChartAnnotator.PriceAction;
+using ChartAnnotator.Regime;
 using ChartAnnotator.Structure;
+using ChartAnnotator.Value;
 
 namespace ChartAnnotator.Engine;
 
@@ -32,7 +34,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         MarketStructureAnalyzer? marketStructureAnalyzer = null)
     {
         _options = options ?? new ChartAnnotationOptions();
-        Validate(_options);
+        _options.Validate();
         _supportResistance = supportResistance ?? new SupportResistanceDetector();
         _trendlineDetector = trendlineDetector ?? new RansacTrendlineDetector();
         _channelDetector = channelDetector ?? new ChannelDetector();
@@ -106,9 +108,18 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         AtrAnalysisSnapshot atrAnalysis = state.Atr.IsReady
             ? state.AtrAnalysis.Update(state.Atr.Current, candleEvent.Candle.Prices.Close)
             : AtrAnalysisSnapshot.Empty;
+        VolumeAnalysisSnapshot volumeAnalysis = state.VolumeAnalysis.Update(
+            candleEvent.Candle.Volume);
         BollingerAnalysisSnapshot bollingerAnalysis = state.BollingerAnalysis.Update(
             candleEvent.Candle.Prices.Close,
             state.Bollinger);
+        state.EfficiencyRatio.Update(candleEvent.Candle.Prices.Close);
+        EfficiencyAnalysisSnapshot efficiencyAnalysis = state.EfficiencyRatioAnalysis.Update(
+            state.EfficiencyRatio.Current,
+            state.EfficiencyRatio.IsReady);
+        state.Donchian.Update(
+            candleEvent.Candle,
+            state.Atr.IsReady ? state.Atr.Current : null);
 
         IReadOnlyList<SwingPoint> confirmed = state.SwingDetector.Update(candleEvent.Candle);
         foreach (SwingPoint swing in confirmed)
@@ -187,7 +198,11 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             BollingerMiddle = state.Bollinger.IsReady ? state.Bollinger.Middle : null,
             BollingerUpper = state.Bollinger.IsReady ? state.Bollinger.Upper : null,
             BollingerLower = state.Bollinger.IsReady ? state.Bollinger.Lower : null,
+            EfficiencyRatio = state.EfficiencyRatio.IsReady ? state.EfficiencyRatio.Current : null,
+            EfficiencyAnalysis = efficiencyAnalysis,
+            Donchian = state.Donchian.Current,
             AtrAnalysis = atrAnalysis,
+            VolumeAnalysis = volumeAnalysis,
             RsiAnalysis = rsiAnalysis,
             BollingerAnalysis = bollingerAnalysis,
             AdxAnalysis = state.Adx.Snapshot()
@@ -201,6 +216,23 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             previousStructure,
             indicators,
             candleEvent.Sequence);
+        // Composite setups (break-retest, sweep-displacement, sweep-CHOCH) are
+        // derived from atomic events on this timeframe only.
+        priceAction = state.SetupComposer.Apply(
+            priceAction,
+            candleEvent.Candle,
+            candleEvent.Sequence);
+        MarketRegimeSnapshot regime = state.MarketRegime?.Update(
+            candleEvent.Candle,
+            indicators,
+            structure,
+            priceAction) ?? MarketRegimeSnapshot.Unknown;
+        IReadOnlyList<AnchoredValueReference> valueReferences = state.AnchoredValueReferences.Update(
+            candleEvent.Candle,
+            state.Candles.Snapshot(),
+            confirmed,
+            priceAction,
+            indicators.Atr);
         ConfidenceScore confidence = _confidenceScorer.Calculate(
             candleEvent.Candle,
             indicators,
@@ -223,6 +255,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             Channels = state.Channels,
             MarketStructure = structure,
             PriceAction = priceAction,
+            MarketRegime = regime,
+            ValueReferences = valueReferences,
             Confidence = confidence
         };
 
@@ -237,7 +271,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             confidence.Total,
             indicators.AtrAnalysis,
             indicators.RsiAnalysis,
-            indicators.BollingerAnalysis));
+            indicators.BollingerAnalysis,
+            indicators.VolumeAnalysis));
         return snapshot;
     }
 
@@ -289,47 +324,6 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
     private AnalysisState GetOrCreate(ChartKey key) =>
         _states.GetOrAdd(key, _ => new AnalysisState(_options));
 
-    private static void Validate(ChartAnnotationOptions options)
-    {
-        if (options.CandleCapacity < 1 ||
-            options.SwingCapacity < 1 ||
-            options.IndicatorCapacity < 1 ||
-            options.HeavyAnalysisEveryCandles < 1 ||
-            options.AtrPeriod <= 1 ||
-            options.AdxPeriod <= 1 ||
-            options.AtrAnalysisHistoryPeriod < 2 ||
-            options.AtrAnalysisChangeLookback < 1 ||
-            options.AtrAnalysisChangeLookback >= options.AtrAnalysisHistoryPeriod ||
-            options.AtrAnalysisMinimumSamples < 2 ||
-            options.AtrAnalysisMinimumSamples > options.AtrAnalysisHistoryPeriod ||
-            options.AtrDirectionThresholdPercent < 0m ||
-            options.RsiPeriod <= 1 ||
-            options.RsiMomentumLookback < 1 ||
-            options.RsiMomentumThreshold < 0m ||
-            options.RsiMinimumDivergenceDifference < 0m ||
-            options.RsiMinimumPriceDifferenceAtr < 0m ||
-            options.RsiSignalLifetimeCandles < 1 ||
-            options.BollingerPeriod <= 1 ||
-            options.BollingerStandardDeviations <= 0m ||
-            options.BollingerWidthHistoryPeriod < 2 ||
-            options.BollingerWidthChangeLookback < 1 ||
-            options.BollingerWidthChangeLookback >= options.BollingerWidthHistoryPeriod ||
-            options.BollingerWidthMinimumSamples < 2 ||
-            options.BollingerWidthMinimumSamples > options.BollingerWidthHistoryPeriod ||
-            options.BollingerWidthDirectionThresholdPercent < 0m ||
-            options.BollingerSqueezePercentile is < 0m or > 100m ||
-            options.BollingerWidePercentile is < 0m or > 100m ||
-            options.BollingerWidePercentile <= options.BollingerSqueezePercentile ||
-            options.SwingLeftBars < 1 ||
-            options.SwingRightBars < 1 ||
-            options.StructureDirectionToleranceAtr < 0m)
-        {
-            throw new ArgumentOutOfRangeException(nameof(options));
-        }
-
-        options.PriceAction.Validate();
-    }
-
     public void FreezeCalibration(DateTimeOffset frozenAt)
     {
         foreach (AnalysisState state in _states.Values)
@@ -337,6 +331,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             lock (state.SyncRoot)
             {
                 state.PriceAction.FreezeCalibration(frozenAt);
+                state.MarketRegime?.FreezeCalibration(frozenAt);
             }
         }
     }
@@ -355,6 +350,12 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
                 options.AtrAnalysisChangeLookback,
                 options.AtrAnalysisMinimumSamples,
                 options.AtrDirectionThresholdPercent);
+            VolumeAnalysis = new VolumeAnalysisState(
+                options.VolumeHistoryPeriod,
+                options.VolumeMinimumSamples,
+                options.VolumeLowRelativeThreshold,
+                options.VolumeHighRelativeThreshold,
+                options.VolumeSpikeRelativeThreshold);
             Rsi = new RsiState(options.RsiPeriod);
             RsiAnalysis = new RsiAnalysisState(
                 Math.Max(options.IndicatorCapacity, options.RsiMomentumLookback + 1),
@@ -378,6 +379,27 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
                 options.SwingLeftBars,
                 options.SwingRightBars);
             PriceAction = new PriceActionAnalyzer(options.PriceAction);
+            SetupComposer = new PriceActionSetupComposer(options.PriceActionSetups);
+            EfficiencyRatio = new EfficiencyRatioState(options.EfficiencyRatioPeriod);
+            EfficiencyRatioAnalysis = new EfficiencyRatioAnalysisState(
+                options.EfficiencyRatioAnalysisHistoryPeriod,
+                options.EfficiencyRatioAnalysisChangeLookback,
+                options.EfficiencyRatioAnalysisMinimumSamples,
+                options.EfficiencyRatioDirectionThresholdPercent,
+                options.EfficiencyRatioHighlyChoppyMaximum,
+                options.EfficiencyRatioChoppyMaximum,
+                options.EfficiencyRatioTransitionalMaximum,
+                options.EfficiencyRatioEfficientMaximum,
+                options.EfficiencyRatioChoppyPercentile,
+                options.EfficiencyRatioTransitionalPercentile,
+                options.EfficiencyRatioEfficientPercentile,
+                options.EfficiencyRatioHighlyEfficientPercentile);
+            Donchian = new DonchianState(options.DonchianPeriod);
+            AnchoredValueReferences = new AnchoredValueReferenceState(
+                options.MaximumAnchoredValueReferences,
+                options.MinimumValueReferenceVolumeCoveragePercent,
+                new TimeOnly(options.SessionValueAnchorHourUtc, 0));
+            MarketRegime = options.MarketRegime.Enabled ? new MarketRegimeClassifier(options.MarketRegime) : null;
         }
 
         public object SyncRoot { get; } = new();
@@ -388,12 +410,19 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         public AtrState Atr { get; }
         public AdxState Adx { get; }
         public AtrAnalysisState AtrAnalysis { get; }
+        public VolumeAnalysisState VolumeAnalysis { get; }
         public RsiState Rsi { get; }
         public RsiAnalysisState RsiAnalysis { get; }
         public BollingerState Bollinger { get; }
         public BollingerAnalysisState BollingerAnalysis { get; }
+        public EfficiencyRatioState EfficiencyRatio { get; }
+        public EfficiencyRatioAnalysisState EfficiencyRatioAnalysis { get; }
+        public DonchianState Donchian { get; }
+        public AnchoredValueReferenceState AnchoredValueReferences { get; }
+        public MarketRegimeClassifier? MarketRegime { get; }
         public SwingDetector SwingDetector { get; }
         public PriceActionAnalyzer PriceAction { get; }
+        public PriceActionSetupComposer SetupComposer { get; }
         public IReadOnlyList<PriceZone> Zones { get; set; } = [];
         public IReadOnlyList<Trendline> Trendlines { get; set; } = [];
         public IReadOnlyList<PriceChannel> Channels { get; set; } = [];

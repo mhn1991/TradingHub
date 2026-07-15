@@ -2,11 +2,18 @@ using System.Text.Json.Serialization;
 using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
+using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
 using RiskManager;
 using RiskManager.Safety;
+using RiskManager.Conditions;
 using Simulator.MarketData;
 using TradeManager;
+using PortfolioManager.Correlation;
+using PortfolioManager.Risk;
+using Simulator.Execution;
+using Simulator.Financing;
+using RiskManager.Calibration;
 
 namespace Simulator.Models;
 
@@ -38,7 +45,15 @@ public enum AmbiguousIntrabarPolicy
 public enum FillModel
 {
     HistoricalBidAsk,
-    MidpointPlusConfiguredSpread
+    MidpointPlusConfiguredSpread,
+    VariableSyntheticSpread,
+    StressExecution
+}
+
+public enum SimulationAccountMode
+{
+    IndependentStrategyAccounts,
+    SharedPortfolioAccount
 }
 
 public enum SimulationJobStatus
@@ -60,6 +75,7 @@ public enum SimulationJobStatus
 /// <summary>Validated runtime configuration for streamed comparative backtests.</summary>
 public sealed record BacktestRuntimeOptions
 {
+    public SimulationAccountMode AccountMode { get; init; } = SimulationAccountMode.IndependentStrategyAccounts;
     /// <summary>Legacy alias for <see cref="ExecutionInterval"/>.</summary>
     public BarInterval BaseInterval
     {
@@ -74,19 +90,20 @@ public sealed record BacktestRuntimeOptions
     public BarInterval AnalysisBaseInterval { get; init; } = BarInterval.Minutes(1);
 
     public IReadOnlyList<BarInterval> AnalysisIntervals { get; init; } =
-        [BarInterval.Minutes(5), BarInterval.Minutes(15), BarInterval.Hours(1)];
+        RecommendedSimulationDefaults.AnalysisIntervals;
 
     public SimulationPrecisionMode PrecisionMode { get; init; } = SimulationPrecisionMode.Fast;
     public HistoricalDataSourceKind SourceKind { get; init; } = HistoricalDataSourceKind.OandaCandles;
     public string? ImportedCandlePath { get; init; }
 
-    public ProgressiveStrategyTimeframes StrategyTimeframes { get; init; } = new();
+    public ProgressiveStrategyTimeframes StrategyTimeframes { get; init; } =
+        RecommendedSimulationDefaults.StrategyTimeframes;
 
     public int SourcePageSize { get; init; } = 5_000;
     public int PrefetchCapacity { get; init; } = 20_000;
     public int PrefetchLowWatermark { get; init; } = 5_000;
 
-    public int WarmupDays { get; init; } = 45;
+    public int WarmupDays { get; init; } = RecommendedSimulationDefaults.WarmupDays;
     public int? WarmupBaseCandleCount { get; init; }
 
     public StrategyExecutionMode StrategyExecutionMode { get; init; } = StrategyExecutionMode.ParallelWorkers;
@@ -128,7 +145,32 @@ public sealed record BacktestRuntimeOptions
     public TradingSafetyOptions SafetyOptions { get; init; } = new();
 
     /// <summary>Order-size calculation and capital/margin reservation policy.</summary>
-    public PositionSizingOptions PositionSizing { get; init; } = new();
+    public PositionSizingOptions PositionSizing { get; init; } =
+        RecommendedSimulationDefaults.PositionSizing;
+
+    /// <summary>
+    /// ChartAnnotator indicator/regime-classification configuration (Efficiency
+    /// Ratio, Donchian, MarketRegimeClassifier, etc.). Previously never reached the
+    /// live engine - see StreamingComparativeEngineOptions.AnnotationOptions wiring.
+    /// </summary>
+    public ChartAnnotationOptions AnnotationOptions { get; init; } = new();
+
+    /// <summary>
+    /// Regime-based strategy routing (allow/block entries, risk multiplier) applied
+    /// to both Legacy and Improved. Disabled by default.
+    /// </summary>
+    public MarketRegimePolicyOptions MarketRegimeRouting { get; init; } = new();
+    public TradingConditionOptions TradingConditions { get; init; } = new();
+    public PortfolioRiskOptions PortfolioRisk { get; init; } = new();
+    public CorrelationRiskOptions CorrelationRisk { get; init; } = new();
+    public AdaptiveRiskOptions AdaptiveRisk { get; init; } = new();
+    public SetupCalibrationPolicyOptions SetupCalibration { get; init; } = new();
+    public SetupCalibrationArtifact? SetupCalibrationArtifact { get; init; }
+    public RegimeManagementOptions RegimeManagement { get; init; } = new();
+    public TradeManagementCalibrationOptions ManagementCalibration { get; init; } = new();
+    public TradeManagementCalibration? ManagementCalibrationArtifact { get; init; }
+    public ExecutionModelOptions Execution { get; init; } = new();
+    public FinancingOptions Financing { get; init; } = new();
 
     public SimulationTimeframeOptions ToTimeframeOptions() => new()
     {
@@ -154,6 +196,29 @@ public sealed record BacktestRuntimeOptions
         ImprovedPositionManagement.Validate();
         SafetyOptions.Validate();
         PositionSizing.Validate();
+        AnnotationOptions.Validate();
+        MarketRegimeRouting.Validate();
+        TradingConditions.Validate();
+        PortfolioRisk.Validate();
+        CorrelationRisk.Validate();
+        AdaptiveRisk.Validate();
+        SetupCalibration.Validate();
+        if (SetupCalibration.Enabled)
+        {
+            if (SetupCalibrationArtifact is null)
+                throw new ArgumentException("Enabled setup calibration requires a versioned artifact.");
+            SetupCalibrationArtifact.Validate();
+        }
+        RegimeManagement.Validate();
+        ManagementCalibration.Validate();
+        if (ManagementCalibration.Enabled)
+        {
+            if (ManagementCalibrationArtifact is null)
+                throw new ArgumentException("Enabled trade-management calibration requires a versioned artifact.");
+            ManagementCalibrationArtifact.Validate();
+        }
+        Execution.Validate();
+        Financing.Validate();
 
         BarInterval[] derivedAnalysisIntervals = StrategyTimeframes.RequiredIntervals
             .Concat(ResolveManagementIntervals("legacy"))
@@ -230,7 +295,8 @@ public sealed record BacktestRuntimeOptions
         if (!Enum.IsDefined(StrategyExecutionMode) ||
             !Enum.IsDefined(AnalysisSharingMode) ||
             !Enum.IsDefined(StrategyFailurePolicy) ||
-            !Enum.IsDefined(AmbiguousIntrabarPolicy))
+            !Enum.IsDefined(AmbiguousIntrabarPolicy) ||
+            !Enum.IsDefined(AccountMode))
         {
             throw new ArgumentException("One or more enumeration values are invalid.");
         }
@@ -338,6 +404,12 @@ public sealed record BacktestRequest
             ? Runtime with { SourceKind = HistoricalDataSourceKind.InlineTestData }
             : Runtime;
         runtime.Validate(Strategies.Count);
+        if (runtime.Financing.Enabled &&
+            !runtime.Financing.InstrumentRates.ContainsKey(Instrument.Value))
+        {
+            throw new ArgumentException(
+                $"Enabled financing requires an explicit long/short rate for {Instrument.Value}.");
+        }
     }
 
     public DateTimeOffset ResolveWarmupFrom() => Runtime.ResolveWarmupFrom(From);

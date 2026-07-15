@@ -1,6 +1,9 @@
 using Brokers.Models;
 using Simulator.Abstractions;
 using Simulator.Models;
+using Simulator.Execution;
+using Simulator.Financing;
+using PortfolioManager.Risk;
 
 namespace Simulator.Broker;
 
@@ -15,6 +18,10 @@ public sealed class SimulatedBrokerRuntime
     private readonly SimulationOptions _options;
     private readonly ISimulationClock _clock;
     private readonly Action _ensureActive;
+    private readonly ISimulationExecutionModel _executionModel;
+    private readonly IFinancingModel? _financingModel;
+    private readonly TimeZoneInfo? _financingTimeZone;
+    private DateTimeOffset? _lastFinancingObservation;
 
     internal SimulatedBrokerRuntime(
         SimulatedBrokerState state,
@@ -28,6 +35,12 @@ public sealed class SimulatedBrokerRuntime
         _options = options;
         _clock = clock;
         _ensureActive = ensureActive;
+        _executionModel = new SimulationExecutionModel(options.ExecutionModel);
+        if (options.Financing.Enabled)
+        {
+            _financingModel = new ConfiguredFinancingModel(options.Financing);
+            _financingTimeZone = TimeZoneInfo.FindSystemTimeZoneById(options.Financing.BrokerTimeZoneId);
+        }
     }
 
     public Task ProcessExecutionCandleAsync(
@@ -40,6 +53,7 @@ public sealed class SimulatedBrokerRuntime
         ValidateExecutionCandle(candle);
         _state.AdvanceMarket(candle);
         _state.RecordCandle(candle);
+        PostFinancing(candle);
 
         IReadOnlyList<SimulatedOrder> orders = _state.GetEligibleOrders(
             candle.Instrument,
@@ -67,7 +81,15 @@ public sealed class SimulatedBrokerRuntime
                 continue;
             }
 
-            FillDecision decision = Evaluate(order, candle);
+            decimal remainingOrderQuantity = order.Request.Quantity.Value - order.FilledQuantity;
+            FillEvaluation decision = _executionModel.Evaluate(order, candle, new ExecutionModelContext
+            {
+                Sequence = _state.MarketSequence,
+                ConfiguredSpreadBasisPoints = _options.SpreadBasisPoints,
+                ConfiguredSlippageBasisPoints = _options.SlippageBasisPoints,
+                OrderQuantity = order.Request.Quantity.Value,
+                RemainingQuantity = remainingOrderQuantity
+            });
             if (decision.TriggeredOnly)
             {
                 if (_state.MarkTriggered(order.BrokerOrderId))
@@ -85,12 +107,9 @@ public sealed class SimulatedBrokerRuntime
                 continue;
             }
 
-            decimal quantity = order.Request.Quantity.Value - order.FilledQuantity;
-            decimal executionPrice = ApplyCostsToPrice(
-                decision.RawPrice,
-                order.Request.Side,
-                order.Request.Type,
-                order.Request.LimitPrice);
+            decimal quantity = decision.FillQuantity;
+            decimal executionPrice = decision.ExecutablePrice ??
+                throw new InvalidOperationException("A fill evaluation did not provide an executable price.");
             decimal quoteToBaseRate = _state.GetQuoteToBaseCurrencyRate(order.Request.Instrument);
             decimal commission = Math.Abs(executionPrice * quantity) *
                 quoteToBaseRate *
@@ -120,15 +139,24 @@ public sealed class SimulatedBrokerRuntime
 
             FillApplicationResult applied = result
                 ?? throw new InvalidOperationException("A successful fill did not return a result.");
+            _state.RecordExecutionFill(order.Request.Type, decision);
 
             _events.Append(
                 SimulatedOrderClient.ToEvent(
                     applied.Order,
-                    OrderEventType.Filled,
+                    decision.IsPartialFill ? OrderEventType.PartiallyFilled : OrderEventType.Filled,
                     _clock.UtcNow,
                     executionPrice,
                     applied.FilledQuantity,
-                    applied.Commission));
+                    applied.Commission,
+                    decision.GapThroughStop
+                        ? "GapThroughStop: filled at adverse executable open plus slippage."
+                        : decision.IsPartialFill
+                            ? "Synthetic deterministic partial-fill capacity applied."
+                            : null,
+                    appliedSpread: decision.AppliedSpreadPrice,
+                    appliedSlippage: decision.AppliedSlippagePrice,
+                    executionModelVersion: $"simulation-execution-v1:{_options.ExecutionModel.FillModel}"));
 
             foreach (SimulatedOrder resized in applied.ResizedProtectiveOrders)
             {
@@ -148,13 +176,19 @@ public sealed class SimulatedBrokerRuntime
                     message: "Protective order cancelled because the position was fully closed."));
             }
 
-            foreach (SimulatedOrder sibling in _state.CancelOcoSiblings(applied.Order.BrokerOrderId))
+            if (string.Equals(applied.Order.Status, "FILLED", StringComparison.Ordinal))
             {
-                _events.Append(
-                    SimulatedOrderClient.ToEvent(sibling, OrderEventType.Cancelled, _clock.UtcNow));
+                foreach (SimulatedOrder sibling in _state.CancelOcoSiblings(applied.Order.BrokerOrderId))
+                {
+                    _events.Append(
+                        SimulatedOrderClient.ToEvent(sibling, OrderEventType.Cancelled, _clock.UtcNow));
+                }
             }
 
-            CreateAttachedExitOrders(applied.Order);
+            CreateAttachedExitOrders(applied.Order, applied.Order.FilledQuantity);
+            if (decision.IsPartialFill &&
+                order.Request.TimeInForce == StandardTimeInForce.ImmediateOrCancel)
+                ExpireImmediateOrder(applied.Order);
         }
 
         return Task.CompletedTask;
@@ -164,6 +198,81 @@ public sealed class SimulatedBrokerRuntime
     {
         _ensureActive();
         _state.RecordCandle(candle);
+    }
+
+    private void PostFinancing(Candle candle)
+    {
+        if (_financingModel is null || _financingTimeZone is null || candle.CloseTime is not DateTimeOffset current)
+            return;
+        if (_lastFinancingObservation is not DateTimeOffset previous)
+        {
+            _lastFinancingObservation = current;
+            return;
+        }
+
+        DateTime previousLocal = TimeZoneInfo.ConvertTime(previous, _financingTimeZone).DateTime;
+        DateTime currentLocal = TimeZoneInfo.ConvertTime(current, _financingTimeZone).DateTime;
+        DateTime date = previousLocal.Date;
+        while (date <= currentLocal.Date)
+        {
+            DateTime boundaryLocal = date + _options.Financing.RolloverLocalTime.ToTimeSpan();
+            if (previousLocal < boundaryLocal && currentLocal >= boundaryLocal)
+            {
+                DateTime boundaryUtc = TimeZoneInfo.ConvertTimeToUtc(
+                    DateTime.SpecifyKind(boundaryLocal, DateTimeKind.Unspecified),
+                    _financingTimeZone);
+                DateTimeOffset boundary = new(boundaryUtc, TimeSpan.Zero);
+                int dayCount = ResolveFinancingDayCount(DateOnly.FromDateTime(boundaryLocal));
+                foreach (BrokerPosition position in _state.GetPositions()
+                             .OrderBy(item => item.Instrument.Value, StringComparer.Ordinal))
+                {
+                    decimal price = position.AveragePrice ?? candle.Prices.Close;
+                    decimal conversion = _state.GetQuoteToBaseCurrencyRate(position.Instrument);
+                    FinancingCharge charge = _financingModel.Calculate(
+                        new PortfolioPositionLot
+                        {
+                            LotId = position.PositionId,
+                            StrategyId = "shared-account",
+                            DecisionId = "financing",
+                            Instrument = position.Instrument,
+                            Side = position.Side,
+                            Quantity = position.Quantity,
+                            EntryPrice = price,
+                            CurrentPrice = candle.Prices.Close,
+                            QuoteToAccountCurrencyRate = conversion
+                        },
+                        previous,
+                        boundary,
+                        new FinancingContext
+                        {
+                            QuoteToAccountCurrencyRate = conversion,
+                            RolloverDate = DateOnly.FromDateTime(boundaryLocal),
+                            RolloverDayCount = dayCount,
+                            AccountCurrency = _options.BaseCurrency
+                        });
+                    _state.ApplyFinancing(boundary, charge.AmountAccountCurrency,
+                        $"{charge.Explanation} Model={charge.ModelVersion}; instrument={position.Instrument}.");
+                }
+            }
+            date = date.AddDays(1);
+        }
+        _lastFinancingObservation = current;
+    }
+
+    private int ResolveFinancingDayCount(DateOnly rolloverDate)
+    {
+        int dayCount = rolloverDate.DayOfWeek == _options.Financing.TripleFinancingDay ? 3 : 1;
+        // The configured calendar represents non-settlement days. Extend the charge
+        // horizon for holidays without double-counting weekend days already covered by
+        // the normal triple rollover.
+        for (int offset = 1; offset <= dayCount; offset++)
+        {
+            DateOnly settlementDate = rolloverDate.AddDays(offset);
+            if (_options.Financing.Holidays.Contains(settlementDate) &&
+                settlementDate.DayOfWeek is not DayOfWeek.Saturday and not DayOfWeek.Sunday)
+                dayCount++;
+        }
+        return dayCount;
     }
 
     public Task LiquidateAtMarketCloseAsync(
@@ -202,7 +311,13 @@ public sealed class SimulatedBrokerRuntime
             Side = side,
             Type = StandardOrderType.Market,
             Quantity = new OrderQuantity(position.Quantity, QuantityUnit.Units),
-            ClientOrderId = $"simulation-liquidation-{_state.MarketSequence}"
+            ClientOrderId = $"simulation-liquidation-{_state.MarketSequence}",
+            StrategyId = position.StrategyId,
+            DecisionId = position.DecisionId,
+            SetupId = position.SetupId,
+            PortfolioReservationId = position.PortfolioReservationId,
+            RiskClusterId = position.RiskClusterId,
+            ReduceOnly = true
         }, _clock.UtcNow);
 
         decimal executionPrice = ApplyCostsToPrice(
@@ -310,49 +425,6 @@ public sealed class SimulatedBrokerRuntime
         }
     }
 
-    private FillDecision Evaluate(SimulatedOrder order, Candle candle)
-    {
-        decimal open = candle.Prices.Open;
-        decimal high = candle.Prices.High;
-        decimal low = candle.Prices.Low;
-        bool buy = order.Request.Side == OrderSide.Buy;
-
-        return order.Request.Type switch
-        {
-            StandardOrderType.Market => FillDecision.Fill(open),
-
-            StandardOrderType.Limit => buy
-                ? low <= order.Request.LimitPrice!.Value
-                    ? FillDecision.Fill(open <= order.Request.LimitPrice.Value ? open : order.Request.LimitPrice.Value)
-                    : FillDecision.None
-                : high >= order.Request.LimitPrice!.Value
-                    ? FillDecision.Fill(open >= order.Request.LimitPrice.Value ? open : order.Request.LimitPrice.Value)
-                    : FillDecision.None,
-
-            StandardOrderType.Stop => buy
-                ? high >= order.Request.StopPrice!.Value
-                    ? FillDecision.Fill(open >= order.Request.StopPrice.Value ? open : order.Request.StopPrice.Value)
-                    : FillDecision.None
-                : low <= order.Request.StopPrice!.Value
-                    ? FillDecision.Fill(open <= order.Request.StopPrice.Value ? open : order.Request.StopPrice.Value)
-                    : FillDecision.None,
-
-            StandardOrderType.StopLimit when !order.IsTriggered => buy
-                ? high >= order.Request.StopPrice!.Value ? FillDecision.Trigger : FillDecision.None
-                : low <= order.Request.StopPrice!.Value ? FillDecision.Trigger : FillDecision.None,
-
-            StandardOrderType.StopLimit => buy
-                ? low <= order.Request.LimitPrice!.Value
-                    ? FillDecision.Fill(open <= order.Request.LimitPrice.Value ? open : order.Request.LimitPrice.Value)
-                    : FillDecision.None
-                : high >= order.Request.LimitPrice!.Value
-                    ? FillDecision.Fill(open >= order.Request.LimitPrice.Value ? open : order.Request.LimitPrice.Value)
-                    : FillDecision.None,
-
-            _ => FillDecision.None
-        };
-    }
-
     private decimal ApplyCostsToPrice(
         decimal rawPrice,
         OrderSide side,
@@ -377,7 +449,8 @@ public sealed class SimulatedBrokerRuntime
     }
 
     private void CreateAttachedExitOrders(
-        SimulatedOrder filled)
+        SimulatedOrder filled,
+        decimal totalFilledQuantity)
     {
         PlaceOrderRequest request = filled.Request;
         if (request.StopLoss is null && request.TakeProfit is null)
@@ -387,6 +460,21 @@ public sealed class SimulatedBrokerRuntime
 
         OrderSide exitSide = request.Side == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
         string ocoGroup = $"OCO-{filled.BrokerOrderId}";
+        IReadOnlyList<SimulatedOrder> resized = _state.ResizeOpenOcoGroupQuantities(
+            ocoGroup,
+            totalFilledQuantity);
+        if (resized.Count > 0)
+        {
+            foreach (SimulatedOrder order in resized)
+            {
+                _events.Append(SimulatedOrderClient.ToEvent(
+                    order,
+                    OrderEventType.Replaced,
+                    _clock.UtcNow,
+                    message: $"Protective quantity increased to cumulative entry fill {totalFilledQuantity}."));
+            }
+            return;
+        }
 
         if (request.StopLoss is not null)
         {
@@ -395,9 +483,15 @@ public sealed class SimulatedBrokerRuntime
                 Instrument = request.Instrument,
                 Side = exitSide,
                 Type = StandardOrderType.Stop,
-                Quantity = request.Quantity,
+                Quantity = new OrderQuantity(totalFilledQuantity, request.Quantity.Unit),
                 StopPrice = request.StopLoss.Price,
-                ClientOrderId = $"{filled.ClientOrderId}-SL"
+                ClientOrderId = $"{filled.ClientOrderId}-SL",
+                StrategyId = request.StrategyId,
+                DecisionId = request.DecisionId,
+                SetupId = request.SetupId,
+                PortfolioReservationId = request.PortfolioReservationId,
+                RiskClusterId = request.RiskClusterId,
+                ReduceOnly = true
             }, _clock.UtcNow, ocoGroup);
 
             _events.Append(
@@ -411,9 +505,15 @@ public sealed class SimulatedBrokerRuntime
                 Instrument = request.Instrument,
                 Side = exitSide,
                 Type = StandardOrderType.Limit,
-                Quantity = request.Quantity,
+                Quantity = new OrderQuantity(totalFilledQuantity, request.Quantity.Unit),
                 LimitPrice = request.TakeProfit.Price,
-                ClientOrderId = $"{filled.ClientOrderId}-TP"
+                ClientOrderId = $"{filled.ClientOrderId}-TP",
+                StrategyId = request.StrategyId,
+                DecisionId = request.DecisionId,
+                SetupId = request.SetupId,
+                PortfolioReservationId = request.PortfolioReservationId,
+                RiskClusterId = request.RiskClusterId,
+                ReduceOnly = true
             }, _clock.UtcNow, ocoGroup);
 
             _events.Append(
@@ -421,13 +521,4 @@ public sealed class SimulatedBrokerRuntime
         }
     }
 
-    private readonly record struct FillDecision(
-        bool ShouldFill,
-        bool TriggeredOnly,
-        decimal RawPrice)
-    {
-        public static FillDecision None => new(false, false, 0m);
-        public static FillDecision Trigger => new(false, true, 0m);
-        public static FillDecision Fill(decimal price) => new(true, false, price);
-    }
 }

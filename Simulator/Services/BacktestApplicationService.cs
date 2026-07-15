@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Channels;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Agent.Abstractions;
 using Agent.Strategies;
 using Brokers;
@@ -174,14 +176,17 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                 .ConfigureAwait(false);
             if (existing is null)
                 throw new KeyNotFoundException($"Simulation '{simulationId}' was not found.");
+            // Terminal jobs: treat pause as a no-op so UI retries after completion don't look like crashes.
             if (existing.IsComplete)
-                throw new InvalidOperationException($"Simulation '{simulationId}' is already {existing.Status}.");
+                return;
             throw new InvalidOperationException($"Simulation '{simulationId}' is not running in this process.");
         }
 
         SimulationJobSnapshot current = job.Snapshot;
         if (current.IsComplete)
-            throw new InvalidOperationException($"Simulation '{simulationId}' is already complete.");
+            return;
+        if (current.Status is SimulationJobStatus.Paused)
+            return;
         if (current.Status is not (
                 SimulationJobStatus.PreparingData or
                 SimulationJobStatus.DownloadingData or
@@ -207,17 +212,35 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             if (existing is null)
                 throw new KeyNotFoundException($"Simulation '{simulationId}' was not found.");
             if (existing.IsComplete)
-                throw new InvalidOperationException($"Simulation '{simulationId}' is already {existing.Status}.");
+            {
+                string detail = string.IsNullOrWhiteSpace(existing.Error)
+                    ? string.Empty
+                    : $" Failure detail: {existing.Error}";
+                throw new InvalidOperationException(
+                    $"Simulation '{simulationId}' has already finished as {existing.Status}.{detail} " +
+                    "Start a new simulation to run again — resume only works from Paused.");
+            }
+
             throw new InvalidOperationException($"Simulation '{simulationId}' is not running in this process.");
         }
 
         SimulationJobSnapshot current = job.Snapshot;
         if (current.IsComplete)
-            throw new InvalidOperationException($"Simulation '{simulationId}' is already complete.");
+        {
+            string detail = string.IsNullOrWhiteSpace(current.Error)
+                ? string.Empty
+                : $" Failure detail: {current.Error}";
+            throw new InvalidOperationException(
+                $"Simulation '{simulationId}' has already finished as {current.Status}.{detail} " +
+                "Start a new simulation to run again — resume only works from Paused.");
+        }
+
+        if (current.Status == SimulationJobStatus.Running)
+            return;
         if (current.Status != SimulationJobStatus.Paused)
         {
             throw new InvalidOperationException(
-                $"Simulation '{simulationId}' cannot be resumed while {current.Status}.");
+                $"Simulation '{simulationId}' cannot be resumed while {current.Status}. Resume only works when the job is Paused.");
         }
 
         job.PauseGate.Resume();
@@ -325,6 +348,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                     InputStreamId = result.InputStreamId,
                     DataQuality = result.DataQuality,
                     WorkerMetrics = result.Strategies.Select(item => item.Metrics).ToArray(),
+                    PortfolioPerformance = result.PortfolioPerformance,
                     Strategies = result.Strategies.Select(item => new StrategyProgressSnapshot
                     {
                         StrategyId = item.StrategyId,
@@ -419,7 +443,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             CandleCapacity = runtime.CandleCapacity,
             LedgerCapacity = runtime.LedgerCapacity,
             OrderEventCapacity = runtime.OrderEventCapacity,
-            OcoFillPolicy = runtime.ToOcoFillPolicy()
+            OcoFillPolicy = runtime.ToOcoFillPolicy(),
+            ExecutionModel = runtime.Execution,
+            Financing = runtime.Financing
         };
 
         var engine = new StreamingComparativeEngine(stream, strategies);
@@ -503,6 +529,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                 .EffectiveAnalysisIntervals(
                     strategies.SelectMany(s => s.Agent.RequiredIntervals)),
             Runtime = runtime,
+            AnnotationOptions = runtime.AnnotationOptions,
             SimulationOptions = simulationOptions,
             OutputDirectory = job.OutputDirectory,
             InputStreamId = inputStreamId,
@@ -579,6 +606,10 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         string inputRequestId)
     {
         BacktestRuntimeOptions runtime = request.Runtime;
+        string quantitativeConfiguration = JsonSerializer.Serialize(runtime, new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        });
         string canonical = string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
             $"{inputRequestId}|analysis-base:{BarIntervalParser.Format(runtime.AnalysisBaseInterval)}|" +
@@ -606,7 +637,8 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             $"rr:{request.MinimumRewardRisk}|ambiguity:{runtime.AmbiguousIntrabarPolicy}|" +
             $"legacy-pm:{PositionManagementIdentity(runtime.LegacyPositionManagement)}|" +
             $"improved-pm:{PositionManagementIdentity(runtime.ImprovedPositionManagement)}|" +
-            $"safety:{SafetyIdentity(runtime.SafetyOptions)}|v4");
+            $"safety:{SafetyIdentity(runtime.SafetyOptions)}|" +
+            $"runtime:{quantitativeConfiguration}|v5");
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
@@ -746,7 +778,8 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             MinimumRewardRisk = request.MinimumRewardRisk,
             PriceActionConfirmation = request.PriceActionConfirmation,
             MinimumPriceActionConfidence = request.MinimumPriceActionConfidence,
-            RejectStrongOpposingPriceAction = request.RejectStrongOpposingPriceAction
+            RejectStrongOpposingPriceAction = request.RejectStrongOpposingPriceAction,
+            MarketRegime = request.Runtime.MarketRegimeRouting
         };
 
         var list = new List<(string, ITradingAgent)>();

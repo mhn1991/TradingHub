@@ -61,6 +61,7 @@ Phase 4 adds a broker-neutral protective-stop amendment contract. The simulator 
 - Derived indicator context:
   - Bollinger normalized bandwidth, historical percentile, narrowing/widening state, squeeze detection, and squeeze-release/expansion events;
   - RSI zone and momentum direction, regular and hidden bullish/bearish divergence, and same-direction bullish/bearish convergence confirmed only after price swings are known;
+  - same-instrument/timeframe relative volume regime against a rolling median, preserving broker `VolumeKind` semantics (including tick activity versus traded quantity);
   - normalized ATR percentage, recent percentile, volatility regime, and contracting/expanding direction.
 - DBSCAN support/resistance zones.
 - Deterministic RANSAC trendlines.
@@ -69,7 +70,9 @@ Phase 4 adds a broker-neutral protective-stop amendment contract. The simulator 
 - Bullish and bearish break-of-structure detection.
 - Trendline/channel recalculation when market direction changes.
 - Optional removal of stale lines after a structure-direction change.
-- Confidence scoring that includes structure alignment, recent RSI relationships, volatility context, Bollinger squeeze/expansion state, and adverse-break penalties.
+- Confidence scoring that includes structure alignment, volatility context, directional price action, and adverse-break penalties. RSI relationships and Bollinger direction remain visible here but are scored for the expected trade side by the agents.
+- Direction-aware agent use of RSI momentum/divergence/convergence and Bollinger `%B`/width context: aligned confluence can confirm or trigger an entry, while strong opposing divergence or expansion vetoes it. An unresolved squeeze never supplies direction by itself.
+- Direction-aware support/resistance and volume confluence: a matching zone and elevated same-direction activity add weight to RSI relationships; remote zones are ignored, low participation is penalized, and opposing volume spikes can veto. Volume never supplies direction by itself.
 - Full replay-window dashboard support, including an **All candles** option and market-structure display.
 
 ## Streamed dual-strategy simulator (dashboard-first)
@@ -173,6 +176,8 @@ See [`PROFIT_PROTECTION_AND_LONG_RUN_FIX.md`](PROFIT_PROTECTION_AND_LONG_RUN_FIX
 ## Price action and warm-up calibration
 
 The analysis pipeline now includes deterministic BOS/CHoCH, break-and-retest, structural rejection, displacement, liquidity-sweep, compression/expansion, price-leg, and ADX/DMI evidence. Profiles are maintained separately per instrument/timeframe during warm-up and frozen before evaluation. See `PRICE_ACTION_CALIBRATION_AND_DIAGNOSTICS.md` and `FINAL_PHASE2_VALIDATION.md`.
+
+Composite same-TF setups (break-retest, sweep-displacement, sweep-CHOCH) and multi-timeframe PA entry gating for progressive agents are documented in [`PRICE_ACTION_SETUPS_AND_MTF.md`](PRICE_ACTION_SETUPS_AND_MTF.md).
 
 ## Simulator broker and asset picker
 

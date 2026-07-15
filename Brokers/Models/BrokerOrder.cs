@@ -24,6 +24,12 @@ public sealed record BrokerOrder
 {
     public required string BrokerOrderId { get; init; }
     public string? ClientOrderId { get; init; }
+    public string? StrategyId { get; init; }
+    public string? DecisionId { get; init; }
+    public string? SetupId { get; init; }
+    public string? PortfolioReservationId { get; init; }
+    public string? RiskClusterId { get; init; }
+    public bool ReduceOnly { get; init; }
     public required InstrumentKey Instrument { get; init; }
     public string? NativeInstrument { get; init; }
     public required OrderSide Side { get; init; }

@@ -56,6 +56,11 @@ public sealed record PlaceOrderRequest
     public StandardTimeInForce TimeInForce { get; init; } = StandardTimeInForce.GoodTillCancelled;
     public DateTimeOffset? ExpireAt { get; init; }
     public string? ClientOrderId { get; init; }
+    public string? StrategyId { get; init; }
+    public string? DecisionId { get; init; }
+    public string? SetupId { get; init; }
+    public string? PortfolioReservationId { get; init; }
+    public string? RiskClusterId { get; init; }
     /// <summary>Rejects or clamps any fill that would increase or reverse exposure.</summary>
     public bool ReduceOnly { get; init; }
     public StopLossInstruction? StopLoss { get; init; }
@@ -111,5 +116,8 @@ public sealed record OrderEvent
     public decimal? FillQuantity { get; init; }
     public decimal? RemainingQuantity { get; init; }
     public decimal? Fee { get; init; }
+    public decimal? AppliedSpread { get; init; }
+    public decimal? AppliedSlippage { get; init; }
+    public string? ExecutionModelVersion { get; init; }
     public string? Message { get; init; }
 }

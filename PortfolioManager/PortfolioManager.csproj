@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>PortfolioManager</RootNamespace>
+    <AssemblyName>PortfolioManager</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Agent/Agent.csproj" />
+    <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <ProjectReference Include="../RiskManager/RiskManager.csproj" />
+  </ItemGroup>
+</Project>

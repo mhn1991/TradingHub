@@ -15,82 +15,443 @@ import AnalysisChart from './AnalysisChart.vue'
 import { useSimulationRealtime } from '../composables/useSimulationRealtime'
 import { useSimulationPlayback, type PlaybackRow } from '../composables/useSimulationPlayback'
 
-const form = reactive({
-  brokerId: 'oanda',
-  instrument: 'FX:GBP/JPY',
-  from: '2025-01-01',
-  to: '2025-02-01',
-  precisionMode: 'Fast',
-  sourceKind: 'OandaCandles',
-  executionInterval: '1m',
-  analysisBaseInterval: '1m',
-  analysisIntervals: '5m,15m,30m,1h,2h',
-  trendInterval: '2h',
-  secondaryTrendIntervals: '1h',
-  setupIntervals: '30m',
-  confirmationInterval: '15m',
-  additionalConfirmationIntervals: '',
-  entryInterval: '5m',
-  minimumSecondaryTrendAlignments: 0,
-  minimumSetupAlignments: 1,
-  minimumConfirmationAlignments: 1,
-  strongOppositionVeto: true,
-  strategies: 'legacy,improved',
-  startingBalance: 100000,
-  dailyEquityProfitTarget: 0,
-  dailyEquityGivebackActivation: 0,
-  maximumDailyEquityGiveback: 0,
-  quantity: 1000,
-  positionSizingMode: 'FixedFractionalRisk',
-  fixedCashRisk: 250,
-  riskPercentOfEquity: 0.5,
-  minimumQuantity: 1,
-  maximumQuantity: 0,
-  quantityStep: 1,
-  maximumAccountMarginUsagePercent: 30,
-  maximumSinglePositionMarginPercent: 10,
-  leverage: 20,
-  commissionRate: 0.00002,
-  spreadBasisPoints: 1,
-  slippageBasisPoints: 0.5,
-  minimumRewardRisk: 1.5,
-  priceActionConfirmation: 'Soft',
-  minimumPriceActionConfidence: 55,
-  rejectStrongOpposingPriceAction: true,
-  warmupDays: 45,
-  strategyExecutionMode: 'ParallelWorkers',
-  ambiguousIntrabarPolicy: 'ConservativeStopFirst',
-  refreshCache: false,
-  noCache: false,
-  legacyPositionManagement: {
-    mode: 'StructureAtr', managementInterval: '15m',
-    evaluateMechanicalProtectionOnEveryExecutionFrame: true,
-    fastStructureInterval: '5m', mainStructureInterval: '15m', thesisInterval: '1h',
-    breakEvenActivationR: 1,
-    structureTrailActivationR: 1.5, atrBufferMultiplier: 0.25,
-    minimumStopImprovementAtr: 0.05, exitOnAdverseStructureBreak: false,
-    preserveBracketTarget: false, enableScaleOut: true, minimumRunnerFraction: 0.4,
-    enableProfitFloor: true, enableMaximumGiveback: true,
-    enableStagnationReduction: true, enableStructuralDeteriorationReduction: true,
-    enableMomentumDecayReduction: true, enableVolatilityExhaustionReduction: true,
-    enableRiskWindowReduction: false, riskWindowStartUtc: '21:45', riskWindowEndUtc: '22:15',
-    enableExecutionCostStressReduction: false,
+/** Full UTC calendar months ending at the start of the current month. */
+function evaluationWindowMonths(months: number): { from: string; to: string } {
+  const now = new Date()
+  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+  const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - months, 1))
+  return {
+    from: from.toISOString().slice(0, 10),
+    to: to.toISOString().slice(0, 10),
+  }
+}
+
+type SimulationFormState = ReturnType<typeof createBaseSimulationForm>
+type PositionManagementForm = SimulationFormState['legacyPositionManagement']
+
+interface SimulationPresetDefinition {
+  id: string
+  name: string
+  badge: string
+  description: string
+  build: () => SimulationFormState
+}
+
+/**
+ * Shared baseline form. Presets patch this rather than reinventing every module field.
+ */
+function createBaseSimulationForm() {
+  const window = evaluationWindowMonths(1)
+  return {
+    brokerId: 'oanda',
+    instrument: 'FX:EUR/USD',
+    from: window.from,
+    to: window.to,
+    precisionMode: 'Fast',
+    sourceKind: 'OandaCandles',
+    executionInterval: '1m',
+    analysisBaseInterval: '1m',
+    analysisIntervals: '5m,15m,30m,1h,2h',
+    trendInterval: '2h',
+    secondaryTrendIntervals: '1h',
+    setupIntervals: '30m',
+    confirmationInterval: '15m',
+    additionalConfirmationIntervals: '',
+    entryInterval: '5m',
+    minimumSecondaryTrendAlignments: 0,
+    minimumSetupAlignments: 1,
+    minimumConfirmationAlignments: 1,
+    strongOppositionVeto: true,
+    strategies: 'legacy,improved',
+    startingBalance: 100_000,
+    dailyEquityProfitTarget: 0,
+    dailyEquityGivebackActivation: 0,
+    maximumDailyEquityGiveback: 0,
+    equityProtectionEnabled: false,
+    equityProtectionActivationProfitPercent: 0,
+    equityProtectionMaxGivebackPercent: 0,
+    equityProtectionActionType: 'PauseNewEntries',
+    equityProtectionReductionFraction: 0.25,
+    equityProtectionFutureRiskMultiplier: 0.5,
+    equityProtectionRecoveryBars: 3,
+    quantity: 1_000,
+    positionSizingMode: 'FixedFractionalRisk',
+    fixedCashRisk: 250,
+    riskPercentOfEquity: 0.25,
+    minimumQuantity: 1,
+    maximumQuantity: 0,
+    quantityStep: 1,
+    maximumAccountMarginUsagePercent: 30,
+    maximumSinglePositionMarginPercent: 10,
+    leverage: 20,
+    commissionRate: 0.00002,
+    spreadBasisPoints: 1,
+    slippageBasisPoints: 0.5,
+    minimumRewardRisk: 1.5,
+    priceActionConfirmation: 'Soft',
+    minimumPriceActionConfidence: 55,
+    rejectStrongOpposingPriceAction: true,
+    warmupDays: 21,
+    strategyExecutionMode: 'ParallelWorkers',
+    ambiguousIntrabarPolicy: 'ConservativeStopFirst',
+    accountMode: 'IndependentStrategyAccounts',
+    regimeEnabled: false,
+    efficiencyRatioPeriod: 14,
+    regimeConfirmationBars: 2,
+    regimePersistenceBars: 3,
+    regimeSoftSpreadAtr: 0.15,
+    regimeHardSpreadAtr: 0.30,
+    tradingConditionsEnabled: false,
+    allowedSessions: 'Asian,London,NewYork,LondonNewYorkOverlap',
+    rolloverBlackoutMinutesBefore: 15,
+    rolloverBlackoutMinutesAfter: 15,
+    conditionSoftSpreadAtr: 0.15,
+    conditionHardSpreadAtr: 0.30,
+    economicEventFilterEnabled: false,
+    maximumTotalPortfolioHeatPercent: 1.5,
+    maximumPendingRiskPercent: 0.75,
+    maximumStrategyRiskPercent: 0.75,
+    maximumInstrumentRiskPercent: 0.75,
+    maximumCurrencyRiskPercent: 0.75,
+    minimumUnallocatedMarginReservePercent: 30,
+    maximumOpenPositions: 3,
+    correlationLookbackBars: 120,
+    correlationMinimumSamples: 60,
+    correlationSoftThreshold: 0.5,
+    correlationHardThreshold: 0.75,
+    adaptiveRiskEnabled: false,
+    executionFillModel: 'MidpointPlusConfiguredSpread',
+    stressExecutionScenario: 'Base',
+    maximumFillQuantityPerFrame: 0,
+    maximumFillParticipationFraction: 1,
+    asianSessionSpreadMultiplier: 1.2,
+    rolloverSpreadMultiplier: 3,
+    volatilitySlippageFraction: 0,
+    gapSlippageFraction: 0,
+    financingEnabled: false,
+    financingLongAnnualPercent: 0,
+    financingShortAnnualPercent: 0,
+    refreshCache: false,
+    noCache: false,
+    legacyPositionManagement: {
+      mode: 'StructureAtr',
+      managementInterval: '15m',
+      evaluateMechanicalProtectionOnEveryExecutionFrame: true,
+      fastStructureInterval: '5m',
+      mainStructureInterval: '15m',
+      thesisInterval: '1h',
+      breakEvenActivationR: 1,
+      structureTrailActivationR: 1.5,
+      atrBufferMultiplier: 0.25,
+      minimumStopImprovementAtr: 0.05,
+      exitOnAdverseStructureBreak: false,
+      preserveBracketTarget: false,
+      enableScaleOut: true,
+      minimumRunnerFraction: 0.4,
+      enableProfitFloor: true,
+      enableMaximumGiveback: true,
+      enableStagnationReduction: true,
+      enableStructuralDeteriorationReduction: true,
+      enableMomentumDecayReduction: true,
+      enableVolatilityExhaustionReduction: true,
+      enableRiskWindowReduction: false,
+      riskWindowStartUtc: '21:45',
+      riskWindowEndUtc: '22:15',
+      enableExecutionCostStressReduction: false,
+    },
+    improvedPositionManagement: {
+      mode: 'StructureAtr',
+      managementInterval: '15m',
+      evaluateMechanicalProtectionOnEveryExecutionFrame: true,
+      fastStructureInterval: '5m',
+      mainStructureInterval: '15m',
+      thesisInterval: '1h',
+      breakEvenActivationR: 1,
+      structureTrailActivationR: 2,
+      atrBufferMultiplier: 0.25,
+      minimumStopImprovementAtr: 0.05,
+      exitOnAdverseStructureBreak: false,
+      preserveBracketTarget: true,
+      enableScaleOut: true,
+      minimumRunnerFraction: 0.5,
+      enableProfitFloor: true,
+      enableMaximumGiveback: true,
+      enableStagnationReduction: true,
+      enableStructuralDeteriorationReduction: true,
+      enableMomentumDecayReduction: true,
+      enableVolatilityExhaustionReduction: true,
+      enableRiskWindowReduction: false,
+      riskWindowStartUtc: '21:45',
+      riskWindowEndUtc: '22:15',
+      enableExecutionCostStressReduction: false,
+    },
+  }
+}
+
+function patchSimulationForm(
+  patches: Partial<Omit<SimulationFormState, 'legacyPositionManagement' | 'improvedPositionManagement'>> & {
+    legacyPositionManagement?: Partial<PositionManagementForm>
+    improvedPositionManagement?: Partial<PositionManagementForm>
+  } = {},
+): SimulationFormState {
+  const next = createBaseSimulationForm()
+  const {
+    legacyPositionManagement,
+    improvedPositionManagement,
+    ...rest
+  } = patches
+  Object.assign(next, rest)
+  if (legacyPositionManagement) Object.assign(next.legacyPositionManagement, legacyPositionManagement)
+  if (improvedPositionManagement) Object.assign(next.improvedPositionManagement, improvedPositionManagement)
+  return next
+}
+
+/** @deprecated Prefer createBaseSimulationForm / presets; kept as alias for clarity. */
+function createRecommendedSimulationForm() {
+  return createBaseSimulationForm()
+}
+
+const simulationPresets: SimulationPresetDefinition[] = [
+  {
+    id: 'research',
+    name: 'Research baseline',
+    badge: 'Default',
+    description: 'Balanced dual-strategy research stack with modules off so the equity curve is unconstrained.',
+    build: () => createBaseSimulationForm(),
   },
-  improvedPositionManagement: {
-    mode: 'StructureAtr', managementInterval: '15m',
-    evaluateMechanicalProtectionOnEveryExecutionFrame: true,
-    fastStructureInterval: '5m', mainStructureInterval: '15m', thesisInterval: '1h',
-    breakEvenActivationR: 1,
-    structureTrailActivationR: 2, atrBufferMultiplier: 0.25,
-    minimumStopImprovementAtr: 0.05, exitOnAdverseStructureBreak: false,
-    preserveBracketTarget: true, enableScaleOut: true, minimumRunnerFraction: 0.5,
-    enableProfitFloor: true, enableMaximumGiveback: true,
-    enableStagnationReduction: true, enableStructuralDeteriorationReduction: true,
-    enableMomentumDecayReduction: true, enableVolatilityExhaustionReduction: true,
-    enableRiskWindowReduction: false, riskWindowStartUtc: '21:45', riskWindowEndUtc: '22:15',
-    enableExecutionCostStressReduction: false,
+  {
+    id: 'day-trading',
+    name: 'Day trading',
+    badge: 'Intraday',
+    description: 'Faster MTF stack, London/NY sessions, regime + condition filters, quicker break-even and tighter runners.',
+    build: () => patchSimulationForm({
+      ...evaluationWindowMonths(1),
+      analysisIntervals: '1m,5m,15m,30m,1h',
+      trendInterval: '1h',
+      secondaryTrendIntervals: '30m',
+      setupIntervals: '15m',
+      confirmationInterval: '5m',
+      additionalConfirmationIntervals: '',
+      entryInterval: '1m',
+      minimumSecondaryTrendAlignments: 0,
+      minimumSetupAlignments: 1,
+      minimumConfirmationAlignments: 1,
+      riskPercentOfEquity: 0.35,
+      fixedCashRisk: 200,
+      minimumRewardRisk: 1.2,
+      minimumPriceActionConfidence: 50,
+      warmupDays: 10,
+      regimeEnabled: true,
+      tradingConditionsEnabled: true,
+      allowedSessions: 'London,NewYork,LondonNewYorkOverlap',
+      rolloverBlackoutMinutesBefore: 20,
+      rolloverBlackoutMinutesAfter: 20,
+      maximumOpenPositions: 4,
+      maximumTotalPortfolioHeatPercent: 2,
+      maximumPendingRiskPercent: 1,
+      maximumStrategyRiskPercent: 1,
+      maximumInstrumentRiskPercent: 1,
+      maximumCurrencyRiskPercent: 1,
+      adaptiveRiskEnabled: true,
+      legacyPositionManagement: {
+        fastStructureInterval: '1m',
+        mainStructureInterval: '5m',
+        thesisInterval: '15m',
+        managementInterval: '5m',
+        breakEvenActivationR: 0.75,
+        structureTrailActivationR: 1.25,
+        minimumRunnerFraction: 0.3,
+        atrBufferMultiplier: 0.2,
+        minimumStopImprovementAtr: 0.03,
+        enableRiskWindowReduction: true,
+        enableExecutionCostStressReduction: true,
+      },
+      improvedPositionManagement: {
+        fastStructureInterval: '1m',
+        mainStructureInterval: '5m',
+        thesisInterval: '15m',
+        managementInterval: '5m',
+        breakEvenActivationR: 0.75,
+        structureTrailActivationR: 1.5,
+        minimumRunnerFraction: 0.35,
+        atrBufferMultiplier: 0.2,
+        minimumStopImprovementAtr: 0.03,
+        enableRiskWindowReduction: true,
+        enableExecutionCostStressReduction: true,
+      },
+    }),
   },
-})
+  {
+    id: 'swing-trading',
+    name: 'Swing trading',
+    badge: 'Multi-day',
+    description: 'Higher-timeframe structure, wider R targets, longer warm-up, financing on, patient runners.',
+    build: () => patchSimulationForm({
+      ...evaluationWindowMonths(3),
+      analysisIntervals: '15m,1h,2h,4h,1d',
+      trendInterval: '1d',
+      secondaryTrendIntervals: '4h',
+      setupIntervals: '2h',
+      confirmationInterval: '1h',
+      additionalConfirmationIntervals: '',
+      entryInterval: '15m',
+      minimumSecondaryTrendAlignments: 1,
+      minimumSetupAlignments: 1,
+      minimumConfirmationAlignments: 1,
+      riskPercentOfEquity: 0.5,
+      fixedCashRisk: 400,
+      minimumRewardRisk: 2,
+      minimumPriceActionConfidence: 55,
+      warmupDays: 45,
+      regimeEnabled: true,
+      tradingConditionsEnabled: true,
+      allowedSessions: 'Asian,London,NewYork,LondonNewYorkOverlap',
+      maximumOpenPositions: 2,
+      maximumTotalPortfolioHeatPercent: 1.25,
+      maximumPendingRiskPercent: 0.6,
+      maximumStrategyRiskPercent: 0.6,
+      maximumInstrumentRiskPercent: 0.6,
+      maximumCurrencyRiskPercent: 0.6,
+      financingEnabled: true,
+      financingLongAnnualPercent: 2.5,
+      financingShortAnnualPercent: -0.5,
+      legacyPositionManagement: {
+        fastStructureInterval: '15m',
+        mainStructureInterval: '1h',
+        thesisInterval: '4h',
+        managementInterval: '1h',
+        breakEvenActivationR: 1.25,
+        structureTrailActivationR: 2.5,
+        minimumRunnerFraction: 0.5,
+        atrBufferMultiplier: 0.3,
+        minimumStopImprovementAtr: 0.08,
+        preserveBracketTarget: true,
+      },
+      improvedPositionManagement: {
+        fastStructureInterval: '15m',
+        mainStructureInterval: '1h',
+        thesisInterval: '4h',
+        managementInterval: '1h',
+        breakEvenActivationR: 1.5,
+        structureTrailActivationR: 3,
+        minimumRunnerFraction: 0.55,
+        atrBufferMultiplier: 0.3,
+        minimumStopImprovementAtr: 0.08,
+        preserveBracketTarget: true,
+      },
+    }),
+  },
+  {
+    id: 'scalping',
+    name: 'Scalping',
+    badge: 'High frequency',
+    description: 'Very short stack on liquid FX, low R:R, early break-even, session filter, small per-trade risk.',
+    build: () => patchSimulationForm({
+      ...evaluationWindowMonths(1),
+      analysisIntervals: '1m,5m,15m,30m',
+      trendInterval: '30m',
+      secondaryTrendIntervals: '15m',
+      setupIntervals: '',
+      confirmationInterval: '5m',
+      additionalConfirmationIntervals: '',
+      entryInterval: '1m',
+      minimumSecondaryTrendAlignments: 0,
+      minimumSetupAlignments: 0,
+      minimumConfirmationAlignments: 1,
+      riskPercentOfEquity: 0.15,
+      fixedCashRisk: 100,
+      minimumRewardRisk: 1,
+      minimumPriceActionConfidence: 45,
+      warmupDays: 7,
+      regimeEnabled: true,
+      tradingConditionsEnabled: true,
+      allowedSessions: 'London,NewYork,LondonNewYorkOverlap',
+      rolloverBlackoutMinutesBefore: 30,
+      rolloverBlackoutMinutesAfter: 30,
+      maximumOpenPositions: 5,
+      maximumTotalPortfolioHeatPercent: 1.75,
+      maximumPendingRiskPercent: 0.9,
+      maximumStrategyRiskPercent: 0.9,
+      maximumInstrumentRiskPercent: 0.9,
+      maximumCurrencyRiskPercent: 0.9,
+      adaptiveRiskEnabled: true,
+      spreadBasisPoints: 1.2,
+      slippageBasisPoints: 0.8,
+      legacyPositionManagement: {
+        fastStructureInterval: '1m',
+        mainStructureInterval: '1m',
+        thesisInterval: '5m',
+        managementInterval: '1m',
+        breakEvenActivationR: 0.4,
+        structureTrailActivationR: 0.8,
+        minimumRunnerFraction: 0.2,
+        atrBufferMultiplier: 0.15,
+        minimumStopImprovementAtr: 0.02,
+        enableScaleOut: true,
+        enableRiskWindowReduction: true,
+        enableExecutionCostStressReduction: true,
+      },
+      improvedPositionManagement: {
+        fastStructureInterval: '1m',
+        mainStructureInterval: '1m',
+        thesisInterval: '5m',
+        managementInterval: '1m',
+        breakEvenActivationR: 0.5,
+        structureTrailActivationR: 1,
+        minimumRunnerFraction: 0.25,
+        atrBufferMultiplier: 0.15,
+        minimumStopImprovementAtr: 0.02,
+        enableScaleOut: true,
+        enableRiskWindowReduction: true,
+        enableExecutionCostStressReduction: true,
+      },
+    }),
+  },
+  {
+    id: 'risk-managed',
+    name: 'Risk-managed',
+    badge: 'Live-like',
+    description: 'Research MTF with daily profit locks, equity protection, portfolio heat, correlation and adaptive sizing enabled.',
+    build: () => patchSimulationForm({
+      ...evaluationWindowMonths(1),
+      riskPercentOfEquity: 0.2,
+      fixedCashRisk: 200,
+      minimumRewardRisk: 1.5,
+      warmupDays: 21,
+      regimeEnabled: true,
+      tradingConditionsEnabled: true,
+      adaptiveRiskEnabled: true,
+      dailyEquityProfitTarget: 1500,
+      dailyEquityGivebackActivation: 1000,
+      maximumDailyEquityGiveback: 400,
+      equityProtectionEnabled: true,
+      equityProtectionActivationProfitPercent: 3,
+      equityProtectionMaxGivebackPercent: 1.5,
+      equityProtectionActionType: 'PauseNewEntries',
+      equityProtectionReductionFraction: 0.25,
+      equityProtectionFutureRiskMultiplier: 0.5,
+      equityProtectionRecoveryBars: 5,
+      maximumOpenPositions: 2,
+      maximumTotalPortfolioHeatPercent: 1,
+      maximumPendingRiskPercent: 0.5,
+      maximumStrategyRiskPercent: 0.5,
+      maximumInstrumentRiskPercent: 0.5,
+      maximumCurrencyRiskPercent: 0.5,
+      correlationSoftThreshold: 0.45,
+      correlationHardThreshold: 0.7,
+      minimumUnallocatedMarginReservePercent: 40,
+      maximumAccountMarginUsagePercent: 25,
+      maximumSinglePositionMarginPercent: 8,
+    }),
+  },
+]
+
+const form = reactive(createBaseSimulationForm())
+const selectedPresetId = ref(simulationPresets[0]!.id)
+const showAdvancedConfig = ref(false)
+const selectedPreset = computed(() =>
+  simulationPresets.find((preset) => preset.id === selectedPresetId.value) ?? simulationPresets[0]!,
+)
 
 const brokerCatalog = ref<SimulationBrokerCatalog | null>(null)
 const brokerCatalogLoading = ref(false)
@@ -190,6 +551,146 @@ const {
 
 const activeStrategies = computed(() => job.value?.strategies ?? [])
 const flatTrades = computed(() => trades.value.map((payload) => payload.trade))
+
+/** SignalR historically sent enums as integers (e.g. 8 = Cancelled). Map for display. */
+const simulationStatusNames = [
+  'Queued',
+  'PreparingData',
+  'DownloadingData',
+  'LoadingCache',
+  'WarmingUp',
+  'Running',
+  'Paused',
+  'Cancelling',
+  'Cancelled',
+  'Exporting',
+  'Completed',
+  'Failed',
+] as const
+
+function formatSimulationStatus(status: string | number | null | undefined): string {
+  if (status == null || status === '') return '—'
+  if (typeof status === 'number' && status >= 0 && status < simulationStatusNames.length) {
+    return simulationStatusNames[status]
+  }
+  if (typeof status === 'string' && /^\d+$/.test(status)) {
+    const index = Number(status)
+    if (index >= 0 && index < simulationStatusNames.length) {
+      return simulationStatusNames[index]
+    }
+  }
+  return String(status)
+}
+
+const displayJobStatus = computed(() => formatSimulationStatus(job.value?.status))
+const jobIsComplete = computed(() =>
+  Boolean(job.value?.isComplete) ||
+  ['Completed', 'Failed', 'Cancelled'].includes(displayJobStatus.value),
+)
+const canPauseCompute = computed(() =>
+  ['PreparingData', 'DownloadingData', 'LoadingCache', 'WarmingUp', 'Running', 'Exporting']
+    .includes(displayJobStatus.value),
+)
+const canResumeCompute = computed(() => displayJobStatus.value === 'Paused')
+const canCancelCompute = computed(() => !jobIsComplete.value && displayJobStatus.value !== 'Cancelling')
+const jobFailureMessage = computed(() => {
+  if (displayJobStatus.value !== 'Failed') return null
+  return job.value?.error?.trim() || 'The simulation failed without a detailed error message.'
+})
+const strategyFailures = computed(() =>
+  (job.value?.strategies ?? [])
+    .map((strategy) => {
+      const detail = strategy.lastError?.trim()
+      if (!detail) return null
+      return `${strategy.strategyName}: ${detail}`
+    })
+    .filter((item): item is string => item != null),
+)
+
+/** Warm-up builds indicators/structure; trading only starts at the evaluation From date. */
+const evaluationPhase = computed(() => {
+  const current = job.value
+  if (!current) return null
+  const status = formatSimulationStatus(current.status)
+  const marketMs = current.currentMarketTime ? Date.parse(current.currentMarketTime) : Number.NaN
+  const fromMs = Date.parse(current.requestedFrom)
+  const toMs = Date.parse(current.requestedTo)
+  if (Number.isFinite(marketMs) && Number.isFinite(fromMs) && marketMs < fromMs) {
+    return 'Warm-up (downloading/processing history; no trading yet)'
+  }
+  if (status === 'WarmingUp') {
+    return 'Warm-up (no trading yet)'
+  }
+  if (Number.isFinite(marketMs) && Number.isFinite(toMs) && marketMs >= toMs) {
+    return 'Past evaluation window'
+  }
+  if (status === 'Running' || status === 'Paused' || status === 'Exporting' || status === 'Completed') {
+    return 'Evaluation window (entries allowed)'
+  }
+  if (status === 'Cancelling' || status === 'Cancelled') {
+    return 'Cancelled — warm-up/evaluation stopped early'
+  }
+  if (status === 'Failed') {
+    return 'Failed — see error below; start a new run to try again'
+  }
+  return status
+})
+
+const dataWindowSummary = computed(() => {
+  const current = job.value
+  if (!current) return null
+  const evalFrom = current.requestedFrom?.slice(0, 10) ?? '—'
+  const evalTo = current.requestedTo?.slice(0, 10) ?? '—'
+  const warm = current.warmupFrom?.slice(0, 10)
+  if (warm && warm !== evalFrom) {
+    return `Data ${warm} → ${evalTo} (warm-up ${warm} → ${evalFrom}, trade ${evalFrom} → ${evalTo})`
+  }
+  return `Evaluation ${evalFrom} → ${evalTo}`
+})
+
+const formDataWindowHint = computed(() => {
+  if (!form.from || form.warmupDays <= 0) {
+    return `Data window matches evaluation (${form.from || '—'} → ${form.to || '—'}).`
+  }
+  const fromDate = new Date(`${form.from}T00:00:00Z`)
+  if (Number.isNaN(fromDate.getTime())) {
+    return 'Warm-up history is loaded before the evaluation From date; no trades during warm-up.'
+  }
+  const warm = new Date(fromDate)
+  warm.setUTCDate(warm.getUTCDate() - form.warmupDays)
+  const warmIso = warm.toISOString().slice(0, 10)
+  return `With ${form.warmupDays} warm-up days, candles load from ${warmIso} (history only). Trading starts ${form.from}.`
+})
+
+const activePresetSummary = computed(() => {
+  const sizing = form.positionSizingMode === 'FixedFractionalRisk'
+    ? `${form.riskPercentOfEquity}% equity / trade`
+    : form.positionSizingMode === 'FixedCashRisk'
+      ? `${form.fixedCashRisk} cash risk`
+      : `${form.quantity} fixed units`
+  const modules = [
+    form.regimeEnabled ? 'regime' : null,
+    form.tradingConditionsEnabled ? 'sessions' : null,
+    form.adaptiveRiskEnabled ? 'adaptive risk' : null,
+    form.equityProtectionEnabled ? 'equity protection' : null,
+    form.dailyEquityProfitTarget > 0 || form.dailyEquityGivebackActivation > 0 ? 'daily lock' : null,
+    form.financingEnabled ? 'financing' : null,
+  ].filter(Boolean)
+  return [
+    selectedPreset.value.name,
+    `${form.instrument}`,
+    `${form.from} → ${form.to}`,
+    `MTF ${form.trendInterval}/${form.secondaryTrendIntervals || '—'}/${form.setupIntervals || '—'}/${form.confirmationInterval}/${form.entryInterval}`,
+    `${form.strategies}`,
+    sizing,
+    `min R:R ${form.minimumRewardRisk}`,
+    `PA ${form.priceActionConfirmation}`,
+    `${form.warmupDays}d warm-up`,
+    modules.length ? `modules: ${modules.join(', ')}` : 'modules: off',
+    form.precisionMode,
+  ].join(' · ')
+})
+
 const managementSummary = computed(() => {
   const legacy = form.legacyPositionManagement
   const improved = form.improvedPositionManagement
@@ -227,6 +728,7 @@ const replayFrames = computed<ReplayFrame[]>(() => replayRows.value.map((row, in
     bollingerMiddle: null,
     bollingerUpper: null,
     bollingerLower: null,
+    efficiencyRatio: null,
   },
   swings: row.analysis?.swings ?? [],
   priceZones: row.analysis?.priceZones ?? [],
@@ -234,6 +736,7 @@ const replayFrames = computed<ReplayFrame[]>(() => replayRows.value.map((row, in
   channels: row.analysis?.channels ?? [],
   marketStructure: row.analysis?.marketStructure,
   priceAction: row.analysis?.priceAction,
+  marketRegime: row.analysis?.marketRegime,
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
@@ -246,7 +749,7 @@ const executionDetailFrames = computed<ReplayFrame[]>(() => executionDetailRows.
     open: row.open, high: row.high, low: row.low, close: row.close, volume: row.volume ?? 0,
   },
   indicators: row.analysis?.indicators ?? {
-    atr: null, rsi: null, bollingerMiddle: null, bollingerUpper: null, bollingerLower: null,
+    atr: null, rsi: null, bollingerMiddle: null, bollingerUpper: null, bollingerLower: null, efficiencyRatio: null,
   },
   swings: row.analysis?.swings ?? [],
   priceZones: row.analysis?.priceZones ?? [],
@@ -254,6 +757,7 @@ const executionDetailFrames = computed<ReplayFrame[]>(() => executionDetailRows.
   channels: row.analysis?.channels ?? [],
   marketStructure: row.analysis?.marketStructure,
   priceAction: row.analysis?.priceAction,
+  marketRegime: row.analysis?.marketRegime,
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
@@ -268,6 +772,9 @@ const replayLayers = reactive<ChartLayers>({
   zones: true,
   trendlines: true,
   channels: true,
+  donchian: true,
+  efficiencyRatio: true,
+  marketRegime: true,
 })
 const progressLabel = computed(() => {
   if (!job.value) return 'No simulation running'
@@ -286,12 +793,14 @@ onBeforeUnmount(() => {
 
 watch(job, (value) => {
   if (!value) return
-  if (!value.isComplete) {
-    void loadProgressiveReplay(value.id)
-    void loadTrades(value.id)
-  } else {
-    void loadProgressiveReplay(value.id)
-    void loadTrades(value.id)
+  void loadProgressiveReplay(value.id)
+  void loadTrades(value.id)
+
+  // Surface the real failure reason instead of a later pause/resume conflict.
+  const status = formatSimulationStatus(value.status)
+  if (status === 'Failed') {
+    const detail = value.error?.trim()
+    if (detail) error.value = detail
   }
 })
 
@@ -390,6 +899,17 @@ async function startSimulation() {
       maximumDailyEquityGiveback: form.maximumDailyEquityGiveback > 0
         ? form.maximumDailyEquityGiveback
         : null,
+      equityProtectionEnabled: form.equityProtectionEnabled,
+      equityProtectionActivationProfitPercent: form.equityProtectionActivationProfitPercent > 0
+        ? form.equityProtectionActivationProfitPercent
+        : null,
+      equityProtectionMaxGivebackPercent: form.equityProtectionMaxGivebackPercent > 0
+        ? form.equityProtectionMaxGivebackPercent
+        : null,
+      equityProtectionActionType: form.equityProtectionActionType,
+      equityProtectionReductionFraction: form.equityProtectionReductionFraction,
+      equityProtectionFutureRiskMultiplier: form.equityProtectionFutureRiskMultiplier,
+      equityProtectionRecoveryBars: form.equityProtectionRecoveryBars,
       quantity: form.quantity,
       positionSizingMode: form.positionSizingMode,
       fixedCashRisk: form.fixedCashRisk,
@@ -410,6 +930,47 @@ async function startSimulation() {
       warmupDays: form.warmupDays,
       strategyExecutionMode: form.strategyExecutionMode,
       ambiguousIntrabarPolicy: form.ambiguousIntrabarPolicy,
+      accountMode: form.accountMode,
+      regimeEnabled: form.regimeEnabled,
+      efficiencyRatioPeriod: form.efficiencyRatioPeriod,
+      regimeConfirmationBars: form.regimeConfirmationBars,
+      regimePersistenceBars: form.regimePersistenceBars,
+      regimeSoftSpreadAtr: form.regimeSoftSpreadAtr,
+      regimeHardSpreadAtr: form.regimeHardSpreadAtr,
+      tradingConditionsEnabled: form.tradingConditionsEnabled,
+      allowedSessions: form.allowedSessions.split(',').map((item) => item.trim()).filter(Boolean),
+      rolloverBlackoutMinutesBefore: form.rolloverBlackoutMinutesBefore,
+      rolloverBlackoutMinutesAfter: form.rolloverBlackoutMinutesAfter,
+      conditionSoftSpreadAtr: form.conditionSoftSpreadAtr,
+      conditionHardSpreadAtr: form.conditionHardSpreadAtr,
+      economicEventFilterEnabled: form.economicEventFilterEnabled,
+      maximumTotalPortfolioHeatPercent: form.maximumTotalPortfolioHeatPercent,
+      maximumPendingRiskPercent: form.maximumPendingRiskPercent,
+      maximumStrategyRiskPercent: form.maximumStrategyRiskPercent,
+      maximumInstrumentRiskPercent: form.maximumInstrumentRiskPercent,
+      maximumCurrencyRiskPercent: form.maximumCurrencyRiskPercent,
+      minimumUnallocatedMarginReservePercent: form.minimumUnallocatedMarginReservePercent,
+      maximumOpenPositions: form.maximumOpenPositions,
+      correlationLookbackBars: form.correlationLookbackBars,
+      correlationMinimumSamples: form.correlationMinimumSamples,
+      correlationSoftThreshold: form.correlationSoftThreshold,
+      correlationHardThreshold: form.correlationHardThreshold,
+      adaptiveRiskEnabled: form.adaptiveRiskEnabled,
+      executionFillModel: form.executionFillModel,
+      stressExecutionScenario: form.stressExecutionScenario,
+      maximumFillQuantityPerFrame: form.maximumFillQuantityPerFrame > 0 ? form.maximumFillQuantityPerFrame : null,
+      maximumFillParticipationFraction: form.maximumFillParticipationFraction,
+      asianSessionSpreadMultiplier: form.asianSessionSpreadMultiplier,
+      rolloverSpreadMultiplier: form.rolloverSpreadMultiplier,
+      volatilitySlippageFraction: form.volatilitySlippageFraction,
+      gapSlippageFraction: form.gapSlippageFraction,
+      financingEnabled: form.financingEnabled,
+      financingRates: form.financingEnabled
+        ? { [form.instrument]: {
+            longAnnualPercent: form.financingLongAnnualPercent,
+            shortAnnualPercent: form.financingShortAnnualPercent,
+          } }
+        : {},
       refreshCache: form.refreshCache,
       noCache: form.noCache,
       legacyPositionManagement: form.legacyPositionManagement,
@@ -521,7 +1082,17 @@ async function loadSimulationCatalog(refresh = false) {
   }
 }
 
-function applyBrokerSelection() {
+function preferredInstrumentForBroker(broker: SimulationBrokerOption): string | undefined {
+  const preferredKeys = broker.id === 'binance'
+    ? ['CRYPTO:BTC/USDT', 'CRYPTO:ETH/USDT']
+    : ['FX:EUR/USD', 'FX:GBP/USD', 'FX:GBP/JPY', 'FX:USD/JPY', 'FX:EUR/GBP']
+  for (const key of preferredKeys) {
+    if (broker.instruments.some((asset) => asset.instrument === key)) return key
+  }
+  return broker.instruments[0]?.instrument
+}
+
+function applyBrokerSelection(preferRecommendedInstrument = false) {
   const broker = selectedBroker.value
   form.sourceKind = broker.sourceKind === 'Unavailable' ? 'OandaCandles' : broker.sourceKind
   selectedAssetClass.value = 'All'
@@ -532,10 +1103,43 @@ function applyBrokerSelection() {
   applyPrecisionDefaults()
 
   if (broker.id === 'imported') return
-  const preferred = broker.instruments.find((asset) =>
-    asset.instrument === (broker.id === 'binance' ? 'CRYPTO:BTC/USDT' : 'FX:GBP/JPY'))
   const selected = broker.instruments.find((asset) => asset.instrument === form.instrument)
-  form.instrument = (selected ?? preferred ?? broker.instruments[0])?.instrument ?? ''
+  if (preferRecommendedInstrument || !selected) {
+    form.instrument = preferredInstrumentForBroker(broker) ?? form.instrument
+    return
+  }
+  form.instrument = selected.instrument
+}
+
+function applyFormState(next: SimulationFormState, options?: { preserveBroker?: boolean; preferRecommendedInstrument?: boolean }) {
+  const preserveBroker = options?.preserveBroker !== false
+  const brokerId = form.brokerId
+  const instrument = form.instrument
+  const {
+    legacyPositionManagement,
+    improvedPositionManagement,
+    ...rest
+  } = next
+  Object.assign(form, rest)
+  Object.assign(form.legacyPositionManagement, legacyPositionManagement)
+  Object.assign(form.improvedPositionManagement, improvedPositionManagement)
+  if (preserveBroker && brokerCatalog.value?.brokers.some((broker) => broker.id === brokerId && broker.isAvailable)) {
+    form.brokerId = brokerId
+    form.instrument = instrument
+  }
+  applyBrokerSelection(options?.preferRecommendedInstrument ?? false)
+  error.value = null
+}
+
+function applyPreset(presetId: string) {
+  const preset = simulationPresets.find((item) => item.id === presetId) ?? simulationPresets[0]!
+  selectedPresetId.value = preset.id
+  applyFormState(preset.build(), { preserveBroker: true, preferRecommendedInstrument: false })
+  showAdvancedConfig.value = false
+}
+
+function applyRecommendedDefaults() {
+  applyPreset(selectedPresetId.value || 'research')
 }
 
 function applyPrecisionDefaults() {
@@ -638,18 +1242,57 @@ function validatePositionManagement() {
   if (form.startingBalance <= 0 || form.leverage <= 0 || form.quantity <= 0) {
     throw new Error('Starting balance, leverage and fallback quantity must be greater than zero.')
   }
-  if (form.fixedCashRisk <= 0 || form.riskPercentOfEquity <= 0 || form.riskPercentOfEquity > 100) {
-    throw new Error('Cash risk must be positive and percentage risk must be between 0 and 100.')
+  if (form.positionSizingMode === 'FixedCashRisk' && form.fixedCashRisk <= 0) {
+    throw new Error('Fixed cash risk must be greater than zero when that sizing mode is selected.')
+  }
+  if (form.positionSizingMode === 'FixedFractionalRisk' &&
+      (form.riskPercentOfEquity <= 0 || form.riskPercentOfEquity > 100)) {
+    throw new Error('Percentage risk must be between 0 (exclusive) and 100 when fractional sizing is selected.')
+  }
+  if (form.fixedCashRisk < 0 || form.riskPercentOfEquity < 0 || form.riskPercentOfEquity > 100) {
+    throw new Error('Cash risk and percentage risk cannot be negative; percentage risk cannot exceed 100.')
   }
   if (form.minimumQuantity <= 0 || form.quantityStep <= 0 ||
       form.maximumQuantity < 0 ||
       (form.maximumQuantity > 0 && form.maximumQuantity < form.minimumQuantity)) {
-    throw new Error('Quantity limits and step are invalid.')
+    throw new Error('Quantity limits and step are invalid. Quantity step may be fractional (e.g. 0.01); maximum 0 means unlimited.')
   }
   if (form.maximumAccountMarginUsagePercent <= 0 || form.maximumAccountMarginUsagePercent > 100 ||
       form.maximumSinglePositionMarginPercent <= 0 || form.maximumSinglePositionMarginPercent > 100 ||
       form.maximumSinglePositionMarginPercent > form.maximumAccountMarginUsagePercent) {
     throw new Error('Margin caps must be within 0-100, and the one-position cap cannot exceed the account cap.')
+  }
+  // Soft thresholds may be 0 (disabled sensitivity); hard must still be strictly above soft.
+  if (form.regimeSoftSpreadAtr < 0 || form.regimeHardSpreadAtr <= form.regimeSoftSpreadAtr ||
+      form.conditionSoftSpreadAtr < 0 || form.conditionHardSpreadAtr <= form.conditionSoftSpreadAtr) {
+    throw new Error('Each hard spread/ATR threshold must be greater than its soft threshold (soft may be 0).')
+  }
+  if (form.regimeConfirmationBars < 1 || form.regimePersistenceBars < 0 || form.efficiencyRatioPeriod < 2) {
+    throw new Error('Regime confirmation, persistence, and ER period values are invalid.')
+  }
+  if (form.maximumTotalPortfolioHeatPercent < 0 ||
+      form.maximumPendingRiskPercent < 0 ||
+      form.maximumStrategyRiskPercent < 0 ||
+      form.maximumInstrumentRiskPercent < 0 ||
+      form.maximumCurrencyRiskPercent < 0 ||
+      form.maximumPendingRiskPercent > form.maximumTotalPortfolioHeatPercent ||
+      form.maximumStrategyRiskPercent > form.maximumTotalPortfolioHeatPercent ||
+      form.maximumInstrumentRiskPercent > form.maximumTotalPortfolioHeatPercent ||
+      form.maximumCurrencyRiskPercent > form.maximumTotalPortfolioHeatPercent ||
+      form.maximumOpenPositions < 1) {
+    throw new Error('Portfolio sub-limits cannot exceed total heat, cannot be negative, and maximum positions must be positive.')
+  }
+  if (form.correlationMinimumSamples < 2 || form.correlationMinimumSamples > form.correlationLookbackBars ||
+      form.correlationSoftThreshold < 0 || form.correlationHardThreshold < 0 ||
+      form.correlationHardThreshold <= form.correlationSoftThreshold ||
+      form.correlationHardThreshold > 1) {
+    throw new Error('Correlation lookback, samples, and soft/hard thresholds are inconsistent (soft may be 0).')
+  }
+  if (form.maximumFillParticipationFraction <= 0 || form.maximumFillParticipationFraction > 1 ||
+      form.maximumFillQuantityPerFrame < 0 || form.asianSessionSpreadMultiplier < 0 ||
+      form.rolloverSpreadMultiplier < 0 || form.volatilitySlippageFraction < 0 ||
+      form.gapSlippageFraction < 0) {
+    throw new Error('Execution capacity, spread multipliers, and slippage fractions are invalid (0 is allowed where it means off).')
   }
 
   if (!Number.isFinite(form.minimumPriceActionConfidence) ||
@@ -657,17 +1300,24 @@ function validatePositionManagement() {
       form.minimumPriceActionConfidence > 100) {
     throw new Error('Minimum price-action confidence must be between 0 and 100.')
   }
+  if (form.minimumRewardRisk < 0) {
+    throw new Error('Minimum reward/risk cannot be negative (0 disables the filter).')
+  }
 
   for (const [name, options] of [
     ['Legacy', form.legacyPositionManagement],
     ['Improved', form.improvedPositionManagement],
   ] as const) {
-    if (options.breakEvenActivationR <= 0) throw new Error(`${name} break-even activation must be greater than zero.`)
+    // 0 is allowed: means activate break-even immediately / at open when enabled by mode.
+    if (options.breakEvenActivationR < 0) throw new Error(`${name} break-even activation cannot be negative.`)
     if (options.structureTrailActivationR < options.breakEvenActivationR) {
       throw new Error(`${name} structure activation must be at or above break-even activation.`)
     }
     if (options.atrBufferMultiplier < 0 || options.minimumStopImprovementAtr < 0) {
       throw new Error(`${name} ATR values cannot be negative.`)
+    }
+    if (options.minimumRunnerFraction < 0 || options.minimumRunnerFraction > 1) {
+      throw new Error(`${name} minimum runner fraction must be between 0 and 1.`)
     }
     const fast = parseIntervalSeconds(options.fastStructureInterval, `${name} fast structure interval`)
     const main = parseIntervalSeconds(options.mainStructureInterval, `${name} main structure interval`)
@@ -691,6 +1341,24 @@ function validatePositionManagement() {
   if (hasGivebackActivation && maximumGiveback > givebackActivation) {
     throw new Error('Maximum daily giveback cannot exceed the activation profit.')
   }
+
+  if (form.equityProtectionEnabled) {
+    if (form.equityProtectionMaxGivebackPercent <= 0) {
+      throw new Error('Equity protection requires a maximum giveback percent above zero.')
+    }
+    if (form.equityProtectionActivationProfitPercent < 0) {
+      throw new Error('Equity protection activation profit percent cannot be negative.')
+    }
+    if (form.equityProtectionReductionFraction < 0 || form.equityProtectionReductionFraction > 1) {
+      throw new Error('Equity protection reduction fraction must be between 0 and 1 inclusive.')
+    }
+    if (form.equityProtectionFutureRiskMultiplier < 0 || form.equityProtectionFutureRiskMultiplier > 1) {
+      throw new Error('Equity protection future-risk multiplier must be between 0 and 1 (never above base risk).')
+    }
+    if (form.equityProtectionRecoveryBars < 0) {
+      throw new Error('Equity protection recovery bars cannot be negative.')
+    }
+  }
 }
 
 function startBackgroundPollers(id: string) {
@@ -702,12 +1370,42 @@ function startBackgroundPollers(id: string) {
 
 async function control(action: 'pause' | 'resume' | 'cancel') {
   if (!job.value) return
+  const status = formatSimulationStatus(job.value.status)
+  if (action === 'pause' && !canPauseCompute.value) {
+    error.value = status === 'Failed'
+      ? `This simulation already failed${job.value.error ? `: ${job.value.error}` : '.'} Start a new run — pause is only available while compute is active.`
+      : `Cannot pause while status is ${status}.`
+    return
+  }
+  if (action === 'resume' && !canResumeCompute.value) {
+    error.value = status === 'Failed'
+      ? `This simulation already failed${job.value.error ? `: ${job.value.error}` : '.'} Resume only works from Paused — start a new simulation to run again.`
+      : `Cannot resume while status is ${status}. Resume is only available when the job is Paused.`
+    return
+  }
+  if (action === 'cancel' && !canCancelCompute.value) {
+    error.value = `Simulation is already ${status}; nothing to cancel.`
+    return
+  }
+
   busy.value = true
   try {
     const response = await fetch(`${import.meta.env.BASE_URL}api/simulations/${job.value.id}/${action}`, {
       method: 'POST',
     })
-    if (!response.ok) throw new Error(await readApiError(response, `${action} failed`))
+    if (!response.ok) {
+      const message = await readApiError(response, `${action} failed`)
+      // If the job failed between click and response, prefer the snapshot error.
+      if (message.includes('SimulationStateConflict') || message.includes('already Failed')) {
+        const detail = job.value.error?.trim()
+        throw new Error(
+          detail
+            ? `Simulation already finished as Failed: ${detail}`
+            : `${message} Start a new simulation instead of pause/resume.`,
+        )
+      }
+      throw new Error(message)
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -842,7 +1540,7 @@ function togglePlayback() {
   else pause()
 }
 
-watch(() => form.brokerId, applyBrokerSelection)
+watch(() => form.brokerId, () => applyBrokerSelection())
 watch(() => form.precisionMode, applyPrecisionDefaults)
 watch(selectedAssetClass, selectFirstFilteredAsset)
 watch(assetSearch, selectFirstFilteredAsset)
@@ -860,8 +1558,8 @@ onMounted(() => {
       <div>
         <h2>Dashboard Simulator</h2>
         <p>
-          Streamed historical simulation with shared market frames, isolated strategy accounts,
-          SignalR progress, and visual playback independent of compute speed.
+          Choose a trading-style preset, adjust instrument/dates if needed, then run.
+          Warm-up history is loaded automatically; trading starts at the evaluation From date.
         </p>
       </div>
       <div class="simulator-status">
@@ -873,7 +1571,40 @@ onMounted(() => {
 
     <div class="simulator-grid">
       <form class="card config-card" @submit.prevent="startSimulation">
-        <h3>Configuration</h3>
+        <div class="config-heading">
+          <h3>Configuration</h3>
+          <button type="button" class="secondary compact-button" @click="applyRecommendedDefaults">
+            Reset active preset
+          </button>
+        </div>
+        <fieldset class="preset-picker">
+          <legend>Trading style presets</legend>
+          <div class="preset-grid" role="radiogroup" aria-label="Simulation configuration preset">
+            <button
+              v-for="preset in simulationPresets"
+              :key="preset.id"
+              type="button"
+              class="preset-card"
+              :class="{ active: selectedPresetId === preset.id }"
+              role="radio"
+              :aria-checked="selectedPresetId === preset.id"
+              @click="applyPreset(preset.id)"
+            >
+              <span class="preset-badge">{{ preset.badge }}</span>
+              <strong>{{ preset.name }}</strong>
+              <small>{{ preset.description }}</small>
+            </button>
+          </div>
+          <div class="preset-banner">
+            <strong>{{ selectedPreset.name }} ready</strong>
+            <p class="mono preset-line">{{ activePresetSummary }}</p>
+            <p class="muted">
+              Pick a style to load MTF roles, risk, management, and module toggles together.
+              Change instrument/dates if needed; open advanced only for fine-tuning.
+              Fractional fields use 0.01 steps and accept 0 where 0 means off/unlimited/immediate.
+            </p>
+          </div>
+        </fieldset>
         <fieldset class="broker-picker">
           <legend>Broker and asset</legend>
           <div class="row">
@@ -936,9 +1667,26 @@ onMounted(() => {
           </label>
         </fieldset>
         <div class="row">
-          <label>From <input v-model="form.from" type="date" /></label>
-          <label>To <input v-model="form.to" type="date" /></label>
+          <label>From (evaluation) <input v-model="form.from" type="date" /></label>
+          <label>To (evaluation) <input v-model="form.to" type="date" /></label>
         </div>
+        <small class="muted">{{ formDataWindowHint }}</small>
+
+        <div class="run-row">
+          <button type="submit" :disabled="busy || brokerCatalogLoading || !selectedBroker.isAvailable">
+            {{ busy ? 'Starting…' : 'Run Simulation' }}
+          </button>
+          <button
+            type="button"
+            class="secondary"
+            @click="showAdvancedConfig = !showAdvancedConfig"
+          >
+            {{ showAdvancedConfig ? 'Hide advanced' : 'Show advanced' }}
+          </button>
+        </div>
+        <p v-if="error || realtimeError" class="error">{{ error || realtimeError }}</p>
+
+        <div v-show="showAdvancedConfig" class="advanced-config">
         <label>
           Precision mode
           <select v-model="form.precisionMode">
@@ -1042,17 +1790,17 @@ onMounted(() => {
             <label>Thesis / runner <input v-model="form.legacyPositionManagement.thesisInterval" /></label>
           </div>
           <div class="row">
-            <label>Break-even R <input v-model.number="form.legacyPositionManagement.breakEvenActivationR" type="number" min="0.1" step="0.1" /></label>
-            <label>Structure R <input v-model.number="form.legacyPositionManagement.structureTrailActivationR" type="number" min="0.1" step="0.1" /></label>
+            <label>Break-even R <input v-model.number="form.legacyPositionManagement.breakEvenActivationR" type="number" min="0" step="0.01" /></label>
+            <label>Structure R <input v-model.number="form.legacyPositionManagement.structureTrailActivationR" type="number" min="0" step="0.01" /></label>
           </div>
           <div class="row">
-            <label>ATR buffer <input v-model.number="form.legacyPositionManagement.atrBufferMultiplier" type="number" min="0" step="0.05" /></label>
+            <label>ATR buffer <input v-model.number="form.legacyPositionManagement.atrBufferMultiplier" type="number" min="0" step="0.01" /></label>
             <label>Min improvement ATR <input v-model.number="form.legacyPositionManagement.minimumStopImprovementAtr" type="number" min="0" step="0.01" /></label>
           </div>
           <div class="row">
             <label class="inline-check"><input v-model="form.legacyPositionManagement.enableScaleOut" type="checkbox" /> Scale out in stages</label>
             <label>Minimum runner
-              <input v-model.number="form.legacyPositionManagement.minimumRunnerFraction" type="number" min="0.1" max="0.9" step="0.05" />
+              <input v-model.number="form.legacyPositionManagement.minimumRunnerFraction" type="number" min="0" max="1" step="0.01" />
             </label>
           </div>
           <div class="row checks">
@@ -1094,17 +1842,17 @@ onMounted(() => {
             <label>Thesis / runner <input v-model="form.improvedPositionManagement.thesisInterval" /></label>
           </div>
           <div class="row">
-            <label>Break-even R <input v-model.number="form.improvedPositionManagement.breakEvenActivationR" type="number" min="0.1" step="0.1" /></label>
-            <label>Structure R <input v-model.number="form.improvedPositionManagement.structureTrailActivationR" type="number" min="0.1" step="0.1" /></label>
+            <label>Break-even R <input v-model.number="form.improvedPositionManagement.breakEvenActivationR" type="number" min="0" step="0.01" /></label>
+            <label>Structure R <input v-model.number="form.improvedPositionManagement.structureTrailActivationR" type="number" min="0" step="0.01" /></label>
           </div>
           <div class="row">
-            <label>ATR buffer <input v-model.number="form.improvedPositionManagement.atrBufferMultiplier" type="number" min="0" step="0.05" /></label>
+            <label>ATR buffer <input v-model.number="form.improvedPositionManagement.atrBufferMultiplier" type="number" min="0" step="0.01" /></label>
             <label>Min improvement ATR <input v-model.number="form.improvedPositionManagement.minimumStopImprovementAtr" type="number" min="0" step="0.01" /></label>
           </div>
           <div class="row">
             <label class="inline-check"><input v-model="form.improvedPositionManagement.enableScaleOut" type="checkbox" /> Scale out in stages</label>
             <label>Minimum runner
-              <input v-model.number="form.improvedPositionManagement.minimumRunnerFraction" type="number" min="0.1" max="0.9" step="0.05" />
+              <input v-model.number="form.improvedPositionManagement.minimumRunnerFraction" type="number" min="0" max="1" step="0.01" />
             </label>
           </div>
           <div class="row checks">
@@ -1133,6 +1881,94 @@ onMounted(() => {
           </div>
         </fieldset>
         <p class="behaviour-summary">{{ managementSummary }}</p>
+        <fieldset class="management-config">
+          <legend>Market regime and trading conditions</legend>
+          <div class="row checks">
+            <label><input v-model="form.regimeEnabled" type="checkbox" /> Regime classification, routing, and profiles</label>
+            <label><input v-model="form.tradingConditionsEnabled" type="checkbox" /> Session/spread condition filter</label>
+          </div>
+          <div class="row">
+            <label>ER period (bars) <input v-model.number="form.efficiencyRatioPeriod" type="number" min="2" step="1" /></label>
+            <label>Regime confirmation (bars) <input v-model.number="form.regimeConfirmationBars" type="number" min="1" step="1" /></label>
+            <label>Regime persistence (bars) <input v-model.number="form.regimePersistenceBars" type="number" min="0" step="1" /></label>
+          </div>
+          <div class="row">
+            <label>Regime soft spread/ATR <input v-model.number="form.regimeSoftSpreadAtr" type="number" min="0" step="0.01" /></label>
+            <label>Regime hard spread/ATR <input v-model.number="form.regimeHardSpreadAtr" type="number" min="0" step="0.01" /></label>
+          </div>
+          <div class="row">
+            <label>Allowed sessions <input v-model="form.allowedSessions" :disabled="!form.tradingConditionsEnabled" /></label>
+            <label>Rollover before (minutes) <input v-model.number="form.rolloverBlackoutMinutesBefore" type="number" min="0" step="1" /></label>
+            <label>Rollover after (minutes) <input v-model.number="form.rolloverBlackoutMinutesAfter" type="number" min="0" step="1" /></label>
+          </div>
+          <div class="row">
+            <label>Condition soft spread/ATR <input v-model.number="form.conditionSoftSpreadAtr" type="number" min="0" step="0.01" /></label>
+            <label>Condition hard spread/ATR <input v-model.number="form.conditionHardSpreadAtr" type="number" min="0" step="0.01" /></label>
+            <label class="inline-check"><input v-model="form.economicEventFilterEnabled" type="checkbox" /> Event blackout (provider required)</label>
+          </div>
+        </fieldset>
+        <fieldset class="management-config">
+          <legend>Portfolio and adaptive sizing</legend>
+          <div class="row">
+            <label>Account mode
+              <select v-model="form.accountMode">
+                <option>IndependentStrategyAccounts</option>
+                <option>SharedPortfolioAccount</option>
+              </select>
+            </label>
+            <label class="inline-check"><input v-model="form.adaptiveRiskEnabled" type="checkbox" /> Drawdown/volatility adaptive sizing</label>
+            <label>Maximum positions <input v-model.number="form.maximumOpenPositions" type="number" min="1" step="1" /></label>
+          </div>
+          <div class="row">
+            <label>Total heat (% of equity) <input v-model.number="form.maximumTotalPortfolioHeatPercent" type="number" min="0" step="0.01" /></label>
+            <label>Pending heat (%) <input v-model.number="form.maximumPendingRiskPercent" type="number" min="0" step="0.01" /></label>
+            <label>Strategy heat (%) <input v-model.number="form.maximumStrategyRiskPercent" type="number" min="0" step="0.01" /></label>
+          </div>
+          <div class="row">
+            <label>Instrument heat (%) <input v-model.number="form.maximumInstrumentRiskPercent" type="number" min="0" step="0.01" /></label>
+            <label>Currency heat (%) <input v-model.number="form.maximumCurrencyRiskPercent" type="number" min="0" step="0.01" /></label>
+            <label>Unallocated margin reserve (%) <input v-model.number="form.minimumUnallocatedMarginReservePercent" type="number" min="0" max="99" step="0.01" /></label>
+          </div>
+          <div class="row">
+            <label>Correlation lookback (bars) <input v-model.number="form.correlationLookbackBars" type="number" min="2" step="1" /></label>
+            <label>Minimum samples <input v-model.number="form.correlationMinimumSamples" type="number" min="2" step="1" /></label>
+            <label>Soft / hard correlation <input v-model.number="form.correlationSoftThreshold" type="number" min="0" max="1" step="0.01" /> / <input v-model.number="form.correlationHardThreshold" type="number" min="0" max="1" step="0.01" /></label>
+          </div>
+        </fieldset>
+        <fieldset class="management-config">
+          <legend>Execution and financing</legend>
+          <div class="row">
+            <label>Fill model
+              <select v-model="form.executionFillModel">
+                <option>MidpointPlusConfiguredSpread</option>
+                <option>VariableSyntheticSpread</option>
+                <option>StressExecution</option>
+              </select>
+            </label>
+            <label>Stress scenario
+              <select v-model="form.stressExecutionScenario">
+                <option>Base</option><option>SpreadDouble</option><option>SlippageTriple</option>
+                <option>GapStress</option><option>StopAmendmentFailure</option><option>ConnectionLoss</option>
+                <option>CorrelationShock</option><option>CombinedStress</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label>Capacity (quantity/frame; 0 = unlimited) <input v-model.number="form.maximumFillQuantityPerFrame" type="number" min="0" step="0.01" /></label>
+            <label>Maximum participation <input v-model.number="form.maximumFillParticipationFraction" type="number" min="0.01" max="1" step="0.01" /></label>
+          </div>
+          <div class="row">
+            <label>Asian spread multiplier <input v-model.number="form.asianSessionSpreadMultiplier" type="number" min="0" step="0.01" /></label>
+            <label>Rollover spread multiplier <input v-model.number="form.rolloverSpreadMultiplier" type="number" min="0" step="0.01" /></label>
+            <label>Volatility slippage (range fraction) <input v-model.number="form.volatilitySlippageFraction" type="number" min="0" step="0.01" /></label>
+            <label>Gap slippage (gap fraction) <input v-model.number="form.gapSlippageFraction" type="number" min="0" step="0.01" /></label>
+          </div>
+          <div class="row checks">
+            <label><input v-model="form.financingEnabled" type="checkbox" /> Synthetic configured financing</label>
+            <label>Long annual % <input v-model.number="form.financingLongAnnualPercent" type="number" step="0.01" :disabled="!form.financingEnabled" /></label>
+            <label>Short annual % <input v-model.number="form.financingShortAnnualPercent" type="number" step="0.01" :disabled="!form.financingEnabled" /></label>
+          </div>
+        </fieldset>
         <fieldset>
           <legend>Account profit lock</legend>
           <div class="row">
@@ -1142,7 +1978,7 @@ onMounted(() => {
                 v-model.number="form.dailyEquityProfitTarget"
                 type="number"
                 min="0"
-                step="100"
+                step="0.01"
               />
             </label>
             <label>
@@ -1151,7 +1987,7 @@ onMounted(() => {
                 v-model.number="form.dailyEquityGivebackActivation"
                 type="number"
                 min="0"
-                step="100"
+                step="0.01"
               />
             </label>
           </div>
@@ -1162,13 +1998,92 @@ onMounted(() => {
                 v-model.number="form.maximumDailyEquityGiveback"
                 type="number"
                 min="0"
-                step="100"
+                step="0.01"
               />
             </label>
           </div>
           <p class="muted">
             Values are in account currency. Use 0 to disable. These rules pause new
             entries for the rest of the UTC day; open positions remain protected and managed.
+          </p>
+        </fieldset>
+        <fieldset>
+          <legend>Equity protection</legend>
+          <div class="row">
+            <label class="inline-check">
+              <input v-model="form.equityProtectionEnabled" type="checkbox" />
+              Enabled (persistent, non-daily-resetting high-watermark)
+            </label>
+          </div>
+          <div class="row">
+            <label>
+              Activation profit (% of starting equity)
+              <input
+                v-model.number="form.equityProtectionActivationProfitPercent"
+                type="number"
+                min="0"
+                step="0.01"
+                :disabled="!form.equityProtectionEnabled"
+              />
+            </label>
+            <label>
+              Maximum giveback (% of peak equity)
+              <input
+                v-model.number="form.equityProtectionMaxGivebackPercent"
+                type="number"
+                min="0"
+                step="0.01"
+                :disabled="!form.equityProtectionEnabled"
+              />
+            </label>
+          </div>
+          <div class="row">
+            <label>Action
+              <select v-model="form.equityProtectionActionType" :disabled="!form.equityProtectionEnabled">
+                <option>PauseNewEntries</option>
+                <option>ReduceOpenPositions</option>
+                <option>FlattenAllPositions</option>
+                <option>ReduceFutureRisk</option>
+              </select>
+            </label>
+            <label>Recovery bars
+              <input
+                v-model.number="form.equityProtectionRecoveryBars"
+                type="number"
+                min="0"
+                step="1"
+                :disabled="!form.equityProtectionEnabled"
+              />
+            </label>
+          </div>
+          <div class="row">
+            <label>
+              Reduction fraction (ReduceOpenPositions)
+              <input
+                v-model.number="form.equityProtectionReductionFraction"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                :disabled="!form.equityProtectionEnabled"
+              />
+            </label>
+            <label>
+              Future-risk multiplier (ReduceFutureRisk)
+              <input
+                v-model.number="form.equityProtectionFutureRiskMultiplier"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                :disabled="!form.equityProtectionEnabled"
+              />
+            </label>
+          </div>
+          <p class="muted">
+            Unlike the daily lock above, this never resets and stays active until equity
+            recovers for the configured number of consecutive bars. Risk multipliers can
+            only reduce future position size, never increase it above base risk.
           </p>
         </fieldset>
         <fieldset class="management-config">
@@ -1181,36 +2096,37 @@ onMounted(() => {
                 <option>FixedFractionalRisk</option>
               </select>
             </label>
-            <label>Fallback fixed quantity <input v-model.number="form.quantity" type="number" min="1" step="1" /></label>
+            <label>Fallback fixed quantity <input v-model.number="form.quantity" type="number" min="0.01" step="0.01" /></label>
           </div>
           <div class="row">
-            <label>Risk per trade (%) <input v-model.number="form.riskPercentOfEquity" type="number" min="0.01" max="100" step="0.05" /></label>
-            <label>Fixed cash risk <input v-model.number="form.fixedCashRisk" type="number" min="1" step="10" /></label>
+            <label>Risk per trade (%) <input v-model.number="form.riskPercentOfEquity" type="number" min="0" max="100" step="0.01" /></label>
+            <label>Fixed cash risk <input v-model.number="form.fixedCashRisk" type="number" min="0" step="0.01" /></label>
           </div>
           <div class="row">
-            <label>Minimum quantity <input v-model.number="form.minimumQuantity" type="number" min="0.00000001" step="1" /></label>
-            <label>Maximum quantity (0 = none) <input v-model.number="form.maximumQuantity" type="number" min="0" step="1" /></label>
-            <label>Quantity step <input v-model.number="form.quantityStep" type="number" min="0.00000001" step="1" /></label>
+            <label>Minimum quantity <input v-model.number="form.minimumQuantity" type="number" min="0.01" step="0.01" /></label>
+            <label>Maximum quantity (0 = none) <input v-model.number="form.maximumQuantity" type="number" min="0" step="0.01" /></label>
+            <label>Quantity step <input v-model.number="form.quantityStep" type="number" min="0.01" step="0.01" /></label>
           </div>
           <div class="row">
-            <label>Maximum account margin usage (%) <input v-model.number="form.maximumAccountMarginUsagePercent" type="number" min="1" max="100" step="1" /></label>
-            <label>Maximum one-position margin (%) <input v-model.number="form.maximumSinglePositionMarginPercent" type="number" min="1" max="100" step="1" /></label>
+            <label>Maximum account margin usage (%) <input v-model.number="form.maximumAccountMarginUsagePercent" type="number" min="0" max="100" step="0.01" /></label>
+            <label>Maximum one-position margin (%) <input v-model.number="form.maximumSinglePositionMarginPercent" type="number" min="0" max="100" step="0.01" /></label>
           </div>
-          <small class="muted">Fixed-fractional mode calculates quantity from account equity, original stop distance, currency conversion, costs and margin caps. It rounds down so planned risk is not exceeded.</small>
+          <small class="muted">Fixed-fractional mode calculates quantity from account equity, original stop distance, currency conversion, costs and margin caps. It rounds down so planned risk is not exceeded. Quantity step accepts fractional lots (0.01).</small>
         </fieldset>
-        <label>Balance <input v-model.number="form.startingBalance" type="number" /></label>
+        <label>Balance <input v-model.number="form.startingBalance" type="number" min="0" step="0.01" /></label>
         <div class="row">
-          <label>Leverage <input v-model.number="form.leverage" type="number" /></label>
-          <label>Min R:R <input v-model.number="form.minimumRewardRisk" type="number" step="0.1" /></label>
+          <label>Leverage <input v-model.number="form.leverage" type="number" min="0" step="0.01" /></label>
+          <label>Min R:R <input v-model.number="form.minimumRewardRisk" type="number" min="0" step="0.01" /></label>
         </div>
         <div class="row">
-          <label>Spread bps <input v-model.number="form.spreadBasisPoints" type="number" step="0.1" /></label>
-          <label>Slippage bps <input v-model.number="form.slippageBasisPoints" type="number" step="0.1" /></label>
+          <label>Spread bps <input v-model.number="form.spreadBasisPoints" type="number" min="0" step="0.01" /></label>
+          <label>Slippage bps <input v-model.number="form.slippageBasisPoints" type="number" min="0" step="0.01" /></label>
         </div>
         <div class="row">
-          <label>Commission <input v-model.number="form.commissionRate" type="number" step="0.00001" /></label>
-          <label>Warm-up days <input v-model.number="form.warmupDays" type="number" /></label>
+          <label>Commission <input v-model.number="form.commissionRate" type="number" min="0" step="0.00001" /></label>
+          <label>Warm-up days <input v-model.number="form.warmupDays" type="number" min="0" step="1" /></label>
         </div>
+        <small class="muted">Progress % includes warm-up candles; agents do not open trades until the evaluation From date.</small>
         <div class="row">
           <label>
             Execution
@@ -1233,8 +2149,10 @@ onMounted(() => {
           <label><input v-model="form.noCache" type="checkbox" /> No cache</label>
         </div>
         <p class="muted">Historical bid/ask fills are not enabled until OANDA bid/ask history is wired.</p>
-        <button type="submit" :disabled="busy || brokerCatalogLoading || !selectedBroker.isAvailable">Run Simulation</button>
-        <p v-if="error || realtimeError" class="error">{{ error || realtimeError }}</p>
+        <button type="submit" :disabled="busy || brokerCatalogLoading || !selectedBroker.isAvailable">
+          {{ busy ? 'Starting…' : 'Run Simulation' }}
+        </button>
+        </div>
       </form>
 
       <section class="card runtime-card">
@@ -1243,20 +2161,37 @@ onMounted(() => {
           <dl class="metrics">
             <div><dt>Simulation ID</dt><dd class="mono">{{ job.id }}</dd></div>
             <div><dt>Revision</dt><dd>{{ job.revision ?? 0 }}</dd></div>
-            <div><dt>Status</dt><dd>{{ job.status }}</dd></div>
+            <div><dt>Status</dt><dd>{{ displayJobStatus }}</dd></div>
+            <div><dt>Phase</dt><dd>{{ evaluationPhase ?? '—' }}</dd></div>
+            <div><dt>Window</dt><dd>{{ dataWindowSummary ?? '—' }}</dd></div>
             <div><dt>Market time</dt><dd>{{ job.currentMarketTime ?? '—' }}</dd></div>
             <div><dt>Candles</dt><dd>{{ job.processedBaseCandles.toLocaleString() }}</dd></div>
-            <div><dt>Progress</dt><dd>{{ job.progressPercent.toFixed(2) }}%</dd></div>
+            <div><dt>Progress</dt><dd>{{ job.progressPercent.toFixed(2) }}% <span class="muted">(includes warm-up)</span></dd></div>
             <div><dt>Candles/sec</dt><dd>{{ job.candlesPerSecond.toFixed(1) }}</dd></div>
             <div><dt>Data source</dt><dd>{{ job.dataSourceStatus ?? '—' }}</dd></div>
             <div><dt>Input request</dt><dd class="mono">{{ job.inputRequestId ?? '—' }}</dd></div>
             <div><dt>Configuration</dt><dd class="mono">{{ job.simulationConfigurationId ?? '—' }}</dd></div>
             <div><dt>Input hash</dt><dd class="mono">{{ job.inputHash ?? '—' }}</dd></div>
           </dl>
+          <div v-if="jobFailureMessage" class="job-failure">
+            <strong>Simulation failed</strong>
+            <p>{{ jobFailureMessage }}</p>
+            <ul v-if="strategyFailures.length">
+              <li v-for="item in strategyFailures" :key="item">{{ item }}</li>
+            </ul>
+            <small class="muted">Failed jobs cannot be paused or resumed. Change settings if needed and run a new simulation.</small>
+          </div>
+          <p
+            v-if="evaluationPhase?.startsWith('Warm-up')"
+            class="muted"
+          >
+            Seeing dates before your From field is expected: warm-up loads history for structure/indicators.
+            Entries only start once market time reaches {{ job.requestedFrom?.slice(0, 10) }}.
+          </p>
           <div class="controls">
-            <button type="button" :disabled="busy" @click="control('pause')">Pause compute</button>
-            <button type="button" :disabled="busy" @click="control('resume')">Resume compute</button>
-            <button type="button" :disabled="busy" @click="control('cancel')">Cancel</button>
+            <button type="button" :disabled="busy || !canPauseCompute" title="Only while prepare/download/warm-up/run is active" @click="control('pause')">Pause compute</button>
+            <button type="button" :disabled="busy || !canResumeCompute" title="Only when status is Paused" @click="control('resume')">Resume compute</button>
+            <button type="button" :disabled="busy || !canCancelCompute" title="Stop an in-flight job" @click="control('cancel')">Cancel</button>
           </div>
         </template>
         <p v-else class="muted">Start a simulation to stream progress. Refresh reconnects via SignalR or polling.</p>
@@ -1342,8 +2277,46 @@ onMounted(() => {
             <div><dt>Mode / last action</dt><dd>{{ strategy.openPositionManagement.trailingMode }} / {{ strategy.openPositionManagement.lastManagementAction ?? '—' }}</dd></div>
             <div><dt>Reason</dt><dd>{{ strategy.openPositionManagement.lastManagementReason ?? '—' }}</dd></div>
             <div><dt>Next close</dt><dd>{{ strategy.openPositionManagement.nextManagementIntervalClose ?? '—' }}</dd></div>
+            <div><dt>Entry / current regime</dt><dd>{{ strategy.openPositionManagement.entryRegime ?? '—' }} / {{ strategy.openPositionManagement.currentRegime ?? '—' }}</dd></div>
+            <div><dt>Regime confidence</dt><dd>{{ strategy.openPositionManagement.regimeConfidence?.toFixed(1) ?? '—' }}</dd></div>
+            <div><dt>Base / final risk budget</dt><dd>{{ strategy.openPositionManagement.baseRiskBudget?.toFixed(2) ?? '—' }} / {{ strategy.openPositionManagement.finalRiskBudget?.toFixed(2) ?? '—' }}</dd></div>
+            <div><dt>Final risk multiplier</dt><dd>{{ strategy.openPositionManagement.finalRiskMultiplier?.toFixed(3) ?? '—' }}×</dd></div>
+            <div><dt>Risk multipliers</dt><dd>{{ Object.entries(strategy.openPositionManagement.riskMultipliers).map(([key, value]) => `${key} ${value.toFixed(2)}×`).join(' · ') }}</dd></div>
+            <div><dt>Raw / allocated quantity</dt><dd>{{ strategy.openPositionManagement.rawQuantity ?? '—' }} / {{ strategy.openPositionManagement.allocatedQuantity ?? '—' }}</dd></div>
+            <div><dt>Planned stop risk</dt><dd>{{ strategy.openPositionManagement.plannedStopRisk?.toFixed(2) ?? '—' }}</dd></div>
+            <div><dt>Reservation / cluster</dt><dd>{{ strategy.openPositionManagement.portfolioReservationId ?? '—' }} / {{ strategy.openPositionManagement.correlationClusterId ?? '—' }}</dd></div>
           </dl>
           <small v-else class="muted">No open position.</small>
+        </div>
+
+        <h3>Equity protection</h3>
+        <div v-for="strategy in activeStrategies" :key="`${strategy.strategyId}-equity-protection`" class="management-runtime">
+          <strong>{{ strategy.strategyName }}</strong>
+          <dl v-if="strategy.equityProtection" class="metrics compact-metrics">
+            <div><dt>Peak equity</dt><dd>{{ strategy.equityProtection.peakEquity.toFixed(2) }}</dd></div>
+            <div><dt>Drawdown from peak</dt><dd>{{ strategy.equityProtection.drawdownPercent.toFixed(2) }}%</dd></div>
+            <div><dt>Current risk multiplier</dt><dd>{{ strategy.equityProtection.currentRiskMultiplier.toFixed(2) }}×</dd></div>
+            <div><dt>Active tiers</dt><dd>{{ strategy.equityProtection.activatedTierIds.length ? strategy.equityProtection.activatedTierIds.join(', ') : 'none' }}</dd></div>
+            <div><dt>New entries</dt><dd>{{ strategy.equityProtection.newEntriesPaused ? 'Paused' : 'Allowed' }}</dd></div>
+          </dl>
+          <small v-else class="muted">Not enabled, or no equity observed yet.</small>
+        </div>
+
+        <h3>Shared portfolio risk</h3>
+        <div v-for="strategy in activeStrategies" :key="`${strategy.strategyId}-portfolio-risk`" class="management-runtime">
+          <strong>{{ strategy.strategyName }}</strong>
+          <dl v-if="strategy.portfolioRisk" class="metrics compact-metrics">
+            <div><dt>Open / pending / total heat</dt><dd>{{ strategy.portfolioRisk.openHeat.toFixed(2) }} / {{ strategy.portfolioRisk.pendingHeat.toFixed(2) }} / {{ strategy.portfolioRisk.totalHeat.toFixed(2) }}</dd></div>
+            <div><dt>Total heat</dt><dd>{{ strategy.portfolioRisk.totalHeatPercent.toFixed(3) }}% of equity</dd></div>
+            <div><dt>Strategy / instrument heat</dt><dd>{{ strategy.portfolioRisk.strategyHeat.toFixed(2) }} / {{ strategy.portfolioRisk.instrumentHeat.toFixed(2) }}</dd></div>
+            <div><dt>Currency risk</dt><dd>{{ Object.entries(strategy.portfolioRisk.currencyRisk).map(([key, value]) => `${key} ${value.toFixed(2)}`).join(' · ') || 'none' }}</dd></div>
+            <div><dt>Cluster heat</dt><dd>{{ Object.entries(strategy.portfolioRisk.clusterHeat).map(([key, value]) => `${key} ${value.toFixed(2)}`).join(' · ') || 'none' }}</dd></div>
+            <div><dt>Used / reserved margin</dt><dd>{{ strategy.portfolioRisk.marginUsed.toFixed(2) }} / {{ strategy.portfolioRisk.reservedMargin.toFixed(2) }}</dd></div>
+            <div><dt>Unallocated margin</dt><dd>{{ strategy.portfolioRisk.unallocatedMargin.toFixed(2) }}</dd></div>
+            <div><dt>Account peak / protected floor</dt><dd>{{ strategy.portfolioRisk.accountPeakEquity.toFixed(2) }} / {{ strategy.portfolioRisk.accountProtectedFloor.toFixed(2) }}</dd></div>
+            <div><dt>Account protection tiers</dt><dd>{{ strategy.portfolioRisk.accountActivatedTierIds.join(', ') || 'none' }}</dd></div>
+          </dl>
+          <small v-else class="muted">Independent account mode.</small>
         </div>
 
         <h3>Live trades ({{ flatTrades.length }})</h3>
@@ -1412,7 +2385,7 @@ onMounted(() => {
         <ul class="job-list">
           <li v-for="item in jobs" :key="item.id">
             <button type="button" class="linkish" @click="selectJob(item)">
-              {{ item.instrument }} · {{ item.status }} · {{ item.progressPercent.toFixed(0) }}%
+              {{ item.instrument }} · {{ formatSimulationStatus(item.status) }} · {{ item.progressPercent.toFixed(0) }}%
             </button>
           </li>
         </ul>
@@ -1440,6 +2413,104 @@ onMounted(() => {
   margin: 0;
   color: var(--muted, #8b93a7);
   max-width: 60ch;
+}
+.config-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.config-heading h3 { margin: 0; }
+.preset-picker {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.55rem;
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0.65rem 0.75rem 0.75rem;
+}
+.preset-picker legend {
+  color: #bfdbfe;
+  padding: 0 0.3rem;
+}
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.5rem;
+}
+.preset-card {
+  display: grid;
+  gap: 0.3rem;
+  align-content: start;
+  min-height: 7.5rem;
+  padding: 0.6rem 0.65rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.55rem;
+  background: rgba(12, 16, 22, 0.85);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.preset-card:hover {
+  border-color: rgba(139, 164, 255, 0.4);
+  background: rgba(22, 30, 40, 0.95);
+}
+.preset-card.active {
+  border-color: rgba(71, 215, 172, 0.55);
+  background: rgba(71, 215, 172, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(71, 215, 172, 0.15);
+}
+.preset-card strong {
+  font-size: 0.88rem;
+  line-height: 1.2;
+}
+.preset-card small {
+  color: var(--muted, #8b93a7);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+.preset-badge {
+  justify-self: start;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: #9fb0bc;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.preset-card.active .preset-badge {
+  border-color: rgba(71, 215, 172, 0.35);
+  color: var(--mint, #47d7ac);
+}
+.preset-banner {
+  border: 1px solid rgba(71, 215, 172, 0.28);
+  background: rgba(71, 215, 172, 0.07);
+  border-radius: 0.65rem;
+  padding: 0.65rem 0.75rem;
+  display: grid;
+  gap: 0.35rem;
+}
+.preset-banner strong { color: var(--mint, #47d7ac); font-size: 0.9rem; }
+.preset-line {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.run-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 0.5rem;
+}
+.run-row button { width: 100%; }
+.advanced-config {
+  display: grid;
+  gap: 0.65rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 .simulator-status {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1554,6 +2625,29 @@ button.secondary {
   text-align: left;
 }
 .error { color: #f87171; margin: 0; }
+.job-failure {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.35rem 0 0.15rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 0.55rem;
+  background: rgba(248, 113, 113, 0.08);
+}
+.job-failure strong { color: #fca5a5; }
+.job-failure p {
+  margin: 0;
+  color: #fecaca;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.job-failure ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: #fecaca;
+  font-size: 0.82rem;
+}
 @media (max-width: 1100px) {
   .simulator-grid { grid-template-columns: 1fr; }
 }

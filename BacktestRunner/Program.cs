@@ -294,15 +294,15 @@ Usage:
   dotnet run --project BacktestRunner -- [options]
 
 Options:
-  --instrument FX:GBP/JPY
-  --from 2025-01-01
-  --to 2026-01-01
+  --instrument FX:EUR/USD                  (default: liquid major)
+  --from YYYY-MM-DD                        (default: start of previous UTC month)
+  --to YYYY-MM-DD                          (default: start of current UTC month)
   --execution-interval 1m / --base-interval 1m
   --precision-mode fast|broker-native|high-precision
   --source oanda|binance|imported
   --imported-candles /server/path/to/candles.csv
   --analysis-base-interval 1m
-  --analysis-intervals 5m,15m,1h
+  --analysis-intervals 5m,15m,30m,1h,2h
   --trend-interval 2h
   --secondary-trend-intervals 1h
   --setup-intervals 30m
@@ -326,7 +326,19 @@ Options:
   --strategy-failure-policy stop-all|stop-one
   --analysis-sharing shared|independent
   --ambiguous-policy stop-first|target-first|nearest-open
-  --warmup-days 45
+  --account-mode independent|shared
+  --regime
+  --er-period 14
+  --trading-conditions
+  --adaptive-risk
+  --maximum-portfolio-heat-percent 1.5
+  --fill-model MidpointPlusConfiguredSpread|VariableSyntheticSpread|StressExecution
+  --stress-scenario Base|SpreadDouble|SlippageTriple|GapStress|StopAmendmentFailure|ConnectionLoss|CorrelationShock|CombinedStress
+  --fill-capacity 25000
+  --financing
+  --financing-long-annual-percent -3.5
+  --financing-short-annual-percent 1.2
+  --warmup-days 21
   --quantity 1000                         (manual/fixed-quantity fallback)
   --position-sizing-mode fixed-fractional|fixed-cash|fixed-quantity
   --risk-percent 0.5
@@ -337,7 +349,7 @@ Options:
   --maximum-account-margin-percent 30
   --maximum-position-margin-percent 10
   --starting-balance 100000
-  --base-currency JPY
+  --base-currency USD
   --leverage 20
   --commission-rate 0.00002
   --spread-bps 1
@@ -346,7 +358,7 @@ Options:
   --daily-equity-profit-target 3000
   --daily-equity-giveback-activation 2500
   --maximum-daily-equity-giveback 750
-  --price-action-mode disabled|soft|required
+  --price-action-mode disabled|soft|required|required-with-context
   --minimum-price-action-confidence 55
   --allow-opposing-price-action
   --progress-interval 500

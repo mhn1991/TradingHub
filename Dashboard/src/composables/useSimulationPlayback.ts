@@ -19,6 +19,7 @@ export interface PlaybackRow {
     channels: ReplayFrame['channels']
     marketStructure?: ReplayFrame['marketStructure']
     priceAction?: ReplayFrame['priceAction']
+    marketRegime?: ReplayFrame['marketRegime']
     confidence: ReplayFrame['confidence']
   } | null
 }

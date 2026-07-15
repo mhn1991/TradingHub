@@ -114,6 +114,103 @@ public sealed class Phase4TrailingStopTests
     }
 
     [Test]
+    public void LongStructureTrail_IgnoresMicroSwingInsideMinimumAtrBand()
+    {
+        AnalysisSnapshot analysis = Analysis(22, atr: 1m) with
+        {
+            // 0.2 ATR behind price — micro noise; meaningful swing further back.
+            Swings =
+            [
+                Swing(103.8m, SwingType.Low, confirmed: true),
+                Swing(102.5m, SwingType.Low, confirmed: true)
+            ]
+        };
+
+        TradeManagementRecommendation result = Manager().Evaluate(
+            Trade(OrderSide.Buy, 104m) with
+            {
+                InitialStopPrice = 98m,
+                CurrentStopPrice = 98m
+            },
+            analysis);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Action, Is.EqualTo(TradeManagementAction.MoveStop));
+            Assert.That(result.StructuralLevel, Is.EqualTo(102.5m));
+            Assert.That(result.ProposedStopPrice, Is.EqualTo(102.25m));
+        });
+    }
+
+    [Test]
+    public void LongStructureTrail_IgnoresWeakZonesBelowStrengthGate()
+    {
+        AnalysisSnapshot analysis = Analysis(23, atr: 1m) with
+        {
+            PriceZones =
+            [
+                Zone(102.0m, 102.4m, PriceZoneType.Support) with { Strength = 10m }
+            ]
+        };
+
+        TradeManagementRecommendation result = Manager().Evaluate(
+            Trade(OrderSide.Buy, 104m) with
+            {
+                InitialStopPrice = 98m,
+                CurrentStopPrice = 98m
+            },
+            analysis);
+
+        // No quality structure → falls back to break-even (open R = 4).
+        Assert.That(result.AmendmentReason, Is.EqualTo(StopAmendmentReason.BreakEven));
+    }
+
+    [Test]
+    public void ScaleOut_RThreshold_DoesNotFireOnPureMechanicalScope()
+    {
+        var manager = new StructureBasedTradeManager(new PositionManagementOptions
+        {
+            Mode = TrailingStopMode.Disabled,
+            EnableScaleOut = true,
+            ScaleOutRThresholdRequiresManagementBar = true,
+            ScaleOutRules =
+            [
+                new ScaleOutRule
+                {
+                    StageId = "scale-1r",
+                    ActivationR = 1m,
+                    MinimumOpenProfitR = 1m,
+                    FractionOfInitialQuantity = 0.2m,
+                    TriggerMode = ScaleOutTriggerMode.RThreshold
+                }
+            ],
+            MinimumRunnerFraction = 0.4m
+        });
+        ManagedTradeState trade = Trade(OrderSide.Buy, 101.5m) with
+        {
+            InitialQuantity = 100m,
+            CurrentQuantity = 100m,
+            MinimumQuantityIncrement = 1m
+        };
+
+        TradeManagementRecommendation mechanical = manager.Evaluate(
+            trade,
+            Analysis(60, atr: 0.2m),
+            TradeManagementEvaluationScope.Mechanical);
+        TradeManagementRecommendation management = manager.Evaluate(
+            trade,
+            Analysis(61, atr: 0.2m),
+            TradeManagementEvaluationScope.MainStructure);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(mechanical.PositionReduction, Is.Null);
+            Assert.That(management.PositionReduction, Is.Not.Null);
+            Assert.That(management.PositionReduction!.StageId, Is.EqualTo("scale-1r"));
+        });
+    }
+
+    [Test]
     public void ShortStructureTrail_UsesConfirmedSwingAndAtrBuffer()
     {
         AnalysisSnapshot analysis = Analysis(21, atr: 1m) with

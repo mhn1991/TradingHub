@@ -107,6 +107,9 @@ const layers = reactive<ChartLayers>({
   zones: true,
   trendlines: true,
   channels: true,
+  donchian: true,
+  efficiencyRatio: true,
+  marketRegime: true,
 })
 let playbackTimer: number | undefined
 let marketPollTimer: number | undefined
@@ -1233,6 +1236,8 @@ function isAbortError(error: unknown) {
         <article><span>Average R</span><strong>{{ replayPerformance.averageR?.toFixed(2) ?? '—' }}</strong></article>
         <article><span>Closed-trade drawdown</span><strong>{{ replayPerformance.maximumDrawdown.toLocaleString(undefined, { maximumFractionDigits: 2 }) }} {{ replayPerformance.currency }}</strong></article>
         <article><span>Final equity</span><strong>{{ replayPerformance.finalEquity.toLocaleString(undefined, { maximumFractionDigits: 2 }) }} {{ replayPerformance.currency }}</strong></article>
+        <article><span>Peak equity</span><strong>{{ replayPerformance.peakEquity.toLocaleString(undefined, { maximumFractionDigits: 2 }) }} {{ replayPerformance.currency }}</strong></article>
+        <article><span>Protection activations</span><strong>{{ replayPerformance.equityProtectionActivationCount }}</strong></article>
       </section>
 
       <div class="dashboard-grid">
@@ -1314,6 +1319,9 @@ function isAbortError(error: unknown) {
                 </div>
               </div>
               <div class="live-facts">
+                <span class="live-price">{{ price(currentFrame.candle.close) }}</span>
+                <span :class="candleMovePips >= 0 ? 'positive-text' : 'negative-text'">{{ candleMovementLabel }}</span>
+                <span>{{ activeWorkspace?.interval ?? activeSeries.interval }}</span>
                 <span>Closed candles only</span>
                 <span>{{ activeSeries.frames.length }} buffered</span>
                 <span v-if="liveStatus?.reconnectAttempt">Retry {{ liveStatus.reconnectAttempt }}</span>

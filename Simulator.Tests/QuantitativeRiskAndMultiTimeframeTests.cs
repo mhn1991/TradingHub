@@ -109,6 +109,217 @@ public sealed class QuantitativeRiskAndMultiTimeframeTests
     }
 
     [Test]
+    public void PositionSizer_AppliesContractMultiplierToPerUnitRisk()
+    {
+        var sizer = new PositionSizer(new PositionSizingOptions
+        {
+            Mode = PositionSizingMode.FixedFractionalRisk,
+            RiskPercentOfEquity = 0.5m,
+            MinimumQuantity = 1m,
+            QuantityStep = 1m,
+            MaximumAccountMarginUsagePercent = 30m,
+            MaximumSinglePositionMarginPercent = 10m,
+            Leverage = 20m
+        });
+
+        // Multiplier 10 makes per-unit loss 9 instead of 0.9 → quantity 55 instead of 555.
+        PositionSizingResult result = sizer.Calculate(new PositionSizingContext
+        {
+            Decision = BuyDecision(reference: 100m, stop: 99.1m),
+            RequestedQuantity = 1_000m,
+            Accounts = [Account(balance: 100_000m)],
+            Positions = [],
+            QuoteToAccountCurrencyRate = 1m,
+            InstrumentSpec = new InstrumentRiskSpec { ContractMultiplier = 10m }
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Approved, Is.True);
+            Assert.That(result.RiskBudget, Is.EqualTo(500m));
+            Assert.That(result.Quantity, Is.EqualTo(55m));
+            Assert.That(result.EstimatedLossAtStop, Is.EqualTo(495m));
+        });
+    }
+
+    [Test]
+    public void PositionSizer_CapsQuantityUsingPortfolioOpenRiskHeat()
+    {
+        var sizer = new PositionSizer(new PositionSizingOptions
+        {
+            Mode = PositionSizingMode.FixedFractionalRisk,
+            RiskPercentOfEquity = 1m,
+            MinimumQuantity = 1m,
+            QuantityStep = 1m,
+            MaximumAccountMarginUsagePercent = 50m,
+            MaximumSinglePositionMarginPercent = 50m,
+            Leverage = 50m,
+            MaximumOpenRiskPercentOfEquity = 1m
+        });
+
+        // Equity 100_000 → 1% heat budget = 1_000. Known open risk 700 leaves 300 for the new trade.
+        // Per-unit loss = 1 → quantity capped at 300 (risk budget alone would allow 1_000).
+        PositionSizingResult result = sizer.Calculate(new PositionSizingContext
+        {
+            Decision = BuyDecision(reference: 100m, stop: 99m),
+            RequestedQuantity = 100_000m,
+            Accounts = [Account(balance: 100_000m)],
+            Positions =
+            [
+                new BrokerPosition
+                {
+                    PositionId = "open-1",
+                    Instrument = new InstrumentKey("FX:EUR/USD"),
+                    Side = OrderSide.Buy,
+                    Quantity = 700m,
+                    AveragePrice = 1.1m
+                }
+            ],
+            QuoteToAccountCurrencyRate = 1m,
+            KnownOpenRiskAccountCurrency = 700m
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Approved, Is.True);
+            Assert.That(result.Quantity, Is.EqualTo(300m));
+            Assert.That(result.OpenRiskAccountCurrency, Is.EqualTo(700m));
+            Assert.That(result.ProjectedOpenRiskAccountCurrency, Is.EqualTo(1_000m));
+        });
+    }
+
+    [Test]
+    public void PreTradeRisk_RejectsWhenProjectedOpenRiskHeatExceedsCap()
+    {
+        var manager = new PreTradeRiskManager(new PreTradeRiskOptions
+        {
+            RequireStopLoss = true,
+            MaximumOpenRiskPercentOfEquity = 1m
+        });
+
+        RiskAssessment assessment = manager.Evaluate(new PreTradeRiskContext
+        {
+            Decision = BuyDecision(reference: 100m, stop: 99m),
+            Quantity = 500m,
+            Accounts = [Account(balance: 100_000m)],
+            Positions = [],
+            QuoteToAccountCurrencyRate = 1m,
+            KnownOpenRiskAccountCurrency = 700m
+        });
+
+        // New trade risk 500 + open 700 = 1_200 → 1.2% of equity > 1%.
+        Assert.Multiple(() =>
+        {
+            Assert.That(assessment.Approved, Is.False);
+            Assert.That(assessment.OpenRiskAccountCurrency, Is.EqualTo(700m));
+            Assert.That(assessment.ProjectedOpenRiskAccountCurrency, Is.EqualTo(1_200m));
+            Assert.That(assessment.Summary, Does.Contain("open risk").IgnoreCase);
+        });
+    }
+
+    [Test]
+    public void PreTradeRisk_EstimatesOpenRiskFromAssumedStopDistancePercent()
+    {
+        var manager = new PreTradeRiskManager(new PreTradeRiskOptions
+        {
+            RequireStopLoss = true,
+            MaximumOpenRiskPercentOfEquity = 2m,
+            AssumedOpenPositionRiskDistancePercentOfPrice = 1m
+        });
+
+        // Open position on a different instrument so pyramiding rules do not apply:
+        // avg 100, qty 200, assumed distance 1% of price = 1 → open risk 200.
+        // New trade: distance 1 × qty 100 = 100. Projected 300 → 0.3% of equity, under 2%.
+        RiskAssessment assessment = manager.Evaluate(new PreTradeRiskContext
+        {
+            Decision = BuyDecision(reference: 100m, stop: 99m),
+            Quantity = 100m,
+            Accounts = [Account(balance: 100_000m)],
+            Positions =
+            [
+                new BrokerPosition
+                {
+                    PositionId = "open-1",
+                    Instrument = new InstrumentKey("FX:EUR/USD"),
+                    Side = OrderSide.Buy,
+                    Quantity = 200m,
+                    AveragePrice = 100m
+                }
+            ],
+            QuoteToAccountCurrencyRate = 1m
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(assessment.Approved, Is.True, assessment.Summary);
+            Assert.That(assessment.OpenRiskAccountCurrency, Is.EqualTo(200m));
+            Assert.That(assessment.ProjectedOpenRiskAccountCurrency, Is.EqualTo(300m));
+        });
+    }
+
+    [Test]
+    public void PreTradeRisk_DoesNotRequireCurrencyRateForStructuralChecksOnly()
+    {
+        var manager = new PreTradeRiskManager(new PreTradeRiskOptions
+        {
+            RequireStopLoss = true,
+            MinimumRewardRiskRatio = 1.5m
+        });
+
+        RiskAssessment assessment = manager.Evaluate(new PreTradeRiskContext
+        {
+            Decision = BuyDecision(reference: 100m, stop: 99m) with
+            {
+                TakeProfitPrice = 102m
+            },
+            Quantity = 100m,
+            Accounts = [Account(balance: 100_000m)],
+            Positions = [],
+            QuoteToAccountCurrencyRate = 0m
+        });
+
+        Assert.That(assessment.Approved, Is.True, assessment.Summary);
+    }
+
+    [Test]
+    public void MaximumLossPercentageOfBalance_UsesPercentagePoints()
+    {
+        // 0.5 means half a percent of balance, not 50%.
+        var manager = new PreTradeRiskManager(new PreTradeRiskOptions
+        {
+            RequireStopLoss = true,
+            MaximumLossPercentageOfBalance = 0.5m
+        });
+
+        // Loss 600 on 100_000 balance = 0.6% → reject.
+        RiskAssessment rejected = manager.Evaluate(new PreTradeRiskContext
+        {
+            Decision = BuyDecision(reference: 100m, stop: 99m),
+            Quantity = 600m,
+            Accounts = [Account(balance: 100_000m)],
+            Positions = [],
+            QuoteToAccountCurrencyRate = 1m
+        });
+
+        // Loss 400 = 0.4% → approve.
+        RiskAssessment approved = manager.Evaluate(new PreTradeRiskContext
+        {
+            Decision = BuyDecision(reference: 100m, stop: 99m),
+            Quantity = 400m,
+            Accounts = [Account(balance: 100_000m)],
+            Positions = [],
+            QuoteToAccountCurrencyRate = 1m
+        });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(rejected.Approved, Is.False);
+            Assert.That(rejected.Summary, Does.Contain("0.500%"));
+            Assert.That(approved.Approved, Is.True, approved.Summary);
+        });
+    }
+
+    [Test]
     public async Task ProgressiveAgent_UsesAllRoleIntervalsAndVetoesStrongSecondaryOpposition()
     {
         BarInterval entry = BarInterval.Minutes(5);
@@ -222,6 +433,50 @@ public sealed class QuantitativeRiskAndMultiTimeframeTests
     }
 
     [Test]
+    public async Task ProgressiveAgent_ContradictoryStructureAndCandle_WaitsWithoutDmiResolution()
+    {
+        BarInterval entry = BarInterval.Minutes(5);
+        BarInterval confirmation = BarInterval.Minutes(15);
+        BarInterval trend = BarInterval.Hours(1);
+        var agent = new LegacyProgressiveAgent(new ProgressiveStrategyOptions
+        {
+            TrendInterval = trend,
+            ConfirmationInterval = confirmation,
+            EntryInterval = entry,
+            PriceActionConfirmation = PriceActionConfirmationMode.Disabled
+        });
+        AnalysisSnapshot contradictoryTrend = Snapshot(trend, bullish: true) with
+        {
+            LatestCandle = TestCandles.Create(
+                Instrument,
+                Now.AddHours(-1),
+                trend,
+                110m,
+                111m,
+                99m,
+                100m),
+            Indicators = new IndicatorSnapshot
+            {
+                Atr = 2m,
+                Rsi = 50m,
+                BollingerMiddle = 105m,
+                AdxAnalysis = AdxAnalysisSnapshot.Empty
+            }
+        };
+
+        AgentDecision decision = await agent.EvaluateAsync(Context(
+            contradictoryTrend,
+            Snapshot(confirmation, bullish: true),
+            Snapshot(entry, bullish: true)));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Observe));
+            Assert.That(decision.ReasonCode, Is.EqualTo("PrimaryTrendNotReady"));
+        });
+    }
+
+    [Test]
     public void RuntimeValidation_RejectsManagementIntervalsThatCannotBeAggregatedFromAnalysisBase()
     {
         var runtime = new BacktestRuntimeOptions
@@ -245,20 +500,29 @@ public sealed class QuantitativeRiskAndMultiTimeframeTests
     [Test]
     public void MechanicalScope_ProtectsProfitWithoutWaitingForStructureSnapshot()
     {
+        // Pure mechanical frames still move stops / floors, but R-threshold scale-outs
+        // require a management-bar scope so 1s/5s noise does not fire partials (P2).
         var manager = new StructureBasedTradeManager(PositionManagementOptions.LegacyDefaults);
         ManagedTradeState trade = ManagedTrade(currentPrice: 110m, maximumFavourableR: 1.1m);
 
-        TradeManagementRecommendation recommendation = manager.Evaluate(
+        TradeManagementRecommendation mechanical = manager.Evaluate(
             trade,
             Snapshot(BarInterval.Minutes(5), bullish: true),
             TradeManagementEvaluationScope.Mechanical);
+        TradeManagementRecommendation managementBar = manager.Evaluate(
+            trade,
+            Snapshot(BarInterval.Minutes(5), bullish: true),
+            TradeManagementEvaluationScope.FastStructure);
 
         Assert.Multiple(() =>
         {
-            Assert.That(recommendation.Action, Is.EqualTo(TradeManagementAction.ReduceAndMoveStop));
-            Assert.That(recommendation.PositionReduction?.StageId, Is.EqualTo("scale-1r"));
-            Assert.That(recommendation.PositionReduction?.QuantityToClose, Is.EqualTo(20m));
-            Assert.That(recommendation.ProposedStopPrice, Is.GreaterThanOrEqualTo(100m));
+            Assert.That(mechanical.Action, Is.EqualTo(TradeManagementAction.MoveStop));
+            Assert.That(mechanical.PositionReduction, Is.Null);
+            Assert.That(mechanical.ProposedStopPrice, Is.GreaterThanOrEqualTo(100m));
+
+            Assert.That(managementBar.Action, Is.EqualTo(TradeManagementAction.ReduceAndMoveStop));
+            Assert.That(managementBar.PositionReduction?.StageId, Is.EqualTo("scale-1r"));
+            Assert.That(managementBar.PositionReduction?.QuantityToClose, Is.EqualTo(20m));
         });
     }
 

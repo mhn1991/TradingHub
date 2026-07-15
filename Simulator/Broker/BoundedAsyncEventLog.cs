@@ -59,6 +59,22 @@ internal sealed class BoundedAsyncEventLog<T>
         signal.TrySetResult();
     }
 
+    public IReadOnlyList<(long Sequence, T Item)> SnapshotAfter(long sequence)
+    {
+        lock (_sync)
+        {
+            long oldestRetained = _entries.Count == 0
+                ? _nextSequence + 1
+                : _entries.Oldest.Sequence;
+            if (sequence + 1 < oldestRetained)
+                throw new InvalidOperationException("The event snapshot cursor fell behind the retained bounded window.");
+            return _entries
+                .Where(entry => entry.Sequence > sequence)
+                .Select(entry => (entry.Sequence, entry.Item))
+                .ToArray();
+        }
+    }
+
     public async IAsyncEnumerable<T> ReadAllAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {

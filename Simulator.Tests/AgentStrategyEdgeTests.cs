@@ -46,6 +46,20 @@ public sealed class AgentStrategyEdgeTests
     }
 
     [Test]
+    public void StrategyRejectsDuplicateOrMisorderedTimeframes()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(
+                () => new RuleBasedMultiTimeframeAgent(Five, Five, Hour, 1m),
+                Throws.TypeOf<ArgumentException>());
+            Assert.That(
+                () => new RuleBasedMultiTimeframeAgent(Hour, Fifteen, Five, 1m),
+                Throws.TypeOf<ArgumentException>());
+        });
+    }
+
+    [Test]
     public async Task MissingIndicators_ProducesObserveDecision()
     {
         var agent = Agent();
@@ -122,6 +136,130 @@ public sealed class AgentStrategyEdgeTests
     }
 
     [Test]
+    public async Task AlignedRsiRelationship_CanLiftQualifiedSignalAboveConfidenceFloor()
+    {
+        var agent = Agent(minimumConfidence: 60m);
+        AnalysisSnapshot entry = Snapshot(Five, bullish: true, confidence: 57m);
+        entry = entry with
+        {
+            Indicators = entry.Indicators with
+            {
+                RsiAnalysis = new RsiAnalysisSnapshot
+                {
+                    MomentumDirection = MomentumDirection.Rising,
+                    LatestRelationship = Relationship(
+                        RsiRelationshipType.RegularBullishDivergence,
+                        80m)
+                }
+            }
+        };
+        AgentMarketContext context = Context(
+            entry,
+            Snapshot(Fifteen, bullish: true, confidence: 57m),
+            Snapshot(Hour, bullish: true, confidence: 57m));
+
+        AgentDecision decision = await agent.EvaluateAsync(context);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Buy), decision.Reason);
+            Assert.That(decision.Confidence, Is.GreaterThanOrEqualTo(60m));
+            Assert.That(decision.Reason, Does.Contain("RegularBullishDivergence"));
+        });
+    }
+
+    [Test]
+    public async Task RsiRelationship_WithSupportAndElevatedVolume_GetsConfluenceWeight()
+    {
+        var agent = Agent(minimumConfidence: 70m);
+        AnalysisSnapshot entry = Snapshot(Five, bullish: true, confidence: 60m);
+        entry = entry with
+        {
+            Indicators = entry.Indicators with
+            {
+                RsiAnalysis = new RsiAnalysisSnapshot
+                {
+                    MomentumDirection = MomentumDirection.Rising,
+                    LatestRelationship = Relationship(
+                        RsiRelationshipType.RegularBullishDivergence,
+                        80m)
+                },
+                VolumeAnalysis = new VolumeAnalysisSnapshot
+                {
+                    Value = 170m,
+                    Kind = VolumeKind.TickCount,
+                    BaselineMedian = 100m,
+                    RelativeToBaseline = 1.7m,
+                    Percentile = 88m,
+                    Regime = VolumeRegime.High,
+                    SampleCount = 30,
+                    IsReliable = true
+                }
+            },
+            PriceZones =
+            [
+                new PriceZone
+                {
+                    LowerPrice = 108.5m,
+                    UpperPrice = 109.5m,
+                    CentrePrice = 109m,
+                    TouchCount = 3,
+                    Strength = 80m,
+                    Type = PriceZoneType.Support
+                }
+            ]
+        };
+        AgentMarketContext context = Context(
+            entry,
+            Snapshot(Fifteen, bullish: true, confidence: 60m),
+            Snapshot(Hour, bullish: true, confidence: 60m));
+
+        AgentDecision decision = await agent.EvaluateAsync(context);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Buy), decision.Reason);
+            Assert.That(decision.Confidence, Is.GreaterThanOrEqualTo(70m));
+            Assert.That(decision.Reason, Does.Contain("supporting Support zone"));
+            Assert.That(decision.Reason, Does.Contain("tick activity"));
+            Assert.That(decision.Reason, Does.Contain("RSI relationship confirmed"));
+        });
+    }
+
+    [Test]
+    public async Task StrongOpposingRsiRelationship_VetoesOtherwiseAlignedSignal()
+    {
+        var agent = Agent();
+        AnalysisSnapshot entry = Snapshot(Five, bullish: true);
+        entry = entry with
+        {
+            Indicators = entry.Indicators with
+            {
+                RsiAnalysis = new RsiAnalysisSnapshot
+                {
+                    MomentumDirection = MomentumDirection.Falling,
+                    LatestRelationship = Relationship(
+                        RsiRelationshipType.RegularBearishDivergence,
+                        80m)
+                }
+            }
+        };
+        AgentMarketContext context = Context(
+            entry,
+            Snapshot(Fifteen, bullish: true),
+            Snapshot(Hour, bullish: true));
+
+        AgentDecision decision = await agent.EvaluateAsync(context);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Observe));
+            Assert.That(decision.Reason, Does.Contain("vetoed"));
+            Assert.That(decision.Reason, Does.Contain("RegularBearishDivergence"));
+        });
+    }
+
+    [Test]
     public async Task ZeroAtr_UsesFallbackDistanceInsteadOfZeroWidthProtection()
     {
         var agent = Agent();
@@ -152,6 +290,36 @@ public sealed class AgentStrategyEdgeTests
         AgentDecision decision = await agent.EvaluateAsync(context);
 
         Assert.That(decision.Action, Is.EqualTo(AgentAction.Observe));
+    }
+
+    [Test]
+    public async Task ExistingPosition_DoesNotEmitAnotherEntrySignal()
+    {
+        var agent = Agent();
+        AgentMarketContext context = Context(
+            Snapshot(Five, bullish: true),
+            Snapshot(Fifteen, bullish: true),
+            Snapshot(Hour, bullish: true)) with
+        {
+            Positions =
+            [
+                new BrokerPosition
+                {
+                    PositionId = "existing",
+                    Instrument = Instrument,
+                    Side = OrderSide.Buy,
+                    Quantity = 2m
+                }
+            ]
+        };
+
+        AgentDecision decision = await agent.EvaluateAsync(context);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Observe));
+            Assert.That(decision.Reason, Does.Contain("open position"));
+        });
     }
 
     [Test]
@@ -255,4 +423,22 @@ public sealed class AgentStrategyEdgeTests
             }
         };
     }
+
+    private static RsiRelationshipSnapshot Relationship(
+        RsiRelationshipType type,
+        decimal strength) => new()
+    {
+        Type = type,
+        FirstPivotTime = Now.AddMinutes(-30),
+        SecondPivotTime = Now.AddMinutes(-10),
+        ConfirmedAt = Now.AddMinutes(-5),
+        FirstPrice = 100m,
+        SecondPrice = 101m,
+        FirstRsi = 60m,
+        SecondRsi = 55m,
+        PriceChange = 1m,
+        RsiChange = -5m,
+        Strength = strength,
+        AgeCandles = 1
+    };
 }
