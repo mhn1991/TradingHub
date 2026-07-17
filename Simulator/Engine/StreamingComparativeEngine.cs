@@ -12,8 +12,26 @@ using Simulator.MarketData;
 using Simulator.Models;
 using Simulator.Replay;
 using RiskManager.Calibration;
+using TradingCore.Pipeline;
 
 namespace Simulator.Engine;
+
+/// <summary>
+/// One resolved strategy/instrument pairing <see cref="StreamingComparativeEngine"/> consumes. A
+/// named record (Phase 5 of the multi-agent architecture), not the original bare 3-tuple, so
+/// <see cref="AnalysisOptionsOverride"/>/<see cref="Mode"/> have a home without every call site
+/// re-deriving a wider tuple type. <see cref="AnalysisOptionsOverride"/> null (the default) means
+/// "use the run's shared <c>StreamingComparativeEngineOptions.AnnotationOptions</c>" - only
+/// assignments that explicitly diverge resolve to their own <c>AnalysisProfileKey</c>.
+/// </summary>
+public sealed record StrategyFactoryEntry(
+    string Id,
+    ITradingAgent Agent,
+    InstrumentKey Instrument,
+    ChartAnnotationOptions? AnalysisOptionsOverride = null,
+    AgentExecutionMode Mode = AgentExecutionMode.Shadow,
+    Guid? PolicyBundleId = null,
+    int? PolicyRevision = null);
 
 public sealed class StreamingComparativeEngineOptions
 {
@@ -43,11 +61,11 @@ public sealed class StreamingComparativeEngineOptions
 public sealed class StreamingComparativeEngine
 {
     private readonly IHistoricalCandleStream _stream;
-    private readonly IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> _strategies;
+    private readonly IReadOnlyList<StrategyFactoryEntry> _strategies;
 
     public StreamingComparativeEngine(
         IHistoricalCandleStream stream,
-        IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> strategies)
+        IReadOnlyList<StrategyFactoryEntry> strategies)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _strategies = strategies ?? throw new ArgumentNullException(nameof(strategies));
@@ -76,12 +94,17 @@ public sealed class StreamingComparativeEngine
 
         // Per-instrument candle sourcing/aggregation/quality state is constructed further
         // down, once the traded-instrument set and the wrapped candle stream are known
-        // (see InstrumentPipelineState). The annotator stays a single shared instance
-        // across instruments - it is already partitioned internally by
-        // ChartKey(instrument, interval).
-        var sharedAnnotator = new ChartAnnotationEngine(options.AnnotationOptions);
+        // (see InstrumentPipelineState). Analysis engines themselves are resolved through
+        // the profile registry, de-duplicated by AnalysisProfileKey - today every session
+        // resolves to the same options.AnnotationOptions and therefore shares exactly one
+        // engine, matching the previous single-sharedAnnotator behaviour byte-for-byte, but
+        // a future per-assignment AnalysisOptionsOverride (Phase 5) will transparently split
+        // into multiple engines without further changes here.
+        var profileRegistry = new AnalysisProfileRegistry(MetaLabelFeatureFactory.SchemaVersion);
+        IReadOnlySet<BarInterval> requiredIntervalsSet = new HashSet<BarInterval>(effectiveAnalysis);
 
         var sessions = new List<StrategySimulationSession>(_strategies.Count);
+        var sessionProfiles = new List<AnalysisProfileKey>(_strategies.Count);
         SharedPortfolioRuntime? sharedPortfolio = isSharedPortfolio
             ? new SharedPortfolioRuntime(
                 options.SimulationOptions,
@@ -94,15 +117,25 @@ public sealed class StreamingComparativeEngine
         CrossMarketAnalysisCoordinator? crossMarket = options.Runtime.CurrencyStrength.Enabled
             ? new CrossMarketAnalysisCoordinator(options.Runtime.CurrencyStrength)
             : null;
-        foreach ((string id, ITradingAgent agent, InstrumentKey _) in _strategies)
+        foreach (StrategyFactoryEntry entry in _strategies)
         {
+            string id = entry.Id;
+            ITradingAgent agent = entry.Agent;
+            // Per-assignment AnalysisOptionsOverride (Phase 5) falls back to the run's shared
+            // options exactly as every session resolved before this phase - only assignments
+            // that explicitly diverge resolve to their own AnalysisProfileKey/engine.
+            ChartAnnotationOptions? resolvedAnnotationOptions = entry.AnalysisOptionsOverride ?? options.AnnotationOptions;
+            AnalysisProfileKey sessionProfile = profileRegistry.GetOrCreateProfile(
+                resolvedAnnotationOptions, requiredIntervalsSet);
+            sessionProfiles.Add(sessionProfile);
             StrategySimulationSession session = StrategySimulationSession.Create(
                 id,
                 agent,
                 options.SimulationOptions,
                 safetyOptions: options.Runtime.SafetyOptions,
                 analysisSharing: options.Runtime.AnalysisSharingMode,
-                annotationOptions: options.AnnotationOptions,
+                annotationOptions: resolvedAnnotationOptions,
+                analysisProfile: sessionProfile,
                 positionManagementOptions: options.Runtime.GetPositionManagement(id),
                 managementInterval: options.Runtime.ResolveManagementInterval(id),
                 positionSizingOptions: options.Runtime.PositionSizing,
@@ -119,7 +152,7 @@ public sealed class StreamingComparativeEngine
                 detailedExcursionTracking: options.Runtime.DetailedExcursionTracking,
                 featurePolicy: new TradingCore.Pipeline.RuntimeFeaturePolicy
                 {
-                    AnnotationOptions = options.AnnotationOptions ?? new(),
+                    AnnotationOptions = resolvedAnnotationOptions ?? new(),
                     MarketRegimeRouting = options.Runtime.MarketRegimeRouting,
                     ValueLocationEvidence = options.Runtime.ValueLocationEvidence,
                     CurrencyStrengthEvidence = options.Runtime.CurrencyStrengthEvidence,
@@ -137,11 +170,22 @@ public sealed class StreamingComparativeEngine
         var workerHosts = new List<StrategyWorkerHost>();
         if (options.Runtime.StrategyExecutionMode == StrategyExecutionMode.ParallelWorkers)
         {
-            foreach (StrategySimulationSession session in sessions)
+            for (int strategyIndex = 0; strategyIndex < sessions.Count; strategyIndex++)
             {
+                // PolicyBundleId/Revision default to Guid.Empty/0 placeholders when an assignment
+                // doesn't declare real policy-bundle identity (StrategyInstrumentAssignment's
+                // PolicyBundleId/PolicyRevision, Phase 5) - not a claim of genuine identity in
+                // that case.
+                var key = new AgentInstanceKey(
+                    AgentInstanceKey.SimulatorDeploymentId,
+                    _strategies[strategyIndex].Instrument,
+                    sessions[strategyIndex].StrategyId,
+                    _strategies[strategyIndex].PolicyBundleId ?? Guid.Empty,
+                    _strategies[strategyIndex].PolicyRevision ?? 0);
                 workerHosts.Add(new StrategyWorkerHost(
-                    session,
-                    options.Runtime.StrategyChannelCapacity));
+                    sessions[strategyIndex],
+                    options.Runtime.StrategyChannelCapacity,
+                    key));
             }
         }
 
@@ -152,6 +196,8 @@ public sealed class StreamingComparativeEngine
         // on every batch.
         var sessionsByInstrument = new Dictionary<InstrumentKey, List<StrategySimulationSession>>();
         var hostsByInstrument = new Dictionary<InstrumentKey, List<StrategyWorkerHost>>();
+        var profilesByInstrument = new Dictionary<InstrumentKey, List<AnalysisProfileKey>>();
+        var profileBySession = new Dictionary<StrategySimulationSession, AnalysisProfileKey>();
         for (int strategyIndex = 0; strategyIndex < _strategies.Count; strategyIndex++)
         {
             InstrumentKey instrument = _strategies[strategyIndex].Instrument;
@@ -164,6 +210,12 @@ public sealed class StreamingComparativeEngine
                     hostsByInstrument[instrument] = hostList = [];
                 hostList.Add(workerHosts[strategyIndex]);
             }
+
+            profileBySession[sessions[strategyIndex]] = sessionProfiles[strategyIndex];
+            if (!profilesByInstrument.TryGetValue(instrument, out List<AnalysisProfileKey>? profileList))
+                profilesByInstrument[instrument] = profileList = [];
+            if (!profileList.Contains(sessionProfiles[strategyIndex]))
+                profileList.Add(sessionProfiles[strategyIndex]);
         }
 
         await using var replayWriter = new ChunkedReplayWriter(
@@ -280,6 +332,8 @@ public sealed class StreamingComparativeEngine
                     options.Runtime.BaseCandleGapPolicy,
                     options.Runtime.CandleCapacity,
                     cancellationToken);
+                foreach (AnalysisProfileKey profile in profilesByInstrument.GetValueOrDefault(instrument, []))
+                    pipelines[instrument].LatestSnapshotsFor(profile);
             }
 
             // Chronological k-way merge across every traded instrument's own candle
@@ -519,8 +573,11 @@ public sealed class StreamingComparativeEngine
                     // ChartAnnotationEngine creates chart state lazily on first candle, so
                     // an instrument whose first candle arrives after another instrument's
                     // crossing would otherwise never get frozen at all.
-                    if (sharedAnnotator is ICalibratableChartAnnotator sharedCalibration)
-                        sharedCalibration.FreezeCalibration(options.EvaluationFrom);
+                    foreach (AnalysisProfileKey profile in profilesByInstrument.GetValueOrDefault(pipeline.Instrument, []))
+                    {
+                        if (profileRegistry.EngineFor(profile) is ICalibratableChartAnnotator sharedCalibration)
+                            sharedCalibration.FreezeCalibration(options.EvaluationFrom);
+                    }
                     foreach (StrategySimulationSession session in sessionsByInstrument.GetValueOrDefault(pipeline.Instrument, []))
                     {
                         if (session.IndependentAnnotator is ICalibratableChartAnnotator independentCalibration)
@@ -557,9 +614,13 @@ public sealed class StreamingComparativeEngine
                     foreach (CandleClosedEvent closedEvent in closedEvents)
                     {
                         closed.Add(closedEvent.Interval);
-                        AnalysisSnapshot snapshot = await sharedAnnotator
-                            .ProcessAsync(closedEvent, runtimeContext, cancellationToken)
-                            .ConfigureAwait(false);
+                        foreach (AnalysisProfileKey profile in profilesByInstrument.GetValueOrDefault(pipeline.Instrument, []))
+                        {
+                            AnalysisSnapshot snapshot = await profileRegistry.EngineFor(profile)
+                                .ProcessAsync(closedEvent, runtimeContext, cancellationToken)
+                                .ConfigureAwait(false);
+                            pipeline.LatestSnapshotsFor(profile)[closedEvent.Interval] = snapshot;
+                        }
                         if (options.Runtime.AnalysisSharingMode == AnalysisSharingMode.IndependentPerStrategy)
                         {
                             foreach (StrategySimulationSession session in sessionsByInstrument.GetValueOrDefault(pipeline.Instrument, []))
@@ -572,8 +633,6 @@ public sealed class StreamingComparativeEngine
                                 }
                             }
                         }
-
-                        pipeline.LatestSnapshots[closedEvent.Interval] = snapshot;
 
                         if (sharedPortfolio is not null && closedEvent.Interval == options.Runtime.CorrelationRisk.Interval)
                         {
@@ -593,14 +652,32 @@ public sealed class StreamingComparativeEngine
                 IReadOnlySet<BarInterval> closedIntervals = closed.Count == 0
                     ? emptyClosed
                     : closed;
+                IReadOnlyList<AnalysisProfileKey> instrumentProfiles =
+                    profilesByInstrument.GetValueOrDefault(pipeline.Instrument, []);
                 if (closed.Count > 0)
                 {
-                    pipeline.SnapshotSet = new AnalysisSnapshotSet
+                    foreach (AnalysisProfileKey profile in instrumentProfiles)
                     {
-                        Version = pipeline.SnapshotSet.Version + 1,
-                        Snapshots = new Dictionary<BarInterval, AnalysisSnapshot>(pipeline.LatestSnapshots)
-                    };
+                        AnalysisSnapshotSet previous = pipeline.SnapshotSetsByProfile[profile];
+                        pipeline.SnapshotSetsByProfile[profile] = new AnalysisSnapshotSet
+                        {
+                            Version = previous.Version + 1,
+                            Snapshots = new Dictionary<BarInterval, AnalysisSnapshot>(pipeline.LatestSnapshotsFor(profile))
+                        };
+                    }
                 }
+
+                // Every profile trading this instrument gets its own resolved snapshot view;
+                // Snapshots (singular) stays populated with the first/primary profile's view
+                // for replay/execution-detail consumers that are not yet profile-aware
+                // (ChunkedReplayWriter) - today there is exactly one profile per instrument in
+                // practice, so this is identical to the previous single-annotator behaviour.
+                var snapshotsByProfile = new Dictionary<AnalysisProfileKey, IReadOnlyDictionary<BarInterval, AnalysisSnapshot>>();
+                foreach (AnalysisProfileKey profile in instrumentProfiles)
+                    snapshotsByProfile[profile] = pipeline.SnapshotSetsByProfile[profile].Snapshots;
+                IReadOnlyDictionary<BarInterval, AnalysisSnapshot> primarySnapshots = instrumentProfiles.Count > 0
+                    ? snapshotsByProfile[instrumentProfiles[0]]
+                    : new Dictionary<BarInterval, AnalysisSnapshot>();
 
                 // Frame is always on the execution clock for fills; strategy evaluates only
                 // when its trigger interval is in ClosedIntervals (after analysis-base close).
@@ -611,7 +688,8 @@ public sealed class StreamingComparativeEngine
                     ExecutionCandle = marketCandle,
                     AnalysisBaseCandle = analysisBaseClosed.LastOrDefault(),
                     ClosedIntervals = closedIntervals,
-                    Snapshots = pipeline.SnapshotSet.Snapshots,
+                    Snapshots = primarySnapshots,
+                    SnapshotsByProfile = snapshotsByProfile,
                     InputStreamId = options.InputStreamId,
                     IsWarmup = isWarmup,
                     IsLastCandle = isLast

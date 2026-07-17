@@ -107,9 +107,11 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         TradeManagementCalibration? managementCalibrationArtifact = null,
         PortfolioManager.CrossMarket.CrossMarketAnalysisCoordinator? crossMarket = null,
         bool detailedExcursionTracking = false,
-        string? featurePolicyHash = null)
+        string? featurePolicyHash = null,
+        AnalysisProfileKey? analysisProfile = null)
     {
         FeaturePolicyHash = featurePolicyHash;
+        AnalysisProfile = analysisProfile;
         _crossMarket = crossMarket;
         _detailedExcursionTracking = detailedExcursionTracking;
         StrategyId = strategyId ?? throw new ArgumentNullException(nameof(strategyId));
@@ -167,6 +169,10 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     /// direct construction), so its presence proves the pipeline factory was actually exercised
     /// rather than left dead.</summary>
     public string? FeaturePolicyHash { get; }
+    /// <summary>The analysis profile this session's frames were resolved against - set only
+    /// when <see cref="Create"/> constructs the session. Null means "use <c>frame.Snapshots</c>
+    /// directly," the safe fallback for direct-construction callers/tests.</summary>
+    public AnalysisProfileKey? AnalysisProfile { get; }
     public HistoricalSimulationClock Clock { get; }
     public IReadOnlyList<SimulatedTradeRecord> Trades => _trades;
     public SimulatedTradeRecord? ActiveTrade => _activeTrade;
@@ -218,7 +224,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         PortfolioManager.CrossMarket.CrossMarketAnalysisCoordinator? crossMarket = null,
         bool detailedExcursionTracking = false,
         RuntimeFeaturePolicy? featurePolicy = null,
-        string? strategyVersion = null)
+        string? strategyVersion = null,
+        AnalysisProfileKey? analysisProfile = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         SimulationOptions options = simulationOptions;
@@ -333,7 +340,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             managementCalibrationArtifact: managementCalibrationArtifact,
             crossMarket: crossMarket,
             detailedExcursionTracking: detailedExcursionTracking,
-            featurePolicyHash: decisionRuntime.FeaturePolicyHash);
+            featurePolicyHash: decisionRuntime.FeaturePolicyHash,
+            analysisProfile: analysisProfile);
     }
 
     public async Task<StrategyFrameResult> ProcessFrameAsync(
@@ -776,8 +784,26 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         _lastManagementReason = reason;
     }
 
+    /// <summary>Resolves the snapshot dictionary this session should read from
+    /// <paramref name="frame"/>: its own <see cref="AnalysisProfile"/> entry in
+    /// <c>frame.SnapshotsByProfile</c> when both are present, else <c>frame.Snapshots</c> - the
+    /// safe fallback for direct-construction callers/tests and for the
+    /// <see cref="AnalysisSharingMode.IndependentPerStrategy"/> path, which never populates a
+    /// profile (it reads <see cref="IndependentAnnotator"/> directly instead).</summary>
+    private IReadOnlyDictionary<BarInterval, AnalysisSnapshot> ResolveSnapshots(MarketFrame frame)
+    {
+        if (AnalysisProfile is AnalysisProfileKey profile &&
+            frame.SnapshotsByProfile is not null &&
+            frame.SnapshotsByProfile.TryGetValue(profile, out IReadOnlyDictionary<BarInterval, AnalysisSnapshot>? profileSnapshots))
+        {
+            return profileSnapshots;
+        }
+        return frame.Snapshots;
+    }
+
     private Dictionary<BarInterval, AnalysisSnapshot> FilterSnapshots(MarketFrame frame)
     {
+        IReadOnlyDictionary<BarInterval, AnalysisSnapshot> snapshots = ResolveSnapshots(frame);
         var filtered = new Dictionary<BarInterval, AnalysisSnapshot>();
         foreach (BarInterval interval in Strategy.RequiredIntervals)
         {
@@ -789,7 +815,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             }
 
             if (snapshot is null)
-                frame.Snapshots.TryGetValue(interval, out snapshot);
+                snapshots.TryGetValue(interval, out snapshot);
 
             if (snapshot is not null)
                 filtered[interval] = snapshot;
@@ -800,13 +826,14 @@ public sealed class StrategySimulationSession : IAsyncDisposable
 
     private bool HasRequiredSnapshots(MarketFrame frame)
     {
+        IReadOnlyDictionary<BarInterval, AnalysisSnapshot> snapshots = ResolveSnapshots(frame);
         foreach (BarInterval interval in Strategy.RequiredIntervals)
         {
             AnalysisSnapshot? snapshot = null;
             if (IndependentAnnotator is not null)
                 snapshot = IndependentAnnotator.GetLatest(frame.ExecutionCandle.Instrument, interval);
             if (snapshot is null)
-                frame.Snapshots.TryGetValue(interval, out snapshot);
+                snapshots.TryGetValue(interval, out snapshot);
             if (snapshot is null || snapshot.AvailableAt > frame.AvailableAt)
                 return false;
         }
@@ -1016,6 +1043,12 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 EquityProtectionRiskMultiplier = decision.EquityProtectionRiskMultiplier,
                 SetupCalibrationRiskMultiplier = decision.SetupCalibrationRiskMultiplier,
                 MetaLabelRiskMultiplier = decision.MetaLabelRiskMultiplier,
+                NeoWaveRiskMultiplier = decision.NeoWaveRiskMultiplier,
+                EntryNeoWaveHypothesisId = decision.NeoWaveHypothesisId,
+                EntryNeoWaveInvalidationPrice = decision.NeoWaveInvalidationPrice,
+                EntryNeoWavePatternType = decision.NeoWavePatternType?.ToString(),
+                EntryNeoWaveStructuralScore = decision.NeoWaveStructuralScore,
+                EntryNeoWaveConflictScore = decision.NeoWaveConflictScore,
                 FinalRiskBudgetMultiplier = finalRiskMultiplier,
                 EntryMultiTimeframeAlignment = _pendingEntryMultiTimeframeAlignment
             };
@@ -1790,7 +1823,9 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                     ? int.MaxValue
                     : _analysisBarsSinceLastAmendment,
                 EntryRegime = _activeTrade.EntryRegime,
-                EntryManagementProfileId = _activeTrade.EntryManagementProfileId
+                EntryManagementProfileId = _activeTrade.EntryManagementProfileId,
+                EntryNeoWaveHypothesisId = _activeTrade.EntryNeoWaveHypothesisId,
+                EntryNeoWaveInvalidationPrice = _activeTrade.EntryNeoWaveInvalidationPrice
             },
             analysis,
             scope,
@@ -1873,7 +1908,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         if (!frame.ClosedIntervals.Contains(interval) ||
-            !frame.Snapshots.TryGetValue(interval, out AnalysisSnapshot? snapshot) ||
+            !ResolveSnapshots(frame).TryGetValue(interval, out AnalysisSnapshot? snapshot) ||
             snapshot.AvailableAt > frame.AvailableAt)
         {
             return false;
@@ -1890,17 +1925,18 @@ public sealed class StrategySimulationSession : IAsyncDisposable
 
     private AnalysisSnapshot? ResolveMechanicalSnapshot(MarketFrame frame)
     {
-        if (frame.Snapshots.TryGetValue(Strategy.TriggerInterval, out AnalysisSnapshot? trigger) &&
+        IReadOnlyDictionary<BarInterval, AnalysisSnapshot> snapshots = ResolveSnapshots(frame);
+        if (snapshots.TryGetValue(Strategy.TriggerInterval, out AnalysisSnapshot? trigger) &&
             trigger.AvailableAt <= frame.AvailableAt)
         {
             return trigger;
         }
-        if (frame.Snapshots.TryGetValue(_fastStructureInterval, out AnalysisSnapshot? fast) &&
+        if (snapshots.TryGetValue(_fastStructureInterval, out AnalysisSnapshot? fast) &&
             fast.AvailableAt <= frame.AvailableAt)
         {
             return fast;
         }
-        return frame.Snapshots.Values
+        return snapshots.Values
             .Where(snapshot => snapshot.AvailableAt <= frame.AvailableAt)
             .OrderByDescending(snapshot => snapshot.AvailableAt)
             .ThenBy(snapshot => BarIntervalParser.ApproximateSeconds(snapshot.Interval))
@@ -1941,6 +1977,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         {
             TradeManagementExitReason.AdverseStructure =>
                 SimulatedTradeExitReason.TradeManagerStructureExit,
+            TradeManagementExitReason.NeoWaveInvalidation =>
+                SimulatedTradeExitReason.NeoWaveInvalidationExit,
             TradeManagementExitReason.ProfitFloorBreached =>
                 SimulatedTradeExitReason.ProfitFloorExit,
             TradeManagementExitReason.MaximumGivebackBreached =>
@@ -2253,7 +2291,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         (decision.StrategyAllocationRiskMultiplier ?? 1m) *
         (decision.EquityProtectionRiskMultiplier ?? 1m) *
         (decision.SetupCalibrationRiskMultiplier ?? 1m) *
-        (decision.MetaLabelRiskMultiplier ?? 1m),
+        (decision.MetaLabelRiskMultiplier ?? 1m) *
+        (decision.NeoWaveRiskMultiplier ?? 1m),
         0m,
         1m);
 
@@ -2266,7 +2305,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             ["strategyAllocation"] = trade.StrategyAllocationRiskMultiplier ?? 1m,
             ["equityProtection"] = trade.EquityProtectionRiskMultiplier ?? 1m,
             ["setupCalibration"] = trade.SetupCalibrationRiskMultiplier ?? 1m,
-            ["metaLabel"] = trade.MetaLabelRiskMultiplier ?? 1m
+            ["metaLabel"] = trade.MetaLabelRiskMultiplier ?? 1m,
+            ["neoWave"] = trade.NeoWaveRiskMultiplier ?? 1m
         };
 
     private static int IncrementSaturating(int value) =>

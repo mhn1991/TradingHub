@@ -16,6 +16,7 @@ using PortfolioManager.Risk;
 using PortfolioManager.CrossMarket;
 using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Value;
+using ChartAnnotator.NeoWave;
 using Simulator.Execution;
 using Simulator.Financing;
 
@@ -130,6 +131,13 @@ internal sealed record BacktestCommandOptions
     /// </summary>
     public CurrencyStrengthEvidenceOptions CurrencyStrengthEvidence { get; init; } = new();
     /// <summary>
+    /// Causal monowave/hypothesis analysis. CLI activation is explicit through --neo-wave;
+    /// RecordOnly is the safe default mode and does not change decisions or risk.
+    /// </summary>
+    public bool NeoWaveEnabled { get; init; }
+    public NeoWaveEvidenceOptions NeoWaveEvidence { get; init; } = new();
+    public BarInterval? NeoWaveEvidenceInterval { get; init; }
+    /// <summary>
     /// Setup-calibration policy configuration (audit §16). Programmatic/JSON callers may set
     /// this directly; no individual --flag parsing yet - use --setup-calibration-artifact-id
     /// to enable via a server-owned artifact from the calibration repository instead.
@@ -229,9 +237,10 @@ internal sealed record BacktestCommandOptions
                 "legacy-no-momentum-reduction" or "improved-no-momentum-reduction" or
                 "legacy-no-volatility-reduction" or "improved-no-volatility-reduction" or
                 "legacy-enable-cost-stress-reduction" or "improved-enable-cost-stress-reduction" or
+                "legacy-neo-wave-invalidation-exit" or "improved-neo-wave-invalidation-exit" or
                 "regime" or "no-regime" or "trading-conditions" or "no-trading-conditions" or
                 "adaptive-risk" or "no-adaptive-risk" or "financing" or
-                "auto-train-calibration")
+                "neo-wave" or "auto-train-calibration")
             {
                 values[key] = "true";
                 continue;
@@ -416,6 +425,16 @@ internal sealed record BacktestCommandOptions
             // Enabled by default (2026-07-16 agent decision-quality pass); --no-adaptive-risk opts out.
             // --adaptive-risk is still accepted as a harmless legacy no-op.
             ,AdaptiveRiskEnabled = !values.ContainsKey("no-adaptive-risk")
+            ,NeoWaveEnabled = values.ContainsKey("neo-wave")
+            ,NeoWaveEvidence = new NeoWaveEvidenceOptions
+            {
+                Mode = values.ContainsKey("neo-wave")
+                    ? Enum.Parse<NeoWaveEvidenceMode>(values.GetValueOrDefault("neo-wave-mode") ?? "RecordOnly", true)
+                    : NeoWaveEvidenceMode.Disabled
+            }
+            ,NeoWaveEvidenceInterval = values.GetValueOrDefault("neo-wave-interval") is string neoWaveInterval
+                ? ParseInterval(neoWaveInterval)
+                : null
             ,MaximumPortfolioHeatPercent = ParseDecimal(values.GetValueOrDefault("maximum-portfolio-heat-percent"), 1.5m, 0m, "maximum-portfolio-heat-percent")
             ,ExecutionFillModel = Enum.Parse<SimulationFillModel>(values.GetValueOrDefault("fill-model") ?? "MidpointPlusConfiguredSpread", true)
             ,StressScenario = Enum.Parse<StressExecutionScenario>(values.GetValueOrDefault("stress-scenario") ?? "Base", true)
@@ -501,11 +520,14 @@ internal sealed record BacktestCommandOptions
             AnnotationOptions = AnnotationOptions with
             {
                 EfficiencyRatioPeriod = EfficiencyRatioPeriod,
-                MarketRegime = AnnotationOptions.MarketRegime with { Enabled = RegimeEnabled }
+                MarketRegime = AnnotationOptions.MarketRegime with { Enabled = RegimeEnabled },
+                NeoWave = AnnotationOptions.NeoWave with { Enabled = NeoWaveEnabled }
             },
             MarketRegimeRouting = MarketRegimeRouting with { Enabled = RegimeEnabled },
             ValueLocationEvidence = ValueLocationEvidence,
             CurrencyStrengthEvidence = CurrencyStrengthEvidence,
+            NeoWaveEvidence = NeoWaveEvidence,
+            NeoWaveEvidenceInterval = NeoWaveEvidenceInterval,
             CurrencyStrength = CurrencyStrength,
             RegimeManagement = new RegimeManagementOptions { Enabled = RegimeEnabled },
             TradingConditions = new TradingConditionOptions { Enabled = TradingConditionsEnabled },
@@ -810,6 +832,14 @@ internal sealed record BacktestCommandOptions
             BreakEvenActivationR = breakEven,
             StructureTrailActivationR = structure,
             AtrBufferMultiplier = atrBuffer,
+            EnableNeoWaveInvalidationExit =
+                values.ContainsKey($"{prefix}-neo-wave-invalidation-exit"),
+            NeoWaveInvalidationBufferAtr = ParseDecimal(
+                values.GetValueOrDefault($"{prefix}-neo-wave-invalidation-buffer-atr"),
+                defaults.NeoWaveInvalidationBufferAtr,
+                -1m,
+                $"{prefix}-neo-wave-invalidation-buffer-atr",
+                allowZero: true),
             PreserveBracketTarget = preserveTarget,
             EnableScaleOut = !values.ContainsKey($"{prefix}-no-scale-out"),
             EnableProfitFloor = !values.ContainsKey($"{prefix}-no-profit-floor"),

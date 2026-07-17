@@ -72,6 +72,7 @@ public enum SimulatedTradeExitReason
     StrategyClose,
     StructuralInvalidation,
     TradeManagerStructureExit,
+    NeoWaveInvalidationExit,
     ProfitFloorExit,
     MaximumGivebackExit,
     SafetyClose,
@@ -233,6 +234,12 @@ public sealed record SimulatedTradeRecord
     public decimal? EquityProtectionRiskMultiplier { get; init; }
     public decimal? SetupCalibrationRiskMultiplier { get; init; }
     public decimal? MetaLabelRiskMultiplier { get; init; }
+    public decimal? NeoWaveRiskMultiplier { get; init; }
+    public string? EntryNeoWaveHypothesisId { get; init; }
+    public decimal? EntryNeoWaveInvalidationPrice { get; init; }
+    public string? EntryNeoWavePatternType { get; init; }
+    public decimal? EntryNeoWaveStructuralScore { get; init; }
+    public decimal? EntryNeoWaveConflictScore { get; init; }
     public decimal? FinalRiskBudgetMultiplier { get; init; }
     /// <summary>
     /// Fraction of causal analysis snapshots whose regime direction agreed with the entry side

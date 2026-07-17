@@ -28,6 +28,19 @@ public static class LiveAgentFactory
         ArgumentNullException.ThrowIfNull(agentOptions);
         ArgumentNullException.ThrowIfNull(policyBundle);
         ArgumentNullException.ThrowIfNull(pipelineFactory);
+        agentOptions.Validate();
+        if (agentOptions.NeoWaveEvidence != policyBundle.FeaturePolicy.NeoWaveEvidence)
+        {
+            throw new ArgumentException(
+                "Agent NEoWave evidence must match the promoted feature policy.",
+                nameof(agentOptions));
+        }
+        if (agentOptions.NeoWaveEvidence.Enabled && !policyBundle.FeaturePolicy.AnnotationOptions.NeoWave.Enabled)
+        {
+            throw new ArgumentException(
+                "NEoWave evidence requires the promoted analysis policy to enable NEoWave.",
+                nameof(agentOptions));
+        }
 
         var definition = new StrategyRuntimeDefinition
         {

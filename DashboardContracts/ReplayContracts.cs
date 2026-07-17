@@ -1,6 +1,7 @@
 using Brokers.Models;
 using ChartAnnotator.Engine;
 using ChartAnnotator.Models;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
 
 namespace Dashboard.Contracts;
@@ -143,7 +144,8 @@ public sealed record ReplayFrame(
     MarketRegimeSnapshot MarketRegime,
     ConfidenceScore Confidence,
     double AnalysisMicroseconds,
-    IReadOnlyList<AnchoredValueReference>? ValueReferences = null);
+    IReadOnlyList<AnchoredValueReference>? ValueReferences = null,
+    NeoWaveSnapshot? NeoWave = null);
 
 public sealed record ReplayCandle(
     DateTimeOffset OpenTime,
@@ -189,7 +191,8 @@ public static class ReplayContractMapper
             MarketRegime: snapshot.MarketRegime,
             Confidence: snapshot.Confidence,
             AnalysisMicroseconds: analysisMicroseconds,
-            ValueReferences: snapshot.ValueReferences);
+            ValueReferences: snapshot.ValueReferences,
+            NeoWave: snapshot.NeoWave);
     }
 }
 

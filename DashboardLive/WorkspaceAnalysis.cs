@@ -1,5 +1,7 @@
 using Brokers.Models;
 using ChartAnnotator.Engine;
+using ChartAnnotator.NeoWave;
+using ChartAnnotator.Regime;
 using Dashboard.Contracts;
 
 namespace Dashboard.Live;
@@ -16,7 +18,10 @@ internal static class WorkspaceAnalysis
         BollingerStandardDeviations = 2m,
         SwingLeftBars = 2,
         SwingRightBars = 2,
-        HeavyAnalysisEveryCandles = 6
+        HeavyAnalysisEveryCandles = 6,
+        // Chart layers (NEoWave, regime) need explicit enable — options default off for backtest identity.
+        MarketRegime = new MarketRegimeOptions { Enabled = true },
+        NeoWave = new NeoWaveOptions { Enabled = true }
     };
 
     public static BarInterval ParseInterval(string value) => value switch

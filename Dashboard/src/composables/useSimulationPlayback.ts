@@ -22,6 +22,7 @@ export interface PlaybackRow {
     marketStructure?: ReplayFrame['marketStructure']
     priceAction?: ReplayFrame['priceAction']
     marketRegime?: ReplayFrame['marketRegime']
+    neoWave?: ReplayFrame['neoWave']
     confidence: ReplayFrame['confidence']
   } | null
 }

@@ -27,7 +27,13 @@ public sealed class ResearchTradeMapperTests
             MaximumAdverseExcursionR = -0.4m,
             NetProfitLoss = 15m,
             PlannedStopRiskAccountCurrency = 10m,
-            RealizedPartialNetProfitLoss = 4m
+            RealizedPartialNetProfitLoss = 4m,
+            EntryNeoWaveHypothesisId = "wave-1",
+            EntryNeoWavePatternType = "ImpulseCandidate",
+            EntryNeoWaveStructuralScore = 85m,
+            EntryNeoWaveConflictScore = 15m,
+            EntryNeoWaveInvalidationPrice = 1.2940m,
+            NeoWaveRiskMultiplier = 0.8m
         };
 
         ResearchTrade? result = ResearchTradeMapper.ToResearchTrade(trade);
@@ -53,6 +59,12 @@ public sealed class ResearchTradeMapperTests
             Assert.That(result.StopDistance, Is.EqualTo(0.0050m));
             Assert.That(result.PartialExitContributionR, Is.EqualTo(0.4m));
             Assert.That(result.RunnerContributionR, Is.EqualTo(1.1m));
+            Assert.That(result.NeoWaveHypothesisId, Is.EqualTo("wave-1"));
+            Assert.That(result.NeoWavePatternType, Is.EqualTo("ImpulseCandidate"));
+            Assert.That(result.NeoWaveStructuralScore, Is.EqualTo(85m));
+            Assert.That(result.NeoWaveConflictScore, Is.EqualTo(15m));
+            Assert.That(result.NeoWaveInvalidationPrice, Is.EqualTo(1.2940m));
+            Assert.That(result.NeoWaveRiskMultiplier, Is.EqualTo(0.8m));
         });
     }
 

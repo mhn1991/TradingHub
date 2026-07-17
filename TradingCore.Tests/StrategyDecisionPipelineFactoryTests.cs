@@ -126,14 +126,10 @@ public sealed class StrategyDecisionPipelineFactoryTests
     }
 
     [Test]
-    public void FeaturePolicyHash_IsByteIdenticalToThePreRefactorInlineCanonicalization()
+    public void FeaturePolicyHash_MatchesExplicitCanonicalizationIncludingNeoWaveEvidence()
     {
-        // Phase 2 (multi-agent architecture): ComputeHash()'s AnnotationOptions canonicalization
-        // was extracted into ChartAnnotationOptionsHasher (shared with the new AnalysisProfileKey)
-        // so RuntimeFeaturePolicy no longer duplicates that logic. This test reconstructs the
-        // exact pre-extraction inline string-building here and asserts it still equals the
-        // current ComputeHash() output for the same policy, proving the refactor is byte-identical
-        // and did not silently change any already-computed FeatureSchemaHash/ConfigurationHash.
+        // Reconstruct the complete canonical identity independently so new decision features,
+        // including NEoWave evidence, cannot be omitted from policy provenance by accident.
         RuntimeFeaturePolicy policy = DefaultPolicy() with
         {
             MarketRegimeRouting = new MarketRegimePolicyOptions { Enabled = true }
@@ -156,6 +152,7 @@ public sealed class StrategyDecisionPipelineFactoryTests
             $"{policy.CurrencyStrength.VolatilityLookbackBars},{policy.CurrencyStrength.MinimumCurrencyCoveragePercent}," +
             $"[{string.Join(';', policy.CurrencyStrength.Baskets.OrderBy(entry => entry.Key, StringComparer.Ordinal).Select(entry => $"{entry.Key}:{string.Join(',', entry.Value.Select(i => i.Value))}"))}]|" +
             $"setup-calibration:{policy.SetupCalibration}|" +
+            $"neowave-evidence:{policy.NeoWaveEvidence}|" +
             $"schema:{RiskManager.Calibration.MetaLabelFeatureFactory.SchemaVersion}";
         byte[] expectedHashBytes = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(expectedCanonical));

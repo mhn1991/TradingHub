@@ -3,6 +3,7 @@ using Brokers.Models;
 using ChartAnnotator.Collections;
 using ChartAnnotator.Indicators;
 using ChartAnnotator.Models;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.PriceAction;
 using ChartAnnotator.Regime;
 using ChartAnnotator.Structure;
@@ -106,6 +107,9 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         bool atrBecameReady = !atrWasReady && state.Atr.IsReady;
         state.Rsi.Update(candleEvent.Candle.Prices.Close);
         state.Bollinger.Update(candleEvent.Candle.Prices.Close);
+        state.Cci.Update(candleEvent.Candle);
+        state.Sma50.Update(candleEvent.Candle.Prices.Close);
+        state.Sma200.Update(candleEvent.Candle.Prices.Close);
         state.Adx.Update(candleEvent.Candle);
         AtrAnalysisSnapshot atrAnalysis = state.Atr.IsReady
             ? state.AtrAnalysis.Update(state.Atr.Current, candleEvent.Candle.Prices.Close)
@@ -200,6 +204,9 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             BollingerMiddle = state.Bollinger.IsReady ? state.Bollinger.Middle : null,
             BollingerUpper = state.Bollinger.IsReady ? state.Bollinger.Upper : null,
             BollingerLower = state.Bollinger.IsReady ? state.Bollinger.Lower : null,
+            Cci = state.Cci.IsReady ? state.Cci.Current : null,
+            Sma50 = state.Sma50.IsReady ? state.Sma50.Current : null,
+            Sma200 = state.Sma200.IsReady ? state.Sma200.Current : null,
             EfficiencyRatio = state.EfficiencyRatio.IsReady ? state.EfficiencyRatio.Current : null,
             EfficiencyAnalysis = efficiencyAnalysis,
             Donchian = state.Donchian.Current,
@@ -231,6 +238,11 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             indicators.Atr is decimal currentAtrForSpread && currentAtrForSpread > 0m
                 ? executableSpread / currentAtrForSpread
                 : null;
+        NeoWaveSnapshot neoWave = state.NeoWave.Update(
+            state.SwingSnapshot,
+            candleEvent.Candle,
+            indicators.Atr,
+            state.IndicatorHistory.Snapshot());
         MarketRegimeSnapshot regime = state.MarketRegime?.Update(
             candleEvent.Candle,
             indicators,
@@ -267,6 +279,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             MarketStructure = structure,
             PriceAction = priceAction,
             MarketRegime = regime,
+            NeoWave = neoWave,
             ValueReferences = valueReferences,
             Confidence = confidence
         };
@@ -283,7 +296,10 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             indicators.AtrAnalysis,
             indicators.RsiAnalysis,
             indicators.BollingerAnalysis,
-            indicators.VolumeAnalysis));
+            indicators.VolumeAnalysis,
+            indicators.Cci,
+            indicators.Sma50,
+            indicators.Sma200));
         return snapshot;
     }
 
@@ -379,6 +395,9 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             Bollinger = new BollingerState(
                 options.BollingerPeriod,
                 options.BollingerStandardDeviations);
+            Cci = new CciState(options.CciPeriod);
+            Sma50 = new SmaState(options.SmaFastPeriod);
+            Sma200 = new SmaState(options.SmaSlowPeriod);
             BollingerAnalysis = new BollingerAnalysisState(
                 options.BollingerWidthHistoryPeriod,
                 options.BollingerWidthChangeLookback,
@@ -411,6 +430,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
                 options.MinimumValueReferenceVolumeCoveragePercent,
                 new TimeOnly(options.SessionValueAnchorHourUtc, 0));
             MarketRegime = options.MarketRegime.Enabled ? new MarketRegimeClassifier(options.MarketRegime) : null;
+            NeoWave = new NeoWaveAnalyzer(options.NeoWave);
         }
 
         public object SyncRoot { get; } = new();
@@ -425,12 +445,16 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         public RsiState Rsi { get; }
         public RsiAnalysisState RsiAnalysis { get; }
         public BollingerState Bollinger { get; }
+        public CciState Cci { get; }
+        public SmaState Sma50 { get; }
+        public SmaState Sma200 { get; }
         public BollingerAnalysisState BollingerAnalysis { get; }
         public EfficiencyRatioState EfficiencyRatio { get; }
         public EfficiencyRatioAnalysisState EfficiencyRatioAnalysis { get; }
         public DonchianState Donchian { get; }
         public AnchoredValueReferenceState AnchoredValueReferences { get; }
         public MarketRegimeClassifier? MarketRegime { get; }
+        public NeoWaveAnalyzer NeoWave { get; }
         public SwingDetector SwingDetector { get; }
         public PriceActionAnalyzer PriceAction { get; }
         public PriceActionSetupComposer SetupComposer { get; }

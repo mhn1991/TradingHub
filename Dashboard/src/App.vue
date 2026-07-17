@@ -102,6 +102,8 @@ const layers = reactive<ChartLayers>({
   priceAction: true,
   bollinger: true,
   bollingerRegimes: true,
+  movingAverages: true,
+  cci: true,
   rsiRelationships: true,
   atr: true,
   volume: true,
@@ -112,6 +114,7 @@ const layers = reactive<ChartLayers>({
   donchian: true,
   efficiencyRatio: true,
   marketRegime: true,
+  neoWave: true,
 })
 let playbackTimer: number | undefined
 let marketPollTimer: number | undefined
@@ -268,6 +271,293 @@ const freshSwings = computed(() =>
     swing.confirmedAt === currentFrame.value?.availableAt,
   ) ?? [],
 )
+const neoWaveInventory = computed(() => {
+  const neo = currentFrame.value?.neoWave
+  if (!neo) {
+    return {
+      enabled: false,
+      ready: false,
+      statusLabel: 'Not available',
+      preferredLabel: '—',
+      bias: 'Neutral',
+      score: null as number | null,
+      conflict: null as number | null,
+      maturity: null as number | null,
+      invalidation: null as string | null,
+      legs: 0,
+      hypothesisCount: 0,
+      qualityReason: null as string | null,
+      rows: [] as Array<{
+        hypothesisId: string
+        status: string
+        statusClass: string
+        label: string
+        score: string
+        meta: string
+        isPreferred: boolean
+      }>,
+    }
+  }
+
+  if (!neo.enabled) {
+    return {
+      enabled: false,
+      ready: false,
+      statusLabel: 'Disabled',
+      preferredLabel: '—',
+      bias: 'Neutral',
+      score: null,
+      conflict: null,
+      maturity: null,
+      invalidation: null,
+      legs: 0,
+      hypothesisCount: 0,
+      qualityReason: null,
+      rows: [],
+    }
+  }
+
+  const preferred = neo.hypotheses.find(item => item.hypothesisId === neo.preferredHypothesisId)
+  const preferredLabel = preferred
+    ? formatNeoWaveHypothesisName(preferred.patternType, preferred.direction)
+    : !neo.quality?.isReady
+      ? (neo.quality?.reasonCode || 'Not ready')
+      : 'None preferred'
+
+  const invalidation = neo.invalidationPrice != null
+    ? `${price(neo.invalidationPrice)}${neo.invalidationDistanceAtr != null ? ` · ${neo.invalidationDistanceAtr.toFixed(2)} ATR` : ''}`
+    : preferred?.invalidation?.price != null
+      ? `${price(preferred.invalidation.price)} (${preferred.invalidation.comparison})`
+      : null
+
+  const rows = [...neo.hypotheses]
+    .sort((a, b) => {
+      const rank = (status: string) =>
+        status === 'Preferred' ? 0 : status === 'Confirmed' ? 1 : status === 'Possible' ? 2 : 3
+      return rank(a.status) - rank(b.status) || b.structuralScore - a.structuralScore
+    })
+    .slice(0, 8)
+    .map(item => ({
+      hypothesisId: item.hypothesisId,
+      status: item.status,
+      statusClass: item.status.toLowerCase(),
+      label: formatNeoWaveHypothesisName(item.patternType, item.direction),
+      score: item.structuralScore.toFixed(0),
+      meta: [
+        `maturity ${item.maturity.toFixed(0)}`,
+        `${item.componentWaveIds.length} legs`,
+        item.supportingRuleIds.length ? `${item.supportingRuleIds.length} rules ok` : null,
+        item.violatedRuleIds.length ? `${item.violatedRuleIds.length} violated` : null,
+      ].filter(Boolean).join(' · '),
+      isPreferred: item.hypothesisId === neo.preferredHypothesisId,
+    }))
+
+  return {
+    enabled: true,
+    ready: neo.quality?.isReady ?? false,
+    statusLabel: preferred
+      ? 'Preferred set'
+      : neo.quality?.isReady
+        ? 'No preferred'
+        : (neo.quality?.reasonCode || 'Warming up'),
+    preferredLabel,
+    bias: neo.structuralBias,
+    score: preferred?.structuralScore ?? (neo.structuralScore || null),
+    conflict: neo.conflictScore,
+    maturity: preferred?.maturity ?? (neo.maturity || null),
+    invalidation,
+    legs: neo.confirmedMonoWaves?.length ?? 0,
+    hypothesisCount: neo.hypotheses.length,
+    qualityReason: neo.quality?.reasonCode ?? null,
+    rows,
+  }
+})
+
+function formatNeoWavePatternType(patternType: string): string {
+  switch (patternType) {
+    case 'ImpulseCandidate': return 'Impulse'
+    case 'ZigZagCorrection': return 'ZigZag'
+    case 'FlatCorrection': return 'Flat'
+    case 'TriangleCorrection': return 'Triangle'
+    case 'ComplexCorrection': return 'Complex'
+    case 'TrendSequence': return 'Trend sequence'
+    default: return patternType
+  }
+}
+
+function formatNeoWaveHypothesisName(patternType: string, direction: string): string {
+  const pattern = formatNeoWavePatternType(patternType)
+  return direction === 'Neutral' ? pattern : `${pattern} ${direction}`
+}
+
+const priceActionInventory = computed(() => {
+  const frame = currentFrame.value
+  const pa = frame?.priceAction
+  if (!pa) {
+    return {
+      available: false,
+      statusLabel: 'Not available',
+      bias: 'Neutral' as const,
+      biasClass: 'possible',
+      headline: '—',
+      headlineReason: null as string | null,
+      headlineExplanation: null as string | null,
+      scoreLine: null as string | null,
+      retestLine: null as string | null,
+      legLine: null as string | null,
+      rows: [] as Array<{
+        id: string
+        kind: string
+        kindClass: string
+        label: string
+        score: string
+        reason: string
+        explanation: string
+        highlight: boolean
+      }>,
+    }
+  }
+
+  const events = [...(pa.events ?? [])]
+    .sort((a, b) => b.confidence - a.confidence || b.confirmedSequence - a.confirmedSequence)
+  const setups = [...(pa.setups ?? [])]
+    .sort((a, b) => {
+      const phaseRank = (phase: string) =>
+        phase === 'Triggered' ? 0 : phase === 'Armed' ? 1 : phase === 'Invalidated' ? 2 : 3
+      return phaseRank(a.phase) - phaseRank(b.phase) || b.confidence - a.confidence
+    })
+  const freshEvents = events.filter(item => item.confirmedAt === frame?.availableAt)
+  const primarySetup = setups.find(item => item.phase === 'Triggered')
+    ?? setups.find(item => item.phase === 'Armed')
+    ?? null
+  const primaryEvent = freshEvents[0] ?? events[0] ?? null
+  const primary = primarySetup
+    ? {
+        label: formatPriceActionLabel(primarySetup.type),
+        reason: primarySetup.reasonCode,
+        explanation: primarySetup.explanation,
+        confidence: primarySetup.confidence,
+        kind: primarySetup.phase,
+      }
+    : primaryEvent
+      ? {
+          label: formatPriceActionLabel(primaryEvent.type),
+          reason: primaryEvent.reasonCode,
+          explanation: primaryEvent.explanation,
+          confidence: primaryEvent.confidence,
+          kind: 'Event',
+        }
+      : null
+
+  const retest = pa.activeRetest
+  const retestLine = retest && retest.state !== 'None'
+    ? [
+        `${retest.direction} retest ${formatPriceActionLabel(retest.state)}`,
+        retest.brokenLevel != null ? `break ${price(retest.brokenLevel)}` : null,
+        retest.barsSinceBreak > 0 ? `${retest.barsSinceBreak} bars` : null,
+        retest.invalidReason || null,
+      ].filter(Boolean).join(' · ')
+    : null
+
+  const leg = pa.latestLeg
+  const legLine = leg
+    ? [
+        `${leg.direction} leg`,
+        leg.distanceAtr != null ? `${leg.distanceAtr.toFixed(2)} ATR` : price(leg.distance),
+        `${leg.barCount} bars`,
+        `eff ${leg.efficiencyRatio.toFixed(2)}`,
+        leg.retracementPercent > 0 ? `retr ${leg.retracementPercent.toFixed(0)}%` : null,
+      ].filter(Boolean).join(' · ')
+    : null
+
+  const rows: Array<{
+    id: string
+    kind: string
+    kindClass: string
+    label: string
+    score: string
+    reason: string
+    explanation: string
+    highlight: boolean
+  }> = []
+
+  for (const setup of setups.slice(0, 4)) {
+    rows.push({
+      id: setup.setupId,
+      kind: setup.phase,
+      kindClass: setup.phase.toLowerCase(),
+      label: formatPriceActionLabel(setup.type),
+      score: setup.confidence.toFixed(0),
+      reason: setup.reasonCode,
+      explanation: setup.explanation,
+      highlight: setup.phase === 'Triggered' || setup.phase === 'Armed',
+    })
+  }
+
+  const eventBudget = Math.max(3, 8 - rows.length)
+  for (const event of events.slice(0, eventBudget)) {
+    rows.push({
+      id: event.eventId,
+      kind: event.direction,
+      kindClass: event.direction.toLowerCase(),
+      label: formatPriceActionLabel(event.type),
+      score: event.confidence.toFixed(0),
+      reason: event.reasonCode,
+      explanation: event.explanation,
+      highlight: event.confirmedAt === frame?.availableAt,
+    })
+  }
+
+  // Surface rejected candidates so the "why not" reasons are visible.
+  const rejected = (pa.diagnostics ?? [])
+    .filter(item => !item.accepted)
+    .slice(0, 3)
+  for (const diagnostic of rejected) {
+    if (rows.length >= 8) break
+    rows.push({
+      id: `diag:${diagnostic.candidate}:${diagnostic.reasonCode}`,
+      kind: 'Rejected',
+      kindClass: 'invalidated',
+      label: formatPriceActionLabel(diagnostic.candidate),
+      score: '—',
+      reason: diagnostic.reasonCode,
+      explanation: diagnostic.explanation,
+      highlight: false,
+    })
+  }
+
+  const biasClass = pa.bias === 'Bullish'
+    ? 'confirmed'
+    : pa.bias === 'Bearish'
+      ? 'invalidated'
+      : 'possible'
+
+  return {
+    available: true,
+    statusLabel: primary
+      ? `${primary.kind}: ${primary.label}`
+      : events.length
+        ? `${events.length} events · no primary setup`
+        : 'No events yet',
+    bias: pa.bias,
+    biasClass,
+    headline: primary?.label ?? (pa.bias !== 'Neutral' ? `${pa.bias} bias` : 'No primary signal'),
+    headlineReason: primary?.reason ?? null,
+    headlineExplanation: primary?.explanation ?? null,
+    scoreLine: `Bull ${pa.bullishScore.toFixed(0)} · Bear ${pa.bearishScore.toFixed(0)}${primary ? ` · conf ${primary.confidence.toFixed(0)}` : ''}`,
+    retestLine,
+    legLine,
+    rows,
+  }
+})
+
+function formatPriceActionLabel(value: string): string {
+  return value
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/Cho Ch/g, 'ChoCh')
+    .replace(/Of /g, 'of ')
+}
+
 const strongestZones = computed(() =>
   [...(currentFrame.value?.priceZones ?? [])]
     .sort((left, right) => right.strength - left.strength)
@@ -1458,6 +1748,107 @@ function isAbortError(error: unknown) {
               <div><span>Trendlines</span><strong>{{ currentFrame.trendlines.length }}</strong></div>
               <div><span>Channels</span><strong>{{ currentFrame.channels.length }}</strong></div>
             </div>
+
+            <div class="neo-wave-inventory">
+              <div class="neo-wave-inventory-header">
+                <div>
+                  <div class="neo-wave-inventory-title">NEoWave hypothesis</div>
+                  <div class="neo-wave-inventory-subtitle">{{ neoWaveInventory.statusLabel }}</div>
+                </div>
+                <span
+                  class="zone-chip"
+                  :class="neoWaveInventory.enabled ? (neoWaveInventory.ready ? 'preferred' : 'possible') : 'invalidated'"
+                >{{ neoWaveInventory.enabled ? (neoWaveInventory.ready ? 'Ready' : 'Warming') : 'Off' }}</span>
+              </div>
+
+              <div class="neo-wave-preferred-card" :class="{ empty: !neoWaveInventory.enabled || neoWaveInventory.preferredLabel === 'None preferred' || neoWaveInventory.preferredLabel === '—' }">
+                <span>Preferred</span>
+                <strong>{{ neoWaveInventory.preferredLabel }}</strong>
+                <small v-if="neoWaveInventory.enabled">
+                  Bias {{ neoWaveInventory.bias }}
+                  <template v-if="neoWaveInventory.score != null"> · score {{ neoWaveInventory.score.toFixed(0) }}</template>
+                  <template v-if="neoWaveInventory.maturity != null"> · maturity {{ neoWaveInventory.maturity.toFixed(0) }}</template>
+                  <template v-if="neoWaveInventory.conflict != null"> · conflict {{ neoWaveInventory.conflict.toFixed(0) }}</template>
+                </small>
+                <small v-if="neoWaveInventory.invalidation">Invalidation {{ neoWaveInventory.invalidation }}</small>
+                <small v-else-if="neoWaveInventory.enabled">
+                  {{ neoWaveInventory.legs }} legs · {{ neoWaveInventory.hypothesisCount }} hypotheses
+                  <template v-if="neoWaveInventory.qualityReason"> · {{ neoWaveInventory.qualityReason }}</template>
+                </small>
+              </div>
+
+              <div v-if="neoWaveInventory.rows.length" class="zone-list neo-wave-hypothesis-list">
+                <div
+                  v-for="row in neoWaveInventory.rows"
+                  :key="row.hypothesisId"
+                  :class="{ preferred: row.isPreferred }"
+                >
+                  <span :class="['zone-chip', row.statusClass]">{{ row.status }}</span>
+                  <strong>{{ row.label }}</strong>
+                  <small>
+                    <b>{{ row.score }}</b>
+                    {{ row.meta }}
+                  </small>
+                </div>
+              </div>
+              <div v-else-if="neoWaveInventory.enabled" class="empty-state compact-empty neo-wave-empty">
+                No scored hypotheses at this frame.
+              </div>
+              <div v-else class="empty-state compact-empty neo-wave-empty">
+                Enable NEoWave analysis to populate hypotheses.
+              </div>
+            </div>
+
+            <div class="neo-wave-inventory price-action-inventory">
+              <div class="neo-wave-inventory-header">
+                <div>
+                  <div class="neo-wave-inventory-title">Price action reason</div>
+                  <div class="neo-wave-inventory-subtitle">{{ priceActionInventory.statusLabel }}</div>
+                </div>
+                <span class="zone-chip" :class="priceActionInventory.biasClass">
+                  {{ priceActionInventory.available ? priceActionInventory.bias : 'Off' }}
+                </span>
+              </div>
+
+              <div
+                class="neo-wave-preferred-card price-action-card"
+                :class="{ empty: !priceActionInventory.available || !priceActionInventory.headlineReason }"
+              >
+                <span>Primary</span>
+                <strong>{{ priceActionInventory.headline }}</strong>
+                <small v-if="priceActionInventory.scoreLine">{{ priceActionInventory.scoreLine }}</small>
+                <small v-if="priceActionInventory.headlineReason" class="reason-code">
+                  {{ priceActionInventory.headlineReason }}
+                </small>
+                <p v-if="priceActionInventory.headlineExplanation" class="reason-explanation">
+                  {{ priceActionInventory.headlineExplanation }}
+                </p>
+                <small v-if="priceActionInventory.retestLine">{{ priceActionInventory.retestLine }}</small>
+                <small v-if="priceActionInventory.legLine">{{ priceActionInventory.legLine }}</small>
+              </div>
+
+              <div v-if="priceActionInventory.rows.length" class="zone-list neo-wave-hypothesis-list price-action-reason-list">
+                <div
+                  v-for="row in priceActionInventory.rows"
+                  :key="row.id"
+                  :class="{ preferred: row.highlight }"
+                >
+                  <span :class="['zone-chip', row.kindClass]">{{ row.kind }}</span>
+                  <div class="price-action-reason-body">
+                    <strong>{{ row.label }}</strong>
+                    <small class="reason-code">{{ row.reason }} · conf {{ row.score }}</small>
+                    <p class="reason-explanation">{{ row.explanation }}</p>
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="priceActionInventory.available" class="empty-state compact-empty neo-wave-empty">
+                No price-action events or setups at this frame.
+              </div>
+              <div v-else class="empty-state compact-empty neo-wave-empty">
+                Price-action analysis is not present on this frame.
+              </div>
+            </div>
+
             <div class="zone-list">
               <div
                 v-for="zone in strongestZones"

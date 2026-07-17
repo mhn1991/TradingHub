@@ -2,6 +2,7 @@ using Brokers.Models;
 using ChartAnnotator.Models;
 using Simulator.MarketData;
 using TradeManager;
+using TradingCore.Pipeline;
 
 namespace Simulator.Models;
 
@@ -17,7 +18,17 @@ public sealed record MarketFrame
     /// <summary>Completed analysis-base candle, present only on analysis close frames.</summary>
     public Candle? AnalysisBaseCandle { get; init; }
     public required IReadOnlySet<BarInterval> ClosedIntervals { get; init; }
+    /// <summary>Primary/back-compat resolved snapshots - the first analysis profile trading
+    /// this instrument. Consumers that are not yet profile-aware (replay/execution-detail
+    /// capture) read this directly; strategy evaluation prefers
+    /// <see cref="SnapshotsByProfile"/>[session's own profile] when present via
+    /// <c>StrategySimulationSession.ResolveSnapshots</c>.</summary>
     public required IReadOnlyDictionary<BarInterval, AnalysisSnapshot> Snapshots { get; init; }
+    /// <summary>Per-analysis-profile resolved snapshots for this instrument at this candle.
+    /// Null for callers/tests that construct a <see cref="MarketFrame"/> directly without
+    /// going through a multi-profile-aware engine - <see cref="Snapshots"/> is always the
+    /// safe fallback in that case.</summary>
+    public IReadOnlyDictionary<AnalysisProfileKey, IReadOnlyDictionary<BarInterval, AnalysisSnapshot>>? SnapshotsByProfile { get; init; }
     public required string InputStreamId { get; init; }
     public required bool IsWarmup { get; init; }
     public required bool IsLastCandle { get; init; }

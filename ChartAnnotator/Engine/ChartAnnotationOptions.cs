@@ -1,4 +1,5 @@
 using ChartAnnotator.PriceAction;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
 
 namespace ChartAnnotator.Engine;
@@ -27,6 +28,9 @@ public sealed record ChartAnnotationOptions
     public int RsiSignalLifetimeCandles { get; init; } = 50;
     public int BollingerPeriod { get; init; } = 20;
     public decimal BollingerStandardDeviations { get; init; } = 2m;
+    public int CciPeriod { get; init; } = 20;
+    public int SmaFastPeriod { get; init; } = 50;
+    public int SmaSlowPeriod { get; init; } = 200;
     public int BollingerWidthHistoryPeriod { get; init; } = 50;
     public int BollingerWidthChangeLookback { get; init; } = 5;
     public int BollingerWidthMinimumSamples { get; init; } = 20;
@@ -61,6 +65,7 @@ public sealed record ChartAnnotationOptions
     public int SessionValueAnchorHourUtc { get; init; }
 
     public MarketRegimeOptions MarketRegime { get; init; } = new();
+    public NeoWaveOptions NeoWave { get; init; } = new();
 
     public void Validate()
     {
@@ -90,6 +95,10 @@ public sealed record ChartAnnotationOptions
             RsiSignalLifetimeCandles < 1 ||
             BollingerPeriod <= 1 ||
             BollingerStandardDeviations <= 0m ||
+            CciPeriod < 2 ||
+            SmaFastPeriod < 1 ||
+            SmaSlowPeriod < 1 ||
+            SmaSlowPeriod < SmaFastPeriod ||
             BollingerWidthHistoryPeriod < 2 ||
             BollingerWidthChangeLookback < 1 ||
             BollingerWidthChangeLookback >= BollingerWidthHistoryPeriod ||
@@ -136,5 +145,6 @@ public sealed record ChartAnnotationOptions
         PriceAction.Validate();
         PriceActionSetups.Validate();
         MarketRegime.Validate();
+        NeoWave.Validate();
     }
 }

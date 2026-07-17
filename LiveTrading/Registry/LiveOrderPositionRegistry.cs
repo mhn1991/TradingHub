@@ -40,6 +40,8 @@ public sealed record LiveOrderRecord
     public string EntryRegime { get; init; } = "Unknown";
     public string EntrySession { get; init; } = "Unknown";
     public string EntrySetupType { get; init; } = "Unknown";
+    public string? EntryNeoWaveHypothesisId { get; init; }
+    public decimal? EntryNeoWaveInvalidationPrice { get; init; }
     /// <summary>Regime-routed management profile the decision selected (see <c>Agent.Models.AgentDecision.RegimeManagementProfileId</c>), or "default" when regime routing is disabled - mirrors <c>Simulator.Models.SimulatedTradeRecord.EntryManagementProfileId</c>.</summary>
     public string EntryManagementProfileId { get; init; } = "default";
     public decimal? ProtectiveStopPrice { get; init; }
@@ -72,6 +74,8 @@ public sealed record LivePositionRecord
     public string EntryRegime { get; init; } = "Unknown";
     public string EntrySession { get; init; } = "Unknown";
     public string EntrySetupType { get; init; } = "Unknown";
+    public string? EntryNeoWaveHypothesisId { get; init; }
+    public decimal? EntryNeoWaveInvalidationPrice { get; init; }
     /// <summary>Regime-routed management profile this position was opened under - carried unchanged from <see cref="LiveOrderRecord.EntryManagementProfileId"/>, never re-derived after entry.</summary>
     public string EntryManagementProfileId { get; init; } = "default";
     public decimal? AveragePrice { get; init; }
@@ -172,6 +176,8 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
             EntrySession = decision.Candidate.TradingCondition?.Session.ToString() ?? "Unknown",
             EntrySetupType = decision.Decision.PriceActionSetupType?.ToString() ??
                 decision.Candidate.SetupId ?? "Unknown",
+            EntryNeoWaveHypothesisId = decision.Decision.NeoWaveHypothesisId,
+            EntryNeoWaveInvalidationPrice = decision.Decision.NeoWaveInvalidationPrice,
             EntryManagementProfileId = decision.Decision.RegimeManagementProfileId ?? "default",
             ProtectiveStopPrice = decision.Decision.StopLossPrice,
             TakeProfitPrice = decision.Decision.TakeProfitPrice,
@@ -316,6 +322,10 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                         EntryRegime = existing?.EntryRegime ?? updatedOrder.EntryRegime,
                         EntrySession = existing?.EntrySession ?? updatedOrder.EntrySession,
                         EntrySetupType = existing?.EntrySetupType ?? updatedOrder.EntrySetupType,
+                        EntryNeoWaveHypothesisId = existing?.EntryNeoWaveHypothesisId ??
+                            updatedOrder.EntryNeoWaveHypothesisId,
+                        EntryNeoWaveInvalidationPrice = existing?.EntryNeoWaveInvalidationPrice ??
+                            updatedOrder.EntryNeoWaveInvalidationPrice,
                         EntryManagementProfileId = existing?.EntryManagementProfileId ?? updatedOrder.EntryManagementProfileId,
                         AveragePrice = WeightedAverage(existing?.AveragePrice, previousQuantity, brokerEvent.FillPrice, fillQuantity),
                         InitialStopPrice = existing?.InitialStopPrice ?? updatedOrder.ProtectiveStopPrice,
@@ -535,6 +545,10 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                     EntryRegime = existing?.EntryRegime ?? ownershipOrder?.EntryRegime ?? "Unknown",
                     EntrySession = existing?.EntrySession ?? ownershipOrder?.EntrySession ?? "Unknown",
                     EntrySetupType = existing?.EntrySetupType ?? ownershipOrder?.EntrySetupType ?? "Unknown",
+                    EntryNeoWaveHypothesisId = existing?.EntryNeoWaveHypothesisId ??
+                        ownershipOrder?.EntryNeoWaveHypothesisId,
+                    EntryNeoWaveInvalidationPrice = existing?.EntryNeoWaveInvalidationPrice ??
+                        ownershipOrder?.EntryNeoWaveInvalidationPrice,
                     EntryManagementProfileId = existing?.EntryManagementProfileId ?? ownershipOrder?.EntryManagementProfileId ?? "default",
                     AveragePrice = brokerPosition.AveragePrice,
                     InitialStopPrice = existing?.InitialStopPrice ?? ownershipOrder?.ProtectiveStopPrice ??

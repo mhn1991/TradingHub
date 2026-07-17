@@ -66,7 +66,7 @@ public sealed class SimulatorNoTradeDiagnosticsTests
 
         var engine = new StreamingComparativeEngine(
             new Simulator.Abstractions.EnumerableMarketCandleStream(candles),
-            [("legacy", (ITradingAgent)new LegacyProgressiveAgent(options), instrument)]);
+            [new Simulator.Engine.StrategyFactoryEntry("legacy", new LegacyProgressiveAgent(options), instrument)]);
 
         ComparativeSimulationResult result = await engine.RunAsync(
             new StreamingComparativeEngineOptions

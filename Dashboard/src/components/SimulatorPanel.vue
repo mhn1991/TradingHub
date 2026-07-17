@@ -111,6 +111,13 @@ function createBaseSimulationForm() {
     regimePersistenceBars: 3,
     regimeSoftSpreadAtr: 0.25,
     regimeHardSpreadAtr: 0.50,
+    neoWaveEnabled: true,
+    neoWaveEvidenceMode: 'RecordOnly',
+    neoWaveEvidenceInterval: '2h',
+    neoWaveMinimumStructuralScore: 60,
+    neoWaveMaximumTrustedConflictScore: 40,
+    neoWaveMinimumRiskMultiplier: 0.75,
+    neoWaveMaximumConflictRiskReduction: 0.25,
     tradingConditionsEnabled: true,
     allowedSessions: 'Asian,London,NewYork,LondonNewYorkOverlap',
     rolloverBlackoutMinutesBefore: 15,
@@ -175,6 +182,8 @@ function createBaseSimulationForm() {
       atrBufferMultiplier: 0.25,
       minimumStopImprovementAtr: 0.05,
       exitOnAdverseStructureBreak: false,
+      enableNeoWaveInvalidationExit: false,
+      neoWaveInvalidationBufferAtr: 0.1,
       preserveBracketTarget: false,
       enableScaleOut: true,
       minimumRunnerFraction: 0.4,
@@ -201,6 +210,8 @@ function createBaseSimulationForm() {
       atrBufferMultiplier: 0.25,
       minimumStopImprovementAtr: 0.05,
       exitOnAdverseStructureBreak: false,
+      enableNeoWaveInvalidationExit: false,
+      neoWaveInvalidationBufferAtr: 0.1,
       preserveBracketTarget: true,
       enableScaleOut: true,
       minimumRunnerFraction: 0.5,
@@ -826,6 +837,7 @@ const replayFrames = computed<ReplayFrame[]>(() => filteredReplayRows.value.map(
   marketStructure: row.analysis?.marketStructure,
   priceAction: row.analysis?.priceAction,
   marketRegime: row.analysis?.marketRegime,
+  neoWave: row.analysis?.neoWave,
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
@@ -847,6 +859,7 @@ const executionDetailFrames = computed<ReplayFrame[]>(() => executionDetailRows.
   marketStructure: row.analysis?.marketStructure,
   priceAction: row.analysis?.priceAction,
   marketRegime: row.analysis?.marketRegime,
+  neoWave: row.analysis?.neoWave,
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
@@ -854,6 +867,8 @@ const replayLayers = reactive<ChartLayers>({
   priceAction: true,
   bollinger: false,
   bollingerRegimes: false,
+  movingAverages: true,
+  cci: true,
   rsiRelationships: false,
   atr: false,
   volume: true,
@@ -864,6 +879,7 @@ const replayLayers = reactive<ChartLayers>({
   donchian: true,
   efficiencyRatio: true,
   marketRegime: true,
+  neoWave: true,
 })
 const progressLabel = computed(() => {
   if (!job.value) return 'No simulation running'
@@ -1032,6 +1048,13 @@ async function startSimulation() {
       regimePersistenceBars: form.regimePersistenceBars,
       regimeSoftSpreadAtr: form.regimeSoftSpreadAtr,
       regimeHardSpreadAtr: form.regimeHardSpreadAtr,
+      neoWaveEnabled: form.neoWaveEnabled,
+      neoWaveEvidenceMode: form.neoWaveEvidenceMode,
+      neoWaveEvidenceInterval: form.neoWaveEvidenceInterval || null,
+      neoWaveMinimumStructuralScore: form.neoWaveMinimumStructuralScore,
+      neoWaveMaximumTrustedConflictScore: form.neoWaveMaximumTrustedConflictScore,
+      neoWaveMinimumRiskMultiplier: form.neoWaveMinimumRiskMultiplier,
+      neoWaveMaximumConflictRiskReduction: form.neoWaveMaximumConflictRiskReduction,
       tradingConditionsEnabled: form.tradingConditionsEnabled,
       allowedSessions: form.allowedSessions.split(',').map((item) => item.trim()).filter(Boolean),
       rolloverBlackoutMinutesBefore: form.rolloverBlackoutMinutesBefore,
@@ -1406,6 +1429,12 @@ function validatePositionManagement() {
   if (form.regimeConfirmationBars < 1 || form.regimePersistenceBars < 0 || form.efficiencyRatioPeriod < 2) {
     throw new Error('Regime confirmation, persistence, and ER period values are invalid.')
   }
+  if (form.neoWaveMinimumStructuralScore < 0 || form.neoWaveMinimumStructuralScore > 100 ||
+      form.neoWaveMaximumTrustedConflictScore < 0 || form.neoWaveMaximumTrustedConflictScore > 100 ||
+      form.neoWaveMinimumRiskMultiplier < 0 || form.neoWaveMinimumRiskMultiplier > 1 ||
+      form.neoWaveMaximumConflictRiskReduction < 0 || form.neoWaveMaximumConflictRiskReduction > 1) {
+    throw new Error('NEoWave score, conflict, and risk settings are outside their valid ranges.')
+  }
   if (form.maximumTotalPortfolioHeatPercent < 0 ||
       form.maximumPendingRiskPercent < 0 ||
       form.maximumStrategyRiskPercent < 0 ||
@@ -1449,7 +1478,9 @@ function validatePositionManagement() {
     if (options.structureTrailActivationR < options.breakEvenActivationR) {
       throw new Error(`${name} structure activation must be at or above break-even activation.`)
     }
-    if (options.atrBufferMultiplier < 0 || options.minimumStopImprovementAtr < 0) {
+    if (options.atrBufferMultiplier < 0 ||
+        options.minimumStopImprovementAtr < 0 ||
+        options.neoWaveInvalidationBufferAtr < 0) {
       throw new Error(`${name} ATR values cannot be negative.`)
     }
     if (options.minimumRunnerFraction < 0 || options.minimumRunnerFraction > 1) {
@@ -2043,7 +2074,13 @@ onMounted(() => {
             <label>Risk start UTC <input v-model="form.legacyPositionManagement.riskWindowStartUtc" type="time" /></label>
             <label>Risk end UTC <input v-model="form.legacyPositionManagement.riskWindowEndUtc" type="time" /></label>
           </div>
-          <label class="inline-check"><input v-model="form.legacyPositionManagement.exitOnAdverseStructureBreak" type="checkbox" /> Exit on adverse structure</label>
+          <div class="row">
+            <label class="inline-check"><input v-model="form.legacyPositionManagement.exitOnAdverseStructureBreak" type="checkbox" /> Exit on adverse structure</label>
+            <label class="inline-check"><input v-model="form.legacyPositionManagement.enableNeoWaveInvalidationExit" type="checkbox" /> Exit on entry-pinned wave invalidation</label>
+            <label>Wave invalidation buffer ATR
+              <input v-model.number="form.legacyPositionManagement.neoWaveInvalidationBufferAtr" type="number" min="0" step="0.01" :disabled="!form.legacyPositionManagement.enableNeoWaveInvalidationExit" />
+            </label>
+          </div>
           <small class="muted">Legacy scales out at configured R/structure opportunities, protects a runner with profit floors and MFE giveback, and does not require a fixed target.</small>
         </fieldset>
         <fieldset class="management-config">
@@ -2097,8 +2134,12 @@ onMounted(() => {
           </div>
           <div class="row checks">
             <label><input v-model="form.improvedPositionManagement.exitOnAdverseStructureBreak" type="checkbox" /> Adverse exit</label>
+            <label><input v-model="form.improvedPositionManagement.enableNeoWaveInvalidationExit" type="checkbox" /> Entry-pinned wave invalidation exit</label>
             <label><input v-model="form.improvedPositionManagement.preserveBracketTarget" type="checkbox" /> Preserve target</label>
           </div>
+          <label>Wave invalidation buffer ATR
+            <input v-model.number="form.improvedPositionManagement.neoWaveInvalidationBufferAtr" type="number" min="0" step="0.01" :disabled="!form.improvedPositionManagement.enableNeoWaveInvalidationExit" />
+          </label>
         </fieldset>
         <p class="behaviour-summary">{{ managementSummary }}</p>
         <fieldset class="management-config">
@@ -2165,6 +2206,29 @@ onMounted(() => {
           <p class="muted">Currency stop-risk heat splits planned stop-loss risk 50/50 across a pair's base/quote
             currencies. Net/gross exposure caps use real notional exposure instead - a genuinely different
             (usually much larger, since it reflects leveraged notional) metric, not the same number twice.</p>
+        </fieldset>
+        <fieldset class="management-config">
+          <legend>NEoWave structural analysis</legend>
+          <div class="row checks">
+            <label class="inline-check"><input v-model="form.neoWaveEnabled" type="checkbox" /> Causal monowave and hypothesis analysis</label>
+            <label>Agent influence
+              <select v-model="form.neoWaveEvidenceMode" :disabled="!form.neoWaveEnabled">
+                <option>Disabled</option>
+                <option>RecordOnly</option>
+                <option>SoftConfidence</option>
+                <option>SoftRiskReduction</option>
+                <option>SoftConfidenceAndRisk</option>
+              </select>
+            </label>
+            <label>Evidence interval <input v-model="form.neoWaveEvidenceInterval" type="text" style="width:4rem" placeholder="2h" :disabled="!form.neoWaveEnabled" /></label>
+            <label>Minimum structural score <input v-model.number="form.neoWaveMinimumStructuralScore" type="number" min="0" max="100" step="1" :disabled="!form.neoWaveEnabled" /></label>
+          </div>
+          <div class="row checks">
+            <label>Maximum trusted conflict <input v-model.number="form.neoWaveMaximumTrustedConflictScore" type="number" min="0" max="100" step="1" :disabled="!form.neoWaveEnabled" /></label>
+            <label>Minimum risk multiplier <input v-model.number="form.neoWaveMinimumRiskMultiplier" type="number" min="0" max="1" step="0.05" :disabled="!form.neoWaveEnabled" /></label>
+            <label>Maximum conflict reduction <input v-model.number="form.neoWaveMaximumConflictRiskReduction" type="number" min="0" max="1" step="0.05" :disabled="!form.neoWaveEnabled" /></label>
+          </div>
+          <p class="muted">Start with RecordOnly. Soft modes can adjust confidence or reduce risk, but the wave layer never creates an entry, never increases risk, and uncertain structure remains neutral.</p>
         </fieldset>
         <fieldset class="management-config">
           <legend>Value-location evidence and currency strength</legend>

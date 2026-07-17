@@ -51,6 +51,22 @@ public sealed class AgentInstanceState
     public LiveTradeCandidate? LastCandidate { get; set; }
     public string? LastStatus { get; set; }
 
+    /// <summary>Phase 4: the most recent evaluation's decision identity, recorded independently
+    /// of <see cref="LastCandidate"/> so a Phase 6 per-agent timeout can still record which
+    /// decision was in flight even when no candidate was ultimately produced (candidate stays
+    /// null on Observe/reject outcomes and on timeout). Matches <c>LiveTradeCandidate.DecisionId</c>'s
+    /// <c>string</c> type, not a synthesized <c>Guid</c> - this codebase's decision identity is
+    /// always a deterministic string derived from ordered inputs (see <c>ProgressiveStrategyBase</c>).</summary>
+    public string? LastDecisionId { get; set; }
+
+    /// <summary>Multi-agent architecture Phase 6: incremented each time this instance's
+    /// evaluation does not complete within <c>AgentSupervisor</c>'s per-agent timeout. The
+    /// evaluation task itself is never abandoned - it keeps running under this instance's own
+    /// concurrency slot, and a late result is discarded by
+    /// <c>LiveDecisionEpochCoordinator.SubmitCandidate</c>'s stale-sequence rejection if it
+    /// arrives after a newer market update has already begun.</summary>
+    public long TimeoutCount { get; set; }
+
     public Exception? LastEvaluationError { get; set; }
     public DateTimeOffset? LastEvaluationErrorAt { get; set; }
 }

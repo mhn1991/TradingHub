@@ -44,8 +44,8 @@ public sealed class MultiInstrumentPortfolioClockTests
         var engine = new StreamingComparativeEngine(
             stream,
             [
-                ("strategy-eurusd", (ITradingAgent)new OneShotBuyAgent(interval, 1.10m), EurUsd),
-                ("strategy-gbpusd", (ITradingAgent)new OneShotBuyAgent(interval, 1.30m), GbpUsd)
+                new StrategyFactoryEntry("strategy-eurusd", new OneShotBuyAgent(interval, 1.10m), EurUsd),
+                new StrategyFactoryEntry("strategy-gbpusd", new OneShotBuyAgent(interval, 1.30m), GbpUsd)
             ]);
 
         string output = Path.Combine(
@@ -93,8 +93,8 @@ public sealed class MultiInstrumentPortfolioClockTests
         var engine = new StreamingComparativeEngine(
             stream,
             [
-                ("strategy-eurusd", (ITradingAgent)new OneShotBuyAgent(interval, 1.10m), EurUsd),
-                ("strategy-gbpusd", (ITradingAgent)new OneShotBuyAgent(interval, 1.30m), GbpUsd)
+                new StrategyFactoryEntry("strategy-eurusd", new OneShotBuyAgent(interval, 1.10m), EurUsd),
+                new StrategyFactoryEntry("strategy-gbpusd", new OneShotBuyAgent(interval, 1.30m), GbpUsd)
             ]);
 
         string output = Path.Combine(
@@ -143,8 +143,8 @@ public sealed class MultiInstrumentPortfolioClockTests
         var engine = new StreamingComparativeEngine(
             stream,
             [
-                ("strategy-eurusd", (ITradingAgent)new OneShotBuyAgent(interval, 1.10m), EurUsd),
-                ("strategy-gbpusd", (ITradingAgent)new OneShotBuyAgent(interval, 1.30m), GbpUsd)
+                new StrategyFactoryEntry("strategy-eurusd", new OneShotBuyAgent(interval, 1.10m), EurUsd),
+                new StrategyFactoryEntry("strategy-gbpusd", new OneShotBuyAgent(interval, 1.30m), GbpUsd)
             ]);
 
         string output = Path.Combine(

@@ -60,6 +60,8 @@ public sealed class LiveEngineHostedService(
     private ILivePolicyRegistry _policies = null!;
     private ITradingSafetyController _safety = null!;
     private ILiveCalibrationTrainingScheduler _calibrationScheduler = null!;
+    private readonly LiveAnalysisProfileRegistry _analysisProfiles = new();
+    private readonly Dictionary<InstrumentKey, List<AnalysisProfileKey>> _profilesByMarket = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -443,6 +445,12 @@ public sealed class LiveEngineHostedService(
         LivePolicyBundleFactory bundleFactory = services.GetRequiredService<LivePolicyBundleFactory>();
         IStrategyDecisionPipelineFactory pipelineFactory = services.GetRequiredService<IStrategyDecisionPipelineFactory>();
         LiveExecutionRuntimeOptions executionOptions = services.GetRequiredService<LiveExecutionRuntimeOptions>();
+        // Phase 5: LivePolicyRegistry.Register/AgentSupervisor.Register both silently accept an
+        // exact-duplicate AgentInstanceKey (dedup no-op / dictionary overwrite respectively) -
+        // fine for idempotent re-registration, but a genuine configuration mistake (the same
+        // strategy/instrument/policy-bundle/revision listed twice) should fault startup instead
+        // of silently registering once.
+        var registeredKeys = new HashSet<AgentInstanceKey>();
 
         foreach (LiveMarketDefinition market in markets.Value.Markets.Where(market => market.Enabled))
         {
@@ -485,6 +493,34 @@ public sealed class LiveEngineHostedService(
                 ResolvedPolicyBundle resolved = await bundleFactory
                     .BuildAsync(assignment.PolicyBundleId, bundleOptions, cancellationToken)
                     .ConfigureAwait(false);
+
+                // Phase 5: SetupCalibrationArtifact.Validate already supports checking against a
+                // required feature-schema hash - this was simply never wired into registration,
+                // so a calibration artifact trained under a stale feature schema silently ran
+                // live instead of failing fast.
+                if (resolved.SetupCalibration is not null)
+                {
+                    try
+                    {
+                        resolved.SetupCalibration.Validate(resolved.Bundle.FeatureSchemaHash);
+                    }
+                    catch (ArgumentException)
+                    {
+                        return FaultConfiguration(
+                            $"Agent {assignment.StrategyId}/{market.Instrument}: setup calibration artifact " +
+                            $"{resolved.SetupCalibration.CalibrationId} was trained under feature schema " +
+                            $"{resolved.SetupCalibration.FeatureSchemaHash}, which does not match the resolved " +
+                            $"policy bundle's feature schema {resolved.Bundle.FeatureSchemaHash}.");
+                    }
+                }
+
+                AnalysisProfileKey profile = _analysisProfiles.GetOrCreateProfile(
+                    resolved.Bundle.FeaturePolicy.AnnotationOptions, market.AnalysisIntervals);
+                if (!_profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? marketProfiles))
+                    _profilesByMarket[market.Instrument] = marketProfiles = [];
+                if (!marketProfiles.Contains(profile))
+                    marketProfiles.Add(profile);
+
                 StrategyDecisionRuntime runtime = LiveAgentFactory.Create(
                     assignment.StrategyId,
                     portableProfile.AgentKind,
@@ -499,6 +535,12 @@ public sealed class LiveEngineHostedService(
                     assignment.StrategyId,
                     resolved.Bundle.PolicyBundleId,
                     resolved.Bundle.Revision);
+                if (!registeredKeys.Add(key))
+                {
+                    return FaultConfiguration(
+                        $"Agent {assignment.StrategyId}/{market.Instrument} (policy bundle {resolved.Bundle.PolicyBundleId} " +
+                        $"revision {resolved.Bundle.Revision}) is registered more than once. Remove the duplicate assignment.");
+                }
                 _policies.Register(
                     key,
                     resolved.Bundle,
@@ -512,6 +554,21 @@ public sealed class LiveEngineHostedService(
                     PolicyBundle = resolved.Bundle,
                     Assignment = assignment
                 });
+            }
+
+            // AgentSupervisor.ApplyAsync/LiveDecisionEpochCoordinator today assume exactly one
+            // analysis update stream per instrument per epoch (see LiveAnalysisProfileRegistry's
+            // remarks) - true multi-actor-per-instrument dispatch is Phase 6 work. Until then, a
+            // market whose registered assignments resolve to more than one distinct analysis
+            // profile must fail configuration rather than silently evaluate some agents against
+            // analysis computed under another agent's AnnotationOptions.
+            if (_profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? distinctProfiles) &&
+                distinctProfiles.Count > 1)
+            {
+                return FaultConfiguration(
+                    $"{market.Instrument} has {distinctProfiles.Count} distinct analysis profiles across its " +
+                    "registered assignments (differing AnnotationOptions). Multi-profile dispatch on one " +
+                    "instrument is not yet supported - align the assignments' policy bundles' AnnotationOptions.");
             }
         }
         return true;
@@ -530,10 +587,18 @@ public sealed class LiveEngineHostedService(
             market.Instrument,
             market.AnalysisIntervals,
             market.CandleCapacity);
+        // RegisterAgentsAsync resolves and validates every registered assignment's profile
+        // before this runs, and faults startup if a market resolves to more than one distinct
+        // profile - so at most one entry is ever present here. A market with no registered
+        // assignments (all disabled, or none configured) falls back to default options, matching
+        // this actor's previous unconditional default-options behaviour.
+        AnalysisProfileKey profile = _profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? profiles) && profiles.Count > 0
+            ? profiles[0]
+            : _analysisProfiles.GetOrCreateProfile(null, market.AnalysisIntervals);
         return new MarketAnalysisActor(
             market,
             aggregator,
-            new ChartAnnotationEngine(),
+            _analysisProfiles.EngineFor(profile),
             new MarketDataQualityGate(),
             _candleProvider,
             timeProvider,

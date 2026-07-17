@@ -3,6 +3,7 @@ using System.Text;
 using Agent.Strategies;
 using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Engine;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Value;
 using PortfolioManager.CrossMarket;
 using RiskManager.Calibration;
@@ -29,6 +30,7 @@ public sealed record RuntimeFeaturePolicy
     public required bool DmiConfirmationEnabled { get; init; }
     public required CurrencyStrengthOptions CurrencyStrength { get; init; }
     public required SetupCalibrationPolicyOptions SetupCalibration { get; init; }
+    public NeoWaveEvidenceOptions NeoWaveEvidence { get; init; } = new();
 
     public string ComputeHash()
     {
@@ -38,8 +40,8 @@ public sealed record RuntimeFeaturePolicy
         // helpers; AnnotationOptions' own canonicalization (including the same problem for
         // PriceActionSetups.EnabledSetups) is shared with AnalysisProfileKey via
         // ChartAnnotationOptionsHasher.Canonicalize - see that method's doc comment for why this
-        // matters. The exact string built here is unchanged from before that extraction, so this
-        // hash's output is byte-identical to every previously-computed value.
+        // matters. Adding a decision-affecting feature intentionally changes this hash so a
+        // promoted policy cannot silently acquire NEoWave evidence without a new identity.
         string canonical =
             $"{ChartAnnotationOptionsHasher.Canonicalize(AnnotationOptions)}|" +
             $"regime:{RegimeIdentity(MarketRegimeRouting)}|" +
@@ -49,6 +51,7 @@ public sealed record RuntimeFeaturePolicy
             $"dmi:{DmiConfirmationEnabled}|" +
             $"currency-strength:{CurrencyStrengthIdentity(CurrencyStrength)}|" +
             $"setup-calibration:{SetupCalibration}|" +
+            $"neowave-evidence:{NeoWaveEvidence}|" +
             $"schema:{MetaLabelFeatureFactory.SchemaVersion}";
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return Convert.ToHexString(hash).ToLowerInvariant();

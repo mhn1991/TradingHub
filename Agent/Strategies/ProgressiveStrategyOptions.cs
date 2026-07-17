@@ -1,6 +1,7 @@
 using Brokers.Models;
 using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Models;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Value;
 
 namespace Agent.Strategies;
@@ -120,6 +121,15 @@ public sealed record ProgressiveStrategyOptions
     public TrendQualityEvidenceOptions TrendQualityEvidence { get; init; } = new();
     public CurrencyStrengthEvidenceOptions CurrencyStrengthEvidence { get; init; } = new();
 
+    /// <summary>
+    /// Optional wave-structure evidence. Disabled by default. RecordOnly exposes diagnostics;
+    /// soft modes may adjust confidence and/or reduce risk, but can never create a trade or
+    /// increase base risk.
+    /// </summary>
+    public NeoWaveEvidenceOptions NeoWaveEvidence { get; init; } = new();
+    public BarInterval? NeoWaveInterval { get; init; }
+    public BarInterval EffectiveNeoWaveInterval => NeoWaveInterval ?? TrendInterval;
+
     public IReadOnlyList<BarInterval> ConfirmationIntervals =>
         [ConfirmationInterval, .. AdditionalConfirmationIntervals];
 
@@ -131,10 +141,22 @@ public sealed record ProgressiveStrategyOptions
             .. SetupIntervals,
             .. SecondaryTrendIntervals,
             TrendInterval,
-            .. RegimeInterval is BarInterval regimeInterval && regimeInterval != TrendInterval
+            .. RegimeInterval is BarInterval regimeInterval && !ContainsConfiguredInterval(regimeInterval)
                 ? (BarInterval[])[regimeInterval]
+                : [],
+            .. NeoWaveInterval is BarInterval neoWaveInterval && !ContainsConfiguredInterval(neoWaveInterval) &&
+                (RegimeInterval is not BarInterval configuredRegime || configuredRegime != neoWaveInterval)
+                ? (BarInterval[])[neoWaveInterval]
                 : []
         ];
+
+    private bool ContainsConfiguredInterval(BarInterval interval) =>
+        interval == EntryInterval ||
+        interval == ConfirmationInterval ||
+        interval == TrendInterval ||
+        SecondaryTrendIntervals.Contains(interval) ||
+        SetupIntervals.Contains(interval) ||
+        AdditionalConfirmationIntervals.Contains(interval);
 
     public void Validate()
     {
@@ -224,6 +246,12 @@ public sealed record ProgressiveStrategyOptions
         ValueLocationEvidence.Validate();
         TrendQualityEvidence.Validate();
         CurrencyStrengthEvidence.Validate();
+        NeoWaveEvidence.Validate();
+
+        if (NeoWaveInterval is BarInterval neoWaveInterval && !neoWaveInterval.IsValid)
+        {
+            throw new ArgumentException("The NEoWave evidence interval, when set, must be valid.");
+        }
 
         if (RegimeInterval is BarInterval regimeInterval && !regimeInterval.IsValid)
         {

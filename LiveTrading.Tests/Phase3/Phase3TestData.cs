@@ -98,6 +98,7 @@ internal static class Phase3TestData
         Action = AgentAction.Buy,
         DecisionTime = new DateTimeOffset(2026, 7, 16, 12, 0, 0, TimeSpan.Zero),
         DecisionEpoch = 1_721_130_400_000,
+        MarketSequence = 1,
         ReferencePrice = 1.1000m,
         StopLossPrice = 1.0950m,
         TakeProfitPrice = 1.1100m,

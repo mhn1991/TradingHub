@@ -1,6 +1,7 @@
 using Brokers.Models;
 using LiveTrading.Agents;
 using NUnit.Framework;
+using TradingCore.Pipeline;
 
 namespace LiveTrading.Tests.Agents;
 

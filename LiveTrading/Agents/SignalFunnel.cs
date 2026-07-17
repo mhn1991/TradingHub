@@ -1,6 +1,7 @@
 using Agent.Models;
 using Brokers.Models;
 using ChartAnnotator.Models;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
 using RiskManager.Calibration;
 using RiskManager.Conditions;
@@ -90,6 +91,13 @@ public sealed record LiveTradeCandidate
     public required AgentAction Action { get; init; }
     public required DateTimeOffset DecisionTime { get; init; }
     public required long DecisionEpoch { get; init; }
+    /// <summary>Multi-agent architecture Phase 6: the <c>MarketAnalysisUpdate.MarketSequence</c>
+    /// this candidate was computed under - <c>LiveDecisionEpochCoordinator.SubmitCandidate</c>
+    /// rejects a candidate whose sequence is stale relative to the instrument's latest known
+    /// sequence, the live-side substitute for <c>MarketAnalysisSnapshot.SnapshotVersion</c> (Live
+    /// does not yet route agent dispatch through <c>MarketAnalysisSnapshot</c> - see
+    /// <c>AgentSupervisor</c>'s remarks).</summary>
+    public required long MarketSequence { get; init; }
     public decimal? ReferencePrice { get; init; }
     public decimal? StopLossPrice { get; init; }
     public decimal? TakeProfitPrice { get; init; }
@@ -99,6 +107,13 @@ public sealed record LiveTradeCandidate
     public required SetupCalibrationAudit SetupCalibration { get; init; }
     public required MetaLabelAudit MetaLabel { get; init; }
     public required TradingConditionDecision? TradingCondition { get; init; }
+    public decimal NeoWaveRiskMultiplier { get; init; } = 1m;
+    public string? NeoWaveHypothesisId { get; init; }
+    public NeoWavePatternType? NeoWavePatternType { get; init; }
+    public NeoWaveDirection? NeoWaveDirection { get; init; }
+    public decimal? NeoWaveStructuralScore { get; init; }
+    public decimal? NeoWaveConflictScore { get; init; }
+    public decimal? NeoWaveInvalidationPrice { get; init; }
 }
 
 /// <summary>Turns one <see cref="TradingPipelineResult"/> that survived the pipeline as a
@@ -111,7 +126,8 @@ public static class SignalFunnel
         string strategyId,
         AgentMarketContext context,
         TradingPipelineResult result,
-        long decisionEpoch)
+        long decisionEpoch,
+        long marketSequence)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
         ArgumentNullException.ThrowIfNull(context);
@@ -132,6 +148,7 @@ public static class SignalFunnel
             Action = decision.Action,
             DecisionTime = context.Timestamp,
             DecisionEpoch = decisionEpoch,
+            MarketSequence = marketSequence,
             ReferencePrice = decision.ReferencePrice,
             StopLossPrice = decision.StopLossPrice,
             TakeProfitPrice = decision.TakeProfitPrice,
@@ -144,7 +161,14 @@ public static class SignalFunnel
             MetaLabel = result.MetaLabel is { } metaDecision
                 ? MetaLabelAudit.FromDecision(metaDecision)
                 : MetaLabelAudit.Disabled,
-            TradingCondition = result.TradingCondition
+            TradingCondition = result.TradingCondition,
+            NeoWaveRiskMultiplier = Math.Clamp(decision.NeoWaveRiskMultiplier ?? 1m, 0m, 1m),
+            NeoWaveHypothesisId = decision.NeoWaveHypothesisId,
+            NeoWavePatternType = decision.NeoWavePatternType,
+            NeoWaveDirection = decision.NeoWaveDirection,
+            NeoWaveStructuralScore = decision.NeoWaveStructuralScore,
+            NeoWaveConflictScore = decision.NeoWaveConflictScore,
+            NeoWaveInvalidationPrice = decision.NeoWaveInvalidationPrice
         };
     }
 

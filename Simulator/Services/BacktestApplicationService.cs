@@ -12,11 +12,13 @@ using Brokers.Abstractions;
 using Brokers.Binance;
 using Brokers.Models;
 using Brokers.Oanda;
+using ChartAnnotator.Engine;
 using Simulator.Abstractions;
 using Simulator.Engine;
 using Simulator.Jobs;
 using Simulator.MarketData;
 using Simulator.Models;
+using TradingCore.Pipeline;
 
 namespace Simulator.Services;
 
@@ -25,7 +27,7 @@ public sealed class BacktestApplicationServiceOptions
     public int MaxConcurrentJobs { get; init; } = 1;
     public int QueueCapacity { get; init; } = 8;
     public Func<BacktestRequest, IHistoricalCandleStream>? StreamFactory { get; init; }
-    public Func<BacktestRequest, IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)>>? StrategyFactory { get; init; }
+    public Func<BacktestRequest, IReadOnlyList<StrategyFactoryEntry>>? StrategyFactory { get; init; }
 }
 
 /// <summary>
@@ -412,7 +414,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         await UpdateStatusAsync(job, SimulationJobStatus.PreparingData, cancellationToken)
             .ConfigureAwait(false);
 
-        IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> strategies =
+        IReadOnlyList<StrategyFactoryEntry> strategies =
             (_options.StrategyFactory ?? CreateDefaultStrategies)(request);
         IHistoricalCandleStream stream = (_options.StreamFactory ?? CreateDefaultStream)(request);
         await using IAsyncDisposable? ownedStream = stream as IAsyncDisposable;
@@ -691,6 +693,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             $"{options.BreakEvenActivationR},{options.StructureTrailActivationR},{options.AtrBufferMultiplier}," +
             $"{options.BreakEvenBufferAtr},{options.MinimumStopImprovementAtr},{options.MinimumStopImprovementTicks}," +
             $"{options.MinimumAnalysisBarsBetweenAmendments},{options.ExitOnAdverseStructureBreak}," +
+            $"neo-wave-exit={options.EnableNeoWaveInvalidationExit}:{options.NeoWaveInvalidationBufferAtr}," +
             $"{options.PreserveBracketTarget},{options.IncludeEstimatedExitCostsAtBreakEven}," +
             $"{options.EnableScaleOut},{options.MinimumRunnerFraction},{options.OpposingStructureProximityAtr}," +
             $"{options.MinimumAnalysisBarsBetweenReductions},{scaleOut}," +
@@ -778,38 +781,50 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             oanda);
     }
 
-    private static IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> CreateDefaultStrategies(
+    private static IReadOnlyList<StrategyFactoryEntry> CreateDefaultStrategies(
         BacktestRequest request)
     {
-        ProgressiveStrategyOptions strategyOptions = request.ResolveProgressiveStrategyOptions();
+        ProgressiveStrategyOptions defaultStrategyOptions = request.ResolveProgressiveStrategyOptions();
 
         if (request.StrategyAssignments is { Count: > 0 } assignments)
         {
             return assignments
-                .Select(assignment => (
-                    assignment.Id ?? $"{assignment.StrategyType}:{assignment.Instrument.Value}",
-                    assignment.StrategyType switch
-                    {
-                        "legacy" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, strategyOptions),
-                        "improved" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, strategyOptions),
-                        _ => throw new ArgumentException(
-                            $"Unknown strategy type '{assignment.StrategyType}'. Use legacy or improved.")
-                    },
-                    assignment.Instrument))
+                .Select(assignment =>
+                {
+                    // Phase 5: each assignment resolves its own Agent-interpretation options
+                    // instead of every assignment reusing one request-wide instance - only
+                    // assignments that declare AgentOptionsOverride actually diverge.
+                    ProgressiveStrategyOptions strategyOptions =
+                        assignment.AgentOptionsOverride ?? defaultStrategyOptions;
+                    return new StrategyFactoryEntry(
+                        assignment.Id ?? $"{assignment.StrategyType}:{assignment.Instrument.Value}",
+                        assignment.StrategyType switch
+                        {
+                            "legacy" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, strategyOptions),
+                            "improved" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, strategyOptions),
+                            _ => throw new ArgumentException(
+                                $"Unknown strategy type '{assignment.StrategyType}'. Use legacy or improved.")
+                        },
+                        assignment.Instrument,
+                        assignment.AnalysisOptionsOverride,
+                        assignment.Mode,
+                        assignment.PolicyBundleId,
+                        assignment.PolicyRevision);
+                })
                 .ToArray();
         }
 
-        var list = new List<(string, ITradingAgent, InstrumentKey)>();
+        var list = new List<StrategyFactoryEntry>();
         foreach (string raw in request.Strategies)
         {
             string id = NormalizeStrategyId(raw);
             ITradingAgent agent = id switch
             {
-                "legacy" or "legacy-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, strategyOptions),
-                "improved" or "improved-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, strategyOptions),
+                "legacy" or "legacy-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, defaultStrategyOptions),
+                "improved" or "improved-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, defaultStrategyOptions),
                 _ => throw new ArgumentException($"Unknown strategy '{raw}'. Use legacy or improved.")
             };
-            list.Add((
+            list.Add(new StrategyFactoryEntry(
                 id.StartsWith("legacy", StringComparison.Ordinal) ? "legacy" :
                 id.StartsWith("improved", StringComparison.Ordinal) ? "improved" : id,
                 agent,

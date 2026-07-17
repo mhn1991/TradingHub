@@ -5,6 +5,7 @@ using Brokers.Models;
 using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
 using ChartAnnotator.Models;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
 using Dashboard.Contracts;
 
@@ -46,7 +47,8 @@ internal static class Program
                 MinimumConfirmationBars = 2,
                 MinimumPersistenceBars = 2,
                 AdxCalibrationMinimumSamples = 20
-            }
+            },
+            NeoWave = new NeoWaveOptions { Enabled = true }
         };
         BarInterval[] intervals = [FiveMinutes, FifteenMinutes, OneHour];
         var aggregator = new MultiTimeframeAggregator(Instrument, intervals);

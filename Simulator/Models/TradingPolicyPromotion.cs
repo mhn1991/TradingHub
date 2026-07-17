@@ -42,7 +42,8 @@ public static class TradingPolicyPromotion
             RsiBollingerSignals = runtime.RsiBollingerSignals,
             DmiConfirmationEnabled = runtime.DmiConfirmationEnabled,
             CurrencyStrength = runtime.CurrencyStrength,
-            SetupCalibration = runtime.SetupCalibration
+            SetupCalibration = runtime.SetupCalibration,
+            NeoWaveEvidence = runtime.NeoWaveEvidence
         };
 
         return TradingPolicyProfile.Create(

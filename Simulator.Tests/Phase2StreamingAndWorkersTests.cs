@@ -1,3 +1,5 @@
+using Agent.Abstractions;
+using Agent.Models;
 using Agent.Strategies;
 using Brokers.Models;
 using ChartAnnotator.Engine;
@@ -6,6 +8,8 @@ using Simulator.Jobs;
 using Simulator.MarketData;
 using Simulator.Models;
 using Simulator.Services;
+using TradingCore.MarketData;
+using TradingCore.Pipeline;
 
 namespace Simulator.Tests;
 
@@ -184,6 +188,85 @@ public sealed class Phase2StreamingAndWorkersTests
         Assert.That(runtime.ToOcoFillPolicy(), Is.EqualTo(OcoFillPolicy.NearestToOpenFirst));
     }
 
+    /// <summary>
+    /// Multi-agent architecture Phase 6: the simulator's equivalent of Live's new
+    /// MarketSequence-based stale-candidate rejection (<c>LiveDecisionEpochCoordinator
+    /// .SubmitCandidate</c>) is <see cref="StrategyWorkerHost"/>'s existing, unmodified
+    /// out-of-order guard - since every frame for one strategy is processed strictly
+    /// sequentially through one persistent worker (no concurrent-dispatch race to produce a
+    /// "late" result in the first place), a stale/out-of-order frame is a hard, immediate
+    /// failure rather than something that could silently enter a later decision batch.
+    /// </summary>
+    [Test]
+    public async Task StrategyWorkerHost_OutOfOrderFrame_ThrowsInsteadOfSilentlyAccepting()
+    {
+        InstrumentKey instrument = new("FX:EUR/USD");
+        BarInterval interval = BarInterval.Minutes(1);
+        StrategySimulationSession session = StrategySimulationSession.Create(
+            "always-observe",
+            new AlwaysObserveTestAgent(interval),
+            new SimulationOptions
+            {
+                StartingBalance = 100_000m,
+                Leverage = 20m,
+                CommissionRate = 0m,
+                SpreadBasisPoints = 0m,
+                SlippageBasisPoints = 0m,
+                CloseOpenPositionsAtEnd = false
+            },
+            dataQualityOptions: new MarketDataQualityOptions { RequireIndicatorsReady = false, RejectGaps = false });
+        var key = new AgentInstanceKey(AgentInstanceKey.SimulatorDeploymentId, instrument, session.StrategyId, Guid.Empty, 0);
+        await using var host = new StrategyWorkerHost(session, channelCapacity: 4, key);
+
+        DateTimeOffset openTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        MarketFrame FrameAt(long sequence) => new()
+        {
+            Sequence = sequence,
+            AvailableAt = openTime.AddMinutes(sequence),
+            ExecutionCandle = MarketCandle.FromMid(new Candle
+            {
+                Instrument = instrument,
+                Interval = interval,
+                OpenTime = openTime.AddMinutes(sequence - 1),
+                CloseTime = openTime.AddMinutes(sequence),
+                Prices = new Ohlc(1.1m, 1.1005m, 1.0995m, 1.1002m),
+                IsComplete = true
+            }),
+            ClosedIntervals = new HashSet<BarInterval>(),
+            Snapshots = new Dictionary<BarInterval, ChartAnnotator.Models.AnalysisSnapshot>(),
+            InputStreamId = "test-stream",
+            IsWarmup = false,
+            IsLastCandle = false
+        };
+
+        Task<StrategyFrameResult> first = await host.EnqueueAsync(FrameAt(5));
+        await first;
+
+        // A frame at or before the last accepted sequence must never be silently admitted -
+        // exactly the guarantee LiveDecisionEpochCoordinator's MarketSequence check now provides
+        // on the live side for a late, concurrently-dispatched result.
+        Task<StrategyFrameResult> stale = await host.EnqueueAsync(FrameAt(3));
+        Assert.ThrowsAsync<InvalidOperationException>(async () => await stale);
+    }
+
+    private sealed class AlwaysObserveTestAgent(BarInterval interval) : ITradingAgent
+    {
+        public string Name => "always-observe";
+        public IReadOnlySet<BarInterval> RequiredIntervals { get; } = new HashSet<BarInterval> { interval };
+        public BarInterval TriggerInterval => interval;
+        public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.ProtectiveStopAndStrategyExit;
+
+        public Task<AgentDecision> EvaluateAsync(AgentMarketContext context, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AgentDecision
+            {
+                Action = AgentAction.Observe,
+                Instrument = context.Instrument,
+                Confidence = 0m,
+                CreatedAt = context.Timestamp,
+                Reason = "no setup"
+            });
+    }
+
     private static async Task<ComparativeSimulationResult> RunAsync(
         IReadOnlyList<Candle> candles,
         InstrumentKey instrument,
@@ -194,10 +277,10 @@ public sealed class Phase2StreamingAndWorkersTests
         string output = Path.Combine(Path.GetTempPath(), "th-phase2-eng", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(output);
         var strategyOptions = new ProgressiveStrategyOptions { Quantity = 1_000m, MinimumRewardRisk = 1.2m };
-        (string Id, Agent.Abstractions.ITradingAgent Agent, InstrumentKey Instrument)[] strategies =
+        StrategyFactoryEntry[] strategies =
         [
-            ("legacy", new LegacyProgressiveAgent(strategyOptions), instrument),
-            ("improved", new ImprovedProgressiveAgent(strategyOptions), instrument)
+            new("legacy", new LegacyProgressiveAgent(strategyOptions), instrument),
+            new("improved", new ImprovedProgressiveAgent(strategyOptions), instrument)
         ];
         var engine = new StreamingComparativeEngine(new EnumerablePagedCandleSource(candles), strategies);
         var runtime = new BacktestRuntimeOptions

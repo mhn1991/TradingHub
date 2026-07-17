@@ -51,6 +51,9 @@ export interface AnnotationParameters {
   bollingerWidthDirectionThresholdPercent?: number
   bollingerSqueezePercentile?: number
   bollingerWidePercentile?: number
+  cciPeriod?: number
+  smaFastPeriod?: number
+  smaSlowPeriod?: number
   swingLeftBars: number
   swingRightBars: number
   heavyAnalysisEveryCandles: number
@@ -438,6 +441,7 @@ export interface ReplayFrame {
   marketStructure?: MarketStructureSnapshot
   priceAction?: PriceActionSnapshot
   marketRegime?: MarketRegimeSnapshot
+  neoWave?: NeoWaveSnapshot
   confidence: ConfidenceScore
   analysisMicroseconds: number
 }
@@ -631,6 +635,35 @@ export interface PriceActionCalibrationSnapshot {
   rangeAtr90: number
 }
 
+export type PriceActionSetupType =
+  | 'BullishBreakRetestHold'
+  | 'BearishBreakRetestHold'
+  | 'BullishChoChRetestHold'
+  | 'BearishChoChRetestHold'
+  | 'BullishSweepDisplacement'
+  | 'BearishSweepDisplacement'
+  | 'BullishSweepChoCh'
+  | 'BearishSweepChoCh'
+
+export type PriceActionSetupPhase = 'Armed' | 'Triggered' | 'Invalidated' | 'Expired'
+
+export interface PriceActionSetup {
+  setupId: string
+  type: PriceActionSetupType
+  direction: PriceActionDirection
+  phase: PriceActionSetupPhase
+  armedAt: string
+  triggeredAt?: string | null
+  armedSequence: number
+  triggeredSequence?: number | null
+  confidence: number
+  referenceLevel?: number | null
+  entryReference?: number | null
+  reasonCode: string
+  explanation: string
+  sourceEventIds: string[]
+}
+
 export interface PriceActionSnapshot {
   bias: PriceActionDirection
   bullishScore: number
@@ -640,6 +673,8 @@ export interface PriceActionSnapshot {
   activeRetest: BreakRetestSnapshot
   latestLeg: PriceLegMetrics | null
   calibration: PriceActionCalibrationSnapshot
+  /** Composite setups; may be absent on older replay files. */
+  setups?: PriceActionSetup[]
 }
 
 export interface AdxAnalysisSnapshot {
@@ -657,6 +692,9 @@ export interface IndicatorSnapshot {
   bollingerMiddle: number | null
   bollingerUpper: number | null
   bollingerLower: number | null
+  cci?: number | null
+  sma50?: number | null
+  sma200?: number | null
   efficiencyRatio: number | null
   atrAnalysis?: AtrAnalysisSnapshot
   rsiAnalysis?: RsiAnalysisSnapshot
@@ -747,6 +785,93 @@ export interface MarketRegimeSnapshot {
   isTradeable: boolean
 }
 
+
+export type NeoWaveDirection = 'Neutral' | 'Up' | 'Down'
+export type NeoWavePatternType =
+  | 'Unknown'
+  | 'TrendSequence'
+  | 'ImpulseCandidate'
+  | 'ZigZagCorrection'
+  | 'FlatCorrection'
+  | 'TriangleCorrection'
+  | 'ComplexCorrection'
+export type NeoWaveHypothesisStatus = 'Possible' | 'Confirmed' | 'Preferred' | 'Invalidated'
+
+export interface MonoWave {
+  waveId: string
+  startTime: string
+  endTime: string
+  startConfirmedAt: string
+  endConfirmedAt: string
+  availableAt: string
+  startPrice: number
+  endPrice: number
+  direction: NeoWaveDirection
+  priceLength: number
+  timeLength: string
+  lengthAtr?: number | null
+  isConfirmed: boolean
+}
+
+export interface ProvisionalMonoWave {
+  waveId: string
+  startTime: string
+  currentTime: string
+  availableAt: string
+  startPrice: number
+  currentPrice: number
+  direction: NeoWaveDirection
+  priceLength: number
+  lengthAtr?: number | null
+}
+
+export interface NeoWaveInvalidationCondition {
+  comparison: 'None' | 'Below' | 'Above'
+  price?: number | null
+  description: string
+}
+
+export interface NeoWaveHypothesis {
+  hypothesisId: string
+  patternType: NeoWavePatternType
+  direction: NeoWaveDirection
+  degree: 'Micro' | 'Minor' | 'Intermediate' | 'Primary'
+  componentWaveIds: string[]
+  status: NeoWaveHypothesisStatus
+  structuralScore: number
+  maturity: number
+  availableAt: string
+  supportingRuleIds: string[]
+  violatedRuleIds: string[]
+  invalidation: NeoWaveInvalidationCondition
+}
+
+export interface NeoWaveQuality {
+  isReady: boolean
+  confirmedSwingCount: number
+  confirmedMonoWaveCount: number
+  hypothesisCount: number
+  prunedHypothesisCount: number
+  reasonCode: string
+}
+
+export interface NeoWaveSnapshot {
+  enabled: boolean
+  availableAt: string
+  confirmedMonoWaves: MonoWave[]
+  provisionalWave?: ProvisionalMonoWave | null
+  hypotheses: NeoWaveHypothesis[]
+  preferredHypothesisId?: string | null
+  structuralBias: NeoWaveDirection
+  structuralScore: number
+  maturity: number
+  conflictScore: number
+  invalidationPrice?: number | null
+  invalidationDistanceAtr?: number | null
+  reasonCodes: string[]
+  quality: NeoWaveQuality
+}
+
 export type ChannelDirection = 'Falling' | 'Sideways' | 'Rising'
 
 export interface PriceChannel {
@@ -775,6 +900,8 @@ export interface ChartLayers {
   priceAction?: boolean
   bollinger: boolean
   bollingerRegimes: boolean
+  movingAverages: boolean
+  cci: boolean
   rsiRelationships: boolean
   atr: boolean
   volume: boolean
@@ -785,6 +912,7 @@ export interface ChartLayers {
   donchian: boolean
   efficiencyRatio: boolean
   marketRegime: boolean
+  neoWave: boolean
 }
 
 export type LiveConnectionState =

@@ -12,6 +12,7 @@ using Simulator.MarketData;
 using Simulator.Models;
 using Simulator.Time;
 using TradingCore.MarketData;
+using TradingCore.Pipeline;
 using TradeManager;
 
 namespace Simulator.Tests;
@@ -550,7 +551,9 @@ public sealed class Phase4TrailingStopTests
             await sequential.ProcessFrameAsync(frame);
 
         StrategySimulationSession taskSession = CreateTestSession(OrderSide.Buy, interval);
-        await using var worker = new StrategyWorkerHost(taskSession, channelCapacity: 2);
+        var key = new AgentInstanceKey(
+            AgentInstanceKey.SimulatorDeploymentId, Instrument, taskSession.StrategyId, Guid.Empty, 0);
+        await using var worker = new StrategyWorkerHost(taskSession, channelCapacity: 2, key);
         Task<StrategyFrameResult[]> completion = await worker.EnqueueBatchAsync(frames);
         await completion;
 

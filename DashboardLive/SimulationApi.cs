@@ -14,6 +14,7 @@ using Simulator.Services;
 using TradeManager;
 using ChartAnnotator.Engine;
 using ChartAnnotator.Regime;
+using ChartAnnotator.NeoWave;
 using RiskManager.Conditions;
 using PortfolioManager.Risk;
 using PortfolioManager.Correlation;
@@ -1131,6 +1132,15 @@ public sealed record CreateSimulationRequest
     public int RegimePersistenceBars { get; init; } = 3;
     public decimal RegimeSoftSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.SoftMaximum;
     public decimal RegimeHardSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.HardMaximum;
+    /// <summary>Causal chart-only monowave/hypothesis analysis.</summary>
+    public bool NeoWaveEnabled { get; init; } = true;
+    /// <summary>Disabled, RecordOnly, SoftConfidence, SoftRiskReduction, or SoftConfidenceAndRisk.</summary>
+    public string NeoWaveEvidenceMode { get; init; } = "RecordOnly";
+    public string? NeoWaveEvidenceInterval { get; init; }
+    public decimal NeoWaveMinimumStructuralScore { get; init; } = 60m;
+    public decimal NeoWaveMaximumTrustedConflictScore { get; init; } = 40m;
+    public decimal NeoWaveMinimumRiskMultiplier { get; init; } = 0.75m;
+    public decimal NeoWaveMaximumConflictRiskReduction { get; init; } = 0.25m;
     public bool TradingConditionsEnabled { get; init; } = true;
     public string[] AllowedSessions { get; init; } = ["Asian", "London", "NewYork", "LondonNewYorkOverlap"];
     public int RolloverBlackoutMinutesBefore { get; init; } = 15;
@@ -1415,6 +1425,10 @@ public sealed record CreateSimulationRequest
                         MinimumPersistenceBars = RegimePersistenceBars,
                         MaximumTradeableSpreadAtr = RegimeSoftSpreadAtr,
                         HardMaximumSpreadAtr = RegimeHardSpreadAtr
+                    },
+                    NeoWave = new NeoWaveOptions
+                    {
+                        Enabled = NeoWaveEnabled
                     }
                 },
                 MarketRegimeRouting = new MarketRegimePolicyOptions { Enabled = RegimeEnabled },
@@ -1460,6 +1474,20 @@ public sealed record CreateSimulationRequest
                     StretchedFromValueAtrThreshold = ValueLocationStretchedAtrThreshold,
                     ConfidenceAdjustmentPerSignal = ValueLocationConfidenceAdjustment
                 },
+                NeoWaveEvidence = new NeoWaveEvidenceOptions
+                {
+                    // Property NeoWaveEvidenceMode (string) shadows the enum type — qualify fully.
+                    Mode = NeoWaveEnabled
+                        ? Enum.Parse<ChartAnnotator.NeoWave.NeoWaveEvidenceMode>(NeoWaveEvidenceMode, ignoreCase: true)
+                        : ChartAnnotator.NeoWave.NeoWaveEvidenceMode.Disabled,
+                    MinimumStructuralScore = NeoWaveMinimumStructuralScore,
+                    MaximumTrustedConflictScore = NeoWaveMaximumTrustedConflictScore,
+                    MinimumRiskMultiplier = NeoWaveMinimumRiskMultiplier,
+                    MaximumConflictRiskReduction = NeoWaveMaximumConflictRiskReduction
+                },
+                NeoWaveEvidenceInterval = string.IsNullOrWhiteSpace(NeoWaveEvidenceInterval)
+                    ? null
+                    : BarIntervalParser.Parse(NeoWaveEvidenceInterval),
                 CurrencyStrength = new CurrencyStrengthOptions
                 {
                     Enabled = CurrencyStrengthEnabled,
@@ -1586,6 +1614,8 @@ public sealed record PositionManagementRequest
     public decimal MinimumStopImprovementTicks { get; init; } = 1m;
     public int MinimumAnalysisBarsBetweenAmendments { get; init; } = 1;
     public bool ExitOnAdverseStructureBreak { get; init; }
+    public bool? EnableNeoWaveInvalidationExit { get; init; }
+    public decimal? NeoWaveInvalidationBufferAtr { get; init; }
     public bool PreserveBracketTarget { get; init; } = true;
     public bool IncludeEstimatedExitCostsAtBreakEven { get; init; } = true;
     public bool? EnableScaleOut { get; init; }
@@ -1639,6 +1669,10 @@ public sealed record PositionManagementRequest
         MinimumStopImprovementTicks = MinimumStopImprovementTicks,
         MinimumAnalysisBarsBetweenAmendments = MinimumAnalysisBarsBetweenAmendments,
         ExitOnAdverseStructureBreak = ExitOnAdverseStructureBreak,
+        EnableNeoWaveInvalidationExit =
+            EnableNeoWaveInvalidationExit ?? defaults.EnableNeoWaveInvalidationExit,
+        NeoWaveInvalidationBufferAtr =
+            NeoWaveInvalidationBufferAtr ?? defaults.NeoWaveInvalidationBufferAtr,
         PreserveBracketTarget = PreserveBracketTarget,
         IncludeEstimatedExitCostsAtBreakEven = IncludeEstimatedExitCostsAtBreakEven,
         EnableScaleOut = EnableScaleOut ?? defaults.EnableScaleOut,

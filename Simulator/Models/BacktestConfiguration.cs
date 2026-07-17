@@ -5,6 +5,7 @@ using Brokers.Models;
 using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Value;
 using RiskManager;
 using RiskManager.Safety;
@@ -17,6 +18,7 @@ using PortfolioManager.Risk;
 using Simulator.Execution;
 using Simulator.Financing;
 using RiskManager.Calibration;
+using TradingCore.Pipeline;
 
 namespace Simulator.Models;
 
@@ -175,6 +177,8 @@ public sealed record BacktestRuntimeOptions
     /// baskets configured, or the strategy's context never receives a snapshot to evaluate.
     /// </summary>
     public CurrencyStrengthEvidenceOptions CurrencyStrengthEvidence { get; init; } = new();
+    public NeoWaveEvidenceOptions NeoWaveEvidence { get; init; } = new();
+    public BarInterval? NeoWaveEvidenceInterval { get; init; }
     /// <summary>
     /// RSI-relationship and Bollinger-context signal evidence, applied to both Legacy
     /// and Improved. Previously unreachable from any Runtime/CLI/Dashboard path -
@@ -256,6 +260,8 @@ public sealed record BacktestRuntimeOptions
             MarketRegime = MarketRegimeRouting,
             ValueLocationEvidence = ValueLocationEvidence,
             CurrencyStrengthEvidence = CurrencyStrengthEvidence,
+            NeoWaveEvidence = NeoWaveEvidence,
+            NeoWaveInterval = NeoWaveEvidenceInterval,
             RsiBollingerSignals = RsiBollingerSignals,
             EnableDmiConfirmation = DmiConfirmationEnabled
         };
@@ -284,6 +290,13 @@ public sealed record BacktestRuntimeOptions
         MarketRegimeRouting.Validate();
         ValueLocationEvidence.Validate();
         CurrencyStrengthEvidence.Validate();
+        NeoWaveEvidence.Validate();
+        if (NeoWaveEvidence.Enabled && !AnnotationOptions.NeoWave.Enabled)
+        {
+            throw new ArgumentException(
+                "NEoWave evidence requires AnnotationOptions.NeoWave.Enabled.",
+                nameof(NeoWaveEvidence));
+        }
         RsiBollingerSignals.Validate();
         TradingConditions.Validate();
         PortfolioRisk.Validate();
@@ -461,6 +474,42 @@ public sealed record StrategyInstrumentAssignment
     public required InstrumentKey Instrument { get; init; }
     /// <summary>Optional override; defaults to "{StrategyType}:{Instrument.Value}".</summary>
     public string? Id { get; init; }
+
+    /// <summary>
+    /// Multi-agent architecture Phase 5: per-assignment Agent-interpretation override. Null
+    /// (the default) reuses <see cref="BacktestRequest.ResolveProgressiveStrategyOptions"/>
+    /// exactly as before this phase - only assignments that explicitly diverge pay for their own
+    /// options resolution.
+    /// </summary>
+    public ProgressiveStrategyOptions? AgentOptionsOverride { get; init; }
+
+    /// <summary>
+    /// Multi-agent architecture Phase 5: per-assignment computed-analysis override, resolved
+    /// through <c>Simulator.Engine.AnalysisProfileRegistry</c> (Phase 3). Null (the default)
+    /// reuses <c>StreamingComparativeEngineOptions.AnnotationOptions</c> exactly as before
+    /// this phase, so every assignment on one run still shares a single profile/engine unless a
+    /// caller explicitly opts an assignment out.
+    /// </summary>
+    public ChartAnnotationOptions? AnalysisOptionsOverride { get; init; }
+
+    /// <summary>
+    /// Multi-agent architecture Phase 5: declared execution disposition. Validated here (at most
+    /// one <see cref="AgentExecutionMode.Executable"/> assignment per instrument - see
+    /// <see cref="BacktestRequest.Validate"/>) and carried through to
+    /// <c>StrategyWorkerHost.Key</c>/<c>SimulatorAgentRuntime.Mode</c>, but - scope boundary,
+    /// stated explicitly per the approved plan - NOT YET wired into
+    /// <c>SharedPortfolioRuntime</c>/<c>ExecutionCoordinator</c>'s actual admission decisions.
+    /// That wiring is Phase 7 (deferred); do not mistake this validation for a completed
+    /// capital-safety guarantee.
+    /// </summary>
+    public AgentExecutionMode Mode { get; init; } = AgentExecutionMode.Shadow;
+
+    /// <summary>Multi-agent architecture Phase 5: optional policy-bundle identity, carried
+    /// through to this assignment's <c>AgentInstanceKey</c> for parity with the live host's
+    /// registration identity. Null (the default) keeps today's placeholder
+    /// (<c>Guid.Empty</c>/<c>0</c>) identity - see <c>StrategyWorkerHost</c>'s constructor.</summary>
+    public Guid? PolicyBundleId { get; init; }
+    public int? PolicyRevision { get; init; }
 }
 
 /// <summary>User/API request that starts a simulation job.</summary>
@@ -562,6 +611,23 @@ public sealed record BacktestRequest
                 .ToArray();
             if (ids.Distinct(StringComparer.Ordinal).Count() != ids.Length)
                 throw new ArgumentException("StrategyAssignments produced duplicate strategy ids.");
+
+            // Mirrors the live host's existing "one owner per instrument" rule
+            // (LiveEngineHostedService.RegisterAgentsAsync) - closes a real, previously-unflagged
+            // gap: before this phase the simulator had no shadow/executable concept per
+            // assignment at all, so two Executable assignments on one instrument in
+            // SharedPortfolioAccount mode would compete for capital with no "one owner" rule.
+            IEnumerable<InstrumentKey> instrumentsWithMultipleExecutables = assignments
+                .Where(assignment => assignment.Mode == AgentExecutionMode.Executable)
+                .GroupBy(assignment => assignment.Instrument)
+                .Where(group => group.Count() > 1)
+                .Select(group => group.Key);
+            if (instrumentsWithMultipleExecutables.FirstOrDefault() is { IsEmpty: false } duplicateInstrument)
+            {
+                throw new ArgumentException(
+                    $"{duplicateInstrument} has more than one Executable assignment. " +
+                    "At most one assignment per instrument may be Executable.");
+            }
         }
 
         // Inline fixtures use the inline capability set (includes 1s for tests).

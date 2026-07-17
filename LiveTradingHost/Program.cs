@@ -192,11 +192,17 @@ builder.Services.AddSingleton<ILiveQuoteStream>(services =>
         services.GetRequiredService<OandaInstrumentMap>(),
         services.GetRequiredService<TimeProvider>()));
 
-builder.Services.AddSingleton(services => new AgentSupervisor(
-    services.GetRequiredService<IBrokerClient>(),
-    services.GetRequiredService<LiveDecisionEpochCoordinator>(),
-    services.GetRequiredService<TimeProvider>(),
-    services.GetRequiredService<ILoggerFactory>().CreateLogger<AgentSupervisor>()));
+builder.Services.AddSingleton(services =>
+{
+    LiveHostRuntimeOptions hostOptions = services.GetRequiredService<LiveHostRuntimeOptions>();
+    return new AgentSupervisor(
+        services.GetRequiredService<IBrokerClient>(),
+        services.GetRequiredService<LiveDecisionEpochCoordinator>(),
+        services.GetRequiredService<TimeProvider>(),
+        services.GetRequiredService<ILoggerFactory>().CreateLogger<AgentSupervisor>(),
+        hostOptions.MaxConcurrentAgentEvaluations,
+        hostOptions.AgentEvaluationTimeout);
+});
 
 builder.Services.AddSingleton<ITradingAccountLease, FileTradingAccountLease>();
 builder.Services.AddSingleton<ITradingSafetyController>(services =>

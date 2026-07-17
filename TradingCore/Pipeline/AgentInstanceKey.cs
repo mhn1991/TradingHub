@@ -1,6 +1,6 @@
 using Brokers.Models;
 
-namespace LiveTrading.Agents;
+namespace TradingCore.Pipeline;
 
 /// <summary>
 /// Stable identity for one runtime Agent instance. Widened (multi-agent architecture Phase 2)
@@ -10,6 +10,13 @@ namespace LiveTrading.Agents;
 /// confirmation, shadow-only" instance running the same strategy type under two different
 /// promoted policy revisions - no longer collide in <c>AgentSupervisor._instances</c>.
 /// </summary>
+/// <remarks>
+/// Lives in <c>TradingCore.Pipeline</c> (moved from <c>LiveTrading.Agents</c> in Phase 4) so the
+/// shared <c>IAgentRuntime</c> contract - implemented independently by
+/// <c>Simulator.Engine.SimulatorAgentRuntime</c> and <c>LiveTrading.Agents.LiveAgentRuntime</c> -
+/// can expose one <c>Key</c> property without either environment-specific project depending on
+/// the other.
+/// </remarks>
 /// <param name="DeploymentId">
 /// No multi-deployment concept exists elsewhere in this codebase yet (single live host process
 /// per broker account today) - this is a fixed configuration value for now, carried for identity
@@ -36,4 +43,9 @@ public sealed record AgentInstanceKey(
 {
     /// <summary>Fixed value for the single-deployment-per-process model this phase supports.</summary>
     public const string DefaultDeploymentId = "live-practice";
+
+    /// <summary>Fixed value for the single-deployment-per-process model the simulator runs
+    /// under - distinct from <see cref="DefaultDeploymentId"/> so a diagnostic dump spanning
+    /// both environments can never mistake a simulator run for a live one.</summary>
+    public const string SimulatorDeploymentId = "simulator";
 }

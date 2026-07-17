@@ -382,7 +382,7 @@ public sealed class LegacyExitModeAndRiskTests
         };
         var engine = new StreamingComparativeEngine(
             new Simulator.Abstractions.EnumerableMarketCandleStream(candles),
-            [("legacy", (ITradingAgent)new LegacyProgressiveAgent(strategyOptions), instrument)]);
+            [new StrategyFactoryEntry("legacy", new LegacyProgressiveAgent(strategyOptions), instrument)]);
         ComparativeSimulationResult result = await engine.RunAsync(
             new StreamingComparativeEngineOptions
             {

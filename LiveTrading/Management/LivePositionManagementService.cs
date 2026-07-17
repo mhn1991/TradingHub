@@ -260,7 +260,9 @@ public sealed class LivePositionManagementService(
                 LastAmendmentSnapshotVersion = runtime.LastAmendmentSequence,
                 AnalysisBarsSinceLastAmendment = runtime.AnalysisBarsSinceLastAmendment,
                 EntryRegime = entryRegime,
-                EntryManagementProfileId = position.EntryManagementProfileId
+                EntryManagementProfileId = position.EntryManagementProfileId,
+                EntryNeoWaveHypothesisId = position.EntryNeoWaveHypothesisId,
+                EntryNeoWaveInvalidationPrice = position.EntryNeoWaveInvalidationPrice
             },
             analysis,
             scope,

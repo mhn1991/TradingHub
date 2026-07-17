@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Dashboard.Live;
+using ChartAnnotator.NeoWave;
 using RiskManager.Calibration;
 using RiskManager.Conditions;
 using Simulator.Execution;
@@ -30,6 +31,15 @@ public sealed class DashboardRequestRoundTripTests
             ExecutionFillModel = "VariableSyntheticSpread",
             StressExecutionScenario = "SpreadDouble",
             MaximumFillQuantityPerFrame = 250m,
+            NeoWaveEnabled = true,
+            NeoWaveEvidenceMode = "SoftRiskReduction",
+            NeoWaveEvidenceInterval = "15m",
+            NeoWaveMinimumStructuralScore = 65m,
+            LegacyPositionManagement = new PositionManagementRequest
+            {
+                EnableNeoWaveInvalidationExit = true,
+                NeoWaveInvalidationBufferAtr = 0.20m
+            },
             FinancingEnabled = true,
             FinancingRates = new Dictionary<string, FinancingRate>
             {
@@ -67,6 +77,12 @@ public sealed class DashboardRequestRoundTripTests
             Assert.That(mapped.Runtime.Execution.FillModel, Is.EqualTo(SimulationFillModel.VariableSyntheticSpread));
             Assert.That(mapped.Runtime.Execution.StressScenario, Is.EqualTo(StressExecutionScenario.SpreadDouble));
             Assert.That(mapped.Runtime.Execution.FillCapacity.MaximumQuantityPerExecutionFrame, Is.EqualTo(250m));
+            Assert.That(mapped.Runtime.AnnotationOptions.NeoWave.Enabled, Is.True);
+            Assert.That(mapped.Runtime.NeoWaveEvidence.Mode, Is.EqualTo(NeoWaveEvidenceMode.SoftRiskReduction));
+            Assert.That(mapped.Runtime.NeoWaveEvidence.MinimumStructuralScore, Is.EqualTo(65m));
+            Assert.That(mapped.Runtime.NeoWaveEvidenceInterval, Is.EqualTo(Brokers.Models.BarInterval.Minutes(15)));
+            Assert.That(mapped.Runtime.LegacyPositionManagement.EnableNeoWaveInvalidationExit, Is.True);
+            Assert.That(mapped.Runtime.LegacyPositionManagement.NeoWaveInvalidationBufferAtr, Is.EqualTo(0.20m));
             Assert.That(mapped.Runtime.Financing.InstrumentRates["FX:GBP/USD"].LongAnnualPercent, Is.EqualTo(-3.5m));
             Assert.That(() => mapped.Validate(), Throws.Nothing);
         });
@@ -85,6 +101,8 @@ public sealed class DashboardRequestRoundTripTests
         {
             Assert.That(request.RegimeEnabled, Is.True);
             Assert.That(request.ValueLocationEvidenceEnabled, Is.True);
+            Assert.That(request.NeoWaveEnabled, Is.True);
+            Assert.That(request.NeoWaveEvidenceMode, Is.EqualTo("RecordOnly"));
             Assert.That(request.AdaptiveRiskEnabled, Is.True);
             Assert.That(request.AutoCalibrateBeforeRun, Is.True);
             Assert.That(request.AutoCalibrateTrainMonths, Is.EqualTo(2));

@@ -39,6 +39,14 @@ public sealed record ResearchTrade
     public required decimal StopDistance { get; init; }
     public decimal PartialExitContributionR { get; init; }
     public decimal RunnerContributionR { get; init; }
+
+    /// <summary>Entry-time NEoWave evidence; null means disabled or not ready.</summary>
+    public string? NeoWaveHypothesisId { get; init; }
+    public string? NeoWavePatternType { get; init; }
+    public decimal? NeoWaveStructuralScore { get; init; }
+    public decimal? NeoWaveConflictScore { get; init; }
+    public decimal? NeoWaveInvalidationPrice { get; init; }
+    public decimal NeoWaveRiskMultiplier { get; init; } = 1m;
 }
 
 public static class ResearchMetrics

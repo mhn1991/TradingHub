@@ -2,6 +2,7 @@ using LiveTrading.Agents;
 using LiveTrading.Configuration;
 using LiveTrading.Tests.Phase3;
 using NUnit.Framework;
+using TradingCore.Pipeline;
 
 namespace LiveTrading.Tests.Configuration;
 

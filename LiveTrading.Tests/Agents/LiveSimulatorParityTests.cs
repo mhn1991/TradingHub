@@ -347,4 +347,56 @@ public sealed class LiveSimulatorParityTests
             Assert.That(enabledResult.Decision!.ReferencePrice, Is.EqualTo(disabledResult.Decision!.ReferencePrice));
         });
     }
+
+    /// <summary>
+    /// Multi-agent architecture Phase 5: a simulator assignment's <c>AnalysisOptionsOverride</c>
+    /// and an equivalent live-host assignment's resolved <c>LiveTradingPolicyBundle.FeaturePolicy
+    /// .AnnotationOptions</c> must resolve to the identical <see cref="AnalysisProfileKey"/> when
+    /// given the same options/required intervals. <c>Simulator.Engine.AnalysisProfileRegistry</c>
+    /// and <see cref="LiveAnalysisProfileRegistry"/> are independent instances (one per
+    /// environment, per foundational decision #5 - no shared concrete runtime class) - both are
+    /// documented, verified-by-reading thin wrappers around
+    /// <see cref="AnalysisProfileKey.Create"/> with <see cref="MetaLabelFeatureFactory.SchemaVersion"/>,
+    /// so exercising that shared factory directly (rather than adding a test-only cross-project
+    /// reference to Simulator, which LiveTrading.Tests does not otherwise need) proves the same
+    /// parity guarantee both registries individually rely on.
+    /// </summary>
+    [Test]
+    public void AnalysisProfileKey_SameOptions_MatchesAcrossSimulatorAndLiveRegistries()
+    {
+        var options = new ChartAnnotationOptions { RsiPeriod = 21, SwingLeftBars = 3, SwingRightBars = 3 };
+        IReadOnlySet<BarInterval> intervals = new HashSet<BarInterval> { M1 };
+
+        AnalysisProfileKey simulatorProfile = AnalysisProfileKey.Create(
+            options, intervals, MetaLabelFeatureFactory.SchemaVersion);
+        AnalysisProfileKey liveProfile = new LiveAnalysisProfileRegistry().GetOrCreateProfile(options, intervals);
+
+        Assert.That(simulatorProfile.ProfileHash, Is.EqualTo(liveProfile.ProfileHash));
+        Assert.That(simulatorProfile, Is.EqualTo(liveProfile));
+    }
+
+    /// <summary>Divergent options must still diverge identically on both sides - the parity
+    /// guarantee above would be vacuous if the underlying factory simply ignored its input.</summary>
+    [Test]
+    public void AnalysisProfileKey_DifferentOptions_DivergesConsistently()
+    {
+        IReadOnlySet<BarInterval> intervals = new HashSet<BarInterval> { M1 };
+        var liveRegistry = new LiveAnalysisProfileRegistry();
+
+        AnalysisProfileKey simulatorDefault = AnalysisProfileKey.Create(
+            new ChartAnnotationOptions(), intervals, MetaLabelFeatureFactory.SchemaVersion);
+        AnalysisProfileKey simulatorOverride = AnalysisProfileKey.Create(
+            new ChartAnnotationOptions { RsiPeriod = 21 }, intervals, MetaLabelFeatureFactory.SchemaVersion);
+        AnalysisProfileKey liveDefault = liveRegistry.GetOrCreateProfile(new ChartAnnotationOptions(), intervals);
+        AnalysisProfileKey liveOverride = liveRegistry.GetOrCreateProfile(
+            new ChartAnnotationOptions { RsiPeriod = 21 }, intervals);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(simulatorOverride.ProfileHash, Is.Not.EqualTo(simulatorDefault.ProfileHash));
+            Assert.That(liveOverride.ProfileHash, Is.Not.EqualTo(liveDefault.ProfileHash));
+            Assert.That(simulatorDefault.ProfileHash, Is.EqualTo(liveDefault.ProfileHash));
+            Assert.That(simulatorOverride.ProfileHash, Is.EqualTo(liveOverride.ProfileHash));
+        });
+    }
 }

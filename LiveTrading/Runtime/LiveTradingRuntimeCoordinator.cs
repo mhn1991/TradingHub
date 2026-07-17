@@ -10,6 +10,7 @@ using LiveTrading.Reconciliation;
 using LiveTrading.Registry;
 using PortfolioManager.Risk;
 using RiskManager.Safety;
+using TradingCore.Pipeline;
 
 namespace LiveTrading.Runtime;
 

@@ -15,7 +15,8 @@ public sealed class DecisionEpochCoordinatorTests
     private static readonly InstrumentKey Gbp = new("FX:GBP/USD");
 
     private static LiveTradeCandidate Candidate(
-        InstrumentKey instrument, string strategyId, string decisionId, long epoch, DateTimeOffset decisionTime) => new()
+        InstrumentKey instrument, string strategyId, string decisionId, long epoch, DateTimeOffset decisionTime,
+        long marketSequence = 0) => new()
     {
         CandidateId = Guid.NewGuid().ToString("N"),
         DecisionId = decisionId,
@@ -24,6 +25,7 @@ public sealed class DecisionEpochCoordinatorTests
         Action = AgentAction.Buy,
         DecisionTime = decisionTime,
         DecisionEpoch = epoch,
+        MarketSequence = marketSequence,
         RawConfidence = 0.7m,
         MultiTimeframeAlignment = 1m,
         EntryRegime = MarketRegime.TrendingUp,
@@ -194,5 +196,80 @@ public sealed class DecisionEpochCoordinatorTests
         coordinator.NotifyEvaluated(epoch, Gbp);
 
         Assert.That(coordinator.ClosedEpochs.TryRead(out _), Is.False);
+    }
+
+    [Test]
+    public async Task SubmitCandidate_ExactDuplicateDecision_IsRejectedAndCounted()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var coordinator = new LiveDecisionEpochCoordinator(
+            [Eur], clock, new LiveDecisionEpochCoordinatorOptions { BarrierTimeout = TimeSpan.FromSeconds(30) },
+            NullLogger<LiveDecisionEpochCoordinator>.Instance);
+        DateTimeOffset closeTime = clock.GetUtcNow();
+        long epoch = LiveDecisionEpochCoordinator.EpochFor(closeTime);
+
+        coordinator.SubmitCandidate(Candidate(Eur, "strategy-1", "decision-1", epoch, closeTime));
+        // Exact duplicate: same instrument/strategy/decision - must be rejected, not double-counted.
+        coordinator.SubmitCandidate(Candidate(Eur, "strategy-1", "decision-1", epoch, closeTime));
+        coordinator.NotifyEvaluated(epoch, Eur);
+
+        LiveDecisionEpochBatch batch = await coordinator.ClosedEpochs.ReadAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(batch.OrderedCandidates, Has.Count.EqualTo(1));
+            Assert.That(batch.RejectedDuplicateCandidateCount, Is.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public async Task SubmitCandidate_StaleMarketSequence_IsRejectedAndCounted()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var coordinator = new LiveDecisionEpochCoordinator(
+            [Eur], clock, new LiveDecisionEpochCoordinatorOptions { BarrierTimeout = TimeSpan.FromSeconds(30) },
+            NullLogger<LiveDecisionEpochCoordinator>.Instance);
+        DateTimeOffset closeTime = clock.GetUtcNow();
+        long epoch = LiveDecisionEpochCoordinator.EpochFor(closeTime);
+
+        // Opens the epoch group under sequence 1.
+        coordinator.SubmitCandidate(Candidate(Eur, "strategy-1", "decision-1", epoch, closeTime, marketSequence: 1));
+        // A newer market update for the same instrument has already begun.
+        coordinator.NotifyMarketSequence(Eur, 2);
+        // A late-arriving candidate still computed under the now-stale sequence must be discarded.
+        coordinator.SubmitCandidate(Candidate(Eur, "strategy-2", "decision-2", epoch, closeTime, marketSequence: 1));
+        coordinator.NotifyEvaluated(epoch, Eur);
+
+        LiveDecisionEpochBatch batch = await coordinator.ClosedEpochs.ReadAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(batch.OrderedCandidates, Has.Count.EqualTo(1));
+            Assert.That(batch.OrderedCandidates.Single().DecisionId, Is.EqualTo("decision-1"));
+            Assert.That(batch.RejectedStaleCandidateCount, Is.EqualTo(1));
+        });
+    }
+
+    [Test]
+    public async Task SubmitCandidate_SequenceAtOrAboveLatest_IsAccepted()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var coordinator = new LiveDecisionEpochCoordinator(
+            [Eur], clock, new LiveDecisionEpochCoordinatorOptions { BarrierTimeout = TimeSpan.FromSeconds(30) },
+            NullLogger<LiveDecisionEpochCoordinator>.Instance);
+        DateTimeOffset closeTime = clock.GetUtcNow();
+        long epoch = LiveDecisionEpochCoordinator.EpochFor(closeTime);
+
+        coordinator.NotifyMarketSequence(Eur, 5);
+        coordinator.SubmitCandidate(Candidate(Eur, "strategy-1", "decision-1", epoch, closeTime, marketSequence: 5));
+        coordinator.NotifyEvaluated(epoch, Eur);
+
+        LiveDecisionEpochBatch batch = await coordinator.ClosedEpochs.ReadAsync();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(batch.OrderedCandidates, Has.Count.EqualTo(1));
+            Assert.That(batch.RejectedStaleCandidateCount, Is.EqualTo(0));
+        });
     }
 }

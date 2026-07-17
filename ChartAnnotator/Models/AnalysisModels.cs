@@ -1,5 +1,6 @@
 using Brokers.Models;
 using ChartAnnotator.Regime;
+using ChartAnnotator.NeoWave;
 
 namespace ChartAnnotator.Models;
 
@@ -354,6 +355,12 @@ public sealed record IndicatorSnapshot
     public decimal? BollingerMiddle { get; init; }
     public decimal? BollingerUpper { get; init; }
     public decimal? BollingerLower { get; init; }
+    /// <summary>Commodity Channel Index (Lambert), typically period 20.</summary>
+    public decimal? Cci { get; init; }
+    /// <summary>Simple moving average of close (default period 50).</summary>
+    public decimal? Sma50 { get; init; }
+    /// <summary>Simple moving average of close (default period 200).</summary>
+    public decimal? Sma200 { get; init; }
 
     /// <summary>
     /// Incremental Kaufman-style Efficiency Ratio for the current bar. Distinct
@@ -380,7 +387,10 @@ public sealed record IndicatorPoint(
     AtrAnalysisSnapshot? AtrAnalysis = null,
     RsiAnalysisSnapshot? RsiAnalysis = null,
     BollingerAnalysisSnapshot? BollingerAnalysis = null,
-    VolumeAnalysisSnapshot? VolumeAnalysis = null);
+    VolumeAnalysisSnapshot? VolumeAnalysis = null,
+    decimal? Cci = null,
+    decimal? Sma50 = null,
+    decimal? Sma200 = null);
 
 public sealed record ConfidenceContribution(
     string Rule,
@@ -408,6 +418,7 @@ public sealed record AnalysisSnapshot
     public MarketStructureSnapshot MarketStructure { get; init; } = MarketStructureSnapshot.Empty;
     public PriceActionSnapshot PriceAction { get; init; } = PriceActionSnapshot.Empty;
     public MarketRegimeSnapshot MarketRegime { get; init; } = MarketRegimeSnapshot.Unknown;
+    public NeoWaveSnapshot NeoWave { get; init; } = NeoWaveSnapshot.Disabled;
     public IReadOnlyList<AnchoredValueReference> ValueReferences { get; init; } = [];
     public required ConfidenceScore Confidence { get; init; }
 }

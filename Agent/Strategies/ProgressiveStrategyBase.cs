@@ -3,6 +3,7 @@ using Agent.Models;
 using Brokers.Models;
 using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Models;
+using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
 using ChartAnnotator.Value;
 
@@ -148,6 +149,28 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                     CurrencyStrengthDifferential = currencyStrength.Differential
                 };
             }
+        }
+
+        if (Options.NeoWaveEvidence.Enabled && decision.Action is AgentAction.Buy or AgentAction.Sell)
+        {
+            NeoWaveDecisionEvidence neoWave = NeoWaveEvidenceEvaluator.Evaluate(
+                context.Analysis.Get(Options.EffectiveNeoWaveInterval),
+                decision.Action == AgentAction.Buy,
+                Options.NeoWaveEvidence);
+            decision = decision with
+            {
+                Confidence = Math.Clamp(decision.Confidence + neoWave.ConfidenceAdjustment, 0m, 100m),
+                NeoWavePatternType = neoWave.PatternType,
+                NeoWaveDirection = neoWave.Direction,
+                NeoWaveHypothesisId = neoWave.HypothesisId,
+                NeoWaveStructuralScore = neoWave.StructuralScore,
+                NeoWaveMaturity = neoWave.Maturity,
+                NeoWaveConflictScore = neoWave.ConflictScore,
+                NeoWaveInvalidationPrice = neoWave.InvalidationPrice,
+                NeoWaveInvalidationDistanceAtr = neoWave.InvalidationDistanceAtr,
+                NeoWaveReasonCodes = neoWave.ReasonCodes,
+                NeoWaveRiskMultiplier = neoWave.RiskMultiplier
+            };
         }
 
         return decision;

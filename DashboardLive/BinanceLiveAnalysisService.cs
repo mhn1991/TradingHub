@@ -43,16 +43,7 @@ internal sealed class BinanceLiveAnalysisService : BackgroundService
         _logger = logger;
         _options = options.Value;
         (_instrument, _interval) = _options.Validate();
-        _annotationOptions = new ChartAnnotationOptions
-        {
-            AtrPeriod = 14,
-            RsiPeriod = 14,
-            BollingerPeriod = 20,
-            BollingerStandardDeviations = 2m,
-            SwingLeftBars = 2,
-            SwingRightBars = 2,
-            HeavyAnalysisEveryCandles = 6
-        };
+        _annotationOptions = WorkspaceAnalysis.CreateOptions();
         _analysis = new LiveAnalysisState(
             _instrument,
             _interval,

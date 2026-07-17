@@ -64,9 +64,9 @@ public sealed class StrategyDecisionPipelineFactoryWiringTests
             Quantity = 1_000m,
             MinimumRewardRisk = 1.2m
         };
-        (string Id, Agent.Abstractions.ITradingAgent Agent, InstrumentKey Instrument)[] strategies =
+        Simulator.Engine.StrategyFactoryEntry[] strategies =
         [
-            ("legacy", new LegacyProgressiveAgent(strategyOptions), instrument)
+            new("legacy", new LegacyProgressiveAgent(strategyOptions), instrument)
         ];
 
         var engine = new StreamingComparativeEngine(

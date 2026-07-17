@@ -49,7 +49,13 @@ public static class ResearchTradeMapper
             MaximumAdverseExcursionR = trade.MaximumAdverseExcursionR ?? 0m,
             StopDistance = stopDistance,
             PartialExitContributionR = partialR,
-            RunnerContributionR = runnerR
+            RunnerContributionR = runnerR,
+            NeoWaveHypothesisId = trade.EntryNeoWaveHypothesisId,
+            NeoWavePatternType = trade.EntryNeoWavePatternType,
+            NeoWaveStructuralScore = trade.EntryNeoWaveStructuralScore,
+            NeoWaveConflictScore = trade.EntryNeoWaveConflictScore,
+            NeoWaveInvalidationPrice = trade.EntryNeoWaveInvalidationPrice,
+            NeoWaveRiskMultiplier = Math.Clamp(trade.NeoWaveRiskMultiplier ?? 1m, 0m, 1m)
         };
     }
 

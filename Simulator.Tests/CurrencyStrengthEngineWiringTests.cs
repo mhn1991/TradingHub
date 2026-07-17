@@ -49,7 +49,7 @@ public sealed class CurrencyStrengthEngineWiringTests
         });
 
         var capturingAgent = new ContextCapturingAgent(OneMinute);
-        var engine = new StreamingComparativeEngine(stream, [("capture", (ITradingAgent)capturingAgent, GbpUsd)]);
+        var engine = new StreamingComparativeEngine(stream, [new StrategyFactoryEntry("capture", capturingAgent, GbpUsd)]);
 
         string output = Path.Combine(Path.GetTempPath(), "tradinghub-currency-strength", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(output);

@@ -340,16 +340,8 @@ internal sealed class BinanceWorkspaceMarketData
         return _snapshots.GetOrAdd(cacheKey, static _ => new SnapshotEntry());
     }
 
-    private static ChartAnnotationOptions CreateAnnotationOptions() => new()
-    {
-        AtrPeriod = 14,
-        RsiPeriod = 14,
-        BollingerPeriod = 20,
-        BollingerStandardDeviations = 2m,
-        SwingLeftBars = 2,
-        SwingRightBars = 2,
-        HeavyAnalysisEveryCandles = 6
-    };
+    private static ChartAnnotationOptions CreateAnnotationOptions() =>
+        WorkspaceAnalysis.CreateOptions();
 
     private static WorkspaceAsset Asset(string symbol, string baseAsset, string quoteAsset) =>
         new(

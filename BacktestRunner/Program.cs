@@ -474,6 +474,9 @@ Options:
   --er-period 14
   --no-trading-conditions (session/rollover/spread/stale-data protection is on by default)
   --no-adaptive-risk (drawdown/volatility-scaled risk is on by default)
+  --neo-wave                              (enable causal wave analysis; RecordOnly by default)
+  --neo-wave-mode RecordOnly|SoftConfidence|SoftRiskReduction|SoftConfidenceAndRisk
+  --neo-wave-interval 2h                 (default: strategy trend interval)
   --maximum-portfolio-heat-percent 1.5
   --fill-model MidpointPlusConfiguredSpread|VariableSyntheticSpread|StressExecution
   --stress-scenario Base|SpreadDouble|SlippageTriple|GapStress|StopAmendmentFailure|ConnectionLoss|CorrelationShock|CombinedStress
@@ -528,6 +531,8 @@ Options:
   --legacy-break-even-r 1.0
   --legacy-structure-r 1.5
   --legacy-atr-buffer 0.25
+  --legacy-neo-wave-invalidation-exit
+  --legacy-neo-wave-invalidation-buffer-atr 0.10
   --improved-trailing-mode disabled|break-even|structure-atr
   --improved-management-interval 15m      (legacy alias for main interval)
   --improved-fast-management-interval 5m
@@ -537,6 +542,8 @@ Options:
   --improved-break-even-r 1.0
   --improved-structure-r 2.0
   --improved-atr-buffer 0.25
+  --improved-neo-wave-invalidation-exit
+  --improved-neo-wave-invalidation-buffer-atr 0.10
 
 Credentials (only needed when downloading):
   Oanda__AccountId / OANDA_ACCOUNT_ID

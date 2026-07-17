@@ -80,8 +80,8 @@ public sealed class SharedPortfolioIntegrationTests
             var engine = new StreamingComparativeEngine(
                 new EnumerableMarketCandleStream(candles),
                 [
-                    ("strategy-a", (ITradingAgent)new OneShotEntryAgent(interval), instrument),
-                    ("strategy-b", (ITradingAgent)new OneShotEntryAgent(interval), instrument)
+                    new StrategyFactoryEntry("strategy-a", new OneShotEntryAgent(interval), instrument),
+                    new StrategyFactoryEntry("strategy-b", new OneShotEntryAgent(interval), instrument)
                 ]);
             ComparativeSimulationResult result = await engine.RunAsync(
                 new StreamingComparativeEngineOptions
@@ -246,7 +246,7 @@ public sealed class SharedPortfolioIntegrationTests
             var engine = new StreamingComparativeEngine(
                 new EnumerableMarketCandleStream(candles),
                 sides.Select((side, index) =>
-                        ($"strategy-{index}", (ITradingAgent)new DirectedEntryAgent(interval, side), instrument))
+                        new StrategyFactoryEntry($"strategy-{index}", new DirectedEntryAgent(interval, side), instrument))
                     .ToArray());
             ComparativeSimulationResult result = await engine.RunAsync(
                 new StreamingComparativeEngineOptions

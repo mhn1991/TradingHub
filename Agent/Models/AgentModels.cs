@@ -1,6 +1,7 @@
 using Brokers.Models;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
+using ChartAnnotator.NeoWave;
 
 namespace Agent.Models;
 
@@ -99,6 +100,19 @@ public sealed record AgentDecision
     public IReadOnlyList<string> TrendQualityReasonCodes { get; init; } = [];
     public IReadOnlyList<string> CurrencyStrengthReasonCodes { get; init; } = [];
     public decimal? CurrencyStrengthDifferential { get; init; }
+
+    /// <summary>Optional causal wave-structure evidence. Null/empty when disabled or unavailable.</summary>
+    public NeoWavePatternType? NeoWavePatternType { get; init; }
+    public NeoWaveDirection? NeoWaveDirection { get; init; }
+    public string? NeoWaveHypothesisId { get; init; }
+    public decimal? NeoWaveStructuralScore { get; init; }
+    public decimal? NeoWaveMaturity { get; init; }
+    public decimal? NeoWaveConflictScore { get; init; }
+    public decimal? NeoWaveInvalidationPrice { get; init; }
+    public decimal? NeoWaveInvalidationDistanceAtr { get; init; }
+    public IReadOnlyList<string> NeoWaveReasonCodes { get; init; } = [];
+    /// <summary>Bounded to 0..1; NEoWave evidence can reduce but never increase risk.</summary>
+    public decimal? NeoWaveRiskMultiplier { get; init; }
 }
 
 public sealed class MultiTimeframeAnalysis

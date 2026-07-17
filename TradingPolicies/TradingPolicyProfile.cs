@@ -75,6 +75,20 @@ public sealed record TradingPolicyProfile
         ArgumentNullException.ThrowIfNull(FeaturePolicy);
         AgentOptions.Validate();
         FeaturePolicy.SetupCalibration.Validate();
+        FeaturePolicy.NeoWaveEvidence.Validate();
+        FeaturePolicy.AnnotationOptions.NeoWave.Validate();
+        if (AgentOptions.NeoWaveEvidence != FeaturePolicy.NeoWaveEvidence)
+        {
+            throw new ArgumentException(
+                "AgentOptions.NeoWaveEvidence must match FeaturePolicy.NeoWaveEvidence.",
+                nameof(FeaturePolicy));
+        }
+        if (AgentOptions.NeoWaveEvidence.Enabled && !FeaturePolicy.AnnotationOptions.NeoWave.Enabled)
+        {
+            throw new ArgumentException(
+                "NEoWave Agent evidence requires NEoWave chart analysis to be enabled.",
+                nameof(FeaturePolicy));
+        }
         PositionSizing.Validate();
         AdaptiveRisk.Validate();
         PortfolioRisk.Validate();

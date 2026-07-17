@@ -1,6 +1,7 @@
 using Brokers.Models;
 using LiveTrading.Agents;
 using TradeManager;
+using TradingCore.Pipeline;
 
 namespace LiveTrading.Configuration;
 

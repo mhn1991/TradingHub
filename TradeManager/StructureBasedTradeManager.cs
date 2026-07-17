@@ -28,7 +28,8 @@ public enum TradeManagementExitReason
     AdverseStructure,
     ProfitFloorBreached,
     MaximumGivebackBreached,
-    EquityProtectionBreach
+    EquityProtectionBreach,
+    NeoWaveInvalidation
 }
 
 /// <summary>
@@ -120,6 +121,21 @@ public record PositionManagementOptions
     public decimal MinimumStopImprovementTicks { get; init; } = 1m;
     public int MinimumAnalysisBarsBetweenAmendments { get; init; } = 1;
     public bool ExitOnAdverseStructureBreak { get; init; }
+
+    /// <summary>
+    /// When enabled, an open position exits after price crosses the NEoWave invalidation
+    /// level captured at entry. The rule never follows a newly reinterpreted wave count:
+    /// the hypothesis and invalidation level are pinned to the position at entry.
+    /// Disabled by default until shadow attribution demonstrates value.
+    /// </summary>
+    public bool EnableNeoWaveInvalidationExit { get; init; }
+
+    /// <summary>
+    /// Optional ATR-normalised confirmation buffer beyond the entry-pinned invalidation
+    /// price. Zero means the executable price only needs to cross the invalidation level.
+    /// </summary>
+    public decimal NeoWaveInvalidationBufferAtr { get; init; } = 0.10m;
+
     public bool PreserveBracketTarget { get; init; } = true;
     public bool IncludeEstimatedExitCostsAtBreakEven { get; init; } = true;
 
@@ -369,6 +385,7 @@ public record PositionManagementOptions
             AtrBufferMultiplier < 0m || BreakEvenBufferAtr < 0m ||
             MinimumStopImprovementAtr < 0m || MinimumStopImprovementTicks < 0m ||
             MinimumAnalysisBarsBetweenAmendments < 1 ||
+            NeoWaveInvalidationBufferAtr < 0m ||
             MinimumRunnerFraction is < 0m or >= 1m ||
             OpposingStructureProximityAtr < 0m ||
             MinimumAnalysisBarsBetweenReductions < 1 ||
@@ -503,6 +520,16 @@ public sealed record ManagedTradeState
     public int AnalysisBarsSinceLastAmendment { get; init; } = int.MaxValue;
     public MarketRegime EntryRegime { get; init; } = MarketRegime.Unknown;
     public string EntryManagementProfileId { get; init; } = "default";
+
+    /// <summary>Preferred directional wave hypothesis captured at entry, for audit only.</summary>
+    public string? EntryNeoWaveHypothesisId { get; init; }
+
+    /// <summary>
+    /// Structural invalidation price captured at entry. It is immutable for the position
+    /// and may be used only when <see cref="PositionManagementOptions.EnableNeoWaveInvalidationExit"/>
+    /// is explicitly enabled.
+    /// </summary>
+    public decimal? EntryNeoWaveInvalidationPrice { get; init; }
 }
 
 public sealed record PositionReductionRecommendation
@@ -604,6 +631,9 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         decimal openProfitR = favourableMove / initialRisk;
         decimal maximumFavourableR = Math.Max(openProfitR, trade.MaximumFavourableExcursionR);
         bool adverseBreak = IsAdverseBreak(trade.Side, analysis.MarketStructure.Break);
+        decimal? atr = analysis.Indicators.Atr is decimal atrValue && atrValue > 0m
+            ? atrValue
+            : null;
 
         // Account/strategy-level equity protection overrides every other rule below,
         // regardless of scope - it's a safety escalation, not a technical management rule.
@@ -641,6 +671,28 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
             }
         }
 
+        if (includeThesis &&
+            _options.EnableNeoWaveInvalidationExit &&
+            trade.EntryNeoWaveInvalidationPrice is decimal neoWaveInvalidation)
+        {
+            decimal confirmationBuffer = (atr ?? 0m) * _options.NeoWaveInvalidationBufferAtr;
+            bool invalidated = trade.Side == OrderSide.Buy
+                ? trade.CurrentPrice < neoWaveInvalidation - confirmationBuffer
+                : trade.CurrentPrice > neoWaveInvalidation + confirmationBuffer;
+            if (invalidated)
+            {
+                string hypothesis = string.IsNullOrWhiteSpace(trade.EntryNeoWaveHypothesisId)
+                    ? "entry wave hypothesis"
+                    : $"entry wave hypothesis '{trade.EntryNeoWaveHypothesisId}'";
+                return Exit(
+                    openProfitR,
+                    TradeManagementExitReason.NeoWaveInvalidation,
+                    "NeoWaveEntryHypothesisInvalidated",
+                    $"Price crossed the {hypothesis} invalidation level {neoWaveInvalidation} " +
+                    $"with an ATR confirmation buffer of {confirmationBuffer}.");
+            }
+        }
+
         if (includeThesis && _options.ExitOnAdverseStructureBreak && adverseBreak)
         {
             return Exit(
@@ -652,10 +704,6 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
 
         ProfitProtectionFloor? floor = includeMechanical
             ? FindProfitProtectionFloor(maximumFavourableR)
-            : null;
-
-        decimal? atr = analysis.Indicators.Atr is decimal atrValue && atrValue > 0m
-            ? atrValue
             : null;
 
         // P2: profit-floor / giveback prefer stop advancement first. Hard exit is only a

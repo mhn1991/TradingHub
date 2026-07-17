@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using QuantResearch.Analysis;
 using QuantResearch.Calibration;
 using QuantResearch.Models;
 using QuantResearch.Validation;
@@ -42,6 +43,7 @@ public static class Program
             {
                 "walk-forward" => await RunWalkForwardAsync(args).ConfigureAwait(false),
                 "monte-carlo" => await RunMonteCarloAsync(args).ConfigureAwait(false),
+                "neo-wave-attribution" => await RunNeoWaveAttributionAsync(args).ConfigureAwait(false),
                 "ablation" => await RunAblationAsync(args).ConfigureAwait(false),
                 "sensitivity" => await RunSensitivityAsync(args).ConfigureAwait(false),
                 "calibrate-setups" => await RunCalibrateSetupsAsync(args).ConfigureAwait(false),
@@ -149,6 +151,56 @@ public static class Program
         }
 
         Console.WriteLine($"Wrote Monte Carlo report(s) to {outputDirectory}");
+        return 0;
+    }
+
+    private static async Task<int> RunNeoWaveAttributionAsync(string[] args)
+    {
+        if (args.Length < 2 || !Guid.TryParse(args[1], out Guid simulationId))
+        {
+            Console.Error.WriteLine(
+                "Usage: neo-wave-attribution <simulation-id> [--jobs-directory dir] [--output dir] " +
+                "[--minimum-samples n]");
+            return 1;
+        }
+
+        string jobsDirectory = ReadOption(args, "--jobs-directory") ??
+            Path.Combine(".cache", "simulation-jobs");
+        string outputDirectory = ReadOption(args, "--output") ??
+            Path.Combine("research", "neo-wave-attribution", simulationId.ToString("N"));
+        int minimumSamples = int.TryParse(ReadOption(args, "--minimum-samples"), out int parsedMinimum)
+            ? parsedMinimum
+            : 5;
+
+        var options = new NeoWaveAttributionOptions { MinimumCohortSamples = minimumSamples };
+        options.Validate();
+
+        var repository = new FileSimulationJobRepository(jobsDirectory);
+        SimulationJobSnapshot? snapshot = await repository.GetAsync(simulationId).ConfigureAwait(false);
+        if (snapshot?.OutputDirectory is not string simulationOutputDirectory)
+        {
+            Console.Error.WriteLine(
+                $"No completed simulation found for id '{simulationId}' under '{jobsDirectory}'.");
+            return 1;
+        }
+
+        Directory.CreateDirectory(outputDirectory);
+        foreach (StrategyProgressSnapshot strategy in snapshot.Strategies)
+        {
+            IReadOnlyList<SimulatedTradeRecord> trades = await PersistedTradeReader
+                .ReadAsync(simulationOutputDirectory, strategy.StrategyId)
+                .ConfigureAwait(false);
+            IReadOnlyList<ResearchTrade> researchTrades =
+                ResearchTradeMapper.ToResearchTrades(trades);
+            NeoWaveAttributionReport report =
+                NeoWaveAttribution.Analyze(researchTrades, options);
+            await WriteJsonAsync(
+                    Path.Combine(outputDirectory, $"{strategy.StrategyId}.json"),
+                    report)
+                .ConfigureAwait(false);
+        }
+
+        Console.WriteLine($"Wrote NEoWave attribution report(s) to {outputDirectory}");
         return 0;
     }
 
@@ -388,6 +440,7 @@ public static class Program
             Usage:
               dotnet run --project QuantResearchRunner -- walk-forward plan.json
               dotnet run --project QuantResearchRunner -- monte-carlo simulation-id [--jobs-directory dir] [--output dir]
+              dotnet run --project QuantResearchRunner -- neo-wave-attribution simulation-id [--jobs-directory dir] [--output dir] [--minimum-samples n]
               dotnet run --project QuantResearchRunner -- ablation plan.json
               dotnet run --project QuantResearchRunner -- sensitivity plan.json
               dotnet run --project QuantResearchRunner -- calibrate-setups plan.json [--artifacts-directory dir]

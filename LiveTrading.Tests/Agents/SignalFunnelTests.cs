@@ -54,7 +54,7 @@ public sealed class SignalFunnelTests
             Decision = decision
         };
 
-        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1);
+        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1, marketSequence: 1);
 
         decimal expected = MetaLabelFeatureFactory.ComputeMultiTimeframeAlignment(decision.Action, analysis);
         Assert.That(candidate.MultiTimeframeAlignment, Is.EqualTo(expected));
@@ -73,7 +73,7 @@ public sealed class SignalFunnelTests
             Decision = decision
         };
 
-        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1);
+        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1, marketSequence: 1);
 
         Assert.That(candidate.EntryRegime, Is.EqualTo(MarketRegime.TrendingUp));
     }
@@ -91,7 +91,7 @@ public sealed class SignalFunnelTests
             Decision = decision
         };
 
-        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1);
+        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1, marketSequence: 1);
 
         Assert.That(candidate.EntryRegime, Is.EqualTo(analysis.Get(M1).MarketRegime.Regime));
     }
@@ -110,7 +110,7 @@ public sealed class SignalFunnelTests
             // SetupCalibration and MetaLabel left null - both features disabled for this pipeline run.
         };
 
-        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1);
+        LiveTradeCandidate candidate = SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1, marketSequence: 1);
 
         Assert.Multiple(() =>
         {
@@ -132,6 +132,6 @@ public sealed class SignalFunnelTests
         };
 
         Assert.Throws<InvalidOperationException>(
-            () => SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1));
+            () => SignalFunnel.BuildCandidate("strategy-1", Context(analysis, now), result, decisionEpoch: 1, marketSequence: 1));
     }
 }

@@ -23,6 +23,15 @@ public sealed record LiveDecisionEpochBatch
     public required DateTimeOffset EpochCloseTime { get; init; }
     public required IReadOnlyList<LiveTradeCandidate> OrderedCandidates { get; init; }
     public required IReadOnlyList<InstrumentKey> UnavailableInstruments { get; init; }
+    /// <summary>Multi-agent architecture Phase 6: candidates rejected by <see
+    /// cref="LiveDecisionEpochCoordinator.SubmitCandidate"/> for this epoch because their
+    /// <c>MarketSequence</c> was stale relative to the instrument's latest known sequence - the
+    /// concrete mechanism that discards a late timed-out evaluation's result instead of letting
+    /// it enter a decision batch a newer market update has already superseded (Section 12).</summary>
+    public int RejectedStaleCandidateCount { get; init; }
+    /// <summary>Multi-agent architecture Phase 6: exact-duplicate
+    /// (Instrument, StrategyId, DecisionId) submissions rejected for this epoch.</summary>
+    public int RejectedDuplicateCandidateCount { get; init; }
 }
 
 /// <summary>
@@ -43,6 +52,13 @@ public sealed class LiveDecisionEpochCoordinator
     private readonly Dictionary<long, EpochGroup> _openEpochs = [];
     private readonly HashSet<long> _completedEpochs = [];
     private readonly Queue<long> _completedEpochOrder = [];
+    /// <summary>Multi-agent architecture Phase 6: the latest <c>MarketSequence</c> known for each
+    /// instrument, updated via <see cref="NotifyMarketSequence"/> at the start of dispatch for a
+    /// market update - before, not after, agent evaluation - so a still-in-flight evaluation for
+    /// a stale sequence can be detected the moment a newer update begins, even though its own
+    /// <see cref="SubmitCandidate"/> call (if any) only happens once that stale evaluation
+    /// eventually completes.</summary>
+    private readonly Dictionary<InstrumentKey, long> _latestMarketSequence = [];
     private readonly CancellationTokenSource _lifetimeCts = new();
     private readonly Channel<LiveDecisionEpochBatch> _closedEpochs;
 
@@ -75,6 +91,21 @@ public sealed class LiveDecisionEpochCoordinator
     public static long EpochFor(DateTimeOffset entryCandleCloseTime) =>
         entryCandleCloseTime.ToUnixTimeMilliseconds();
 
+    /// <summary>Multi-agent architecture Phase 6: records that a new market update has begun
+    /// dispatch for <paramref name="instrument"/>, establishing the "currently expected" sequence
+    /// <see cref="SubmitCandidate"/> validates late-arriving candidates against. Monotonic per
+    /// instrument - an out-of-order/repeated call (should never happen given the pump loop
+    /// processes one instrument's updates strictly sequentially) is a no-op rather than moving
+    /// the watermark backwards.</summary>
+    public void NotifyMarketSequence(InstrumentKey instrument, long marketSequence)
+    {
+        lock (_gate)
+        {
+            if (!_latestMarketSequence.TryGetValue(instrument, out long current) || marketSequence > current)
+                _latestMarketSequence[instrument] = marketSequence;
+        }
+    }
+
     public void SubmitCandidate(LiveTradeCandidate candidate)
     {
         ArgumentNullException.ThrowIfNull(candidate);
@@ -89,7 +120,42 @@ public sealed class LiveDecisionEpochCoordinator
                 return;
             }
 
+            // Phase 6: a candidate computed under a sequence older than the instrument's latest
+            // known sequence came from an evaluation a newer market update has already
+            // superseded (typically a per-agent timeout that completed late) - discard it rather
+            // than admitting it into whichever epoch happens to still be open.
+            if (_latestMarketSequence.TryGetValue(candidate.Instrument, out long latestSequence) &&
+                candidate.MarketSequence < latestSequence)
+            {
+                _logger.LogWarning(
+                    "Ignoring stale candidate {DecisionId} for {Instrument}: computed under sequence " +
+                    "{CandidateSequence}, but {LatestSequence} is already known.",
+                    candidate.DecisionId,
+                    candidate.Instrument,
+                    candidate.MarketSequence,
+                    latestSequence);
+                // Only record the rejection on an already-open group - a stale candidate must not
+                // itself spin up a fresh epoch group/barrier timer for an epoch nothing else has
+                // touched.
+                if (_openEpochs.TryGetValue(candidate.DecisionEpoch, out EpochGroup? staleGroup))
+                    staleGroup.RejectedStaleCandidateCount++;
+                return;
+            }
+
             EpochGroup group = GetOrCreateGroupUnsafe(candidate.DecisionEpoch);
+            var decisionKey = (candidate.Instrument, candidate.StrategyId, candidate.DecisionId);
+            if (!group.SubmittedDecisions.Add(decisionKey))
+            {
+                _logger.LogWarning(
+                    "Ignoring exact-duplicate candidate {DecisionId} for {StrategyId}/{Instrument} in epoch {Epoch}.",
+                    candidate.DecisionId,
+                    candidate.StrategyId,
+                    candidate.Instrument,
+                    candidate.DecisionEpoch);
+                group.RejectedDuplicateCandidateCount++;
+                return;
+            }
+
             group.Candidates.Add(candidate);
         }
     }
@@ -169,7 +235,9 @@ public sealed class LiveDecisionEpochCoordinator
                 Epoch = group.Epoch,
                 EpochCloseTime = group.EpochCloseTime,
                 OrderedCandidates = ordered,
-                UnavailableInstruments = unavailable
+                UnavailableInstruments = unavailable,
+                RejectedStaleCandidateCount = group.RejectedStaleCandidateCount,
+                RejectedDuplicateCandidateCount = group.RejectedDuplicateCandidateCount
             };
         }
 
@@ -207,6 +275,9 @@ public sealed class LiveDecisionEpochCoordinator
         public required DateTimeOffset EpochCloseTime { get; init; }
         public List<LiveTradeCandidate> Candidates { get; } = [];
         public HashSet<InstrumentKey> ReportedInstruments { get; } = [];
+        public HashSet<(InstrumentKey Instrument, string StrategyId, string DecisionId)> SubmittedDecisions { get; } = [];
+        public int RejectedStaleCandidateCount { get; set; }
+        public int RejectedDuplicateCandidateCount { get; set; }
         public TaskCompletionSource Complete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }

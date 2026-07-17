@@ -103,7 +103,8 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
                 StrategyAllocationMultiplier = strategyMultiplier,
                 EquityProtectionMultiplier = equityMultiplier,
                 CalibrationMultiplier = Clamp(candidate.SetupCalibration.RiskMultiplier),
-                MetaLabelMultiplier = Clamp(candidate.MetaLabel.RiskMultiplier)
+                MetaLabelMultiplier = Clamp(candidate.MetaLabel.RiskMultiplier),
+                NeoWaveMultiplier = Clamp(candidate.NeoWaveRiskMultiplier)
             });
             decimal combined = Clamp(risk.CombinedMultiplier * conditionMultiplier);
             var riskAudit = new LiveRiskBudgetAudit
@@ -111,6 +112,7 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
                 BaseRiskAmount = baseRisk,
                 SetupMultiplier = risk.CalibrationMultiplier,
                 MetaLabelMultiplier = risk.MetaLabelMultiplier,
+                NeoWaveMultiplier = risk.NeoWaveMultiplier,
                 RegimeMultiplier = risk.RegimeMultiplier,
                 TradingConditionMultiplier = conditionMultiplier,
                 DrawdownMultiplier = risk.DrawdownMultiplier,
@@ -329,6 +331,7 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
             return Reject(candidate, "ModelRejected", "Setup calibration or meta-label rejected the candidate.");
         if (candidate.MetaLabel.RiskMultiplier is < 0m or > 1m ||
             candidate.SetupCalibration.RiskMultiplier is < 0m or > 1m ||
+            candidate.NeoWaveRiskMultiplier is < 0m or > 1m ||
             candidate.TradingCondition?.RiskMultiplier is < 0m or > 1m)
             return Reject(candidate, "InvalidRiskMultiplier", "All candidate risk multipliers must remain within 0..1.");
         return null;
@@ -373,6 +376,13 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
             MetaLabelProbability = candidate.MetaLabel.Probability,
             MetaLabelModelVersion = candidate.MetaLabel.ModelVersion,
             MetaLabelReasonCode = candidate.MetaLabel.ReasonCode,
+            NeoWaveRiskMultiplier = candidate.NeoWaveRiskMultiplier,
+            NeoWaveHypothesisId = candidate.NeoWaveHypothesisId,
+            NeoWavePatternType = candidate.NeoWavePatternType,
+            NeoWaveDirection = candidate.NeoWaveDirection,
+            NeoWaveStructuralScore = candidate.NeoWaveStructuralScore,
+            NeoWaveConflictScore = candidate.NeoWaveConflictScore,
+            NeoWaveInvalidationPrice = candidate.NeoWaveInvalidationPrice,
             FinalRiskBudgetMultiplier = combinedMultiplier
         };
     }

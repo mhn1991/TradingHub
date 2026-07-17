@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Threading.Channels;
 using Simulator.Models;
+using TradingCore.Pipeline;
 
 namespace Simulator.Engine;
 
@@ -11,6 +12,7 @@ public interface IStrategyWorkerHost : IAsyncDisposable
     StrategySimulationSession Session { get; }
     Task Completion { get; }
     int WorkerId { get; }
+    AgentInstanceKey Key { get; }
 
     ValueTask<Task<StrategyFrameResult>> EnqueueAsync(
         MarketFrame frame,
@@ -50,7 +52,8 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
 
     public StrategyWorkerHost(
         StrategySimulationSession session,
-        int channelCapacity)
+        int channelCapacity,
+        AgentInstanceKey key)
     {
         Session = session ?? throw new ArgumentNullException(nameof(session));
         if (channelCapacity < 1)
@@ -58,7 +61,8 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
 
         StrategyId = session.StrategyId;
         StrategyName = session.StrategyName;
-        WorkerId = Environment.CurrentManagedThreadId;
+        Key = key ?? throw new ArgumentNullException(nameof(key));
+        WorkerId = Key.GetHashCode();
 
         _channel = Channel.CreateBounded<StrategyFrameEnvelope>(new BoundedChannelOptions(channelCapacity)
         {
@@ -76,6 +80,7 @@ public sealed class StrategyWorkerHost : IStrategyWorkerHost
     public StrategySimulationSession Session { get; }
     public Task Completion => _loop;
     public int WorkerId { get; private set; }
+    public AgentInstanceKey Key { get; }
 
     public async ValueTask<Task<StrategyFrameResult>> EnqueueAsync(
         MarketFrame frame,

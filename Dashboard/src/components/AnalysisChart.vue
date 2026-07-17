@@ -20,23 +20,25 @@ const props = defineProps<{
 }>()
 
 const width = 1240
-// Shorter canvas keeps the chart full-width while leaving room for detail panels below.
-const height = 640
+// Slightly taller canvas to fit CCI without crowding price/RSI/ATR/ER.
+const height = 700
 const plotLeft = 24
 const plotRight = 92
 const plotWidth = width - plotLeft - plotRight
 const regimeTop = 12
 const regimeHeight = 8
 const priceTop = 24
-const priceHeight = 286
-const volumeTop = 318
-const volumeHeight = 46
-const rsiTop = 372
-const rsiHeight = 78
-const atrTop = 458
-const atrHeight = 66
-const erTop = 532
-const erHeight = 58
+const priceHeight = 260
+const volumeTop = 292
+const volumeHeight = 40
+const rsiTop = 340
+const rsiHeight = 56
+const cciTop = 404
+const cciHeight = 56
+const atrTop = 468
+const atrHeight = 52
+const erTop = 528
+const erHeight = 50
 const erDomain = { min: 0, max: 1 }
 const minimumWindowSize = 20
 
@@ -146,6 +148,10 @@ const priceDomain = computed(() => {
     if (props.layers.bollinger) {
       include(frame.indicators.bollingerUpper)
       include(frame.indicators.bollingerLower)
+    }
+    if (props.layers.movingAverages) {
+      include(frame.indicators.sma50)
+      include(frame.indicators.sma200)
     }
     if (props.layers.donchian) {
       include(frame.indicators.donchian?.upper)
@@ -284,14 +290,43 @@ const bollingerBand = computed(() => {
 const bollingerUpper = computed(() => indicatorPath('bollingerUpper'))
 const bollingerMiddle = computed(() => indicatorPath('bollingerMiddle'))
 const bollingerLower = computed(() => indicatorPath('bollingerLower'))
+const sma50Path = computed(() => numericPath(
+  (frame) => frame.indicators.sma50 ?? null,
+  yPrice,
+))
+const sma200Path = computed(() => numericPath(
+  (frame) => frame.indicators.sma200 ?? null,
+  yPrice,
+))
 const rsiPath = computed(() => numericPath(
   (frame) => frame.indicators.rsi,
   yRsi,
+))
+const cciPath = computed(() => numericPath(
+  (frame) => frame.indicators.cci ?? null,
+  yCci,
 ))
 const atrPath = computed(() => numericPath(
   (frame) => frame.indicators.atrAnalysis?.normalizedPercent ?? null,
   yAtr,
 ))
+
+const cciDomain = computed(() => {
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
+  for (const frame of visibleFrames.value) {
+    const value = frame.indicators.cci
+    if (value == null || !Number.isFinite(value)) continue
+    min = Math.min(min, value)
+    max = Math.max(max, value)
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: -200, max: 200 }
+  // Keep classic ±100 bands visible even when CCI is quiet.
+  min = Math.min(min, -100)
+  max = Math.max(max, 100)
+  const padding = Math.max((max - min) * 0.08, 10)
+  return { min: min - padding, max: max + padding }
+})
 
 const donchianBand = computed(() => {
   const upper: string[] = []
@@ -481,6 +516,40 @@ const swingVisuals = computed(() => (analysisFrame.value?.swings ?? [])
     fresh: swing.confirmedAt === analysisFrame.value?.availableAt,
   })))
 
+const neoWaveVisuals = computed(() => {
+  if (!props.layers.neoWave) return []
+  const waveSnapshot = analysisFrame.value?.neoWave
+  if (!waveSnapshot?.enabled) return []
+  const preferred = waveSnapshot.hypotheses.find(item => item.hypothesisId === waveSnapshot.preferredHypothesisId)
+  const preferredIds = new Set(preferred?.componentWaveIds ?? [])
+  // Number monowaves by full history order so labels stay stable when the viewport clips older legs.
+  return (waveSnapshot.confirmedMonoWaves ?? [])
+    .map((wave, index) => ({ wave, index: index + 1 }))
+    .filter(item => intersectsVisibleTimeRange(item.wave.startTime, item.wave.endTime))
+    .map((item) => ({
+      wave: item.wave,
+      index: item.index,
+      x1: xForTime(item.wave.startTime),
+      y1: yPrice(item.wave.startPrice),
+      x2: xForTime(item.wave.endTime),
+      y2: yPrice(item.wave.endPrice),
+      preferred: preferredIds.has(item.wave.waveId),
+    }))
+})
+
+const provisionalNeoWaveVisual = computed(() => {
+  if (!props.layers.neoWave) return null
+  const wave = analysisFrame.value?.neoWave?.provisionalWave
+  if (!wave) return null
+  return {
+    wave,
+    x1: xForTime(wave.startTime),
+    y1: yPrice(wave.startPrice),
+    x2: xForTime(wave.currentTime),
+    y2: yPrice(wave.currentPrice),
+  }
+})
+
 const priceActionVisuals = computed(() => {
   if (props.layers.priceAction === false) return []
   const events = new Map<string, NonNullable<ReplayFrame['priceAction']>['events'][number]>()
@@ -637,6 +706,9 @@ const focusIndicators = computed(() => {
   return {
     time: timestamp(frame.availableAt),
     rsi: frame.indicators.rsi?.toFixed(1) ?? '—',
+    cci: frame.indicators.cci?.toFixed(1) ?? '—',
+    sma50: frame.indicators.sma50 != null ? price(frame.indicators.sma50) : '—',
+    sma200: frame.indicators.sma200 != null ? price(frame.indicators.sma200) : '—',
     atr: frame.indicators.atrAnalysis?.normalizedPercent?.toFixed(3) ?? '—',
     atrRegime: frame.indicators.atrAnalysis?.regime ?? 'Unknown',
     bb: frame.indicators.bollingerAnalysis?.widthRegime ?? '—',
@@ -658,6 +730,7 @@ const panelBadges = computed(() => {
   if (!frame) return null
   return {
     rsi: frame.indicators.rsi?.toFixed(1) ?? null,
+    cci: frame.indicators.cci?.toFixed(1) ?? null,
     atr: frame.indicators.atrAnalysis?.normalizedPercent?.toFixed(3) ?? null,
     er: frame.indicators.efficiencyRatio?.toFixed(2) ?? null,
     volume: compact(frame.candle.volume),
@@ -857,6 +930,17 @@ function isTimeVisible(value: string): boolean {
   return candidate >= times[0] && candidate <= lastClose
 }
 
+/** True when [start, end] overlaps the visible candle window (including legs that fully span it). */
+function intersectsVisibleTimeRange(start: string, end: string): boolean {
+  const times = visibleOpenTimes.value
+  if (!times.length) return false
+  const rangeStart = Math.min(new Date(start).getTime(), new Date(end).getTime())
+  const rangeEnd = Math.max(new Date(start).getTime(), new Date(end).getTime())
+  const viewportStart = times[0]
+  const viewportEnd = new Date(visibleFrames.value.at(-1)!.candle.closeTime).getTime()
+  return rangeEnd >= viewportStart && rangeStart <= viewportEnd
+}
+
 function priceForTime(value: string): number {
   const frames = visibleFrames.value
   if (!frames.length) return 0
@@ -885,6 +969,11 @@ function yRsi(value: number): number {
   return rsiTop + ((100 - value) / 100) * rsiHeight
 }
 
+function yCci(value: number): number {
+  const domain = cciDomain.value
+  return cciTop + ((domain.max - value) / (domain.max - domain.min)) * cciHeight
+}
+
 function yAtr(value: number): number {
   const domain = atrDomain.value
   return atrTop + ((domain.max - value) / (domain.max - domain.min)) * atrHeight
@@ -908,9 +997,9 @@ function numericPath(
 }
 
 function indicatorPath(
-  property: 'bollingerUpper' | 'bollingerMiddle' | 'bollingerLower',
+  property: 'bollingerUpper' | 'bollingerMiddle' | 'bollingerLower' | 'sma50' | 'sma200',
 ): string {
-  return numericPath((frame) => frame.indicators[property], yPrice)
+  return numericPath((frame) => frame.indicators[property] ?? null, yPrice)
 }
 
 function pathNumber(value: number): string {
@@ -1124,6 +1213,9 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       </div>
       <div class="chart-readout-metrics">
         <span><em>RSI</em>{{ focusIndicators.rsi }}</span>
+        <span><em>CCI</em>{{ focusIndicators.cci }}</span>
+        <span><em>SMA50</em>{{ focusIndicators.sma50 }}</span>
+        <span><em>SMA200</em>{{ focusIndicators.sma200 }}</span>
         <span><em>ATR%</em>{{ focusIndicators.atr }}</span>
         <span><em>BB</em>{{ focusIndicators.bb }}</span>
         <span><em>ADX</em>{{ focusIndicators.adx }}</span>
@@ -1182,6 +1274,9 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <clipPath id="rsi-clip">
           <rect :x="plotLeft" :y="rsiTop" :width="plotWidth" :height="rsiHeight" />
         </clipPath>
+        <clipPath id="cci-clip">
+          <rect :x="plotLeft" :y="cciTop" :width="plotWidth" :height="cciHeight" />
+        </clipPath>
         <clipPath id="atr-clip">
           <rect :x="plotLeft" :y="atrTop" :width="plotWidth" :height="atrHeight" />
         </clipPath>
@@ -1196,6 +1291,7 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       <rect class="chart-panel" :x="plotLeft" :y="priceTop" :width="plotWidth" :height="priceHeight" rx="4" />
       <rect class="chart-panel" :x="plotLeft" :y="volumeTop" :width="plotWidth" :height="volumeHeight" rx="4" />
       <rect class="chart-panel" :x="plotLeft" :y="rsiTop" :width="plotWidth" :height="rsiHeight" rx="4" />
+      <rect class="chart-panel" :x="plotLeft" :y="cciTop" :width="plotWidth" :height="cciHeight" rx="4" />
       <rect class="chart-panel" :x="plotLeft" :y="atrTop" :width="plotWidth" :height="atrHeight" rx="4" />
       <rect class="chart-panel" :x="plotLeft" :y="erTop" :width="plotWidth" :height="erHeight" rx="4" />
 
@@ -1255,6 +1351,8 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         >{{ tick.label }}</text>
         <text :x="plotLeft + 10" :y="rsiTop + 15" class="panel-label">RSI · 14</text>
         <text v-if="panelBadges?.rsi" :x="plotLeft + plotWidth - 8" :y="rsiTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.rsi }}</text>
+        <text :x="plotLeft + 10" :y="cciTop + 15" class="panel-label">CCI · 20</text>
+        <text v-if="panelBadges?.cci" :x="plotLeft + plotWidth - 8" :y="cciTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.cci }}</text>
         <text :x="plotLeft + 10" :y="volumeTop + 15" class="panel-label">TICK VOLUME</text>
         <text v-if="panelBadges?.volume" :x="plotLeft + plotWidth - 8" :y="volumeTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.volume }}</text>
         <text :x="plotLeft + 10" :y="atrTop + 15" class="panel-label">ATR · NORMALIZED %</text>
@@ -1370,6 +1468,9 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <path v-if="layers.bollinger" :d="bollingerMiddle" class="indicator-line bollinger-middle" />
         <path v-if="layers.bollinger" :d="bollingerLower" class="indicator-line bollinger-edge" />
 
+        <path v-if="layers.movingAverages" :d="sma50Path" class="indicator-line sma-fast" />
+        <path v-if="layers.movingAverages" :d="sma200Path" class="indicator-line sma-slow" />
+
         <polygon
           v-if="layers.donchian && donchianBand"
           :points="donchianBand"
@@ -1428,6 +1529,32 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
             <circle :cx="item.x2" :cy="item.priceY2" r="4.5" />
             <text :x="item.x2 + 7" :y="item.priceY2 - 7">{{ item.label }}</text>
             <title>{{ item.label }} · strength {{ item.relationship.strength.toFixed(1) }}</title>
+          </g>
+        </g>
+
+        <g v-if="layers.neoWave" class="neo-wave-structure">
+          <g
+            v-for="item in neoWaveVisuals"
+            :key="item.wave.waveId"
+            :class="['neo-wave-leg', item.wave.direction.toLowerCase(), { preferred: item.preferred }]"
+          >
+            <line :x1="item.x1" :y1="item.y1" :x2="item.x2" :y2="item.y2" />
+            <text :x="(item.x1 + item.x2) / 2" :y="(item.y1 + item.y2) / 2 - 6">{{ item.index }}</text>
+            <title>
+              Confirmed monowave {{ item.index }} · {{ item.wave.direction }} ·
+              {{ price(item.wave.startPrice) }} → {{ price(item.wave.endPrice) }} ·
+              confirmed {{ timestamp(item.wave.endConfirmedAt) }}
+              {{ item.preferred ? ' · preferred hypothesis leg' : '' }}
+            </title>
+          </g>
+          <g v-if="provisionalNeoWaveVisual" class="neo-wave-leg provisional">
+            <line
+              :x1="provisionalNeoWaveVisual.x1"
+              :y1="provisionalNeoWaveVisual.y1"
+              :x2="provisionalNeoWaveVisual.x2"
+              :y2="provisionalNeoWaveVisual.y2"
+            />
+            <title>Provisional wave — not confirmed and never used as confirmed history.</title>
           </g>
         </g>
 
@@ -1533,6 +1660,15 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
             <circle :cx="item.x2" :cy="item.rsiY2" r="4" />
           </g>
         </g>
+      </g>
+
+      <g v-if="layers.cci" class="cci-guides">
+        <rect :x="plotLeft" :y="yCci(100)" :width="plotWidth" :height="yCci(-100) - yCci(100)" />
+        <line v-for="level in [-100, 0, 100]" :key="`cci-guide-${level}`" :x1="plotLeft" :x2="plotLeft + plotWidth" :y1="yCci(level)" :y2="yCci(level)" />
+        <text v-for="level in [-100, 0, 100]" :key="`cci-${level}`" :x="plotLeft + plotWidth + 10" :y="yCci(level) + 4">{{ level }}</text>
+      </g>
+      <g v-if="layers.cci" clip-path="url(#cci-clip)" class="cci-panel">
+        <path :d="cciPath" class="cci-line" />
       </g>
 
       <g v-if="layers.atr" clip-path="url(#atr-clip)" class="atr-panel">
