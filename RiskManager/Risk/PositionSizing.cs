@@ -49,6 +49,21 @@ public sealed record PositionSizingOptions
     /// </summary>
     public decimal? AssumedOpenPositionRiskDistancePercentOfPrice { get; init; }
 
+    /// <summary>
+    /// When true, scale the sized quantity by a linear multiplier of
+    /// <see cref="Agent.Models.AgentDecision.Confidence"/> between
+    /// <see cref="ConfidenceMultiplierFloorConfidence"/> and
+    /// <see cref="ConfidenceMultiplierCeilingConfidence"/>. Confidence is a rule score, not a
+    /// calibrated probability, so the multiplier is deliberately bounded to never exceed
+    /// <see cref="MaximumConfidenceMultiplier"/> (1.0) - it can only shrink size on a weak
+    /// score, never leverage up on a strong one.
+    /// </summary>
+    public bool EnableConfidenceScaledSizing { get; init; }
+    public decimal ConfidenceMultiplierFloorConfidence { get; init; } = 40m;
+    public decimal ConfidenceMultiplierCeilingConfidence { get; init; } = 85m;
+    public decimal MinimumConfidenceMultiplier { get; init; } = 0.5m;
+    public decimal MaximumConfidenceMultiplier { get; init; } = 1.0m;
+
     public void Validate()
     {
         if (!Enum.IsDefined(Mode) ||
@@ -65,7 +80,13 @@ public sealed record PositionSizingOptions
             Leverage <= 0m ||
             EstimatedRoundTripCostBasisPoints < 0m ||
             MaximumOpenRiskPercentOfEquity is <= 0m or > 100m ||
-            AssumedOpenPositionRiskDistancePercentOfPrice is <= 0m or > 100m)
+            AssumedOpenPositionRiskDistancePercentOfPrice is <= 0m or > 100m ||
+            ConfidenceMultiplierFloorConfidence is < 0m or > 100m ||
+            ConfidenceMultiplierCeilingConfidence is < 0m or > 100m ||
+            ConfidenceMultiplierCeilingConfidence <= ConfidenceMultiplierFloorConfidence ||
+            MinimumConfidenceMultiplier is <= 0m or > 1m ||
+            MaximumConfidenceMultiplier is <= 0m or > 1m ||
+            MaximumConfidenceMultiplier < MinimumConfidenceMultiplier)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(PositionSizingOptions),
@@ -150,15 +171,17 @@ public sealed class PositionSizer : IPositionSizer
 
         decimal reference = decision.ReferencePrice ?? decision.LimitPrice ?? decision.StopPrice ?? 0m;
 
-        // FixedQuantity is the backwards-compatible/manual mode. It intentionally does
-        // not invent account-currency conversions or reject legacy decisions that do not
-        // carry a reference/stop. Safe Dashboard and CLI defaults use risk-based sizing.
+        // FixedQuantity remains backwards compatible when legacy callers do not supply
+        // monetary-risk inputs. When the entry, stop, conversion and account are available,
+        // calculate stop risk and margin as well so the live portfolio allocator can enforce
+        // the same account-level caps as risk-based sizing. Missing inputs therefore remain
+        // usable by legacy code, but fail closed later at live portfolio admission.
         if (_options.Mode == PositionSizingMode.FixedQuantity)
         {
             decimal fixedQuantity = context.RequestedQuantity > 0m
                 ? context.RequestedQuantity
                 : _options.FixedQuantity;
-            fixedQuantity *= context.RiskBudgetMultiplier;
+            fixedQuantity *= context.RiskBudgetMultiplier * ConfidenceSizingMultiplier(decision.Confidence);
             if (_options.MaximumQuantity is decimal fixedMaximum)
                 fixedQuantity = Math.Min(fixedQuantity, fixedMaximum);
             fixedQuantity = RoundDown(fixedQuantity, _options.QuantityStep);
@@ -169,12 +192,81 @@ public sealed class PositionSizer : IPositionSizer
                     $"Fixed quantity {fixedQuantity:F8} is below the minimum {_options.MinimumQuantity:F8}.");
             }
 
+            AccountSnapshot? fixedAccount = context.Accounts.FirstOrDefault(item => item.Balance is > 0m);
+            // Locals in this branch use a fixed* prefix so they do not collide with method-scope
+            // names declared later for risk-based sizing (CS0136 under C# block scoping).
+            if (reference > 0m &&
+                decision.StopLossPrice is decimal fixedStopPrice &&
+                Math.Abs(reference - fixedStopPrice) > 0m &&
+                context.QuoteToAccountCurrencyRate > 0m &&
+                fixedAccount?.Balance is decimal fixedBalance)
+            {
+                decimal fixedEquity = fixedBalance + (fixedAccount.UnrealizedProfitLoss ?? 0m);
+                if (fixedEquity <= 0m)
+                    return Reject("NonPositiveEquity", "Account equity must be positive before fixed quantity can be admitted live.");
+
+                decimal fixedCostDistance =
+                    reference * _options.EstimatedRoundTripCostBasisPoints / 10_000m;
+                decimal fixedEstimatedLoss = spec.EstimateStopLossAccountCurrency(
+                    Math.Abs(reference - fixedStopPrice) + fixedCostDistance,
+                    fixedQuantity,
+                    context.QuoteToAccountCurrencyRate);
+                decimal fixedEstimatedMargin = spec.EstimateMarginAccountCurrency(
+                    reference,
+                    fixedQuantity,
+                    _options.Leverage,
+                    context.QuoteToAccountCurrencyRate);
+                decimal fixedMaximumAccountMargin =
+                    fixedEquity * _options.MaximumAccountMarginUsagePercent / 100m;
+                decimal fixedMaximumSinglePositionMargin =
+                    fixedEquity * _options.MaximumSinglePositionMarginPercent / 100m;
+                decimal fixedCurrentMargin = fixedAccount.MarginUsed ?? 0m;
+                if (fixedEstimatedMargin > fixedMaximumSinglePositionMargin ||
+                    fixedCurrentMargin + fixedEstimatedMargin > fixedMaximumAccountMargin)
+                {
+                    return Reject(
+                        "FixedQuantityMarginLimit",
+                        $"Fixed quantity requires margin {fixedEstimatedMargin:F2}, above the configured account or single-position cap.");
+                }
+
+                decimal fixedOpenRisk = PortfolioOpenRisk.EstimateAccountCurrency(
+                    context.Positions,
+                    spec,
+                    context.QuoteToAccountCurrencyRate,
+                    context.KnownOpenRiskAccountCurrency,
+                    _options.AssumedOpenPositionRiskDistancePercentOfPrice,
+                    context.InstrumentSpecs,
+                    context.QuoteToAccountRatesByInstrument);
+                decimal fixedProjectedOpenRisk = fixedOpenRisk + fixedEstimatedLoss;
+                if (_options.MaximumOpenRiskPercentOfEquity is decimal fixedMaxOpenRiskPercent &&
+                    fixedProjectedOpenRisk > fixedEquity * fixedMaxOpenRiskPercent / 100m)
+                {
+                    return Reject(
+                        "FixedQuantityOpenRiskLimit",
+                        $"Fixed quantity projects open risk {fixedProjectedOpenRisk:F2}, above the configured heat cap.");
+                }
+
+                return new PositionSizingResult
+                {
+                    Approved = true,
+                    Quantity = fixedQuantity,
+                    RiskBudget = fixedEstimatedLoss,
+                    EstimatedLossAtStop = fixedEstimatedLoss,
+                    EstimatedMargin = fixedEstimatedMargin,
+                    OpenRiskAccountCurrency = fixedOpenRisk,
+                    ProjectedOpenRiskAccountCurrency = fixedProjectedOpenRisk,
+                    ReasonCode = PositionSizingMode.FixedQuantity.ToString(),
+                    Reason = $"Using fixed quantity {fixedQuantity:F8}; estimated stop loss {fixedEstimatedLoss:F2}, " +
+                        $"margin {fixedEstimatedMargin:F2}, projected open risk {fixedProjectedOpenRisk:F2}."
+                };
+            }
+
             return new PositionSizingResult
             {
                 Approved = true,
                 Quantity = fixedQuantity,
                 ReasonCode = PositionSizingMode.FixedQuantity.ToString(),
-                Reason = $"Using configured fixed quantity {fixedQuantity:F8}."
+                Reason = $"Using configured fixed quantity {fixedQuantity:F8}; monetary risk was not estimated because live-risk inputs were incomplete."
             };
         }
 
@@ -218,7 +310,7 @@ public sealed class PositionSizer : IPositionSizer
             riskBudget = _options.Mode == PositionSizingMode.FixedCashRisk
                 ? _options.FixedCashRisk
                 : equity * _options.RiskPercentOfEquity / 100m;
-            riskBudget *= context.RiskBudgetMultiplier;
+            riskBudget *= context.RiskBudgetMultiplier * ConfidenceSizingMultiplier(decision.Confidence);
 
             decimal estimatedCostDistance =
                 reference * _options.EstimatedRoundTripCostBasisPoints / 10_000m;
@@ -315,6 +407,23 @@ public sealed class PositionSizer : IPositionSizer
                 $"estimated stop loss {estimatedLoss:F2}, margin {estimatedMargin:F2}, " +
                 $"projected open risk {projectedOpenRisk:F2}."
         };
+    }
+
+    private decimal ConfidenceSizingMultiplier(decimal confidence)
+    {
+        if (!_options.EnableConfidenceScaledSizing)
+            return 1m;
+
+        decimal floor = _options.ConfidenceMultiplierFloorConfidence;
+        decimal ceiling = _options.ConfidenceMultiplierCeilingConfidence;
+        if (confidence <= floor)
+            return _options.MinimumConfidenceMultiplier;
+        if (confidence >= ceiling)
+            return _options.MaximumConfidenceMultiplier;
+
+        decimal fraction = (confidence - floor) / (ceiling - floor);
+        return _options.MinimumConfidenceMultiplier +
+            fraction * (_options.MaximumConfidenceMultiplier - _options.MinimumConfidenceMultiplier);
     }
 
     private static decimal RoundDown(decimal value, decimal step)

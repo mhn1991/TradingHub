@@ -54,6 +54,9 @@ public sealed record MetaLabelDecision
 
 public interface ISetupMetaModel
 {
+    /// <summary>Identifies the model/calibration in use, before any decision has been made.</summary>
+    string ModelVersion { get; }
+
     MetaLabelDecision Evaluate(MetaLabelFeatures features);
 }
 
@@ -85,9 +88,7 @@ public static class MetaLabelFeatureFactory
         AnalysisSnapshot trigger = snapshots
             .OrderBy(item => ApproximateSeconds(item.Interval))
             .First();
-        int direction = decision.Action == AgentAction.Buy ? 1 : -1;
-        int aligned = snapshots.Count(item => Direction(item.MarketRegime.Regime) == direction);
-        decimal alignment = aligned / (decimal)snapshots.Length;
+        decimal alignment = ComputeMultiTimeframeAlignment(decision.Action, analysis);
         string[] events = snapshots
             .SelectMany(item => item.PriceAction.Events)
             .Where(item => item.ConfirmedAt <= analysis.Timestamp)
@@ -126,6 +127,25 @@ public static class MetaLabelFeatureFactory
             CurrencyStrengthDifferential = currencyStrengthDifferential,
             FeatureSchemaVersion = SchemaVersion
         };
+    }
+
+    /// <summary>
+    /// Fraction of causal analysis snapshots whose regime direction agrees with the decision's
+    /// side. Exposed separately from <see cref="Create"/> so callers that only need this one
+    /// feature (e.g. recording it on a closed trade for later meta-model calibration) don't
+    /// need a full Buy/Sell <see cref="AgentDecision"/> to call it.
+    /// </summary>
+    public static decimal ComputeMultiTimeframeAlignment(AgentAction direction, MultiTimeframeAnalysis analysis)
+    {
+        ArgumentNullException.ThrowIfNull(analysis);
+        if (direction is not (AgentAction.Buy or AgentAction.Sell))
+            return 0m;
+        AnalysisSnapshot[] snapshots = analysis.Timeframes.Values.ToArray();
+        if (snapshots.Length == 0)
+            return 0m;
+        int directionValue = direction == AgentAction.Buy ? 1 : -1;
+        int aligned = snapshots.Count(item => Direction(item.MarketRegime.Regime) == directionValue);
+        return aligned / (decimal)snapshots.Length;
     }
 
     private static int Direction(MarketRegime regime) => regime switch

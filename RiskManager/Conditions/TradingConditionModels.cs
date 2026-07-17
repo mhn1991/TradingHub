@@ -59,7 +59,11 @@ public interface IEconomicEventProvider
 
 public sealed record TradingConditionOptions
 {
-    public bool Enabled { get; init; }
+    // AGENT-03: bare default must be true — every trading-condition safety mechanism (session
+    // gating, rollover blackout, pre-weekend protection, spread/ATR gates, stale-data rejection)
+    // was silently off for any caller that did not explicitly opt in, and only the Dashboard's
+    // Vue frontend happened to always send an explicit `true`.
+    public bool Enabled { get; init; } = true;
     public IReadOnlyList<TradingSession> AllowedSessions { get; init; } =
     [
         TradingSession.Asian,
@@ -75,8 +79,8 @@ public sealed record TradingConditionOptions
     public int RolloverBlackoutMinutesAfter { get; init; } = 15;
     public int FridayCloseHourUtc { get; init; } = 21;
     public int PreWeekendMinutes { get; init; } = 60;
-    public decimal SoftMaximumSpreadAtr { get; init; } = 0.15m;
-    public decimal HardMaximumSpreadAtr { get; init; } = 0.30m;
+    public decimal SoftMaximumSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.SoftMaximum;
+    public decimal HardMaximumSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.HardMaximum;
     public decimal SoftSpreadRiskMultiplier { get; init; } = 0.50m;
     public TimeSpan MaximumDataAge { get; init; } = TimeSpan.FromMinutes(2);
     public bool RejectWhenAtrUnavailable { get; init; } = true;
@@ -110,9 +114,11 @@ public sealed record TradingConditionOptions
             MissingSpreadRiskMultiplier is < 0m or > 1m ||
             EventBlackoutMinutesBefore < 0 || EventBlackoutMinutesAfter < 0 ||
             !Enum.IsDefined(MinimumBlockedEventImportance) ||
+            (Enabled && AllowedSessions.Count == 0) ||
             AllowedSessions.Any(session => !Enum.IsDefined(session)) ||
             InstrumentAllowedSessions.Any(pair => string.IsNullOrWhiteSpace(pair.Key) ||
-                pair.Value is null || pair.Value.Any(session => !Enum.IsDefined(session))))
+                pair.Value is null || pair.Value.Count == 0 ||
+                pair.Value.Any(session => !Enum.IsDefined(session))))
         {
             throw new ArgumentOutOfRangeException(nameof(TradingConditionOptions));
         }

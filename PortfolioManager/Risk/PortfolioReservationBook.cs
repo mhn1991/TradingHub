@@ -76,6 +76,7 @@ public interface IPortfolioReservationBook
     PortfolioReservationResult TryReserve(PortfolioReservationRequest request);
     void CommitFill(string reservationId, PortfolioFillAllocation fill);
     void Release(string reservationId, PortfolioReleaseReason reason);
+    void Restore(PortfolioReservationSnapshot snapshot);
     PortfolioReservationSnapshot Snapshot { get; }
 }
 
@@ -136,7 +137,7 @@ public sealed class PortfolioReservationBook : IPortfolioReservationBook
                 decimal currencyRisk = Math.Abs(request.OpenCurrencyRisk.GetValueOrDefault(currency)) +
                     _reservations.Values.Sum(item => Math.Abs(item.CurrencyExposureDelta.GetValueOrDefault(currency))) +
                     Math.Abs(delta);
-                if (Percent(currencyRisk) > _options.MaximumCurrencyRiskPercent)
+                if (Percent(currencyRisk) > _options.MaximumCurrencyStopRiskPercent)
                     return Reject("CurrencyRiskLimit", $"The {currency} concentration limit would be exceeded.");
             }
 
@@ -205,6 +206,22 @@ public sealed class PortfolioReservationBook : IPortfolioReservationBook
                 _released.Add(reservationId);
                 _version++;
             }
+        }
+    }
+
+    public void Restore(PortfolioReservationSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        lock (_sync)
+        {
+            _reservations.Clear();
+            _released.Clear();
+            foreach (PortfolioReservation reservation in snapshot.Reservations)
+            {
+                if (reservation.RemainingQuantity > 0m)
+                    _reservations[reservation.ReservationId] = reservation;
+            }
+            _version = snapshot.Version;
         }
     }
 

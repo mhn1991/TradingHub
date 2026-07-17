@@ -52,7 +52,7 @@ internal static class ReplayFrameBuilder
             foreach (CandleClosedEvent candleEvent in aggregator.Apply(baseCandles[candleIndex]))
             {
                 long started = Stopwatch.GetTimestamp();
-                AnalysisSnapshot snapshot = await annotator.ProcessAsync(candleEvent, cancellationToken)
+                AnalysisSnapshot snapshot = await annotator.ProcessAsync(candleEvent, runtimeContext: null, cancellationToken)
                     .ConfigureAwait(false);
                 double elapsedMicroseconds = Stopwatch.GetElapsedTime(started).TotalMicroseconds;
 

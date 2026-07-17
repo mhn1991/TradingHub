@@ -9,7 +9,8 @@ using Networking.Http;
 
 namespace Brokers.Oanda;
 
-public sealed class OandaBrokerClient : IProtectiveOrderBrokerClient
+public sealed class OandaBrokerClient : IProtectiveOrderBrokerClient, IPositionReductionBrokerClient,
+    ITransactionHistoryBrokerClient, IInstrumentMetadataBrokerClient
 {
     private static readonly TransportId RestTransportId = new("oanda.rest");
     private readonly BrokerHttpRuntime _runtime;
@@ -76,7 +77,24 @@ public sealed class OandaBrokerClient : IProtectiveOrderBrokerClient
             options.AccountId,
             instrumentMappings,
             _streamingClient);
-        ProtectiveOrders = new OandaProtectiveOrderClient();
+        TransactionHistory = new OandaTransactionHistoryClient(
+            _runtime.Gateway,
+            RestTransportId,
+            options.AccountId,
+            instrumentMappings);
+        InstrumentMetadata = new OandaInstrumentMetadataClient(
+            _runtime.Gateway,
+            RestTransportId,
+            options.AccountId,
+            instrumentMappings);
+        ProtectiveOrders = new OandaProtectiveOrderClient(
+            _runtime.Gateway,
+            RestTransportId,
+            options.AccountId);
+        PositionReductions = new OandaPositionReductionClient(
+            _runtime.Gateway,
+            RestTransportId,
+            options.AccountId);
         Positions = new OandaPositionClient(
             _runtime.Gateway,
             RestTransportId,
@@ -91,9 +109,16 @@ public sealed class OandaBrokerClient : IProtectiveOrderBrokerClient
     public IAccountClient Accounts { get; }
     public ITradingOrderClient Orders { get; }
     IOrderClient IBrokerClient.Orders => Orders;
-    public TradingBrokerCapabilities TradingCapabilities { get; } =
-        TradingBrokerCapabilities.Unsupported;
+    public ITransactionHistoryClient TransactionHistory { get; }
+    public IInstrumentMetadataClient InstrumentMetadata { get; }
+    public TradingBrokerCapabilities TradingCapabilities { get; } = new()
+    {
+        SupportsNativeStopAmendment = true,
+        SupportsAtomicOrderReplacement = true,
+        SupportsDependentOcoAmendment = true
+    };
     public IProtectiveOrderClient ProtectiveOrders { get; }
+    public IPositionReductionClient PositionReductions { get; }
     public IPositionClient Positions { get; }
     public ICostClient Costs { get; }
 
@@ -105,15 +130,8 @@ public sealed class OandaBrokerClient : IProtectiveOrderBrokerClient
             cancellationToken).ConfigureAwait(false);
         foreach (OandaInstrument instrument in response.Instruments)
         {
-            string prefix = string.Equals(instrument.Type, "CURRENCY", StringComparison.OrdinalIgnoreCase)
-                ? "FX"
-                : string.Equals(instrument.Type, "METAL", StringComparison.OrdinalIgnoreCase)
-                    ? "METAL"
-                    : string.Equals(instrument.Type, "CFD", StringComparison.OrdinalIgnoreCase)
-                        ? "CFD"
-                        : "OANDA";
             _instrumentMappings.TryAdd(
-                $"{prefix}:{instrument.Name.Replace('_', '/')}",
+                OandaMappings.CanonicalInstrumentName(instrument),
                 instrument.Name);
         }
 

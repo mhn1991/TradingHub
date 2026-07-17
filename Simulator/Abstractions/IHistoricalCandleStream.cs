@@ -54,6 +54,8 @@ public sealed class EnumerableMarketCandleStream(IEnumerable<Candle> candles) : 
         foreach (Candle candle in _candles.OrderBy(item => item.OpenTime))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (candle.Instrument != request.Instrument)
+                continue;
             if (candle.OpenTime < request.From || candle.OpenTime >= request.To)
                 continue;
             yield return MarketCandle.FromMid(candle);

@@ -39,3 +39,29 @@ public interface ITradingOrderClient : IOrderClient
     IAsyncEnumerable<OrderEvent> StreamOrderEventsAsync(
         CancellationToken cancellationToken = default);
 }
+
+/// <summary>Trading broker that supports an explicit reduce-only close of an owned trade.</summary>
+public interface IPositionReductionBrokerClient : ITradingBrokerClient
+{
+    IPositionReductionClient PositionReductions { get; }
+}
+
+public interface IPositionReductionClient
+{
+    Task<PositionReductionResult> ReducePositionAsync(
+        ReduceBrokerPositionRequest request,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>Trading broker that can replay normalized account events after a durable cursor.</summary>
+public interface ITransactionHistoryBrokerClient : ITradingBrokerClient
+{
+    ITransactionHistoryClient TransactionHistory { get; }
+}
+
+public interface ITransactionHistoryClient
+{
+    Task<BrokerEventHistoryBatch> GetOrderEventsSinceAsync(
+        string lastTransactionId,
+        CancellationToken cancellationToken = default);
+}

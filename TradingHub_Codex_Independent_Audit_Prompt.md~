@@ -1,0 +1,1119 @@
+# TradingHub Agentic Trading Platform — Full Architecture, Logic, Leakage and Production-Readiness Audit
+
+## Role
+
+Act as a principal quantitative trading systems architect, senior .NET engineer, broker-integration specialist and adversarial code reviewer.
+
+You are reviewing a multi-project algorithmic trading platform intended to support:
+
+- historical simulation and quantitative research;
+- strategy calibration and meta-labeling;
+- observe-only live operation;
+- shadow Agents;
+- manual broker demo execution;
+- later autonomous demo execution;
+- portfolio-level risk allocation;
+- broker-side protective orders;
+- live position management;
+- crash recovery and broker reconciliation.
+
+This is not a superficial code-quality review.
+
+You must evaluate whether the system’s architecture, state transitions, numerical logic, data flow, configuration flow and broker lifecycle are internally correct and safe.
+
+---
+
+# Input handling
+
+Use the **latest TradingHub source archive attached to this task** as the primary source.
+
+Also review every attached implementation plan, audit report, configuration note or corrective document that relates to the source, regardless of its filename.
+
+Treat the source code as authoritative.
+
+Treat reports and implementation notes as claims that must be independently verified.
+
+Do not assume that something is correct merely because a report says it was implemented.
+
+When more than one source archive is attached:
+
+1. identify the newest intended implementation;
+2. explain how you selected it;
+3. avoid mixing files from older versions unless comparing regressions;
+4. state clearly which source tree was audited.
+
+---
+
+# Primary objective
+
+Determine whether TradingHub currently has a coherent and safe architecture for an agentic trading system.
+
+Specifically evaluate:
+
+1. architectural design;
+2. dependency direction;
+3. end-to-end decision flow;
+4. live order flow;
+5. trade-management flow;
+6. state ownership;
+7. environment abstraction;
+8. simulation/live equivalence;
+9. data leakage and lookahead bias;
+10. concurrency and race conditions;
+11. risk calculations;
+12. portfolio admission;
+13. execution correctness;
+14. broker reconciliation;
+15. persistence and restart recovery;
+16. configuration drift;
+17. ML/calibration leakage;
+18. missing production functionality;
+19. unnecessary complexity;
+20. opportunities to simplify or strengthen the system.
+
+Do not limit the review to files modified recently. Follow every important call path into the wider solution.
+
+---
+
+# Critical architectural principle
+
+The core trading systems should not know whether they are operating in:
+
+```text
+Simulator
+Historical replay
+Fake broker test
+Broker Practice/Demo
+Future broker Live
+```
+
+The following systems should consume normalized data, immutable configuration and broker-neutral contracts:
+
+```text
+Agent
+ChartAnnotator
+RiskManager
+PortfolioManager
+ExecutionManager
+TradeManager
+Calibration/meta-label pipeline
+Trading-condition filter
+Account-safety logic
+```
+
+Environment-specific knowledge should remain at adapter and orchestration boundaries such as:
+
+```text
+Simulator
+LiveTradingHost
+broker-specific live adapter
+broker-specific networking project
+historical data adapters
+broker stream adapters
+simulation execution/fill adapters
+```
+
+Verify this principle from the actual project references, namespaces, models and call paths.
+
+Look for indirect leakage as well as obvious references.
+
+Examples of indirect environment leakage include:
+
+- `IsLive`, `IsDemo`, `IsSimulation` flags inside domain models;
+- live-only modes attached to neutral trade candidates;
+- broker identifiers embedded in Agent decisions;
+- simulator fill assumptions inside risk or trade management;
+- separate live and simulator Agent configurations;
+- different construction paths producing subtly different strategies;
+- live-specific clock logic inside the Agent;
+- strategy behaviour changing because of host mode rather than policy;
+- direct broker calls from Agents or TradeManager;
+- domain services reading environment variables;
+- Dashboard input silently overriding promoted research policy.
+
+---
+
+# Required end-to-end flows
+
+Trace and document the actual implemented flow for each path.
+
+## Flow A — historical simulator
+
+```text
+Simulation request
+→ configuration resolution
+→ historical market data
+→ candle aggregation
+→ ChartAnnotator
+→ Agent
+→ setup calibration
+→ meta-label
+→ trading-condition filter
+→ risk
+→ portfolio admission
+→ simulated execution
+→ TradeManager
+→ P/L and journal
+→ research metrics/artifacts
+```
+
+Verify:
+
+- the exact construction method for each strategy;
+- when candles become visible;
+- whether only completed candles are used;
+- whether fill logic can see future candle information;
+- when risk and quantity are calculated;
+- how spread, commission and slippage are applied;
+- whether management decisions use information unavailable at that moment;
+- whether all feature switches really alter runtime behaviour;
+- whether generated artifacts accurately describe the configuration used.
+
+## Flow B — policy promotion
+
+```text
+Completed simulation/research configuration
+→ policy-profile generation
+→ artifact validation
+→ configuration hash
+→ review/promotion status
+→ live host loading
+```
+
+Verify:
+
+- the promoted policy uses the simulator’s actual resolved configuration;
+- no values are reconstructed through a second divergent mapper;
+- configuration hashes are stable and deterministic;
+- artifact IDs and content hashes are validated;
+- strategy and feature-schema compatibility are checked;
+- approved live policy cannot silently mutate;
+- a live deployment cannot independently retune Agent, risk, portfolio or management logic;
+- deployment-only values remain outside the strategy policy.
+
+## Flow C — observe/shadow live operation
+
+```text
+Broker pricing
++ authoritative completed candles
+→ normalized market events
+→ per-market actor
+→ multi-timeframe snapshots
+→ ChartAnnotator
+→ Agent
+→ calibration/meta-label
+→ trading conditions
+→ neutral candidate
+→ shadow/observe handling
+→ diagnostics/outcome tracking
+```
+
+Verify:
+
+- strategic decisions use completed candles only;
+- quote data is used only where appropriate;
+- reconnect catch-up does not produce duplicate historical decisions;
+- no trigger interval is evaluated twice;
+- market actors remain isolated;
+- a failure in one market does not corrupt another;
+- cross-market data uses only information available at the decision time;
+- epoch coordination cannot omit or duplicate candidates;
+- shadow Agents cannot reserve capital or send orders.
+
+## Flow D — manual demo trade
+
+```text
+Neutral candidate
+→ account snapshot
+→ monetary risk
+→ position sizing
+→ portfolio ranking
+→ reservation
+→ manual approval
+→ revalidation
+→ serialized broker submission
+→ broker order with initial stop
+→ transaction event
+→ registry update
+→ reconciliation
+→ position manager creation
+```
+
+Verify every transition.
+
+Pay particular attention to:
+
+- exactly-once manual approval;
+- candidate expiry;
+- quote movement after approval;
+- stale account state;
+- duplicate button clicks;
+- client disconnect during submission;
+- duplicate HTTP requests;
+- transport timeout with unknown broker result;
+- deterministic client order IDs;
+- quantity normalization;
+- margin calculation;
+- account-currency conversion;
+- reservation release/retention;
+- atomic initial stop attachment;
+- broker rejection;
+- partial fill;
+- transaction-stream delay;
+- REST/stream disagreement.
+
+## Flow E — live trade management
+
+```text
+Broker fill
+→ strategy-owned live position
+→ quote updates
+→ completed fast/main/thesis timeframe updates
+→ MFE/MAE
+→ TradeManager
+→ close/reduce/stop command
+→ serialized broker operation
+→ transaction confirmation
+→ registry update
+→ risk/reservation update
+→ reconciliation
+```
+
+Verify whether this full flow is actually operational or only represented by contracts.
+
+Distinguish clearly between:
+
+```text
+Implemented
+Wired into host
+Enabled by configuration
+Broker-certified
+Covered by automated tests
+Covered only by explicit integration tests
+Not implemented
+```
+
+Do not describe a capability as complete merely because an interface or class exists.
+
+## Flow F — restart and recovery
+
+```text
+Process restart
+→ account ownership lease
+→ policy/checkpoint loading
+→ journal verification
+→ broker account/orders/trades
+→ transaction cursor replay
+→ registry reconstruction
+→ reservation repair
+→ protective-stop verification
+→ analysis warm-up
+→ position-management restoration
+→ health gate
+→ entry resumption
+```
+
+Test the design mentally and through tests for crashes at each sensitive point:
+
+- before submission;
+- during submission;
+- after the broker accepted but before local persistence;
+- after fill but before transaction processing;
+- during partial close;
+- during stop replacement;
+- after broker close but before registry update;
+- during checkpoint write;
+- during policy activation.
+
+---
+
+# Data leakage and lookahead audit
+
+Perform a dedicated leakage review.
+
+## Market-data leakage
+
+Check for:
+
+- using unfinished candles for strategic indicators;
+- final candle high/low used before the candle closes;
+- future bars used in swing confirmation without delayed availability;
+- centered rolling windows;
+- future-confirmed pivots exposed at the pivot timestamp instead of confirmation time;
+- higher timeframe candles visible before their actual close;
+- cross-market data from timestamps later than the candidate time;
+- REST candle polling returning incomplete candles treated as complete;
+- reconnect catch-up decisions emitted as though real-time;
+- decision-time prices replaced with later execution prices in features.
+
+## Simulator execution leakage
+
+Check for:
+
+- deciding and filling at the same candle close when that price was not executable;
+- deciding from a candle’s close and filling at that candle’s open;
+- choosing stop/target ordering using the entire candle after both were touched;
+- trailing stops moved using a candle high and triggered using the same candle low without a defined intrabar model;
+- partial exits based on future MFE;
+- slippage computed from later information;
+- unrealistic gap handling;
+- management decisions executed before they become observable.
+
+## ML and calibration leakage
+
+Check for:
+
+- training and evaluation samples overlapping in time;
+- random train/test splits for time-series data;
+- setup calibration generated from the same period being evaluated;
+- meta-label features containing future excursion or trade outcome;
+- target leakage through management result fields;
+- normalization fitted on full data;
+- feature selection using untouched-test results;
+- artifacts promoted from in-sample results only;
+- live-shadow outcomes feeding an active model immediately;
+- latest artifact selected automatically without explicit promotion;
+- mutable artifacts;
+- insufficient feature-schema validation.
+
+## Portfolio leakage
+
+Check whether simultaneous candidates are ranked using:
+
+- later account state;
+- later quotes;
+- candidates arriving after the decision epoch;
+- nondeterministic network completion order;
+- data from markets that had not completed the relevant interval.
+
+Report each leakage issue as:
+
+```text
+Confirmed
+Likely
+Possible but guarded
+Not present
+Unable to determine
+```
+
+Include exact file and method references.
+
+---
+
+# Session/spread configuration audit
+
+Review the attached session/spread adjustment document, regardless of its filename.
+
+The intended research/demo defaults are:
+
+```text
+TradingConditionsEnabled = true
+
+AllowedSessions =
+    Asian
+    London
+    NewYork
+    LondonNewYorkOverlap
+
+ConditionSoftSpreadAtr = 0.25
+ConditionHardSpreadAtr = 0.50
+
+RegimeSoftSpreadAtr = 0.25
+RegimeHardSpreadAtr = 0.50
+
+RolloverBlackoutMinutesBefore = 15
+RolloverBlackoutMinutesAfter = 15
+
+EconomicEventFilterEnabled = false
+```
+
+Verify these values across:
+
+- domain-model defaults;
+- API request defaults;
+- Dashboard defaults;
+- simulator presets;
+- policy promotion;
+- JSON serialization;
+- live-policy loading;
+- fallback constructors;
+- unit tests;
+- sample configuration;
+- application settings;
+- CLI paths.
+
+Look for any path that can silently return to:
+
+```text
+0.15 / 0.30
+```
+
+Verify that condition and regime thresholds cannot drift apart accidentally.
+
+Verify that an empty `AllowedSessions` does not silently reject every trade.
+
+Do not alter the trading-condition algorithm merely to satisfy this requirement. The requirement is primarily configuration consistency.
+
+Also verify the implementation does not claim `DelayEntry` is genuinely deferred if candidates are not persisted and revalidated later.
+
+---
+
+# Agent review
+
+Evaluate both Legacy and Improved Agents.
+
+For each Agent, document:
+
+- trigger timeframe;
+- primary trend timeframe;
+- secondary trend timeframe;
+- setup timeframe;
+- confirmation timeframe;
+- entry timeframe;
+- required indicators;
+- required annotations;
+- state retained between updates;
+- setup invalidation;
+- duplicate-decision prevention;
+- Buy/Sell/Observe paths;
+- stop calculation;
+- target calculation;
+- confidence calculation;
+- interaction with calibration/meta-labeling;
+- interaction with trading conditions;
+- feature-switch behaviour.
+
+Check for:
+
+- excessive gate stacking causing trade starvation;
+- contradictory filters;
+- repeated filtering of the same market property;
+- invalid reward/risk calculations;
+- stale setup state;
+- setup state crossing market sessions incorrectly;
+- state shared accidentally between instruments or Agent instances;
+- long/short asymmetry;
+- stop price on the wrong side;
+- target price on the wrong side;
+- zero/negative distance;
+- decimal precision mistakes;
+- direct awareness of execution mode or broker;
+- missing neutral behaviour when evidence is unavailable;
+- confidence values used as probabilities without calibration.
+
+Do not recommend removing filters merely to increase trade count. Explain which filters are redundant, valuable or unverified.
+
+---
+
+# RiskManager review
+
+Verify:
+
+- equity source;
+- risk budget;
+- stop-distance risk;
+- spread and expected-slippage inclusion;
+- commission/financing treatment;
+- account-currency conversion;
+- bid/ask direction;
+- quantity precision;
+- minimum units;
+- maximum units;
+- broker margin rate;
+- fixed-quantity hard caps;
+- drawdown scaling;
+- volatility scaling;
+- liquidity scaling;
+- missing-data behaviour;
+- zero/negative input handling;
+- decimal overflow/rounding;
+- multiplier bounds.
+
+No risk multiplier may increase risk above one in the initial production mode unless this is explicitly designed, justified and separately capped.
+
+Check whether fixed quantity can bypass monetary risk limits.
+
+Check whether quantity is normalized before and after allocation consistently.
+
+Check whether the same quantity is accidentally sized twice.
+
+---
+
+# PortfolioManager review
+
+Verify one serialized authority controls:
+
+- total portfolio heat;
+- pending risk;
+- instrument risk;
+- strategy risk;
+- currency gross exposure;
+- currency net exposure;
+- correlation clusters;
+- margin usage;
+- maximum positions;
+- reserve capital;
+- reservations;
+- simultaneous candidate ranking.
+
+Check:
+
+- deterministic epoch ordering;
+- duplicate candidate handling;
+- late candidate handling;
+- partial allocation;
+- reservation expiry;
+- reservation recovery;
+- concurrent approval;
+- strategy ownership;
+- broker netting implications;
+- opposing positions;
+- pyramiding;
+- multiple strategies trading one instrument;
+- broker-position quantity attribution.
+
+Recommend a simpler safe initial policy where appropriate, for example:
+
+```text
+one executable strategy per instrument
+no pyramiding
+no simultaneous opposing exposure
+maximum two open positions
+low portfolio heat
+```
+
+---
+
+# ExecutionManager and broker review
+
+Verify:
+
+- only one broker-command writer exists;
+- every command is serialized;
+- deterministic client IDs are stable across restart;
+- client IDs fit broker restrictions;
+- unknown submissions are reconciled;
+- retries cannot duplicate orders;
+- cancellation is serialized;
+- close and reduction semantics are correct;
+- partial close cannot reverse a trade;
+- stop replacement cannot remove protection;
+- stop replacement cannot widen risk;
+- dependent-order replacement targets the correct trade;
+- broker IDs and strategy ownership are checked;
+- all broker responses are mapped accurately;
+- transaction events are idempotent;
+- duplicate and out-of-order events are safe;
+- transaction-cursor replay is correct;
+- stale conversion prices fail closed;
+- REST and transaction stream responsibilities are clear.
+
+Confirm whether the implementation uses the broker’s explicit close/reduction operation rather than an unmanaged opposite market order.
+
+Confirm whether the initial entry attaches a broker-side stop atomically.
+
+Treat partial close and dynamic stop replacement as uncertified unless explicit Practice/Demo tests prove them.
+
+---
+
+# TradeManager review
+
+Evaluate whether the simulator and live environment use the same management policy and decision logic.
+
+Review:
+
+- break-even;
+- ATR trailing;
+- swing trailing;
+- zone/channel trailing;
+- profit floors;
+- MFE giveback;
+- partial reduction;
+- stagnation exit;
+- momentum decay;
+- volatility exhaustion;
+- structural deterioration;
+- regime deterioration;
+- session risk;
+- execution-cost stress;
+- fast/main/thesis clocks;
+- management calibration;
+- full close;
+- stop amendment.
+
+Check for:
+
+- stop widening;
+- stop crossing market incorrectly;
+- stale broker position;
+- stale operator request;
+- duplicate reduction;
+- reduction exceeding owned quantity;
+- management using unavailable future structure;
+- management running twice for one snapshot;
+- MFE/MAE using midpoint rather than executable side incorrectly;
+- break-even ignoring spread/commission;
+- profit floor based on unrealizable price;
+- simulator-only behaviour missing from live;
+- live-only approximations producing strategy drift.
+
+Clearly identify which management features are:
+
+```text
+fully live
+fixed-stop only
+market-exit only
+implemented but disabled
+broker-uncertified
+simulator-only
+```
+
+---
+
+# Persistence and recovery review
+
+Verify:
+
+- append-only journal integrity;
+- checkpoint checksum;
+- atomic snapshot replacement;
+- corruption quarantine;
+- flush policy;
+- schema version;
+- replay order;
+- idempotency keys;
+- last applied broker transaction;
+- last completed candle;
+- last decision epoch;
+- reservation reconstruction;
+- open-position restoration;
+- policy revision restoration;
+- calibration IDs;
+- management state;
+- MFE/MAE restoration;
+- high-watermarks;
+- ownership lease.
+
+Check whether a corrupted or missing journal can cause unsafe entry resumption.
+
+Check whether persistence failure pauses new entries.
+
+Check whether one process can exclusively own one broker account.
+
+---
+
+# Concurrency audit
+
+Identify every actor, channel, lock, semaphore and background service.
+
+Produce a concurrency map showing:
+
+- writer count;
+- reader count;
+- bounded/unbounded capacity;
+- backpressure behaviour;
+- drop behaviour;
+- cancellation ownership;
+- state ownership.
+
+Look for:
+
+- multiple writers used with `SingleWriter = true`;
+- async work launched without supervision;
+- `Task.Run` per quote/tick;
+- unobserved tasks;
+- deadlocks;
+- lock held across `await`;
+- mutable snapshots shared across threads;
+- concurrent registry mutation;
+- approval/submission races;
+- cancellation/submission races;
+- reconciliation/event-processor races;
+- late epochs reopening;
+- duplicate epoch closure;
+- shutdown losing broker events;
+- browser/API cancellation aborting broker-critical work;
+- process cancellation interrupting an uncertain broker operation before reconciliation.
+
+---
+
+# Safety and operational review
+
+Verify explicit controls for:
+
+```text
+Pause new entries
+Resume
+Cancel pending entries
+Close position
+Reduce position
+Flatten all
+Stop host while preserving broker stops
+```
+
+Check safety reaction to:
+
+- stale pricing;
+- stale completed candles;
+- pricing-stream disconnect;
+- transaction-stream disconnect;
+- missing protective stop;
+- reconciliation mismatch;
+- account ownership failure;
+- persistence failure;
+- excessive drawdown;
+- daily/weekly loss;
+- margin pressure;
+- repeated rejects;
+- unknown submission;
+- duplicate events;
+- unsupported broker capability.
+
+Verify that real-money execution is rejected unless explicitly certified.
+
+The initial executable release should be Practice/Demo only.
+
+Verify dangerous APIs have authentication, authorization, audit identity and confirmation requirements when remote access is possible.
+
+---
+
+# Agentic-trading completeness review
+
+Determine what is still missing for the system to qualify as a mature agentic trading platform.
+
+Evaluate whether it has adequate support for:
+
+- independent market actors;
+- multiple strategy instances;
+- centralized account authority;
+- deterministic capital competition;
+- strategy ownership;
+- outcome attribution;
+- production versus shadow Agents;
+- policy versioning;
+- artifact promotion;
+- model-drift monitoring;
+- execution-quality feedback;
+- outcome tracking for rejected candidates;
+- feature ablation;
+- operator override;
+- failure isolation;
+- safe degradation;
+- observability;
+- explainable decisions;
+- audit replay;
+- controlled rollout;
+- broker certification;
+- incident recovery.
+
+Identify improvements in three categories.
+
+## Required before manual broker Demo
+
+Only issues that could make even a manually approved tiny demo order unsafe.
+
+## Required before autonomous broker Demo
+
+Issues that can be tolerated in observe/manual mode but not autonomous mode.
+
+## Valuable later improvements
+
+Enhancements such as:
+
+- genuine deferred-entry handling;
+- session-specific risk multipliers;
+- percentile-calibrated spreads;
+- stronger shadow outcome evaluation;
+- live-versus-research distribution drift;
+- execution-quality calibration;
+- broader cross-market signals;
+- multi-broker support;
+- more sophisticated ML.
+
+Do not recommend neural networks or online retraining unless the existing statistical evidence, feature quality and production controls justify them.
+
+---
+
+# Build and test requirements
+
+Discover the actual solution and project filenames from the repository rather than assuming fixed names.
+
+Attempt the equivalent of:
+
+```bash
+dotnet --info
+dotnet restore <solution>
+dotnet build <solution> -c Release
+dotnet test <solution> -c Release
+```
+
+Run important test projects separately where useful.
+
+For the Dashboard, discover its package directory and scripts, then run the available equivalents of:
+
+```bash
+npm ci
+npm run typecheck
+npm run build
+npm run data:validate
+```
+
+Search for explicit integration tests and report them separately.
+
+Do not run broker-write integration tests unless:
+
+- the environment is explicitly Practice/Demo;
+- credentials are supplied;
+- the test uses minimal units;
+- cleanup is guaranteed;
+- the user has authorized broker writes.
+
+If the required SDK or credentials are unavailable, state that clearly. Do not imply the tests passed.
+
+---
+
+# Testing gaps to identify
+
+Look for missing tests covering:
+
+- identical replay produces identical decisions;
+- simulator/live Agent parity;
+- configuration-promotion parity;
+- incomplete and late decision epochs;
+- simultaneous candidates;
+- duplicate approval;
+- approval after expiry;
+- quote movement after approval;
+- unknown broker submission;
+- transaction duplication;
+- transaction reordering;
+- transaction gap replay;
+- broker/local quantity mismatch;
+- missing stop;
+- restart after fill;
+- restart during reduction;
+- restart during stop replacement;
+- stale conversion rate;
+- invalid broker metadata;
+- policy hash mismatch;
+- corrupted checkpoint;
+- lease conflict;
+- persistence failure;
+- no-trigger market in an epoch;
+- weekend/rollover;
+- spread unavailable;
+- ATR unavailable;
+- all sessions enabled;
+- condition/regime threshold consistency.
+
+Add tests only after understanding the existing design.
+
+---
+
+# Required diagrams
+
+Produce Mermaid diagrams for:
+
+1. project dependency graph;
+2. simulator decision flow;
+3. live observe/shadow flow;
+4. manual demo order flow;
+5. position-management flow;
+6. order state machine;
+7. reservation state machine;
+8. engine state machine;
+9. restart/recovery flow;
+10. concurrency ownership map.
+
+The diagrams must describe the actual code, not the intended plan.
+
+Highlight missing or disconnected links.
+
+---
+
+# Issue format
+
+For every confirmed issue, provide:
+
+```text
+ID
+Title
+Severity
+Confidence
+Subsystem
+Files and methods
+Observed behaviour
+Expected behaviour
+Failure scenario
+Why it matters
+Recommended correction
+Required test
+```
+
+Severity:
+
+```text
+Critical
+High
+Medium
+Low
+Informational
+```
+
+Use `Critical` only for issues that could cause:
+
+- uncontrolled duplicate orders;
+- unprotected positions;
+- excessive risk;
+- incorrect account ownership;
+- unrecoverable broker/local divergence;
+- live data leakage producing invalid autonomous decisions;
+- unsafe stop replacement;
+- real-account execution bypassing guards.
+
+Avoid inflating severity.
+
+---
+
+# Required deliverables
+
+Create a **main independent audit report in Markdown** containing:
+
+1. executive assessment;
+2. architecture summary;
+3. what is genuinely complete;
+4. what is only scaffolded;
+5. environment-separation assessment;
+6. design-flow findings;
+7. logic-flow findings;
+8. data-leakage findings;
+9. configuration-leakage findings;
+10. concurrency findings;
+11. risk findings;
+12. portfolio findings;
+13. execution/broker findings;
+14. TradeManager findings;
+15. persistence/recovery findings;
+16. safety findings;
+17. test/build results;
+18. production-readiness matrix;
+19. prioritized corrective plan;
+20. known limitations;
+21. required diagrams;
+22. final verdict.
+
+Also create a **compact Markdown issue register**, ordered by severity and implementation priority.
+
+If code changes are requested or clearly necessary:
+
+1. finish the audit report first;
+2. implement only confirmed corrections;
+3. preserve architectural boundaries;
+4. return a corrected source ZIP;
+5. return a Markdown fix report;
+6. return a SHA-256 checksum.
+
+The fix report must list:
+
+- exact files modified;
+- reason for every modification;
+- tests added;
+- tests passed;
+- tests not run;
+- remaining risks;
+- deferred work.
+
+Use clear, descriptive output filenames based on the repository/project name and the current audit date. Do not depend on any particular input filename.
+
+---
+
+# Production-readiness matrix
+
+Rate each area as:
+
+```text
+Not implemented
+Scaffolded
+Implemented but not wired
+Wired but disabled
+Enabled but unverified
+Verified in deterministic tests
+Verified in broker Practice/Demo
+Production-ready for Demo
+```
+
+Areas:
+
+```text
+Market data
+Completed-candle handling
+Multi-timeframe aggregation
+Chart annotation
+Agent decision pipeline
+Feature switches
+Setup calibration
+Meta-labeling
+Trading-condition filter
+Risk sizing
+Portfolio admission
+Manual approval
+Broker entry
+Initial broker stop
+Transaction processing
+Order registry
+Position registry
+Reconciliation
+Persistence
+Restart recovery
+Account lease
+Full close
+Partial close
+Stop replacement
+Live TradeManager
+Safety controller
+Kill switch
+Dashboard controls
+Authentication/authorization
+QuantResearch integration
+Policy promotion
+Shadow outcome tracking
+Autonomous demo execution
+```
+
+---
+
+# Final verdict requirements
+
+End with direct answers to these questions:
+
+1. Is the architecture fundamentally sound?
+2. Are the core systems genuinely environment-neutral?
+3. Is there any confirmed market-data or ML lookahead leakage?
+4. Can the system safely run observe-only on broker Practice/Demo?
+5. Can it safely submit one manually approved tiny demo trade?
+6. Can it safely manage that trade after a process restart?
+7. Is partial close safe and broker-certified?
+8. Is dynamic stop replacement safe and broker-certified?
+9. Is autonomous broker Demo execution currently justified?
+10. What are the five highest-priority remaining actions?
+11. Is the session/spread configuration problem fully fixed across every path?
+12. Which existing components are over-engineered or unnecessarily duplicated?
+13. Which subsystem most needs extension?
+14. Which subsystem should not be extended until more evidence exists?
+15. What exact evidence is required before enabling autonomous mode?
+
+Be critical and evidence-based.
+
+Do not accept implementation claims without tracing the code.
+
+Do not confuse interfaces, DTOs or tests with a wired production capability.
+
+Do not change strategy behaviour merely to produce more trades.
+
+Do not weaken risk controls to improve trade frequency.
+
+Do not enable broker writes automatically.
+
+Do not claim broker certification without running explicit Practice/Demo tests.
+
+The final result must make it possible for another senior engineer to understand exactly what is safe, what is unsafe, what is missing and what should be implemented next.

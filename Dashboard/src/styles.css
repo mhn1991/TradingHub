@@ -1026,8 +1026,12 @@ input:focus-visible {
 
 .price-action-events polygon {
   stroke: #111827;
-  stroke-width: 1.1;
+  stroke-width: 0.8;
   opacity: 0.92;
+  vector-effect: non-scaling-stroke;
+}
+
+.swing-points polygon {
   vector-effect: non-scaling-stroke;
 }
 
@@ -2391,4 +2395,236 @@ input:focus-visible {
 .view-toggle .button.active {
   border-color: rgba(59, 130, 246, 0.7);
   background: rgba(59, 130, 246, 0.18);
+}
+
+/* —— Research & calibration panel —— */
+.research-panel {
+  display: grid;
+  gap: 16px;
+  padding: 8px 4px 28px;
+}
+
+.research-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.research-header h2 {
+  margin: 0 0 6px;
+  font-size: 1.35rem;
+}
+
+.research-header p {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.research-header-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.research-banner {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+.research-banner.error {
+  border-color: rgba(239, 106, 115, 0.45);
+  background: rgba(239, 106, 115, 0.12);
+  color: #fecaca;
+}
+
+.research-banner.ok {
+  border-color: rgba(54, 201, 143, 0.35);
+  background: rgba(54, 201, 143, 0.1);
+  color: #bbf7d0;
+}
+
+.research-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.research-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--ink-1);
+}
+
+.research-card h3,
+.research-card h4 {
+  margin: 0;
+}
+
+.research-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.research-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 12px;
+}
+
+.research-form.stack {
+  grid-template-columns: 1fr;
+}
+
+.research-form label,
+.research-form label.full {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.research-form label.full {
+  grid-column: 1 / -1;
+}
+
+.research-form input,
+.research-form select,
+.inline-filter select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--ink-0, #0b1117);
+  color: var(--text);
+  font: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
+}
+
+.research-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.research-job-status dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.research-job-status dl > div {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.research-job-status dt {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.research-job-status dd {
+  margin: 0;
+}
+
+.research-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.research-table th,
+.research-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.research-table th {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.type-chip {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #93c5fd;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.linkish {
+  border: 0;
+  background: none;
+  color: #7dd3fc;
+  cursor: pointer;
+  padding: 0 4px;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.button.danger,
+.button-secondary.danger {
+  color: #fecaca;
+  border-color: rgba(239, 106, 115, 0.4);
+}
+
+.selection-summary {
+  margin: 0;
+}
+
+.inline-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.amber-text { color: #f3c969; }
+
+.research-artifacts-fieldset {
+  grid-column: 1 / -1;
+  margin: 8px 0;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+
+.research-artifacts-fieldset legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Brokers.Abstractions;
@@ -67,10 +68,73 @@ internal sealed class OandaAccountClient(
                 Available = BrokerJson.ParseNullableDecimal(account.MarginAvailable),
                 MarginUsed = BrokerJson.ParseNullableDecimal(account.MarginUsed),
                 UnrealizedProfitLoss = BrokerJson.ParseNullableDecimal(account.UnrealizedPl),
+                Equity = BrokerJson.ParseNullableDecimal(account.Nav),
+                LastTransactionId = response.LastTransactionId,
                 CanTrade = account.TradingDisabled is null ? null : !account.TradingDisabled
             }
         ];
     }
+}
+
+internal sealed class OandaInstrumentMetadataClient(
+    INetworkGateway gateway,
+    TransportId transportId,
+    string accountId,
+    System.Collections.Concurrent.ConcurrentDictionary<string, string> instrumentMappings)
+    : IInstrumentMetadataClient
+{
+    public async Task<IReadOnlyList<InstrumentTradingMetadata>> GetInstrumentMetadataAsync(
+        CancellationToken cancellationToken = default)
+    {
+        OandaInstrumentsResponse response = await gateway.SendAsync(
+            new OandaGetInstrumentsCommand(transportId, accountId),
+            cancellationToken).ConfigureAwait(false);
+        foreach (OandaInstrument instrument in response.Instruments)
+        {
+            instrumentMappings.TryAdd(
+                OandaMappings.CanonicalInstrumentName(instrument),
+                instrument.Name);
+        }
+        return response.Instruments
+            .Where(static instrument => !string.IsNullOrWhiteSpace(instrument.Name))
+            .Select(instrument => OandaMappings.ToInstrumentMetadata(instrument, instrumentMappings))
+            .OrderBy(static metadata => metadata.Instrument.Value, StringComparer.Ordinal)
+            .ToArray();
+    }
+}
+
+internal sealed class OandaTransactionHistoryClient(
+    INetworkGateway gateway,
+    TransportId transportId,
+    string accountId,
+    IReadOnlyDictionary<string, string> instrumentMappings) : ITransactionHistoryClient
+{
+    public async Task<BrokerEventHistoryBatch> GetOrderEventsSinceAsync(
+        string lastTransactionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(lastTransactionId);
+        OandaTransactionsResponse response = await gateway.SendAsync(
+            new OandaGetTransactionsSinceCommand(transportId, accountId, lastTransactionId),
+            cancellationToken).ConfigureAwait(false);
+        OrderEvent[] events = response.Transactions
+            .Select(transaction => OandaMappings.ToOrderEvent(transaction, instrumentMappings))
+            .Where(static item => item is not null)
+            .Cast<OrderEvent>()
+            .OrderBy(static item => ParseSortableTransactionId(item.BrokerTransactionId))
+            .ThenBy(static item => item.Timestamp)
+            .ToArray();
+        return new BrokerEventHistoryBatch
+        {
+            Events = events,
+            LastTransactionId = response.LastTransactionId
+        };
+    }
+
+    private static long ParseSortableTransactionId(string? value) =>
+        long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long parsed)
+            ? parsed
+            : long.MaxValue;
 }
 
 internal sealed class OandaOrderClient(
@@ -93,6 +157,10 @@ internal sealed class OandaOrderClient(
             : InstrumentMappers.ToOanda(instrument.Value, instrumentMappings);
 
         return response.Orders
+            // Trade-dependent stops/targets are reconciled from openTrades, where OANDA provides
+            // the owning trade ID and full protection details. Treating them as standalone entry
+            // orders would create false "unowned order" alarms.
+            .Where(order => !OandaMappings.IsTradeDependentOrder(order.Type))
             .Where(order => nativeFilter is null ||
                 string.Equals(order.Instrument, nativeFilter, StringComparison.OrdinalIgnoreCase))
             .Select(order => OandaMappings.ToOrder(order, instrumentMappings))
@@ -187,46 +255,195 @@ internal sealed class OandaPositionClient(
     public async Task<IReadOnlyList<BrokerPosition>> GetOpenPositionsAsync(
         CancellationToken cancellationToken = default)
     {
-        OandaOpenPositionsResponse response = await gateway.SendAsync(
-            new OandaGetOpenPositionsCommand(transportId, accountId),
+        // Live ownership and stop reconciliation require trade-level state. OANDA's openTrades
+        // representation includes the real trade ID and full dependent stop/target orders.
+        OandaOpenTradesResponse response = await gateway.SendAsync(
+            new OandaGetOpenTradesCommand(transportId, accountId),
             cancellationToken).ConfigureAwait(false);
+        return response.Trades
+            .Select(trade => OandaMappings.ToPosition(trade, instrumentMappings))
+            .OrderBy(position => position.PositionId, StringComparer.Ordinal)
+            .ToArray();
+    }
+}
 
-        var result = new List<BrokerPosition>();
-        foreach (OandaPosition position in response.Positions)
+/// <summary>OANDA explicit trade-close/reduction adapter.</summary>
+internal sealed class OandaPositionReductionClient(
+    INetworkGateway gateway,
+    TransportId transportId,
+    string accountId) : IPositionReductionClient
+{
+    public async Task<PositionReductionResult> ReducePositionAsync(
+        ReduceBrokerPositionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Validate();
+        string units = request.IsFullClose
+            ? "ALL"
+            : request.Quantity.ToString("0.############################", CultureInfo.InvariantCulture);
+        try
         {
-            OandaMappings.AddPositionSide(
-                result, position, position.Long, OrderSide.Buy, "long", instrumentMappings);
-            OandaMappings.AddPositionSide(
-                result, position, position.Short, OrderSide.Sell, "short", instrumentMappings);
-        }
+            OandaOrderMutationResponse response = await gateway.SendAsync(
+                new OandaCloseTradeCommand(
+                    transportId,
+                    accountId,
+                    request.PositionId,
+                    new OandaTradeCloseRequest { Units = units }),
+                cancellationToken).ConfigureAwait(false);
 
-        return result;
+            if (response.OrderRejectTransaction is { } rejected)
+            {
+                return new PositionReductionResult
+                {
+                    Status = PositionReductionStatus.Rejected,
+                    ClientRequestId = request.ClientRequestId,
+                    PositionId = request.PositionId,
+                    BrokerOrderId = rejected.OrderId,
+                    BrokerTransactionId = rejected.Id,
+                    RequestedQuantity = request.Quantity,
+                    Certainty = ExecutionCertainty.Rejected,
+                    Reason = response.ErrorMessage ?? rejected.Reason ?? "OANDA rejected the trade reduction."
+                };
+            }
+
+            OandaTransaction? fill = response.OrderFillTransaction;
+            if (fill is null)
+            {
+                return new PositionReductionResult
+                {
+                    Status = PositionReductionStatus.Unknown,
+                    ClientRequestId = request.ClientRequestId,
+                    PositionId = request.PositionId,
+                    BrokerOrderId = response.OrderCreateTransaction?.OrderId,
+                    BrokerTransactionId = response.LastTransactionId,
+                    RequestedQuantity = request.Quantity,
+                    Certainty = ExecutionCertainty.Unknown,
+                    Reason = response.ErrorMessage ?? "OANDA did not return a conclusive trade-close fill."
+                };
+            }
+
+            decimal filled = Math.Abs(BrokerJson.ParseNullableDecimal(fill.Units) ?? request.Quantity);
+            return new PositionReductionResult
+            {
+                Status = filled + 0.00000001m >= request.Quantity
+                    ? PositionReductionStatus.Filled
+                    : PositionReductionStatus.Partial,
+                ClientRequestId = request.ClientRequestId,
+                PositionId = request.PositionId,
+                BrokerOrderId = fill.OrderId,
+                BrokerTransactionId = fill.Id ?? response.LastTransactionId,
+                RequestedQuantity = request.Quantity,
+                FilledQuantity = Math.Min(filled, request.OwnedQuantity),
+                FillPrice = BrokerJson.ParseNullableDecimal(fill.Price),
+                Certainty = ExecutionCertainty.Accepted
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new PositionReductionResult
+            {
+                Status = PositionReductionStatus.Unknown,
+                ClientRequestId = request.ClientRequestId,
+                PositionId = request.PositionId,
+                RequestedQuantity = request.Quantity,
+                Certainty = ExecutionCertainty.Unknown,
+                Reason = ex.Message
+            };
+        }
     }
 }
 
 /// <summary>
-/// OANDA dependent-order replacement is deliberately disabled until the native
-/// trade/order mutation endpoint, precision metadata, and reconciliation path are
-/// covered by integration tests. The existing stop is never cancelled as fallback.
+/// Uses OANDA's single dependent-orders replacement endpoint. The existing stop is not cancelled
+/// by the client first; a rejected or uncertain request therefore leaves broker protection intact.
 /// </summary>
-internal sealed class OandaProtectiveOrderClient : IProtectiveOrderClient
+internal sealed class OandaProtectiveOrderClient(
+    INetworkGateway gateway,
+    TransportId transportId,
+    string accountId) : IProtectiveOrderClient
 {
-    public Task<ProtectiveStopAmendmentResult> AmendProtectiveStopAsync(
+    public async Task<ProtectiveStopAmendmentResult> AmendProtectiveStopAsync(
         AmendProtectiveStopRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(new ProtectiveStopAmendmentResult
+        if (string.IsNullOrWhiteSpace(request.PositionId) || request.NewStopPrice <= 0m)
+            throw new ArgumentException("A broker trade id and positive stop price are required.", nameof(request));
+
+        try
         {
-            Status = ProtectiveStopAmendmentStatus.Unsupported,
-            ClientAmendmentId = request.ClientAmendmentId,
-            PreviousStopOrderId = request.ExistingStopOrderId,
-            CurrentStopOrderId = request.ExistingStopOrderId,
-            RequestedStopPrice = request.NewStopPrice,
-            RejectionReason =
-                "OANDA protective-stop amendment is not enabled; the existing stop remains active.",
-            Certainty = ExecutionCertainty.NotSent
-        });
+            OandaTradeDependentOrdersResponse response = await gateway.SendAsync(
+                new OandaReplaceTradeDependentOrdersCommand(
+                    transportId,
+                    accountId,
+                    request.PositionId,
+                    new OandaTradeDependentOrdersRequest
+                    {
+                        StopLoss = new OandaDependentOrderRequest
+                        {
+                            Price = request.NewStopPrice.ToString(
+                                "0.############################",
+                                CultureInfo.InvariantCulture)
+                        }
+                    }),
+                cancellationToken).ConfigureAwait(false);
+
+            if (response.StopLossOrderTransaction is not { } accepted)
+            {
+                return new ProtectiveStopAmendmentResult
+                {
+                    Status = string.IsNullOrWhiteSpace(response.ErrorMessage)
+                        ? ProtectiveStopAmendmentStatus.Unknown
+                        : ProtectiveStopAmendmentStatus.Rejected,
+                    ClientAmendmentId = request.ClientAmendmentId,
+                    PreviousStopOrderId = request.ExistingStopOrderId,
+                    CurrentStopOrderId = request.ExistingStopOrderId,
+                    RequestedStopPrice = request.NewStopPrice,
+                    RejectionReason = response.ErrorMessage ??
+                        "OANDA did not return a conclusive stop replacement transaction.",
+                    Certainty = string.IsNullOrWhiteSpace(response.ErrorMessage)
+                        ? ExecutionCertainty.Unknown
+                        : ExecutionCertainty.Rejected
+                };
+            }
+
+            return new ProtectiveStopAmendmentResult
+            {
+                Status = ProtectiveStopAmendmentStatus.Replaced,
+                ClientAmendmentId = request.ClientAmendmentId,
+                PreviousStopOrderId = response.StopLossOrderCancelTransaction?.OrderId ??
+                    request.ExistingStopOrderId,
+                CurrentStopOrderId = accepted.OrderId ?? accepted.Id,
+                RequestedStopPrice = request.NewStopPrice,
+                AcceptedStopPrice = BrokerJson.ParseNullableDecimal(accepted.Price) ?? request.NewStopPrice,
+                AcceptedAt = string.IsNullOrWhiteSpace(accepted.Time)
+                    ? null
+                    : DateTimeOffset.Parse(accepted.Time, CultureInfo.InvariantCulture),
+                EffectiveFromExecutionSequence = request.EffectiveFromExecutionSequence,
+                Certainty = ExecutionCertainty.Accepted
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new ProtectiveStopAmendmentResult
+            {
+                Status = ProtectiveStopAmendmentStatus.Unknown,
+                ClientAmendmentId = request.ClientAmendmentId,
+                PreviousStopOrderId = request.ExistingStopOrderId,
+                CurrentStopOrderId = request.ExistingStopOrderId,
+                RequestedStopPrice = request.NewStopPrice,
+                RejectionReason = ex.Message,
+                Certainty = ExecutionCertainty.Unknown
+            };
+        }
     }
 }

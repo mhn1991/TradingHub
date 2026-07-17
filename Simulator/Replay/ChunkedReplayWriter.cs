@@ -94,7 +94,8 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
             frame.ExecutionCandle.Mid.Volume?.Value ?? 0m,
             frame.ClosedIntervals.Select(FormatInterval).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
             frame.IsWarmup,
-            null);
+            null,
+            frame.ExecutionCandle.Mid.Instrument.Value);
         _executionTail.Enqueue(executionRow);
         while (_executionTail.Count > _executionDetailPreEntryFrames + 1)
             _executionTail.Dequeue();
@@ -117,7 +118,8 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 analysisCandle.Volume?.Value ?? 0m,
                 frame.ClosedIntervals.Select(FormatInterval).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
                 frame.IsWarmup,
-                analysis));
+                analysis,
+                frame.ExecutionCandle.Mid.Instrument.Value));
         }
 
         if (_marketBuffer.Count >= _chunkSize)
@@ -513,7 +515,11 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
         decimal Volume,
         IReadOnlyList<string> ClosedIntervals,
         bool IsWarmup,
-        AnalysisSnapshot? Analysis);
+        AnalysisSnapshot? Analysis,
+        // Additive (§7 multi-instrument clock): null on rows written before this field
+        // existed, or absent from JSON entirely - readers must fall back to the
+        // manifest's single/primary Instrument for those.
+        string? Instrument = null);
 
     private sealed record StrategyEventRow(
         long Sequence,
@@ -568,7 +574,16 @@ public sealed record SimulationManifest
 {
     public required Guid SimulationId { get; init; }
     public required int SchemaVersion { get; init; }
+    /// <summary>Primary/default instrument - Instruments[0] for a §7 multi-instrument run.</summary>
     public required string Instrument { get; init; }
+    /// <summary>
+    /// Every distinct instrument traded in this run. Null/single-element for a plain
+    /// single-instrument run (kept optional so older manifests without this field still
+    /// deserialize; readers should fall back to [Instrument] when absent).
+    /// </summary>
+    public IReadOnlyList<string>? Instruments { get; init; }
+    /// <summary>Strategy id -> the instrument it trades. Same fallback rule as Instruments.</summary>
+    public IReadOnlyDictionary<string, string>? StrategyInstruments { get; init; }
     public required DateTimeOffset From { get; init; }
     public required DateTimeOffset To { get; init; }
     public required DateTimeOffset? WarmupFrom { get; init; }

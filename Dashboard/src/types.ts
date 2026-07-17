@@ -357,6 +357,50 @@ export interface SimulationJobSnapshot {
   } | null
 }
 
+export type CalibrationArtifactType = 'Setup' | 'Management' | 'MetaModel'
+
+export interface CalibrationArtifactMetadata {
+  id: string
+  type: CalibrationArtifactType | string
+  schemaVersion: number
+  calibrationId: string
+  createdAt: string
+  contentHash: string
+  description?: string | null
+}
+
+export type ResearchJobStatus = 'Queued' | 'Running' | 'Completed' | 'Failed'
+
+export interface ResearchJobSnapshot {
+  jobId: string
+  kind: string
+  status: ResearchJobStatus | string
+  createdAt: string
+  startedAt?: string | null
+  completedAt?: string | null
+  instrument: string
+  strategy: string
+  from: string
+  to: string
+  message?: string | null
+  error?: string | null
+  artifactId?: string | null
+  artifactType?: string | null
+  calibrationId?: string | null
+  tradeCount: number
+  outcomeCount: number
+  bucketOrCohortCount: number
+}
+
+/** Shared between Research panel and Simulator panel via localStorage. */
+export interface ResearchArtifactSelection {
+  setupCalibrationArtifactId: string
+  managementCalibrationArtifactId: string
+  metaModelArtifactId: string
+}
+
+export const RESEARCH_ARTIFACT_SELECTION_KEY = 'tradinghub.research.artifacts.v1'
+
 export interface BacktestManifestRun {
   id: string
   strategyName: string

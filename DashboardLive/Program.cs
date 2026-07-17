@@ -4,8 +4,11 @@ using Dashboard.Live;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
+using QuantResearch.Training.Pipeline;
+using Simulator.Calibration;
 using Simulator.Jobs;
 using Simulator.Services;
+using TradingPolicies;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options =>
@@ -52,19 +55,51 @@ string jobsDirectory = Path.GetFullPath(Path.Combine(
     ".cache",
     "simulation-jobs"));
 builder.Services.AddSingleton<ISimulationJobRepository>(_ => new FileSimulationJobRepository(jobsDirectory));
+string calibrationArtifactsDirectory = Path.GetFullPath(Path.Combine(
+    builder.Environment.ContentRootPath,
+    "..",
+    ".cache",
+    "calibration-artifacts"));
+builder.Services.AddSingleton<ICalibrationArtifactRepository>(
+    _ => new FileCalibrationArtifactRepository(calibrationArtifactsDirectory));
+string tradingPolicyProfilesDirectory = Path.GetFullPath(Path.Combine(
+    builder.Environment.ContentRootPath, "..", ".cache", "trading-policy-profiles"));
+builder.Services.AddSingleton<ITradingPolicyProfileStore>(
+    _ => new FileTradingPolicyProfileStore(tradingPolicyProfilesDirectory));
+string calibrationBundleCandidatesDirectory = Path.GetFullPath(Path.Combine(
+    builder.Environment.ContentRootPath, "..", ".cache", "calibration-bundle-candidates"));
+builder.Services.AddSingleton<ICalibrationBundleApprovalStore>(services => new FileCalibrationBundleApprovalStore(
+    calibrationBundleCandidatesDirectory,
+    services.GetRequiredService<ICalibrationArtifactRepository>(),
+    services.GetRequiredService<ITradingPolicyProfileStore>(),
+    services.GetRequiredService<TimeProvider>()));
 builder.Services.AddSingleton<BacktestApplicationService>(services =>
 {
+    // Pre-run auto-calibration trains legacy and improved strategy chains in parallel, so the
+    // shared job queue needs at least two concurrent slots (plus headroom for a user sim).
     var appService = new BacktestApplicationService(
         services.GetRequiredService<ISimulationJobRepository>(),
         new BacktestApplicationServiceOptions
         {
-            MaxConcurrentJobs = 1,
-            QueueCapacity = 4
+            MaxConcurrentJobs = 3,
+            QueueCapacity = 8
         });
     return appService;
 });
 builder.Services.AddSingleton<IBacktestApplicationService>(services =>
     services.GetRequiredService<BacktestApplicationService>());
+builder.Services.AddSingleton<ResearchCalibrationService>();
+builder.Services.AddSingleton(services => new CalibrationTrainingPipeline(
+    services.GetRequiredService<IBacktestApplicationService>(),
+    services.GetRequiredService<ICalibrationArtifactRepository>()));
+builder.Services.AddSingleton(services => new PreRunCalibrationService(
+    services.GetRequiredService<CalibrationTrainingPipeline>(),
+    services.GetRequiredService<ICalibrationArtifactRepository>(),
+    services.GetRequiredService<ILogger<PreRunCalibrationService>>()));
+builder.Services.AddSingleton(services => new CalibrationBundleWorkflow(
+    services.GetRequiredService<CalibrationTrainingPipeline>(),
+    services.GetRequiredService<ICalibrationArtifactRepository>(),
+    services.GetRequiredService<ICalibrationBundleApprovalStore>()));
 builder.Services.AddSingleton<SimulationRealtimePublisher>();
 builder.Services.AddHostedService<SimulationRealtimeBridge>();
 builder.Services.AddSignalR().AddJsonProtocol(options =>
@@ -498,6 +533,9 @@ app.MapGet("/api/live/events", async (
 });
 
 app.MapSimulationEndpoints();
+app.MapCalibrationEndpoints();
+app.MapCalibrationBundleEndpoints();
+app.MapResearchEndpoints();
 app.MapHub<SimulationHub>("/hubs/simulations");
 
 app.Run();

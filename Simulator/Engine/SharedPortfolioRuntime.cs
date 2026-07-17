@@ -3,6 +3,7 @@ using Brokers.Abstractions;
 using Brokers.Models;
 using ExecutionManager;
 using PortfolioManager.Allocation;
+using PortfolioManager.Correlation;
 using PortfolioManager.Risk;
 using RiskManager;
 using RiskManager.Safety;
@@ -26,6 +27,10 @@ public sealed class SharedPortfolioRuntime
     private readonly PositionSizingOptions _sizingOptions;
     private readonly AdaptiveRiskOptions _adaptiveRiskOptions;
     private readonly SimulationOptions _simulationOptions;
+    private readonly PortfolioRiskOptions _portfolioRiskOptions;
+    private readonly ICurrencyExposureCalculator _currencyExposureCalculator = new CurrencyExposureCalculator();
+    private readonly RollingCorrelationClusters _correlationClusters;
+    private CorrelationSnapshot? _correlationSnapshot;
     private long _opportunitySequence;
     private long _riskObservationCount;
     private decimal _latestHeat;
@@ -45,15 +50,90 @@ public sealed class SharedPortfolioRuntime
         PortfolioRiskOptions portfolioOptions,
         PositionSizingOptions sizingOptions,
         AdaptiveRiskOptions adaptiveRiskOptions,
-        TradingSafetyOptions safetyOptions)
+        TradingSafetyOptions safetyOptions,
+        CorrelationRiskOptions? correlationOptions = null)
     {
         _simulationOptions = simulationOptions ?? throw new ArgumentNullException(nameof(simulationOptions));
         _sizingOptions = sizingOptions ?? throw new ArgumentNullException(nameof(sizingOptions));
         _adaptiveRiskOptions = adaptiveRiskOptions ?? throw new ArgumentNullException(nameof(adaptiveRiskOptions));
+        _portfolioRiskOptions = portfolioOptions ?? throw new ArgumentNullException(nameof(portfolioOptions));
         Reservations = new PortfolioReservationBook(portfolioOptions);
         RiskManager = new PortfolioRiskManager(portfolioOptions);
         CapitalAllocator = new CapitalAllocator(Reservations);
         AccountSafety = new TradingSafetyController(safetyOptions);
+        _correlationClusters = new RollingCorrelationClusters(correlationOptions);
+    }
+
+    /// <summary>
+    /// Feeds every portfolio instrument's completed trailing-return observation (e.g. a
+    /// closed 1h candle's log return) for one timestamp into the correlation engine in a
+    /// single call, so pair correlation can match observations by exact timestamp. Must
+    /// be called with strictly increasing timestamps. Today's simulator streams one
+    /// instrument per run, so the engine always passes a one-entry dictionary; once the
+    /// multi-instrument portfolio clock lands, every basket instrument closing at the
+    /// same timestamp should be included in one call.
+    /// </summary>
+    internal void ObserveCompletedReturns(DateTimeOffset availableAt, IReadOnlyDictionary<InstrumentKey, decimal> completedReturns)
+    {
+        lock (_sync)
+        {
+            _correlationSnapshot = _correlationClusters.Update(availableAt, completedReturns);
+        }
+    }
+
+    /// <summary>
+    /// Real correlation evaluation for a candidate against currently open/reserved
+    /// portfolio directions. Internal (rather than private) so it can be exercised
+    /// directly by tests without needing a full multi-instrument market-data feed -
+    /// today's simulator only streams one instrument per run, so this is normally
+    /// exercised end-to-end only with synthetic multi-instrument decisions until the
+    /// multi-instrument portfolio clock lands.
+    /// </summary>
+    internal CorrelationPenaltyDecision EvaluateCorrelation(
+        InstrumentKey candidate,
+        OrderSide side,
+        IReadOnlyDictionary<InstrumentKey, int> existingDirections)
+    {
+        Dictionary<InstrumentKey, int> others = existingDirections
+            .Where(item => item.Key != candidate)
+            .ToDictionary(item => item.Key, item => item.Value);
+        if (others.Count == 0)
+        {
+            string cluster = _correlationSnapshot?.ClusterByInstrument.GetValueOrDefault(candidate) ??
+                $"cluster:{candidate.Value}";
+            return new CorrelationPenaltyDecision
+            {
+                RiskMultiplier = 1m,
+                MaximumRelevantCorrelation = 0m,
+                ClusterId = cluster,
+                ReasonCode = "NoOtherPortfolioInstruments"
+            };
+        }
+        int candidateDirection = side == OrderSide.Sell ? -1 : 1;
+        return _correlationClusters.Evaluate(candidate, candidateDirection, others);
+    }
+
+    private Dictionary<InstrumentKey, int> BuildExistingDirections(
+        IReadOnlyList<PortfolioPositionLot> lots,
+        PortfolioReservationSnapshot reservationSnapshot)
+    {
+        var net = new Dictionary<InstrumentKey, decimal>();
+        foreach (PortfolioPositionLot lot in lots)
+        {
+            net[lot.Instrument] = net.GetValueOrDefault(lot.Instrument) +
+                (lot.Side == OrderSide.Buy ? lot.Quantity : -lot.Quantity);
+        }
+        foreach (PortfolioReservation reservation in reservationSnapshot.Reservations)
+        {
+            if (!_pending.TryGetValue(reservation.ReservationId, out PendingReservation? pending)) continue;
+            decimal signed = pending.Decision.Action == AgentAction.Sell
+                ? -reservation.RemainingQuantity
+                : reservation.RemainingQuantity;
+            net[reservation.Instrument] = net.GetValueOrDefault(reservation.Instrument) + signed;
+        }
+        return net
+            .Where(item => item.Value != 0m)
+            .ToDictionary(item => item.Key, item => Math.Sign(item.Value));
     }
 
     public IPortfolioRiskManager RiskManager { get; }
@@ -149,6 +229,12 @@ public sealed class SharedPortfolioRuntime
         foreach ((string currency, decimal risk) in reservation.CurrencyExposureDelta)
             openCurrencyRisk[currency] = openCurrencyRisk.GetValueOrDefault(currency) + Math.Abs(risk);
 
+        // Real notional net/gross exposure (distinct from the stop-risk split above).
+        // Open positions only - pending reservations aren't folded in here since
+        // CurrencyExposureDelta above is stop-risk-shaped, not notional.
+        CurrencyExposureResult openExposure = _currencyExposureCalculator.Calculate(
+            lots, [], BuildFxConversionSnapshot(eventTime, lots));
+
         _riskObservationCount++;
         _latestHeat = heat.TotalHeat;
         _peakHeat = Math.Max(_peakHeat, heat.TotalHeat);
@@ -175,6 +261,9 @@ public sealed class SharedPortfolioRuntime
                 StrategyHeat = heat.StrategyHeat.GetValueOrDefault(session.StrategyId),
                 InstrumentHeat = heat.InstrumentHeat.Values.Sum(),
                 CurrencyRisk = new Dictionary<string, decimal>(openCurrencyRisk, StringComparer.OrdinalIgnoreCase),
+                NetCurrencyExposure = openExposure.NetExposureAccountCurrency,
+                GrossCurrencyExposure = openExposure.GrossExposureAccountCurrency,
+                CurrencyExposureMissingCurrencies = openExposure.MissingCurrencies,
                 ClusterHeat = heat.ClusterHeat,
                 MarginUsed = account.MarginUsed ?? 0m,
                 ReservedMargin = reservationSnapshot.ReservedMargin,
@@ -202,6 +291,7 @@ public sealed class SharedPortfolioRuntime
             return events;
         }
 
+        Dictionary<InstrumentKey, int> existingDirections = BuildExistingDirections(lots, reservationSnapshot);
         var opportunities = new List<PortfolioOpportunity>();
         foreach (QueuedOpportunity item in queued)
         {
@@ -237,6 +327,15 @@ public sealed class SharedPortfolioRuntime
                     $"Shared admission rejected {decision.Instrument}; conversion data was unavailable."));
                 continue;
             }
+            CorrelationPenaltyDecision correlation = EvaluateCorrelation(
+                decision.Instrument,
+                decision.Action == AgentAction.Sell ? OrderSide.Sell : OrderSide.Buy,
+                existingDirections);
+            decision = decision with
+            {
+                CorrelationRiskMultiplier = correlation.RiskMultiplier,
+                RiskClusterId = correlation.ClusterId
+            };
             decimal riskMultiplier = RiskMultiplier(decision);
             PositionSizingResult sizing = new PositionSizer(_sizingOptions).Calculate(new PositionSizingContext
             {
@@ -250,6 +349,14 @@ public sealed class SharedPortfolioRuntime
                 RiskBudgetMultiplier = riskMultiplier
             });
             sizing = AddMonetaryEstimates(sizing, decision, quoteRate);
+            if (sizing.Approved && sizing.Quantity > 0m)
+            {
+                decimal referencePrice = decision.ReferencePrice ?? decision.LimitPrice ?? decision.StopPrice ?? 0m;
+                (bool exposureApproved, string? exposureReason, string? exposureExplanation) = EvaluateCurrencyExposureLimits(
+                    eventTime, decision, sizing.Quantity, referencePrice, quoteRate, lots, equity);
+                if (!exposureApproved)
+                    sizing = sizing with { Approved = false, ReasonCode = exposureReason!, Reason = exposureExplanation! };
+            }
             opportunities.Add(new PortfolioOpportunity
             {
                 StrategyId = item.StrategyId,
@@ -262,7 +369,7 @@ public sealed class SharedPortfolioRuntime
                 ExpectedRewardRisk = decision.ExpectedRewardRisk ?? 0m,
                 RegimeSuitability = decision.RegimeRiskMultiplier ?? 1m,
                 TransactionCostPenalty = _sizingOptions.EstimatedRoundTripCostBasisPoints / 10_000m,
-                CorrelationPenalty = 0m,
+                CorrelationPenalty = 1m - correlation.RiskMultiplier,
                 CurrencyConcentrationPenalty = 0m,
                 MarginConsumptionPenalty = sizing.EstimatedMargin is decimal margin && equity > 0m
                     ? margin / equity
@@ -289,7 +396,8 @@ public sealed class SharedPortfolioRuntime
                 OpenStrategyRisk = heat.StrategyHeat,
                 OpenInstrumentRisk = heat.InstrumentHeat,
                 OpenCurrencyRisk = openCurrencyRisk,
-                CorrelationClusterFactory = opportunity => $"cluster:{opportunity.Decision.Instrument.Value}",
+                CorrelationClusterFactory = opportunity =>
+                    opportunity.Decision.RiskClusterId ?? $"cluster:{opportunity.Decision.Instrument.Value}",
                 CurrencyExposureFactory = (opportunity, quantity) => CurrencyRiskDelta(opportunity, quantity)
             });
 
@@ -321,10 +429,9 @@ public sealed class SharedPortfolioRuntime
             if (allocation.AllocatedQuantity < allocation.OriginalQuantity)
                 _resizedOpportunities++;
 
-            AgentDecision allocatedDecision = item.Decision with
+            AgentDecision allocatedDecision = allocation.Opportunity.Decision with
             {
                 PortfolioReservationId = allocation.ReservationId,
-                RiskClusterId = $"cluster:{item.Decision.Instrument.Value}",
                 PortfolioOriginalQuantity = allocation.OriginalQuantity,
                 PortfolioAllocatedQuantity = allocation.AllocatedQuantity,
                 StrategyAllocationRiskMultiplier = allocation.OriginalQuantity <= 0m
@@ -519,6 +626,16 @@ public sealed class SharedPortfolioRuntime
         }
     }
 
+    /// <summary>
+    /// Balance is reconciled to one shared starting pool (not summed per strategy). Margin is
+    /// netted per instrument across strategies' virtual lots — two strategies opposite-sided on
+    /// the same instrument offset, matching real broker margin economics, instead of each being
+    /// charged full margin independently. Positions themselves stay separate per-strategy broker
+    /// records: merging them into one broker-side position would require rebuilding fill-matching,
+    /// OCO-group management, and the exclusive full-quantity-ownership assumptions baked into
+    /// StrategySimulationSession's exit-management paths and
+    /// ExecutionCoordinator.AmendProtectiveStopCoreAsync's exact-quantity match — out of scope here.
+    /// </summary>
     private AccountSnapshot AggregateAccount()
     {
         AccountSnapshot[] accounts = _registrations.Values
@@ -526,17 +643,28 @@ public sealed class SharedPortfolioRuntime
             .ToArray();
         decimal realisedDelta = accounts.Sum(item => (item.Balance ?? _simulationOptions.StartingBalance) -
             _simulationOptions.StartingBalance);
+        decimal balance = _simulationOptions.StartingBalance + realisedDelta;
+        decimal unrealised = accounts.Sum(item => item.UnrealizedProfitLoss ?? 0m);
+        decimal marginUsed = BuildLots()
+            .GroupBy(lot => lot.Instrument)
+            .Sum(group =>
+            {
+                decimal netQuantity = group.Sum(lot => lot.Side == OrderSide.Buy ? lot.Quantity : -lot.Quantity);
+                PortfolioPositionLot reference = group.First();
+                return Math.Abs(netQuantity) * reference.CurrentPrice * reference.QuoteToAccountCurrencyRate /
+                    _simulationOptions.Leverage;
+            });
+        decimal available = balance + unrealised - marginUsed;
         return new AccountSnapshot
         {
             AccountId = "shared-portfolio-account",
             AccountType = "Shared virtual-lot portfolio",
             Currency = _simulationOptions.BaseCurrency,
-            Balance = _simulationOptions.StartingBalance + realisedDelta,
-            UnrealizedProfitLoss = accounts.Sum(item => item.UnrealizedProfitLoss ?? 0m),
-            MarginUsed = accounts.Sum(item => item.MarginUsed ?? 0m),
-            Available = accounts.Sum(item => item.Available ?? 0m) -
-                Math.Max(0, accounts.Length - 1) * _simulationOptions.StartingBalance,
-            CanTrade = accounts.All(item => item.CanTrade != false)
+            Balance = balance,
+            UnrealizedProfitLoss = unrealised,
+            MarginUsed = marginUsed,
+            Available = available,
+            CanTrade = available > 0m
         };
     }
 
@@ -574,7 +702,8 @@ public sealed class SharedPortfolioRuntime
                     _sizingOptions.EstimatedRoundTripCostBasisPoints / 20_000m,
                 MarginAccountCurrency = position.Quantity * entry * conversion / _simulationOptions.Leverage,
                 QuoteToAccountCurrencyRate = conversion,
-                CorrelationClusterId = $"cluster:{trade.Instrument.Value}"
+                CorrelationClusterId = _correlationSnapshot?.ClusterByInstrument.GetValueOrDefault(trade.Instrument) ??
+                    $"cluster:{trade.Instrument.Value}"
             });
         }
         return lots;
@@ -637,6 +766,107 @@ public sealed class SharedPortfolioRuntime
             [baseCurrency] = risk / 2m,
             [quoteCurrency] = risk / 2m
         };
+    }
+
+    /// <summary>
+    /// Derives an account-currency conversion rate for every currency present in the
+    /// open book (plus, optionally, one candidate instrument) purely from data already
+    /// on each lot - no extra broker calls needed. For a BASE/QUOTE instrument,
+    /// QuoteToAccountCurrencyRate already converts the quote currency; the base
+    /// currency's account-currency rate is CurrentPrice * QuoteToAccountCurrencyRate
+    /// (one unit of base = CurrentPrice units of quote = that many account-currency units).
+    /// </summary>
+    private FxConversionSnapshot BuildFxConversionSnapshot(
+        DateTimeOffset availableAt,
+        IReadOnlyList<PortfolioPositionLot> lots,
+        InstrumentKey? candidateInstrument = null,
+        decimal candidatePrice = 0m,
+        decimal candidateQuoteRate = 0m)
+    {
+        var rates = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        void AddRates(InstrumentKey instrument, decimal price, decimal quoteToAccountRate)
+        {
+            if (price <= 0m || quoteToAccountRate <= 0m) return;
+            (string baseCurrency, string quoteCurrency) = CurrencyExposureCalculator.ParseCurrencies(instrument);
+            rates[quoteCurrency] = quoteToAccountRate;
+            rates[baseCurrency] = price * quoteToAccountRate;
+        }
+        foreach (PortfolioPositionLot lot in lots)
+            AddRates(lot.Instrument, lot.CurrentPrice, lot.QuoteToAccountCurrencyRate);
+        if (candidateInstrument is InstrumentKey candidate)
+            AddRates(candidate, candidatePrice, candidateQuoteRate);
+        return new FxConversionSnapshot
+        {
+            AvailableAt = availableAt,
+            AccountCurrency = _simulationOptions.BaseCurrency,
+            CurrencyToAccountRates = rates
+        };
+    }
+
+    /// <summary>
+    /// Projects real net/gross notional currency exposure (via <see cref="CurrencyExposureCalculator"/>)
+    /// with the candidate added to the current open book, and rejects the candidate if it
+    /// would breach the configured notional-exposure limits. Distinct from the existing
+    /// stop-risk-based <see cref="PortfolioReservationBook"/> currency gate.
+    /// </summary>
+    internal (bool Approved, string? ReasonCode, string? Explanation) EvaluateCurrencyExposureLimits(
+        DateTimeOffset availableAt,
+        AgentDecision decision,
+        decimal quantity,
+        decimal referencePrice,
+        decimal quoteRate,
+        IReadOnlyList<PortfolioPositionLot> lots,
+        decimal equity)
+    {
+        if (quantity <= 0m || referencePrice <= 0m || quoteRate <= 0m || equity <= 0m)
+            return (true, null, null);
+
+        FxConversionSnapshot snapshot = BuildFxConversionSnapshot(
+            availableAt, lots, decision.Instrument, referencePrice, quoteRate);
+        var candidateLot = new PortfolioPositionLot
+        {
+            LotId = "candidate",
+            StrategyId = "candidate",
+            DecisionId = "candidate",
+            Instrument = decision.Instrument,
+            Side = decision.Action == AgentAction.Sell ? OrderSide.Sell : OrderSide.Buy,
+            Quantity = quantity,
+            EntryPrice = referencePrice,
+            CurrentPrice = referencePrice,
+            QuoteToAccountCurrencyRate = quoteRate
+        };
+        CurrencyExposureResult projected = _currencyExposureCalculator.Calculate(
+            [.. lots, candidateLot], [], snapshot);
+        if (!projected.Complete)
+        {
+            return (false, "CurrencyConversionUnavailable",
+                $"Currency exposure could not be evaluated; missing conversions for " +
+                $"{string.Join(",", projected.MissingCurrencies)}.");
+        }
+        // Exposure to the account currency itself is the funding leg of every FX trade,
+        // not foreign-currency concentration risk - margin/heat limits already cover
+        // overall leveraged size, so only gate genuinely foreign currencies here.
+        foreach ((string currency, decimal net) in projected.NetExposureAccountCurrency)
+        {
+            if (string.Equals(currency, snapshot.AccountCurrency, StringComparison.OrdinalIgnoreCase)) continue;
+            if (Math.Abs(net) / equity * 100m > _portfolioRiskOptions.MaximumNetCurrencyExposurePercent)
+            {
+                return (false, "NetCurrencyExposureLimit",
+                    $"{currency} net exposure would reach {Math.Abs(net) / equity * 100m:F2}% of equity, " +
+                    $"exceeding the configured {_portfolioRiskOptions.MaximumNetCurrencyExposurePercent:F2}% limit.");
+            }
+        }
+        foreach ((string currency, decimal gross) in projected.GrossExposureAccountCurrency)
+        {
+            if (string.Equals(currency, snapshot.AccountCurrency, StringComparison.OrdinalIgnoreCase)) continue;
+            if (gross / equity * 100m > _portfolioRiskOptions.MaximumGrossCurrencyExposurePercent)
+            {
+                return (false, "GrossCurrencyExposureLimit",
+                    $"{currency} gross exposure would reach {gross / equity * 100m:F2}% of equity, " +
+                    $"exceeding the configured {_portfolioRiskOptions.MaximumGrossCurrencyExposurePercent:F2}% limit.");
+            }
+        }
+        return (true, null, null);
     }
 
     private static decimal LotRisk(PortfolioPositionLot lot)

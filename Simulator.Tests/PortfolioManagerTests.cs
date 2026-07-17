@@ -19,7 +19,7 @@ public sealed class PortfolioManagerTests
             MaximumPendingRiskPercent = 0.75m,
             MaximumStrategyRiskPercent = 0.75m,
             MaximumInstrumentRiskPercent = 0.75m,
-            MaximumCurrencyRiskPercent = 0.75m
+            MaximumCurrencyStopRiskPercent = 0.75m
         });
         PortfolioReservationRequest first = Request("r1", "a", 500m);
         PortfolioReservationRequest second = Request("r2", "b", 500m);
@@ -183,7 +183,7 @@ public sealed class PortfolioManagerTests
             MaximumPendingRiskPercent = 0.75m,
             MaximumStrategyRiskPercent = 0.75m,
             MaximumInstrumentRiskPercent = 0.75m,
-            MaximumCurrencyRiskPercent = 0.75m
+            MaximumCurrencyStopRiskPercent = 0.75m
         });
         var allocator = new CapitalAllocator(book);
         DateTimeOffset now = new(2026, 7, 15, 10, 0, 0, TimeSpan.Zero);

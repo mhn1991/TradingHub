@@ -234,6 +234,28 @@ public sealed record SimulatedTradeRecord
     public decimal? SetupCalibrationRiskMultiplier { get; init; }
     public decimal? MetaLabelRiskMultiplier { get; init; }
     public decimal? FinalRiskBudgetMultiplier { get; init; }
+    /// <summary>
+    /// Fraction of causal analysis snapshots whose regime direction agreed with the entry side
+    /// at decision time (<see cref="RiskManager.Calibration.MetaLabelFeatureFactory.ComputeMultiTimeframeAlignment"/>).
+    /// Captured for every trade regardless of whether a meta-model is configured, so
+    /// <c>calibrate-metamodel</c> can bucket by it later.
+    /// </summary>
+    public decimal? EntryMultiTimeframeAlignment { get; init; }
+    /// <summary>
+    /// Bar-by-bar MFE/MAE excursion path from entry to close. Null unless
+    /// <see cref="BacktestRuntimeOptions.DetailedExcursionTracking"/> is enabled (off by
+    /// default - zero size/behavior change for every run that doesn't opt in). Feeds
+    /// QuantResearch's trade-management cohort calibration, which needs a path rather than
+    /// just the peak <see cref="MaximumFavourableExcursionR"/>/<see cref="MaximumAdverseExcursionR"/>.
+    /// </summary>
+    public IReadOnlyList<SimulatedTradePathPoint>? ExcursionPath { get; init; }
+}
+
+public sealed record SimulatedTradePathPoint
+{
+    public required int BarsAfterEntry { get; init; }
+    public required decimal MfeR { get; init; }
+    public required decimal MaeR { get; init; }
 }
 
 public sealed record SimulationResult

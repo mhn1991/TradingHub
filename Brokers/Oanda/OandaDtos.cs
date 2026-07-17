@@ -48,6 +48,9 @@ internal sealed record OandaAccountSummaryResponse
 {
     [JsonPropertyName("account")]
     public required OandaAccountSummary Account { get; init; }
+
+    [JsonPropertyName("lastTransactionID")]
+    public string? LastTransactionId { get; init; }
 }
 
 internal sealed record OandaAccountSummary
@@ -69,6 +72,9 @@ internal sealed record OandaAccountSummary
 
     [JsonPropertyName("unrealizedPL")]
     public string? UnrealizedPl { get; init; }
+
+    [JsonPropertyName("NAV")]
+    public string? Nav { get; init; }
 
     [JsonPropertyName("tradingDisabled")]
     public bool? TradingDisabled { get; init; }
@@ -108,6 +114,9 @@ internal sealed record OandaOrder
 
     [JsonPropertyName("clientOrderID")]
     public string? ClientOrderId { get; init; }
+
+    [JsonPropertyName("tradeID")]
+    public string? TradeId { get; init; }
 }
 
 internal sealed record OandaClientExtensions
@@ -146,6 +155,58 @@ internal sealed record OandaPositionSide
     public string? UnrealizedPl { get; init; }
 }
 
+
+internal sealed record OandaOpenTradesResponse
+{
+    [JsonPropertyName("trades")]
+    public IReadOnlyList<OandaTrade> Trades { get; init; } = [];
+
+    [JsonPropertyName("lastTransactionID")]
+    public string? LastTransactionId { get; init; }
+}
+
+internal sealed record OandaTrade
+{
+    [JsonPropertyName("id")]
+    public required string Id { get; init; }
+
+    [JsonPropertyName("instrument")]
+    public required string Instrument { get; init; }
+
+    [JsonPropertyName("price")]
+    public string? Price { get; init; }
+
+    [JsonPropertyName("openTime")]
+    public string? OpenTime { get; init; }
+
+    [JsonPropertyName("initialUnits")]
+    public string? InitialUnits { get; init; }
+
+    [JsonPropertyName("currentUnits")]
+    public string? CurrentUnits { get; init; }
+
+    [JsonPropertyName("unrealizedPL")]
+    public string? UnrealizedPl { get; init; }
+
+    [JsonPropertyName("clientExtensions")]
+    public OandaClientExtensions? ClientExtensions { get; init; }
+
+    [JsonPropertyName("stopLossOrder")]
+    public OandaLinkedTradeOrder? StopLossOrder { get; init; }
+
+    [JsonPropertyName("takeProfitOrder")]
+    public OandaLinkedTradeOrder? TakeProfitOrder { get; init; }
+}
+
+internal sealed record OandaLinkedTradeOrder
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("price")]
+    public string? Price { get; init; }
+}
+
 internal sealed record OandaInstrumentsResponse
 {
     [JsonPropertyName("instruments")]
@@ -162,6 +223,24 @@ internal sealed record OandaInstrument
 
     [JsonPropertyName("type")]
     public string? Type { get; init; }
+
+    [JsonPropertyName("pipLocation")]
+    public int PipLocation { get; init; }
+
+    [JsonPropertyName("displayPrecision")]
+    public int DisplayPrecision { get; init; }
+
+    [JsonPropertyName("tradeUnitsPrecision")]
+    public int TradeUnitsPrecision { get; init; }
+
+    [JsonPropertyName("minimumTradeSize")]
+    public string? MinimumTradeSize { get; init; }
+
+    [JsonPropertyName("maximumOrderUnits")]
+    public string? MaximumOrderUnits { get; init; }
+
+    [JsonPropertyName("marginRate")]
+    public string? MarginRate { get; init; }
 }
 
 internal sealed record OandaCreateOrderEnvelope
@@ -199,6 +278,10 @@ internal sealed record OandaCreateOrderRequest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public OandaClientExtensions? ClientExtensions { get; init; }
 
+    [JsonPropertyName("tradeClientExtensions")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OandaClientExtensions? TradeClientExtensions { get; init; }
+
     [JsonPropertyName("stopLossOnFill")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public OandaDependentOrderRequest? StopLossOnFill { get; init; }
@@ -217,6 +300,44 @@ internal sealed record OandaDependentOrderRequest
     public string TimeInForce { get; init; } = "GTC";
 }
 
+internal sealed record OandaTradeCloseRequest
+{
+    [JsonPropertyName("units")]
+    public required string Units { get; init; }
+}
+
+internal sealed record OandaTradeDependentOrdersRequest
+{
+    [JsonPropertyName("stopLoss")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OandaDependentOrderRequest? StopLoss { get; init; }
+
+    [JsonPropertyName("takeProfit")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OandaDependentOrderRequest? TakeProfit { get; init; }
+}
+
+internal sealed record OandaTradeDependentOrdersResponse
+{
+    [JsonPropertyName("stopLossOrderTransaction")]
+    public OandaTransaction? StopLossOrderTransaction { get; init; }
+
+    [JsonPropertyName("stopLossOrderCancelTransaction")]
+    public OandaTransaction? StopLossOrderCancelTransaction { get; init; }
+
+    [JsonPropertyName("takeProfitOrderTransaction")]
+    public OandaTransaction? TakeProfitOrderTransaction { get; init; }
+
+    [JsonPropertyName("takeProfitOrderCancelTransaction")]
+    public OandaTransaction? TakeProfitOrderCancelTransaction { get; init; }
+
+    [JsonPropertyName("lastTransactionID")]
+    public string? LastTransactionId { get; init; }
+
+    [JsonPropertyName("errorMessage")]
+    public string? ErrorMessage { get; init; }
+}
+
 internal sealed record OandaOrderMutationResponse
 {
     [JsonPropertyName("orderCreateTransaction")]
@@ -231,8 +352,35 @@ internal sealed record OandaOrderMutationResponse
     [JsonPropertyName("orderRejectTransaction")]
     public OandaTransaction? OrderRejectTransaction { get; init; }
 
+    [JsonPropertyName("lastTransactionID")]
+    public string? LastTransactionId { get; init; }
+
     [JsonPropertyName("errorMessage")]
     public string? ErrorMessage { get; init; }
+}
+
+internal sealed record OandaTradeSummary
+{
+    [JsonPropertyName("tradeID")]
+    public string? TradeId { get; init; }
+
+    [JsonPropertyName("units")]
+    public string? Units { get; init; }
+
+    [JsonPropertyName("price")]
+    public string? Price { get; init; }
+
+    [JsonPropertyName("realizedPL")]
+    public string? RealizedPl { get; init; }
+}
+
+internal sealed record OandaTransactionsResponse
+{
+    [JsonPropertyName("transactions")]
+    public IReadOnlyList<OandaTransaction> Transactions { get; init; } = [];
+
+    [JsonPropertyName("lastTransactionID")]
+    public required string LastTransactionId { get; init; }
 }
 
 internal sealed record OandaTransaction
@@ -266,6 +414,18 @@ internal sealed record OandaTransaction
 
     [JsonPropertyName("clientOrderID")]
     public string? ClientOrderId { get; init; }
+
+    [JsonPropertyName("tradeOpened")]
+    public OandaTradeSummary? TradeOpened { get; init; }
+
+    [JsonPropertyName("tradeReduced")]
+    public OandaTradeSummary? TradeReduced { get; init; }
+
+    [JsonPropertyName("tradesClosed")]
+    public IReadOnlyList<OandaTradeSummary> TradesClosed { get; init; } = [];
+
+    [JsonPropertyName("tradeID")]
+    public string? TradeId { get; init; }
 }
 
 internal sealed record OandaPricingStreamMessage

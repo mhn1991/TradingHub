@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>TradingPolicies</RootNamespace>
+    <AssemblyName>TradingPolicies</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsAotCompatible>false</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591;IL2026;IL3050</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Agent/Agent.csproj" />
+    <ProjectReference Include="../Calibration/Calibration.csproj" />
+    <ProjectReference Include="../PortfolioManager/PortfolioManager.csproj" />
+    <ProjectReference Include="../RiskManager/RiskManager.csproj" />
+    <ProjectReference Include="../TradeManager/TradeManager.csproj" />
+    <ProjectReference Include="../TradingCore/TradingCore.csproj" />
+  </ItemGroup>
+</Project>

@@ -105,7 +105,8 @@ public sealed class ImprovedProgressiveAgent(ProgressiveStrategyOptions? options
             entry.Confidence.Total * 0.40m +
             confirmation.Confidence.Total * 0.35m +
             trend.Confidence.Total * 0.25m +
-            PriceActionConfidenceAdjustment(entry, state.Side);
+            PriceActionConfidenceAdjustment(entry, state.Side) +
+            ActiveRetestConfidenceAdjustment(entry, state.Side);
         if (priceActionSetup is not null)
             confidence += Math.Min(8m, priceActionSetup.Confidence * 0.08m);
 
@@ -215,24 +216,10 @@ public sealed class ImprovedProgressiveAgent(ProgressiveStrategyOptions? options
             }
         }
 
-        // 3) Channel boundary.
-        foreach (PriceChannel channel in entry.Channels
-                     .Where(channel => channel.Confidence >= Options.MinimumChannelConfidence)
-                     .OrderByDescending(channel => channel.Confidence)
-                     .Take(2))
-        {
-            decimal level = buy
-                ? channel.LowerLine.PriceAt(entry.AvailableAt)
-                : channel.UpperLine.PriceAt(entry.AvailableAt);
-            if (buy ? level >= price : level <= price)
-                continue;
-            decimal buffered = buy
-                ? level - atr * Options.StopBufferAtr
-                : level + atr * Options.StopBufferAtr;
-            candidates.Add((buffered, 4, "Active channel boundary plus ATR buffer"));
-        }
-
-        // 4) ATR fallback always available.
+        // 3) ATR fallback always available.
+        // (Channel boundaries were deliberately removed as a stop candidate source -
+        // RANSAC trendline/channel detection is not considered reliable enough to
+        // anchor invalidation levels.)
         decimal atrFallback = buy
             ? price - atr * Options.FallbackStopAtr
             : price + atr * Options.FallbackStopAtr;
@@ -338,27 +325,10 @@ public sealed class ImprovedProgressiveAgent(ProgressiveStrategyOptions? options
                     "target buffered before the barrier",
                     reward));
             }
-
-            foreach (PriceChannel channel in snapshot.Channels.Where(channel =>
-                         channel.Confidence >= Options.MinimumChannelConfidence))
-            {
-                decimal boundary = buy
-                    ? channel.UpperLine.PriceAt(snapshot.AvailableAt)
-                    : channel.LowerLine.PriceAt(snapshot.AvailableAt);
-                if (buy ? boundary <= price : boundary >= price)
-                    continue;
-                decimal target = buy ? boundary - targetBuffer : boundary + targetBuffer;
-                decimal reward = buy
-                    ? Math.Max(0m, target - price)
-                    : Math.Max(0m, price - target);
-                candidates.Add((
-                    target,
-                    2,
-                    $"{BarIntervalParser.Format(snapshot.Interval)} channel boundary " +
-                    $"({channel.Confidence:F0}), target buffered before the barrier",
-                    reward));
-            }
         }
+        // (Channel boundaries were deliberately removed as a target candidate source -
+        // RANSAC trendline/channel detection is not considered reliable enough to
+        // anchor a profit objective.)
 
         // The nearest credible opposing structure is the available reward. Skipping it
         // to select a farther level manufactures R:R through a barrier the trade must

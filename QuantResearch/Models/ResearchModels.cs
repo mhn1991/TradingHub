@@ -1,10 +1,18 @@
 namespace QuantResearch.Models;
 
+/// <summary>
+/// Research-layer performance in <b>R-multiples</b> (risk units), not account currency.
+/// Distinct from simulator <c>StrategyPerformanceSnapshot</c>, which uses cash P&amp;L.
+/// Expect closed trades only (open trades must be filtered before calling
+/// <see cref="ResearchMetrics.Calculate"/>).
+/// </summary>
 public sealed record ResearchPerformance
 {
+    /// <summary>Sum of closed-trade R-multiples (not cash net profit).</summary>
     public required decimal NetProfit { get; init; }
     public required decimal AverageR { get; init; }
     public required decimal ProfitFactor { get; init; }
+    /// <summary>Peak-to-trough drawdown on the cumulative R equity curve.</summary>
     public required decimal MaximumDrawdown { get; init; }
     public decimal? Sharpe { get; init; }
     public decimal? Sortino { get; init; }

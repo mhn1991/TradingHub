@@ -88,9 +88,7 @@ public static class ParameterSensitivityRunner
     {
         ArgumentNullException.ThrowIfNull(grid);
         ArgumentNullException.ThrowIfNull(evaluate);
-        IReadOnlyList<IReadOnlyDictionary<string, decimal>> combinations = Cartesian(
-            grid.OrderBy(item => item.Key, StringComparer.Ordinal).ToArray(), 0,
-            new Dictionary<string, decimal>(StringComparer.Ordinal));
+        IReadOnlyList<IReadOnlyDictionary<string, decimal>> combinations = Combinations(grid);
         var result = new List<ParameterSensitivityPoint>(combinations.Count);
         foreach (IReadOnlyDictionary<string, decimal> parameters in combinations)
         {
@@ -101,6 +99,16 @@ public static class ParameterSensitivityRunner
             });
         }
         return result;
+    }
+
+    /// <summary>Every cartesian combination of the grid's parameter values, sorted for determinism.</summary>
+    public static IReadOnlyList<IReadOnlyDictionary<string, decimal>> Combinations(
+        IReadOnlyDictionary<string, IReadOnlyList<decimal>> grid)
+    {
+        ArgumentNullException.ThrowIfNull(grid);
+        return Cartesian(
+            grid.OrderBy(item => item.Key, StringComparer.Ordinal).ToArray(), 0,
+            new Dictionary<string, decimal>(StringComparer.Ordinal));
     }
 
     private static IReadOnlyList<IReadOnlyDictionary<string, decimal>> Cartesian(

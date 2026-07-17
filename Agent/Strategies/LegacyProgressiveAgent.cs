@@ -24,7 +24,9 @@ public sealed class LegacyProgressiveAgent(ProgressiveStrategyOptions? options =
         PriceActionSetup? priceActionSetup)
     {
         decimal price = entry.LatestCandle.Prices.Close;
-        decimal atr = entry.Indicators.Atr ?? price * 0.002m;
+        decimal atr = entry.Indicators.Atr is > 0m
+            ? entry.Indicators.Atr.Value
+            : Math.Max(price * 0.002m, 0.00000001m);
         bool buy = state.Side == SetupSide.Buy;
         PriceActionSetup? paSetup = priceActionSetup ??
             entry.PriceAction.GetBestTriggeredSetup(
@@ -46,8 +48,25 @@ public sealed class LegacyProgressiveAgent(ProgressiveStrategyOptions? options =
             stopSource = "Entry ATR safety stop";
         }
 
+        if ((buy && stop >= price) || (!buy && stop <= price))
+        {
+            return Observe(context, "No valid structural invalidation level was available.") with
+            {
+                ReasonCode = "InvalidStopSide"
+            };
+        }
+
+        if (Math.Abs(price - stop) <= 0m)
+        {
+            return Observe(context, "Entry risk collapsed to zero after stop selection.") with
+            {
+                ReasonCode = "ZeroRisk"
+            };
+        }
+
         decimal confidence = entry.Confidence.Total * 0.45m + confirmation.Confidence.Total * 0.30m + trend.Confidence.Total * 0.25m +
-            PriceActionConfidenceAdjustment(entry, state.Side);
+            PriceActionConfidenceAdjustment(entry, state.Side) +
+            ActiveRetestConfidenceAdjustment(entry, state.Side);
         string setupNote = paSetup is null
             ? PriceActionSummary(entry, state.Side)
             : $"{paSetup.Type} ({paSetup.Confidence:F0})";

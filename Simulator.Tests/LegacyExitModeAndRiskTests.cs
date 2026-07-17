@@ -1,7 +1,9 @@
+using System.Reflection;
 using Agent.Abstractions;
 using Agent.Models;
 using Agent.Strategies;
 using Brokers.Models;
+using ChartAnnotator.Models;
 using RiskManager;
 using Simulator.Engine;
 using Simulator.MarketData;
@@ -13,6 +15,114 @@ namespace Simulator.Tests;
 [TestFixture]
 public sealed class LegacyExitModeAndRiskTests
 {
+    private static readonly InstrumentKey Instrument = new("FX:EUR/USD");
+    private static readonly BarInterval Entry = BarInterval.Minutes(5);
+    private static readonly BarInterval Confirmation = BarInterval.Minutes(15);
+    private static readonly BarInterval Trend = BarInterval.Hours(1);
+    private static readonly DateTimeOffset Now = new(2025, 6, 2, 8, 0, 0, TimeSpan.Zero);
+
+    [Test]
+    public void ZeroAtrWithNoPriceActionSetup_UsesPositiveFallbackDistance_NotAZeroDistanceStop()
+    {
+        // AGENT-04 regression: entry.Indicators.Atr == 0m (a legitimate indicator value, not
+        // null — e.g. a flat run of identical closes) previously bypassed Legacy's
+        // `?? price * 0.002m` fallback entirely (`??` only substitutes on null), producing a
+        // fallback stop of `price - 0 * FallbackStopAtr == price` — a zero-distance stop passed
+        // straight to Trade(), caught only by a downstream, independent PreTradeRiskManager
+        // check. The fix mirrors ImprovedProgressiveAgent's positivity-checked ATR
+        // (`is > 0m ? ... : Math.Max(price * 0.002m, ...)`), so a zero ATR now floors to a
+        // real, positive, price-relative distance instead of collapsing the stop onto price.
+        var options = new ProgressiveStrategyOptions
+        {
+            TrendInterval = Trend,
+            ConfirmationInterval = Confirmation,
+            EntryInterval = Entry,
+            MinimumTrendConfidence = 0m,
+            MinimumConfirmationConfidence = 0m,
+            MinimumEntryConfidence = 0m
+        };
+        var agent = new LegacyProgressiveAgent(options);
+        AnalysisSnapshot entry = Snapshot(Entry, atr: 0m);
+        AnalysisSnapshot confirmation = Snapshot(Confirmation, atr: 2m);
+        AnalysisSnapshot trend = Snapshot(Trend, atr: 2m);
+        AgentMarketContext context = new()
+        {
+            Instrument = Instrument,
+            Timestamp = Now,
+            Analysis = new MultiTimeframeAnalysis(
+                Instrument,
+                Now,
+                new Dictionary<BarInterval, AnalysisSnapshot>
+                {
+                    [Entry] = entry,
+                    [Confirmation] = confirmation,
+                    [Trend] = trend
+                }),
+            Account = new AccountSnapshot { AccountId = "test", CanTrade = true },
+            Positions = [],
+            OpenOrders = []
+        };
+
+        AgentDecision decision = InvokeCreateEntryDecision(agent, context, entry, confirmation, trend);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Buy));
+            Assert.That(decision.StopLossPrice, Is.Not.Null);
+            Assert.That(decision.StopLossPrice, Is.Not.EqualTo(decision.ReferencePrice),
+                "A zero ATR must never collapse the stop onto the entry price.");
+            Assert.That(decision.StopLossPrice!.Value, Is.LessThan(decision.ReferencePrice!.Value));
+        });
+    }
+
+
+    private static AnalysisSnapshot Snapshot(BarInterval interval, decimal atr) => new()
+    {
+        Instrument = Instrument,
+        Interval = interval,
+        AvailableAt = Now,
+        Version = 1,
+        LatestCandle = TestCandles.Create(Instrument, Now.AddMinutes(-5), interval, 1.1000m, 1.1005m, 1.0995m, 1.1000m),
+        Indicators = new IndicatorSnapshot { Atr = atr, Rsi = 60m, BollingerMiddle = 1.0995m },
+        Swings = [],
+        PriceZones = [],
+        Trendlines = [],
+        Channels = [],
+        Confidence = new ConfidenceScore { Total = 80m, Contributions = [] }
+    };
+
+    /// <summary>
+    /// Invokes the protected CreateEntryDecision directly via reflection so the zero-ATR/zero-risk
+    /// edge case (AGENT-04) can be exercised without weakening LegacyProgressiveAgent's sealed
+    /// modifier just for testability, and without needing a real candle stream to coax the full
+    /// state machine into producing an exact zero ATR at the entry timeframe.
+    /// </summary>
+    private static AgentDecision InvokeCreateEntryDecision(
+        LegacyProgressiveAgent agent,
+        AgentMarketContext context,
+        AnalysisSnapshot entry,
+        AnalysisSnapshot confirmation,
+        AnalysisSnapshot trend)
+    {
+        Type baseType = typeof(LegacyProgressiveAgent).BaseType!;
+        Type scopeStateType = baseType.GetNestedType("ScopeState", BindingFlags.NonPublic)!;
+        Type setupSideType = baseType.GetNestedType("SetupSide", BindingFlags.NonPublic)!;
+        Type setupStageType = baseType.GetNestedType("SetupStage", BindingFlags.NonPublic)!;
+        object buySide = Enum.Parse(setupSideType, "Buy");
+        object waitingForEntryStage = Enum.Parse(setupStageType, "WaitingForEntry");
+        object state = Activator.CreateInstance(
+            scopeStateType,
+            "test-setup", buySide, waitingForEntryStage,
+            context.Timestamp, context.Timestamp.AddHours(1), context.Timestamp, (DateTimeOffset?)context.Timestamp)!;
+
+        MethodInfo method = baseType.GetMethod(
+            "CreateEntryDecision",
+            BindingFlags.NonPublic | BindingFlags.Instance)!;
+        return (AgentDecision)method.Invoke(
+            agent,
+            [context, state, trend, confirmation, entry, null])!;
+    }
+
     [Test]
     public void LegacyAgent_ExposesProtectiveStopAndStrategyExit_ThroughInterface()
     {
@@ -272,7 +382,7 @@ public sealed class LegacyExitModeAndRiskTests
         };
         var engine = new StreamingComparativeEngine(
             new Simulator.Abstractions.EnumerableMarketCandleStream(candles),
-            [("legacy", (ITradingAgent)new LegacyProgressiveAgent(strategyOptions))]);
+            [("legacy", (ITradingAgent)new LegacyProgressiveAgent(strategyOptions), instrument)]);
         ComparativeSimulationResult result = await engine.RunAsync(
             new StreamingComparativeEngineOptions
             {

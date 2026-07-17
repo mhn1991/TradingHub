@@ -194,10 +194,10 @@ public sealed class Phase2StreamingAndWorkersTests
         string output = Path.Combine(Path.GetTempPath(), "th-phase2-eng", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(output);
         var strategyOptions = new ProgressiveStrategyOptions { Quantity = 1_000m, MinimumRewardRisk = 1.2m };
-        (string Id, Agent.Abstractions.ITradingAgent Agent)[] strategies =
+        (string Id, Agent.Abstractions.ITradingAgent Agent, InstrumentKey Instrument)[] strategies =
         [
-            ("legacy", new LegacyProgressiveAgent(strategyOptions)),
-            ("improved", new ImprovedProgressiveAgent(strategyOptions))
+            ("legacy", new LegacyProgressiveAgent(strategyOptions), instrument),
+            ("improved", new ImprovedProgressiveAgent(strategyOptions), instrument)
         ];
         var engine = new StreamingComparativeEngine(new EnumerablePagedCandleSource(candles), strategies);
         var runtime = new BacktestRuntimeOptions

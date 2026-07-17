@@ -129,6 +129,7 @@ internal sealed class LiveAnalysisState
         long started = Stopwatch.GetTimestamp();
         AnalysisSnapshot snapshot = await _annotator.ProcessAsync(
             new CandleClosedEvent(_instrument, _interval, candle, ++_sequence),
+            runtimeContext: null,
             cancellationToken);
         double elapsedMicroseconds = Stopwatch.GetElapsedTime(started).TotalMicroseconds;
         DateTimeOffset? previousOpenTime = _cursor.LastOpenTime;

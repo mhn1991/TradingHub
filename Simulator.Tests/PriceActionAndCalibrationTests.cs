@@ -105,6 +105,130 @@ public sealed class PriceActionAndCalibrationTests
     }
 
     [Test]
+    public void BullishPullback_InEstablishedUptrendNearSupport_IsDetected()
+    {
+        var analyzer = new PriceActionAnalyzer();
+        MarketStructureSnapshot structure = Structure(direction: MarketStructureDirection.Rising) with
+        {
+            ConsecutiveHigherHighs = 2,
+            ConsecutiveHigherLows = 2
+        };
+        SwingPoint support = Swing(SwingType.Low, 100.4m, Start.AddMinutes(-10));
+        Candle first = CandleAt(0, 100m, 100.6m, 99.8m, 100.4m);
+        // Retraces (close < open) but stays close to the support swing below it.
+        Candle pullback = CandleAt(1, 101m, 101.2m, 100.5m, 100.7m);
+
+        analyzer.Update(first, [first], [support], [], structure, structure, Indicators(1m), 1);
+        PriceActionSnapshot result = analyzer.Update(
+            pullback,
+            [first, pullback],
+            [support],
+            [],
+            structure,
+            structure,
+            Indicators(1m),
+            2);
+
+        PriceActionEvent eventItem = result.Events.Single(item => item.Type == PriceActionEventType.BullishPullback);
+        Assert.Multiple(() =>
+        {
+            Assert.That(eventItem.Direction, Is.EqualTo(PriceActionDirection.Bullish));
+            Assert.That(eventItem.ReasonCode, Is.EqualTo("BullishTrendPullback"));
+            Assert.That(eventItem.ReferenceLevel, Is.EqualTo(100.4m));
+        });
+    }
+
+    [Test]
+    public void Pullback_WithoutEstablishedTrend_IsNotDetected()
+    {
+        var analyzer = new PriceActionAnalyzer();
+        // Rising direction but consecutive counts fall short of MinimumPullbackTrendStrength.
+        MarketStructureSnapshot structure = Structure(direction: MarketStructureDirection.Rising) with
+        {
+            ConsecutiveHigherHighs = 1,
+            ConsecutiveHigherLows = 1
+        };
+        SwingPoint support = Swing(SwingType.Low, 100.4m, Start.AddMinutes(-10));
+        Candle first = CandleAt(0, 100m, 100.6m, 99.8m, 100.4m);
+        Candle pullback = CandleAt(1, 101m, 101.2m, 100.5m, 100.7m);
+
+        analyzer.Update(first, [first], [support], [], structure, structure, Indicators(1m), 1);
+        PriceActionSnapshot result = analyzer.Update(
+            pullback,
+            [first, pullback],
+            [support],
+            [],
+            structure,
+            structure,
+            Indicators(1m),
+            2);
+
+        Assert.That(
+            result.Events.Any(item => item.Type is PriceActionEventType.BullishPullback or PriceActionEventType.BearishPullback),
+            Is.False);
+    }
+
+    [Test]
+    public void Pullback_WithNoNearbyReference_IsNotDetected()
+    {
+        var analyzer = new PriceActionAnalyzer();
+        MarketStructureSnapshot structure = Structure(direction: MarketStructureDirection.Rising) with
+        {
+            ConsecutiveHigherHighs = 2,
+            ConsecutiveHigherLows = 2
+        };
+        // No swings/zones and no Bollinger middle fallback - there is nothing for the
+        // retracement to be "close to", so it must not be treated as a pullback.
+        Candle first = CandleAt(0, 100m, 100.6m, 99.8m, 100.4m);
+        Candle pullback = CandleAt(1, 101m, 101.2m, 100.5m, 100.7m);
+
+        analyzer.Update(first, [first], [], [], structure, structure, Indicators(1m), 1);
+        PriceActionSnapshot result = analyzer.Update(
+            pullback,
+            [first, pullback],
+            [],
+            [],
+            structure,
+            structure,
+            Indicators(1m),
+            2);
+
+        Assert.That(
+            result.Events.Any(item => item.Type is PriceActionEventType.BullishPullback or PriceActionEventType.BearishPullback),
+            Is.False);
+    }
+
+    [Test]
+    public void Pullback_WithOpposingStructuralBreak_IsNotDetected()
+    {
+        var analyzer = new PriceActionAnalyzer();
+        MarketStructureSnapshot structure = Structure(direction: MarketStructureDirection.Rising) with
+        {
+            ConsecutiveHigherHighs = 2,
+            ConsecutiveHigherLows = 2,
+            Break = MarketStructureBreak.Bearish
+        };
+        SwingPoint support = Swing(SwingType.Low, 100.4m, Start.AddMinutes(-10));
+        Candle first = CandleAt(0, 100m, 100.6m, 99.8m, 100.4m);
+        Candle pullback = CandleAt(1, 101m, 101.2m, 100.5m, 100.7m);
+
+        analyzer.Update(first, [first], [support], [], structure, structure, Indicators(1m), 1);
+        PriceActionSnapshot result = analyzer.Update(
+            pullback,
+            [first, pullback],
+            [support],
+            [],
+            structure,
+            structure,
+            Indicators(1m),
+            2);
+
+        Assert.That(
+            result.Events.Any(item => item.Type is PriceActionEventType.BullishPullback or PriceActionEventType.BearishPullback),
+            Is.False);
+    }
+
+    [Test]
     public void WarmupCalibration_FreezesBeforeEvaluationData()
     {
         var analyzer = new PriceActionAnalyzer(new PriceActionOptions

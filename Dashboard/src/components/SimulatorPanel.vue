@@ -5,12 +5,14 @@ import type {
   ImportedDatasetMetadata,
   ReplayFrame,
   ReplayTrade,
+  ResearchArtifactSelection,
   SimulationBrokerCatalog,
   SimulationBrokerOption,
   SimulationInstrumentOption,
   SimulationJobSnapshot,
   StrategyProgressSnapshot,
 } from '../types'
+import { RESEARCH_ARTIFACT_SELECTION_KEY } from '../types'
 import AnalysisChart from './AnalysisChart.vue'
 import { useSimulationRealtime } from '../composables/useSimulationRealtime'
 import { useSimulationPlayback, type PlaybackRow } from '../composables/useSimulationPlayback'
@@ -63,6 +65,14 @@ function createBaseSimulationForm() {
     minimumConfirmationAlignments: 1,
     strongOppositionVeto: true,
     strategies: 'legacy,improved',
+    // §7 multi-instrument portfolio clock: when enabled, strategyAssignments replaces
+    // `strategies` + the single top-level `instrument` entirely - each row trades its
+    // own instrument on one shared clock instead of every strategy trading `instrument`.
+    strategyAssignmentsEnabled: false,
+    strategyAssignments: [
+      { strategyType: 'legacy', instrument: '' },
+      { strategyType: 'improved', instrument: '' },
+    ] as Array<{ strategyType: string; instrument: string }>,
     startingBalance: 100_000,
     dailyEquityProfitTarget: 0,
     dailyEquityGivebackActivation: 0,
@@ -99,27 +109,47 @@ function createBaseSimulationForm() {
     efficiencyRatioPeriod: 14,
     regimeConfirmationBars: 2,
     regimePersistenceBars: 3,
-    regimeSoftSpreadAtr: 0.15,
-    regimeHardSpreadAtr: 0.30,
-    tradingConditionsEnabled: false,
+    regimeSoftSpreadAtr: 0.25,
+    regimeHardSpreadAtr: 0.50,
+    tradingConditionsEnabled: true,
     allowedSessions: 'Asian,London,NewYork,LondonNewYorkOverlap',
     rolloverBlackoutMinutesBefore: 15,
     rolloverBlackoutMinutesAfter: 15,
-    conditionSoftSpreadAtr: 0.15,
-    conditionHardSpreadAtr: 0.30,
+    conditionSoftSpreadAtr: 0.25,
+    conditionHardSpreadAtr: 0.50,
     economicEventFilterEnabled: false,
     maximumTotalPortfolioHeatPercent: 1.5,
     maximumPendingRiskPercent: 0.75,
     maximumStrategyRiskPercent: 0.75,
     maximumInstrumentRiskPercent: 0.75,
-    maximumCurrencyRiskPercent: 0.75,
+    maximumCurrencyStopRiskPercent: 0.75,
     minimumUnallocatedMarginReservePercent: 30,
     maximumOpenPositions: 3,
     correlationLookbackBars: 120,
     correlationMinimumSamples: 60,
     correlationSoftThreshold: 0.5,
     correlationHardThreshold: 0.75,
+    maximumNetCurrencyExposurePercent: 300,
+    maximumGrossCurrencyExposurePercent: 300,
+    valueLocationEvidenceEnabled: false,
+    valueLocationNearAtrThreshold: 0.5,
+    valueLocationStretchedAtrThreshold: 2.5,
+    valueLocationConfidenceAdjustment: 3,
+    currencyStrengthEnabled: false,
+    currencyStrengthInterval: '1h',
+    currencyStrengthReturnLookbackBars: 12,
+    currencyStrengthVolatilityLookbackBars: 120,
+    currencyStrengthMinimumCoveragePercent: 60,
     adaptiveRiskEnabled: false,
+    // Research calibration artifacts (GUIDs from Research panel / localStorage).
+    // When empty and autoCalibrateBeforeRun is true, the server trains setup→meta→management
+    // on a past window (default 2 months + 10d embargo) before the sim starts.
+    autoCalibrateBeforeRun: true,
+    autoCalibrateTrainMonths: 2,
+    autoCalibrateEmbargoDays: 10,
+    setupCalibrationArtifactId: '',
+    managementCalibrationArtifactId: '',
+    metaModelArtifactId: '',
     executionFillModel: 'MidpointPlusConfiguredSpread',
     stressExecutionScenario: 'Base',
     maximumFillQuantityPerFrame: 0,
@@ -223,25 +253,31 @@ const simulationPresets: SimulationPresetDefinition[] = [
     id: 'day-trading',
     name: 'Day trading',
     badge: 'Intraday',
-    description: 'Faster MTF stack, London/NY sessions, regime + condition filters, quicker break-even and tighter runners.',
+    description: 'Intraday progressive stack (1h→30m→15m→5m), London/NY sessions, quicker management. Regime routing off so compression hours do not zero the sample.',
     build: () => patchSimulationForm({
       ...evaluationWindowMonths(1),
+      // Progressive agents need unique intervals ordered entry < confirm < setup/secondary < trend.
+      // Entry is 5m (not 1m): MaximumEntryCandles defaults to 12 → ~1 hour fill window.
+      // With 1m entry that window is only 12 minutes and almost never fills.
       analysisIntervals: '1m,5m,15m,30m,1h',
       trendInterval: '1h',
-      secondaryTrendIntervals: '30m',
-      setupIntervals: '15m',
-      confirmationInterval: '5m',
+      secondaryTrendIntervals: '',
+      setupIntervals: '30m',
+      confirmationInterval: '15m',
       additionalConfirmationIntervals: '',
-      entryInterval: '1m',
+      entryInterval: '5m',
       minimumSecondaryTrendAlignments: 0,
       minimumSetupAlignments: 1,
       minimumConfirmationAlignments: 1,
       riskPercentOfEquity: 0.35,
       fixedCashRisk: 200,
       minimumRewardRisk: 1.2,
+      priceActionConfirmation: 'Soft',
       minimumPriceActionConfidence: 50,
-      warmupDays: 10,
-      regimeEnabled: true,
+      warmupDays: 14,
+      // Classification can stay available via advanced, but routing blocks Compression /
+      // IlliquidUnsafe / low-confidence regimes and often produces zero-trade months.
+      regimeEnabled: false,
       tradingConditionsEnabled: true,
       allowedSessions: 'London,NewYork,LondonNewYorkOverlap',
       rolloverBlackoutMinutesBefore: 20,
@@ -251,12 +287,19 @@ const simulationPresets: SimulationPresetDefinition[] = [
       maximumPendingRiskPercent: 1,
       maximumStrategyRiskPercent: 1,
       maximumInstrumentRiskPercent: 1,
-      maximumCurrencyRiskPercent: 1,
+      maximumCurrencyStopRiskPercent: 1,
+      // Drawdown/volatility risk reduction is one-directional (never scales risk up,
+      // only down at 2%/4%/6% equity drawdown and in the top volatility percentiles),
+      // so it's a strict downside safety net worth having on for any live-like profile.
       adaptiveRiskEnabled: true,
+      // Soft (confidence-nudge-only, never a veto) pullback/rejection/stretch evidence
+      // against the session-anchored value reference - a natural fit for intraday
+      // pullback entries. Defaults are fine at this timeframe.
+      valueLocationEvidenceEnabled: true,
       legacyPositionManagement: {
-        fastStructureInterval: '1m',
-        mainStructureInterval: '5m',
-        thesisInterval: '15m',
+        fastStructureInterval: '5m',
+        mainStructureInterval: '15m',
+        thesisInterval: '1h',
         managementInterval: '5m',
         breakEvenActivationR: 0.75,
         structureTrailActivationR: 1.25,
@@ -267,9 +310,9 @@ const simulationPresets: SimulationPresetDefinition[] = [
         enableExecutionCostStressReduction: true,
       },
       improvedPositionManagement: {
-        fastStructureInterval: '1m',
-        mainStructureInterval: '5m',
-        thesisInterval: '15m',
+        fastStructureInterval: '5m',
+        mainStructureInterval: '15m',
+        thesisInterval: '1h',
         managementInterval: '5m',
         breakEvenActivationR: 0.75,
         structureTrailActivationR: 1.5,
@@ -311,10 +354,21 @@ const simulationPresets: SimulationPresetDefinition[] = [
       maximumPendingRiskPercent: 0.6,
       maximumStrategyRiskPercent: 0.6,
       maximumInstrumentRiskPercent: 0.6,
-      maximumCurrencyRiskPercent: 0.6,
+      maximumCurrencyStopRiskPercent: 0.6,
+      // Multi-day holds carry real notional exposure risk beyond planned stop-loss -
+      // cap it explicitly rather than relying on the very generous 300%/300% base default.
+      maximumNetCurrencyExposurePercent: 150,
+      maximumGrossCurrencyExposurePercent: 200,
       financingEnabled: true,
       financingLongAnnualPercent: 2.5,
       financingShortAnnualPercent: -0.5,
+      adaptiveRiskEnabled: true,
+      // Multi-day swings hold through session/week anchors long enough for value
+      // location to matter - wider thresholds than intraday since 4h/1d ATR swings
+      // are proportionally larger.
+      valueLocationEvidenceEnabled: true,
+      valueLocationNearAtrThreshold: 0.75,
+      valueLocationStretchedAtrThreshold: 3,
       legacyPositionManagement: {
         fastStructureInterval: '15m',
         mainStructureInterval: '1h',
@@ -345,7 +399,7 @@ const simulationPresets: SimulationPresetDefinition[] = [
     id: 'scalping',
     name: 'Scalping',
     badge: 'High frequency',
-    description: 'Very short stack on liquid FX, low R:R, early break-even, session filter, small per-trade risk.',
+    description: 'Short progressive stack (30m→15m→5m→1m), soft PA, sessions on, regime off. Expect fewer fills than research — 1m entry windows are short.',
     build: () => patchSimulationForm({
       ...evaluationWindowMonths(1),
       analysisIntervals: '1m,5m,15m,30m',
@@ -361,9 +415,11 @@ const simulationPresets: SimulationPresetDefinition[] = [
       riskPercentOfEquity: 0.15,
       fixedCashRisk: 100,
       minimumRewardRisk: 1,
+      priceActionConfirmation: 'Soft',
       minimumPriceActionConfidence: 45,
-      warmupDays: 7,
-      regimeEnabled: true,
+      warmupDays: 10,
+      // Keep routing off; 1m progressive entries are already sparse.
+      regimeEnabled: false,
       tradingConditionsEnabled: true,
       allowedSessions: 'London,NewYork,LondonNewYorkOverlap',
       rolloverBlackoutMinutesBefore: 30,
@@ -373,14 +429,22 @@ const simulationPresets: SimulationPresetDefinition[] = [
       maximumPendingRiskPercent: 0.9,
       maximumStrategyRiskPercent: 0.9,
       maximumInstrumentRiskPercent: 0.9,
-      maximumCurrencyRiskPercent: 0.9,
+      maximumCurrencyStopRiskPercent: 0.9,
+      // High trade frequency means a losing streak compounds fast - downside-only
+      // drawdown/volatility risk reduction matters more here than anywhere else.
       adaptiveRiskEnabled: true,
+      // Tighter thresholds and a smaller nudge than the intraday/swing profiles:
+      // 1m signals are noisier, so weight this evidence more conservatively.
+      valueLocationEvidenceEnabled: true,
+      valueLocationNearAtrThreshold: 0.3,
+      valueLocationStretchedAtrThreshold: 2,
+      valueLocationConfidenceAdjustment: 2,
       spreadBasisPoints: 1.2,
       slippageBasisPoints: 0.8,
       legacyPositionManagement: {
         fastStructureInterval: '1m',
-        mainStructureInterval: '1m',
-        thesisInterval: '5m',
+        mainStructureInterval: '5m',
+        thesisInterval: '15m',
         managementInterval: '1m',
         breakEvenActivationR: 0.4,
         structureTrailActivationR: 0.8,
@@ -393,8 +457,8 @@ const simulationPresets: SimulationPresetDefinition[] = [
       },
       improvedPositionManagement: {
         fastStructureInterval: '1m',
-        mainStructureInterval: '1m',
-        thesisInterval: '5m',
+        mainStructureInterval: '5m',
+        thesisInterval: '15m',
         managementInterval: '1m',
         breakEvenActivationR: 0.5,
         structureTrailActivationR: 1,
@@ -411,7 +475,7 @@ const simulationPresets: SimulationPresetDefinition[] = [
     id: 'risk-managed',
     name: 'Risk-managed',
     badge: 'Live-like',
-    description: 'Research MTF with daily profit locks, equity protection, portfolio heat, correlation and adaptive sizing enabled.',
+    description: 'Research MTF with daily profit locks, equity protection, portfolio heat/currency exposure caps, correlation, value-location evidence, and adaptive sizing enabled - the most conservative, fully-instrumented profile.',
     build: () => patchSimulationForm({
       ...evaluationWindowMonths(1),
       riskPercentOfEquity: 0.2,
@@ -420,6 +484,9 @@ const simulationPresets: SimulationPresetDefinition[] = [
       warmupDays: 21,
       regimeEnabled: true,
       tradingConditionsEnabled: true,
+      // Regime + trading-condition gating already cover the thinnest-liquidity hours;
+      // restricting sessions further on top of that just starves the sample, so this
+      // stays on the base default (all sessions) unlike day-trading/scalping.
       adaptiveRiskEnabled: true,
       dailyEquityProfitTarget: 1500,
       dailyEquityGivebackActivation: 1000,
@@ -436,12 +503,20 @@ const simulationPresets: SimulationPresetDefinition[] = [
       maximumPendingRiskPercent: 0.5,
       maximumStrategyRiskPercent: 0.5,
       maximumInstrumentRiskPercent: 0.5,
-      maximumCurrencyRiskPercent: 0.5,
+      maximumCurrencyStopRiskPercent: 0.5,
+      // Real notional currency-exposure caps, distinct from the stop-risk heat above -
+      // tightest of any profile, matching its "live-like" conservative intent.
+      maximumNetCurrencyExposurePercent: 100,
+      maximumGrossCurrencyExposurePercent: 150,
       correlationSoftThreshold: 0.45,
       correlationHardThreshold: 0.7,
       minimumUnallocatedMarginReservePercent: 40,
       maximumAccountMarginUsagePercent: 25,
       maximumSinglePositionMarginPercent: 8,
+      // Soft confirmation evidence layered on top of everything else here - never a
+      // veto, just a small confidence nudge, consistent with this profile's "every
+      // available real signal, conservatively weighted" design.
+      valueLocationEvidenceEnabled: true,
     }),
   },
 ]
@@ -527,6 +602,20 @@ const replayRows = ref<PlaybackRow[]>([])
 const loadedChunks = ref<Set<string>>(new Set())
 const chunkCursor = ref(0)
 const maxChartRows = 2_000
+// §7 multi-instrument portfolio clock: rows from different instruments interleave in
+// one sequence-ordered stream, so the chart needs to display only one instrument's
+// candles at a time rather than a mixed, meaningless price series.
+const selectedChartInstrument = ref<string | null>(null)
+const chartInstruments = computed(() => {
+  const seen = new Set<string>()
+  for (const row of replayRows.value) if (row.instrument) seen.add(row.instrument)
+  return [...seen].sort()
+})
+const filteredReplayRows = computed(() => {
+  if (chartInstruments.value.length <= 1) return replayRows.value
+  const selected = selectedChartInstrument.value ?? chartInstruments.value[0]
+  return replayRows.value.filter((row) => !row.instrument || row.instrument === selected)
+})
 
 const {
   snapshot: liveSnapshot,
@@ -547,7 +636,7 @@ const {
   pause,
   step,
   jumpToEnd,
-} = useSimulationPlayback(replayRows)
+} = useSimulationPlayback(filteredReplayRows)
 
 const activeStrategies = computed(() => job.value?.strategies ?? [])
 const flatTrades = computed(() => trades.value.map((payload) => payload.trade))
@@ -710,7 +799,7 @@ const managementSummary = computed(() => {
     `${improved.enableScaleOut ? `scale out to ${Math.round(improved.minimumRunnerFraction * 100)}% runner` : 'no scale-out'} · ` +
     `${improved.preserveBracketTarget ? 'preserve target' : 'replace target'}.`
 })
-const replayFrames = computed<ReplayFrame[]>(() => replayRows.value.map((row, index) => ({
+const replayFrames = computed<ReplayFrame[]>(() => filteredReplayRows.value.map((row, index) => ({
   index,
   availableAt: row.availableAt,
   candle: {
@@ -848,6 +937,7 @@ async function startSimulation() {
   busy.value = true
   error.value = null
   replayRows.value = []
+  selectedChartInstrument.value = null
   loadedChunks.value = new Set()
   chunkCursor.value = 0
   trades.value = []
@@ -889,6 +979,11 @@ async function startSimulation() {
       minimumConfirmationAlignments: form.minimumConfirmationAlignments,
       strongOppositionVeto: form.strongOppositionVeto,
       strategies: form.strategies.split(',').map((item) => item.trim()).filter(Boolean),
+      strategyAssignments: form.strategyAssignmentsEnabled
+        ? form.strategyAssignments
+            .filter((row) => row.strategyType && row.instrument.trim())
+            .map((row) => ({ strategyType: row.strategyType, instrument: row.instrument.trim() }))
+        : null,
       startingBalance: form.startingBalance,
       dailyEquityProfitTarget: form.dailyEquityProfitTarget > 0
         ? form.dailyEquityProfitTarget
@@ -948,13 +1043,29 @@ async function startSimulation() {
       maximumPendingRiskPercent: form.maximumPendingRiskPercent,
       maximumStrategyRiskPercent: form.maximumStrategyRiskPercent,
       maximumInstrumentRiskPercent: form.maximumInstrumentRiskPercent,
-      maximumCurrencyRiskPercent: form.maximumCurrencyRiskPercent,
+      maximumCurrencyStopRiskPercent: form.maximumCurrencyStopRiskPercent,
       minimumUnallocatedMarginReservePercent: form.minimumUnallocatedMarginReservePercent,
       maximumOpenPositions: form.maximumOpenPositions,
       correlationLookbackBars: form.correlationLookbackBars,
       correlationMinimumSamples: form.correlationMinimumSamples,
       correlationSoftThreshold: form.correlationSoftThreshold,
       correlationHardThreshold: form.correlationHardThreshold,
+      maximumNetCurrencyExposurePercent: form.maximumNetCurrencyExposurePercent,
+      maximumGrossCurrencyExposurePercent: form.maximumGrossCurrencyExposurePercent,
+      valueLocationEvidenceEnabled: form.valueLocationEvidenceEnabled,
+      valueLocationNearAtrThreshold: form.valueLocationNearAtrThreshold,
+      valueLocationStretchedAtrThreshold: form.valueLocationStretchedAtrThreshold,
+      valueLocationConfidenceAdjustment: form.valueLocationConfidenceAdjustment,
+      currencyStrengthEnabled: form.currencyStrengthEnabled,
+      currencyStrengthInterval: form.currencyStrengthInterval,
+      currencyStrengthReturnLookbackBars: form.currencyStrengthReturnLookbackBars,
+      currencyStrengthVolatilityLookbackBars: form.currencyStrengthVolatilityLookbackBars,
+      currencyStrengthMinimumCoveragePercent: form.currencyStrengthMinimumCoveragePercent,
+      // No basket editor yet - default to a single basket containing the traded
+      // instrument itself so Enabled=true stays valid (§5 leave-one-out means this
+      // basket alone never actually informs the traded pair's own differential;
+      // configuring real alternative pairs currently requires the API/CLI directly).
+      currencyStrengthBaskets: form.currencyStrengthEnabled ? { Majors: [form.instrument] } : {},
       adaptiveRiskEnabled: form.adaptiveRiskEnabled,
       executionFillModel: form.executionFillModel,
       stressExecutionScenario: form.stressExecutionScenario,
@@ -975,6 +1086,12 @@ async function startSimulation() {
       noCache: form.noCache,
       legacyPositionManagement: form.legacyPositionManagement,
       improvedPositionManagement: form.improvedPositionManagement,
+      autoCalibrateBeforeRun: form.autoCalibrateBeforeRun,
+      autoCalibrateTrainMonths: form.autoCalibrateTrainMonths,
+      autoCalibrateEmbargoDays: form.autoCalibrateEmbargoDays,
+      setupCalibrationArtifactId: form.setupCalibrationArtifactId.trim() || null,
+      managementCalibrationArtifactId: form.managementCalibrationArtifactId.trim() || null,
+      metaModelArtifactId: form.metaModelArtifactId.trim() || null,
     }
     const response = await fetch(`${import.meta.env.BASE_URL}api/simulations`, {
       method: 'POST',
@@ -1109,6 +1226,25 @@ function applyBrokerSelection(preferRecommendedInstrument = false) {
     return
   }
   form.instrument = selected.instrument
+}
+
+function addStrategyAssignment() {
+  form.strategyAssignments.push({ strategyType: 'legacy', instrument: form.instrument })
+}
+
+function removeStrategyAssignment(index: number) {
+  form.strategyAssignments.splice(index, 1)
+}
+
+function toggleStrategyAssignments(enabled: boolean) {
+  form.strategyAssignmentsEnabled = enabled
+  if (enabled && form.strategyAssignments.every((row) => !row.instrument.trim())) {
+    // Seed with today's single-instrument two-row shape as the starting point.
+    form.strategyAssignments = [
+      { strategyType: 'legacy', instrument: form.instrument },
+      { strategyType: 'improved', instrument: form.instrument },
+    ]
+  }
 }
 
 function applyFormState(next: SimulationFormState, options?: { preserveBroker?: boolean; preferRecommendedInstrument?: boolean }) {
@@ -1262,10 +1398,10 @@ function validatePositionManagement() {
       form.maximumSinglePositionMarginPercent > form.maximumAccountMarginUsagePercent) {
     throw new Error('Margin caps must be within 0-100, and the one-position cap cannot exceed the account cap.')
   }
-  // Soft thresholds may be 0 (disabled sensitivity); hard must still be strictly above soft.
-  if (form.regimeSoftSpreadAtr < 0 || form.regimeHardSpreadAtr <= form.regimeSoftSpreadAtr ||
-      form.conditionSoftSpreadAtr < 0 || form.conditionHardSpreadAtr <= form.conditionSoftSpreadAtr) {
-    throw new Error('Each hard spread/ATR threshold must be greater than its soft threshold (soft may be 0).')
+  // Soft thresholds must remain positive; hard thresholds must be strictly above soft.
+  if (form.regimeSoftSpreadAtr <= 0 || form.regimeHardSpreadAtr <= form.regimeSoftSpreadAtr ||
+      form.conditionSoftSpreadAtr <= 0 || form.conditionHardSpreadAtr <= form.conditionSoftSpreadAtr) {
+    throw new Error('Soft spread/ATR thresholds must be greater than 0 and each hard threshold must be greater than soft.')
   }
   if (form.regimeConfirmationBars < 1 || form.regimePersistenceBars < 0 || form.efficiencyRatioPeriod < 2) {
     throw new Error('Regime confirmation, persistence, and ER period values are invalid.')
@@ -1274,11 +1410,11 @@ function validatePositionManagement() {
       form.maximumPendingRiskPercent < 0 ||
       form.maximumStrategyRiskPercent < 0 ||
       form.maximumInstrumentRiskPercent < 0 ||
-      form.maximumCurrencyRiskPercent < 0 ||
+      form.maximumCurrencyStopRiskPercent < 0 ||
       form.maximumPendingRiskPercent > form.maximumTotalPortfolioHeatPercent ||
       form.maximumStrategyRiskPercent > form.maximumTotalPortfolioHeatPercent ||
       form.maximumInstrumentRiskPercent > form.maximumTotalPortfolioHeatPercent ||
-      form.maximumCurrencyRiskPercent > form.maximumTotalPortfolioHeatPercent ||
+      form.maximumCurrencyStopRiskPercent > form.maximumTotalPortfolioHeatPercent ||
       form.maximumOpenPositions < 1) {
     throw new Error('Portfolio sub-limits cannot exceed total heat, cannot be negative, and maximum positions must be positive.')
   }
@@ -1505,6 +1641,7 @@ function appendRows(rows: PlaybackRow[]) {
 function selectJob(snapshot: SimulationJobSnapshot) {
   // Clear all job-specific state so chunks/trades never mix across simulations.
   replayRows.value = []
+  selectedChartInstrument.value = null
   loadedChunks.value = new Set()
   chunkCursor.value = 0
   trades.value = []
@@ -1545,7 +1682,35 @@ watch(() => form.precisionMode, applyPrecisionDefaults)
 watch(selectedAssetClass, selectFirstFilteredAsset)
 watch(assetSearch, selectFirstFilteredAsset)
 
+function loadResearchSelection() {
+  try {
+    const raw = localStorage.getItem(RESEARCH_ARTIFACT_SELECTION_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as Partial<ResearchArtifactSelection>
+    form.setupCalibrationArtifactId = parsed.setupCalibrationArtifactId ?? ''
+    form.managementCalibrationArtifactId = parsed.managementCalibrationArtifactId ?? ''
+    form.metaModelArtifactId = parsed.metaModelArtifactId ?? ''
+  } catch {
+    // ignore corrupt storage
+  }
+}
+
+function clearResearchSelection() {
+  form.setupCalibrationArtifactId = ''
+  form.managementCalibrationArtifactId = ''
+  form.metaModelArtifactId = ''
+  localStorage.setItem(
+    RESEARCH_ARTIFACT_SELECTION_KEY,
+    JSON.stringify({
+      setupCalibrationArtifactId: '',
+      managementCalibrationArtifactId: '',
+      metaModelArtifactId: '',
+    } satisfies ResearchArtifactSelection),
+  )
+}
+
 onMounted(() => {
+  loadResearchSelection()
   void loadSimulationCatalog()
   void refreshJobList()
   void refreshImportedDatasets()
@@ -1699,6 +1864,28 @@ onMounted(() => {
           {{ selectedBroker.displayName }} supports execution intervals: {{ selectedBroker.supportedExecutionIntervals.join(', ') || 'none' }}.
           Analysis still begins at 1m unless explicitly changed. No smaller candles are invented from larger OHLC bars.
         </p>
+        <fieldset class="research-artifacts-fieldset">
+          <legend>Research calibration artifacts</legend>
+          <p class="muted">
+            By default the server auto-trains setup → meta → management on history before the sim
+            (2 months ending 10 days before From; legacy and improved train in parallel). Manual
+            GUIDs from the Research tab override auto-calibration when any ID is set.
+          </p>
+          <label class="checkbox-row">
+            <input type="checkbox" v-model="form.autoCalibrateBeforeRun" />
+            Auto-calibrate before run (train then simulate)
+          </label>
+          <div class="row" v-if="form.autoCalibrateBeforeRun">
+            <label>Train months <input type="number" min="1" max="24" v-model.number="form.autoCalibrateTrainMonths" /></label>
+            <label>Embargo days before From <input type="number" min="0" max="90" v-model.number="form.autoCalibrateEmbargoDays" /></label>
+          </div>
+          <div class="row">
+            <label>Setup artifact ID <input v-model.trim="form.setupCalibrationArtifactId" spellcheck="false" placeholder="guid or empty" /></label>
+            <label>Management artifact ID <input v-model.trim="form.managementCalibrationArtifactId" spellcheck="false" placeholder="guid or empty" /></label>
+            <label>Meta-model artifact ID <input v-model.trim="form.metaModelArtifactId" spellcheck="false" placeholder="guid or empty" /></label>
+          </div>
+          <button type="button" class="secondary compact-button" @click="clearResearchSelection">Clear research IDs</button>
+        </fieldset>
         <label v-if="form.sourceKind === 'ImportedSecondCandles'">
           Server-imported candle CSV
           <input type="file" accept=".csv,text/csv" @change="selectImportedFile" />
@@ -1753,7 +1940,40 @@ onMounted(() => {
           </div>
           <small class="muted">The primary trend is the hard directional gate. Secondary trend is soft context, setup intervals locate the opportunity, confirmations validate it, and the entry chart supplies the trigger.</small>
         </fieldset>
-        <label>Strategies <input v-model="form.strategies" /></label>
+        <label>Strategies <input v-model="form.strategies" :disabled="form.strategyAssignmentsEnabled" /></label>
+        <fieldset class="management-config">
+          <legend>Multi-instrument portfolio clock</legend>
+          <label class="inline-check">
+            <input
+              :checked="form.strategyAssignmentsEnabled"
+              @change="toggleStrategyAssignments(($event.target as HTMLInputElement).checked)"
+              type="checkbox"
+            />
+            Assign each strategy its own instrument
+          </label>
+          <template v-if="form.strategyAssignmentsEnabled">
+            <div class="row" v-for="(row, index) in form.strategyAssignments" :key="index">
+              <label>Strategy
+                <select v-model="row.strategyType">
+                  <option value="legacy">Legacy</option>
+                  <option value="improved">Improved</option>
+                </select>
+              </label>
+              <label>Instrument
+                <input v-model="row.instrument" placeholder="FX:EUR/USD" />
+              </label>
+              <button type="button" @click="removeStrategyAssignment(index)">Remove</button>
+            </div>
+            <button type="button" @click="addStrategyAssignment">+ Add strategy/instrument</button>
+            <small class="muted">
+              Each row trades only its own instrument, evaluated on one shared portfolio
+              clock - correlation, margin-netting, and currency-exposure gating in
+              SharedPortfolioAccount mode can only engage across more than one distinct
+              instrument here. Overrides Strategies and the single Instrument above for
+              every assigned strategy while enabled.
+            </small>
+          </template>
+        </fieldset>
         <fieldset class="management-config">
           <legend>Price-action confirmation</legend>
           <div class="row">
@@ -1893,7 +2113,7 @@ onMounted(() => {
             <label>Regime persistence (bars) <input v-model.number="form.regimePersistenceBars" type="number" min="0" step="1" /></label>
           </div>
           <div class="row">
-            <label>Regime soft spread/ATR <input v-model.number="form.regimeSoftSpreadAtr" type="number" min="0" step="0.01" /></label>
+            <label>Regime soft spread/ATR <input v-model.number="form.regimeSoftSpreadAtr" type="number" min="0.01" step="0.01" /></label>
             <label>Regime hard spread/ATR <input v-model.number="form.regimeHardSpreadAtr" type="number" min="0" step="0.01" /></label>
           </div>
           <div class="row">
@@ -1902,7 +2122,7 @@ onMounted(() => {
             <label>Rollover after (minutes) <input v-model.number="form.rolloverBlackoutMinutesAfter" type="number" min="0" step="1" /></label>
           </div>
           <div class="row">
-            <label>Condition soft spread/ATR <input v-model.number="form.conditionSoftSpreadAtr" type="number" min="0" step="0.01" /></label>
+            <label>Condition soft spread/ATR <input v-model.number="form.conditionSoftSpreadAtr" type="number" min="0.01" step="0.01" /></label>
             <label>Condition hard spread/ATR <input v-model.number="form.conditionHardSpreadAtr" type="number" min="0" step="0.01" /></label>
             <label class="inline-check"><input v-model="form.economicEventFilterEnabled" type="checkbox" /> Event blackout (provider required)</label>
           </div>
@@ -1926,7 +2146,7 @@ onMounted(() => {
           </div>
           <div class="row">
             <label>Instrument heat (%) <input v-model.number="form.maximumInstrumentRiskPercent" type="number" min="0" step="0.01" /></label>
-            <label>Currency heat (%) <input v-model.number="form.maximumCurrencyRiskPercent" type="number" min="0" step="0.01" /></label>
+            <label>Currency stop-risk heat (%) <input v-model.number="form.maximumCurrencyStopRiskPercent" type="number" min="0" step="0.01" /></label>
             <label>Unallocated margin reserve (%) <input v-model.number="form.minimumUnallocatedMarginReservePercent" type="number" min="0" max="99" step="0.01" /></label>
           </div>
           <div class="row">
@@ -1934,6 +2154,39 @@ onMounted(() => {
             <label>Minimum samples <input v-model.number="form.correlationMinimumSamples" type="number" min="2" step="1" /></label>
             <label>Soft / hard correlation <input v-model.number="form.correlationSoftThreshold" type="number" min="0" max="1" step="0.01" /> / <input v-model.number="form.correlationHardThreshold" type="number" min="0" max="1" step="0.01" /></label>
           </div>
+          <div class="row">
+            <label>Net currency exposure cap (% of equity)
+              <input v-model.number="form.maximumNetCurrencyExposurePercent" type="number" min="0" step="1" />
+            </label>
+            <label>Gross currency exposure cap (% of equity)
+              <input v-model.number="form.maximumGrossCurrencyExposurePercent" type="number" min="0" step="1" />
+            </label>
+          </div>
+          <p class="muted">Currency stop-risk heat splits planned stop-loss risk 50/50 across a pair's base/quote
+            currencies. Net/gross exposure caps use real notional exposure instead - a genuinely different
+            (usually much larger, since it reflects leveraged notional) metric, not the same number twice.</p>
+        </fieldset>
+        <fieldset class="management-config">
+          <legend>Value-location evidence and currency strength</legend>
+          <div class="row checks">
+            <label class="inline-check"><input v-model="form.valueLocationEvidenceEnabled" type="checkbox" /> Anchored value-location evidence</label>
+            <label>Near-value threshold (ATR) <input v-model.number="form.valueLocationNearAtrThreshold" type="number" min="0" step="0.1" :disabled="!form.valueLocationEvidenceEnabled" /></label>
+            <label>Stretched threshold (ATR) <input v-model.number="form.valueLocationStretchedAtrThreshold" type="number" min="0" step="0.1" :disabled="!form.valueLocationEvidenceEnabled" /></label>
+            <label>Confidence adjustment <input v-model.number="form.valueLocationConfidenceAdjustment" type="number" min="0" max="25" step="0.5" :disabled="!form.valueLocationEvidenceEnabled" /></label>
+          </div>
+          <p class="muted">Soft, reason-coded evidence of price's location relative to an anchored session/week/swing
+            value reference - a small confidence nudge only, never a hard veto.</p>
+          <div class="row checks">
+            <label class="inline-check"><input v-model="form.currencyStrengthEnabled" type="checkbox" /> Cross-market currency strength</label>
+            <label>Interval <input v-model="form.currencyStrengthInterval" type="text" style="width:4rem" :disabled="!form.currencyStrengthEnabled" /></label>
+            <label>Return lookback (bars) <input v-model.number="form.currencyStrengthReturnLookbackBars" type="number" min="1" step="1" :disabled="!form.currencyStrengthEnabled" /></label>
+            <label>Volatility lookback (bars) <input v-model.number="form.currencyStrengthVolatilityLookbackBars" type="number" min="2" step="1" :disabled="!form.currencyStrengthEnabled" /></label>
+            <label>Minimum coverage (%) <input v-model.number="form.currencyStrengthMinimumCoveragePercent" type="number" min="0" max="100" step="1" :disabled="!form.currencyStrengthEnabled" /></label>
+          </div>
+          <p class="muted">No basket editor yet - enabling this uses a single-instrument basket (the traded pair
+            itself), which leave-one-out then excludes from its own differential, so it stays honestly
+            unavailable rather than self-referential. Configuring real alternative pairs for a useful
+            differential currently requires the API or CLI directly.</p>
         </fieldset>
         <fieldset class="management-config">
           <legend>Execution and financing</legend>
@@ -2362,7 +2615,19 @@ onMounted(() => {
               <option :value="100">100×</option>
             </select>
           </label>
+          <label v-if="chartInstruments.length > 1">
+            Chart instrument
+            <select v-model="selectedChartInstrument">
+              <option v-for="instrument in chartInstruments" :key="instrument" :value="instrument">
+                {{ instrument }}
+              </option>
+            </select>
+          </label>
         </div>
+        <p v-if="chartInstruments.length > 1" class="muted">
+          This run trades {{ chartInstruments.length }} instruments on one shared
+          portfolio clock; the chart shows one at a time.
+        </p>
         <AnalysisChart
           v-if="replayFrames.length"
           :frames="replayFrames"
@@ -2372,7 +2637,7 @@ onMounted(() => {
           :trades="flatTrades"
         />
         <dl v-if="currentReplayRow" class="metrics">
-          <div><dt>Index</dt><dd>{{ replayIndex + 1 }} / {{ replayRows.length }}</dd></div>
+          <div><dt>Index</dt><dd>{{ replayIndex + 1 }} / {{ filteredReplayRows.length }}</dd></div>
           <div><dt>Sequence</dt><dd>{{ currentReplayRow.sequence }}</dd></div>
           <div><dt>Time</dt><dd>{{ currentReplayRow.availableAt }}</dd></div>
           <div><dt>OHLC</dt><dd>{{ currentReplayRow.open }} / {{ currentReplayRow.high }} / {{ currentReplayRow.low }} / {{ currentReplayRow.close }}</dd></div>

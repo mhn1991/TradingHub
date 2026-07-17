@@ -12,6 +12,7 @@
     <ProjectReference Include="../Brokers/Brokers.csproj" />
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
     <ProjectReference Include="../ExecutionManager/ExecutionManager.csproj" />
+    <ProjectReference Include="../PortfolioManager/PortfolioManager.csproj" />
     <ProjectReference Include="../RiskManager/RiskManager.csproj" />
     <ProjectReference Include="../TradingJournal/TradingJournal.csproj" />
   </ItemGroup>

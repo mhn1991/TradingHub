@@ -62,7 +62,9 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
         }
 
         ValidateDecision(decision);
-        string clientOrderId = CreateClientOrderId(decision, _options.ClientOrderIdPrefix);
+        string clientOrderId = string.IsNullOrWhiteSpace(decision.ClientOrderId)
+            ? CreateClientOrderId(decision, _options.ClientOrderIdPrefix)
+            : decision.ClientOrderId;
         // Safety locks prevent new risk, but must never block a position-reducing exit.
         string? immediateRejection = decision.Action is AgentAction.Buy or AgentAction.Sell
             ? GetSafetyRejection()
@@ -204,73 +206,94 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                 AccountSnapshot? sizingAccount = accounts.FirstOrDefault(item => item.Balance is > 0m);
                 decimal accountEquity = (sizingAccount?.Balance ?? 0m) +
                     (sizingAccount?.UnrealizedProfitLoss ?? 0m);
-                RiskBudgetDecision riskBudget = _riskBudgetPolicy.Evaluate(new RiskBudgetContext
+                if (decision.QuantityIsPortfolioApproved)
                 {
-                    AccountEquity = accountEquity,
-                    DrawdownPercent = _safety?.Snapshot.EquityProtection.DrawdownPercent ?? 0m,
-                    VolatilityPercentile = decision.AtrPercentile,
-                    RegimeMultiplier = decision.RegimeRiskMultiplier ?? 1m,
-                    LiquidityMultiplier = decision.TradingConditionRiskMultiplier ?? 1m,
-                    CorrelationMultiplier = decision.CorrelationRiskMultiplier ?? 1m,
-                    StrategyAllocationMultiplier = decision.StrategyAllocationRiskMultiplier ?? 1m,
-                    EquityProtectionMultiplier = decision.EquityProtectionRiskMultiplier ??
-                        _safety?.Snapshot.EquityProtection.CurrentRiskMultiplier ?? 1m,
-                    CalibrationMultiplier = decision.SetupCalibrationRiskMultiplier ?? 1m,
-                    MetaLabelMultiplier = decision.MetaLabelRiskMultiplier ?? 1m
-                });
-                if (riskBudget.CombinedMultiplier <= 0m)
-                {
-                    AppendJournal(
-                        TradeJournalEventType.SignalRejected,
-                        decision,
-                        clientOrderId,
-                        $"[{riskBudget.ReasonCode}] {riskBudget.Explanation}");
-                    return RejectWithoutSending(clientOrderId, riskBudget.Explanation);
-                }
-                AppendJournal(
-                    TradeJournalEventType.RiskBudgetAdjusted,
-                    decision,
-                    clientOrderId,
-                    $"[{riskBudget.ReasonCode}] {riskBudget.Explanation}",
-                    riskBudget.CombinedMultiplier);
-                PositionSizingResult sizing = _positionSizer.Calculate(
-                    new PositionSizingContext
+                    if (string.IsNullOrWhiteSpace(decision.PortfolioReservationId) ||
+                        decision.PortfolioAllocatedQuantity is not > 0m ||
+                        decision.SuggestedQuantity != decision.PortfolioAllocatedQuantity)
                     {
-                        Decision = decision,
-                        RequestedQuantity = quantity,
-                        Accounts = accounts,
-                        Positions = positions,
-                        QuoteToAccountCurrencyRate = quoteToAccountRate,
-                        InstrumentSpec = instrumentSpec,
-                        RiskBudgetMultiplier = riskBudget.CombinedMultiplier,
-                        RiskBudgetDecision = riskBudget
-                    });
-                if (!sizing.Approved)
-                {
-                    // Fail closed. Falling back to the strategy's requested quantity after a
-                    // missing conversion, invalid stop, margin cap, or below-minimum result
-                    // bypasses the very risk budget the selected sizing mode is meant to own.
-                    // Fixed-quantity behavior remains available explicitly through
-                    // PositionSizingMode.FixedQuantity.
+                        return RejectWithoutSending(
+                            clientOrderId,
+                            "An authoritative portfolio quantity requires a matching reservation and allocated quantity.");
+                    }
+
+                    quantity = decision.PortfolioAllocatedQuantity.Value;
                     AppendJournal(
-                        TradeJournalEventType.SignalRejected,
+                        TradeJournalEventType.SignalEvaluated,
                         decision,
                         clientOrderId,
-                        $"Position sizing rejected the setup [{sizing.ReasonCode}]: {sizing.Reason}");
-                    return RejectWithoutSending(clientOrderId, sizing.Reason);
+                        $"Using centrally reserved portfolio quantity {quantity:F8}; execution will not size it again.");
                 }
+                else
+                {
+                    RiskBudgetDecision riskBudget = _riskBudgetPolicy.Evaluate(new RiskBudgetContext
+                    {
+                        AccountEquity = accountEquity,
+                        DrawdownPercent = _safety?.Snapshot.EquityProtection.DrawdownPercent ?? 0m,
+                        VolatilityPercentile = decision.AtrPercentile,
+                        RegimeMultiplier = decision.RegimeRiskMultiplier ?? 1m,
+                        LiquidityMultiplier = decision.TradingConditionRiskMultiplier ?? 1m,
+                        CorrelationMultiplier = decision.CorrelationRiskMultiplier ?? 1m,
+                        StrategyAllocationMultiplier = decision.StrategyAllocationRiskMultiplier ?? 1m,
+                        EquityProtectionMultiplier = decision.EquityProtectionRiskMultiplier ??
+                            _safety?.Snapshot.EquityProtection.CurrentRiskMultiplier ?? 1m,
+                        CalibrationMultiplier = decision.SetupCalibrationRiskMultiplier ?? 1m,
+                        MetaLabelMultiplier = decision.MetaLabelRiskMultiplier ?? 1m
+                    });
+                    if (riskBudget.CombinedMultiplier <= 0m)
+                    {
+                        AppendJournal(
+                            TradeJournalEventType.SignalRejected,
+                            decision,
+                            clientOrderId,
+                            $"[{riskBudget.ReasonCode}] {riskBudget.Explanation}");
+                        return RejectWithoutSending(clientOrderId, riskBudget.Explanation);
+                    }
+                    AppendJournal(
+                        TradeJournalEventType.RiskBudgetAdjusted,
+                        decision,
+                        clientOrderId,
+                        $"[{riskBudget.ReasonCode}] {riskBudget.Explanation}",
+                        riskBudget.CombinedMultiplier);
+                    PositionSizingResult sizing = _positionSizer.Calculate(
+                        new PositionSizingContext
+                        {
+                            Decision = decision,
+                            RequestedQuantity = quantity,
+                            Accounts = accounts,
+                            Positions = positions,
+                            QuoteToAccountCurrencyRate = quoteToAccountRate,
+                            InstrumentSpec = instrumentSpec,
+                            RiskBudgetMultiplier = riskBudget.CombinedMultiplier,
+                            RiskBudgetDecision = riskBudget
+                        });
+                    if (!sizing.Approved)
+                    {
+                        // Fail closed. Falling back to the strategy's requested quantity after a
+                        // missing conversion, invalid stop, margin cap, or below-minimum result
+                        // bypasses the very risk budget the selected sizing mode is meant to own.
+                        // Fixed-quantity behavior remains available explicitly through
+                        // PositionSizingMode.FixedQuantity.
+                        AppendJournal(
+                            TradeJournalEventType.SignalRejected,
+                            decision,
+                            clientOrderId,
+                            $"Position sizing rejected the setup [{sizing.ReasonCode}]: {sizing.Reason}");
+                        return RejectWithoutSending(clientOrderId, sizing.Reason);
+                    }
 
-                quantity = decision.PortfolioAllocatedQuantity is decimal allocation
-                    ? Math.Min(sizing.Quantity, allocation)
-                    : sizing.Quantity;
-                if (quantity <= 0m)
-                    return RejectWithoutSending(clientOrderId, "The portfolio allocation did not leave an executable quantity.");
-                AppendJournal(
-                    TradeJournalEventType.SignalEvaluated,
-                    decision,
-                    clientOrderId,
-                    $"Position sizing [{sizing.ReasonCode}]: {sizing.Reason}",
-                    sizing.EstimatedLossAtStop);
+                    quantity = decision.PortfolioAllocatedQuantity is decimal allocation
+                        ? Math.Min(sizing.Quantity, allocation)
+                        : sizing.Quantity;
+                    if (quantity <= 0m)
+                        return RejectWithoutSending(clientOrderId, "The portfolio allocation did not leave an executable quantity.");
+                    AppendJournal(
+                        TradeJournalEventType.SignalEvaluated,
+                        decision,
+                        clientOrderId,
+                        $"Position sizing [{sizing.ReasonCode}]: {sizing.Reason}",
+                        sizing.EstimatedLossAtStop);
+                }
 
                 var riskContext = new PreTradeRiskContext
                 {

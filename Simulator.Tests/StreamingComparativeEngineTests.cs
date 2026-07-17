@@ -181,10 +181,10 @@ public sealed class StreamingComparativeEngineTests
             Quantity = 1_000m,
             MinimumRewardRisk = 1.2m
         };
-        (string Id, Agent.Abstractions.ITradingAgent Agent)[] strategies =
+        (string Id, Agent.Abstractions.ITradingAgent Agent, InstrumentKey Instrument)[] strategies =
         [
-            ("legacy", new LegacyProgressiveAgent(strategyOptions)),
-            ("improved", new ImprovedProgressiveAgent(strategyOptions))
+            ("legacy", new LegacyProgressiveAgent(strategyOptions), instrument),
+            ("improved", new ImprovedProgressiveAgent(strategyOptions), instrument)
         ];
 
         var engine = new StreamingComparativeEngine(

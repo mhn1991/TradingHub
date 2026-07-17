@@ -93,6 +93,14 @@ public sealed record OrderSubmission
     public string? RejectionReason { get; init; }
 }
 
+public enum OrderPositionEffect
+{
+    Unknown,
+    OpenOrIncrease,
+    Reduce,
+    Close
+}
+
 public enum OrderEventType
 {
     Accepted,
@@ -107,6 +115,8 @@ public enum OrderEventType
 
 public sealed record OrderEvent
 {
+    public string? BrokerTransactionId { get; init; }
+    public string? BrokerTradeId { get; init; }
     public required string BrokerOrderId { get; init; }
     public string? ClientOrderId { get; init; }
     public required InstrumentKey Instrument { get; init; }
@@ -119,5 +129,8 @@ public sealed record OrderEvent
     public decimal? AppliedSpread { get; init; }
     public decimal? AppliedSlippage { get; init; }
     public string? ExecutionModelVersion { get; init; }
+    public OrderPositionEffect PositionEffect { get; init; } = OrderPositionEffect.Unknown;
+    public decimal? PositionQuantityAfter { get; init; }
+    public decimal? RealizedProfitLoss { get; init; }
     public string? Message { get; init; }
 }

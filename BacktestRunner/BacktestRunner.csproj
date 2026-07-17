@@ -16,5 +16,6 @@
     <ProjectReference Include="../Simulator/Simulator.csproj" />
     <ProjectReference Include="../RiskManager/RiskManager.csproj" />
     <ProjectReference Include="../TradingCore/TradingCore.csproj" />
+    <ProjectReference Include="../QuantResearch.Training/QuantResearch.Training.csproj" />
   </ItemGroup>
 </Project>

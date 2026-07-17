@@ -28,6 +28,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private long _lastProcessedLedgerSequence;
     private long _lastProcessedOrderEventSequence;
     private AgentDecision? _pendingEntryDecision;
+    private decimal? _pendingEntryMultiTimeframeAlignment;
     private string? _pendingEntryBrokerOrderId;
     private SimulatedTradeRecord? _activeTrade;
     private string? _pendingExitReason;
@@ -83,6 +84,10 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private long? _failedSequence;
     private EquityProtectionDirective? _sharedEquityProtectionDirective;
     private PortfolioRiskStatusSnapshot? _sharedPortfolioRiskStatus;
+    private readonly PortfolioManager.CrossMarket.CrossMarketAnalysisCoordinator? _crossMarket;
+    private readonly bool _detailedExcursionTracking;
+    private List<SimulatedTradePathPoint>? _excursionPath;
+    private int _excursionPathBars;
 
     public StrategySimulationSession(
         string strategyId,
@@ -91,19 +96,22 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         HistoricalSimulationClock clock,
         IExecutionCoordinator execution,
         ITradingSafetyController safety,
-        IMarketDataQualityGate dataQuality,
         ITradeJournal journal,
+        SafeTradingPipeline pipeline,
         IChartAnnotator? independentAnnotator = null,
         PositionManagementOptions? positionManagementOptions = null,
         IStructureBasedTradeManager? tradeManager = null,
         BarInterval? managementInterval = null,
-        ITradingConditionFilter? tradingConditions = null,
         RegimeManagementOptions? regimeManagement = null,
-        ISetupCalibrationPolicy? setupCalibration = null,
-        ISetupMetaModel? metaModel = null,
         TradeManagementCalibrationOptions? managementCalibrationOptions = null,
-        TradeManagementCalibration? managementCalibrationArtifact = null)
+        TradeManagementCalibration? managementCalibrationArtifact = null,
+        PortfolioManager.CrossMarket.CrossMarketAnalysisCoordinator? crossMarket = null,
+        bool detailedExcursionTracking = false,
+        string? featurePolicyHash = null)
     {
+        FeaturePolicyHash = featurePolicyHash;
+        _crossMarket = crossMarket;
+        _detailedExcursionTracking = detailedExcursionTracking;
         StrategyId = strategyId ?? throw new ArgumentNullException(nameof(strategyId));
         Strategy = strategy ?? throw new ArgumentNullException(nameof(strategy));
         Broker = broker ?? throw new ArgumentNullException(nameof(broker));
@@ -142,15 +150,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             : regimeManagement is { Enabled: true }
                 ? new RegimeAwareStructureBasedTradeManager(_positionManagementOptions, regimeManagement)
                 : new StructureBasedTradeManager(_positionManagementOptions));
-        Pipeline = new SafeTradingPipeline(
-            strategy,
-            execution,
-            dataQuality,
-            safety,
-            journal,
-            tradingConditions,
-            setupCalibration,
-            metaModel);
+        Pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));
     }
 
     public string StrategyId { get; }
@@ -162,6 +162,11 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     public ITradeJournal Journal { get; }
     public IChartAnnotator? IndependentAnnotator { get; }
     public SafeTradingPipeline Pipeline { get; }
+    /// <summary>Content hash of the <c>RuntimeFeaturePolicy</c> this session's pipeline was built
+    /// from - populated only when <see cref="Create"/> constructs the session (never set by
+    /// direct construction), so its presence proves the pipeline factory was actually exercised
+    /// rather than left dead.</summary>
+    public string? FeaturePolicyHash { get; }
     public HistoricalSimulationClock Clock { get; }
     public IReadOnlyList<SimulatedTradeRecord> Trades => _trades;
     public SimulatedTradeRecord? ActiveTrade => _activeTrade;
@@ -209,7 +214,11 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         ISetupMetaModel? metaModel = null,
         TradeManagementCalibrationOptions? managementCalibrationOptions = null,
         TradeManagementCalibration? managementCalibrationArtifact = null,
-        Func<string, IExecutionCoordinator, IExecutionCoordinator>? executionDecorator = null)
+        Func<string, IExecutionCoordinator, IExecutionCoordinator>? executionDecorator = null,
+        PortfolioManager.CrossMarket.CrossMarketAnalysisCoordinator? crossMarket = null,
+        bool detailedExcursionTracking = false,
+        RuntimeFeaturePolicy? featurePolicy = null,
+        string? strategyVersion = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         SimulationOptions options = simulationOptions;
@@ -276,9 +285,36 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         IChartAnnotator? independent = analysisSharing == AnalysisSharingMode.IndependentPerStrategy
             ? new ChartAnnotationEngine(annotationOptions)
             : null;
-        ISetupCalibrationPolicy? setupCalibration = setupCalibrationOptions is { Enabled: true }
-            ? new SetupCalibrationPolicy(setupCalibrationArtifact, setupCalibrationOptions)
-            : null;
+        ITradingConditionFilter? tradingConditions = tradingConditionOptions is null
+            ? null
+            : new TradingConditionFilter(tradingConditionOptions, economicEventProvider);
+
+        RuntimeFeaturePolicy resolvedFeaturePolicy = featurePolicy ?? new RuntimeFeaturePolicy
+        {
+            AnnotationOptions = annotationOptions ?? new(),
+            SetupCalibration = setupCalibrationOptions ?? new(),
+            MarketRegimeRouting = new(),
+            ValueLocationEvidence = new(),
+            CurrencyStrengthEvidence = new(),
+            RsiBollingerSignals = new(),
+            DmiConfirmationEnabled = true,
+            CurrencyStrength = new()
+        };
+
+        var pipelineFactory = new StrategyDecisionPipelineFactory(
+            sessionExecution, dataQuality, journal, tradingConditions, sharedSafetyController: safety);
+
+        StrategyDecisionRuntime decisionRuntime = pipelineFactory.Create(
+            new StrategyRuntimeDefinition
+            {
+                StrategyId = strategyId,
+                StrategyVersion = strategyVersion ?? strategyId,
+                Agent = agent
+            },
+            resolvedFeaturePolicy,
+            setupCalibrationArtifact,
+            metaModel,
+            resolvedSafety);
 
         return new StrategySimulationSession(
             strategyId,
@@ -287,19 +323,17 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             clock,
             sessionExecution,
             safety,
-            dataQuality,
             journal,
+            decisionRuntime.Pipeline,
             independent,
             positionManagementOptions,
             managementInterval: managementInterval,
-            tradingConditions: tradingConditionOptions is null
-                ? null
-                : new TradingConditionFilter(tradingConditionOptions, economicEventProvider),
             regimeManagement: regimeManagementOptions,
-            setupCalibration: setupCalibration,
-            metaModel: metaModel,
             managementCalibrationOptions: managementCalibrationOptions,
-            managementCalibrationArtifact: managementCalibrationArtifact);
+            managementCalibrationArtifact: managementCalibrationArtifact,
+            crossMarket: crossMarket,
+            detailedExcursionTracking: detailedExcursionTracking,
+            featurePolicyHash: decisionRuntime.FeaturePolicyHash);
     }
 
     public async Task<StrategyFrameResult> ProcessFrameAsync(
@@ -450,13 +484,14 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                     OpenOrders = openOrders,
                     ExecutableSpread = executionCandle.Prices.Close * Broker.Options.SpreadBasisPoints / 10_000m,
                     MarketDataAvailableAt = frame.AvailableAt,
-                    StrategyId = StrategyId
+                    StrategyId = StrategyId,
+                    CurrencyStrength = _crossMarket?.GetSnapshot(executionCandle.Instrument)
                 };
 
                 TradingPipelineResult pipelineResult = await Pipeline
                     .ProcessAsync(context, Broker, cancellationToken)
                     .ConfigureAwait(false);
-                CaptureDecision(pipelineResult);
+                CaptureDecision(pipelineResult, analysis);
                 CaptureExecutionEvents();
             }
 
@@ -597,7 +632,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 ClosedAt = ended,
                 ExitReason = SimulatedTradeExitReason.EndOfSimulation,
                 ExitReasonText = "Position remained open at the end of the requested history.",
-                FinalStopLossPrice = _activeTrade.CurrentStopLossPrice ?? _activeTrade.InitialStopLossPrice
+                FinalStopLossPrice = _activeTrade.CurrentStopLossPrice ?? _activeTrade.InitialStopLossPrice,
+                ExcursionPath = _excursionPath?.ToArray()
             });
             _activeTrade = null;
         }
@@ -778,7 +814,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         return true;
     }
 
-    private void CaptureDecision(TradingPipelineResult result)
+    private void CaptureDecision(TradingPipelineResult result, MultiTimeframeAnalysis analysis)
     {
         AgentDecision? decision = result.Decision;
         if (decision is null)
@@ -879,6 +915,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         if (decision.Action is AgentAction.Buy or AgentAction.Sell)
         {
             _pendingEntryDecision = decision;
+            _pendingEntryMultiTimeframeAlignment = MetaLabelFeatureFactory.ComputeMultiTimeframeAlignment(
+                decision.Action, analysis);
             _pendingEntryBrokerOrderId = result.Submission.BrokerOrderId;
             AddFrameEvent(
                 StrategyReplayEventType.OrderSubmitted,
@@ -978,9 +1016,16 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 EquityProtectionRiskMultiplier = decision.EquityProtectionRiskMultiplier,
                 SetupCalibrationRiskMultiplier = decision.SetupCalibrationRiskMultiplier,
                 MetaLabelRiskMultiplier = decision.MetaLabelRiskMultiplier,
-                FinalRiskBudgetMultiplier = finalRiskMultiplier
+                FinalRiskBudgetMultiplier = finalRiskMultiplier,
+                EntryMultiTimeframeAlignment = _pendingEntryMultiTimeframeAlignment
             };
+            if (_detailedExcursionTracking)
+            {
+                _excursionPath = [];
+                _excursionPathBars = 0;
+            }
             _pendingEntryDecision = null;
+            _pendingEntryMultiTimeframeAlignment = null;
             _pendingEntryBrokerOrderId = null;
             _lastAmendmentSnapshotVersion = null;
             _lastReductionSnapshotVersion = null;
@@ -1089,7 +1134,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 RMultiple = initialRisk is > 0m ? netTotal / initialRisk.Value : null,
                 ExitReason = exitReason,
                 ExitReasonText = _pendingExitReason ?? exitReason.ToString(),
-                FinalStopLossPrice = _activeTrade.CurrentStopLossPrice ?? _activeTrade.InitialStopLossPrice
+                FinalStopLossPrice = _activeTrade.CurrentStopLossPrice ?? _activeTrade.InitialStopLossPrice,
+                ExcursionPath = _excursionPath?.ToArray()
             };
             _trades.Add(closedTrade);
             RecordCompletedTradeForSafety(closedTrade, timestamp);
@@ -1383,6 +1429,16 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                     : null,
                 MaximumAdverseExcursionAt = timestamp
             };
+        }
+
+        if (_detailedExcursionTracking && _excursionPath is not null)
+        {
+            _excursionPath.Add(new SimulatedTradePathPoint
+            {
+                BarsAfterEntry = _excursionPathBars++,
+                MfeR = updated.MaximumFavourableExcursionR ?? 0m,
+                MaeR = updated.MaximumAdverseExcursionR ?? 0m
+            });
         }
 
         _activeTrade = updated;
@@ -2219,11 +2275,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private static decimal ResolveMinimumQuantityIncrement(InstrumentKey instrument) =>
         instrument.Value.StartsWith("FX:", StringComparison.OrdinalIgnoreCase) ? 1m : 0.00000001m;
 
-    private static string InstrumentGroup(InstrumentKey instrument)
-    {
-        int separator = instrument.Value.IndexOf(':');
-        return separator > 0 ? instrument.Value[..separator].ToUpperInvariant() : "Unknown";
-    }
+    private static string InstrumentGroup(InstrumentKey instrument) =>
+        InstrumentGroupResolver.Resolve(instrument);
 
     private static string SessionName(DateTimeOffset timestamp) => timestamp.UtcDateTime.Hour switch
     {

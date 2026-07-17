@@ -2,6 +2,7 @@ using Agent.Models;
 using Agent.Strategies;
 using Brokers.Models;
 using ChartAnnotator.Models;
+using ChartAnnotator.Value;
 
 namespace Simulator.Tests;
 
@@ -46,6 +47,248 @@ public sealed class ImprovedAgentSignalTests
             Assert.That(decision.ExpectedRewardRisk, Is.GreaterThanOrEqualTo(1.5m));
             Assert.That(decision.PriceActionSetupType, Is.EqualTo(PriceActionSetupType.BullishBreakRetestHold));
         });
+    }
+
+    [Test]
+    public async Task ImprovedAgent_NeverSelectsChannelBoundary_ForStopOrTarget()
+    {
+        // No PA setups/swings/zones on any timeframe - a channel and the ATR
+        // fallback/projection are the only remaining candidates. If channel
+        // candidates were still considered (pre-removal), the close, high-confidence
+        // channel below would win both the stop and target selection outright
+        // (priority 4, beating the ATR fallback's priority 5, and being the sole
+        // target candidate). This proves channels are never selected post-removal,
+        // not just that some other candidate happened to rank higher.
+        var agent = new ImprovedProgressiveAgent(new ProgressiveStrategyOptions
+        {
+            TrendInterval = Hour,
+            ConfirmationInterval = Fifteen,
+            EntryInterval = Five,
+            MinimumRewardRisk = 1.0m,
+            MinimumChannelConfidence = 40m
+        });
+
+        AnalysisSnapshot hour = Aligned(Hour, bullish: true, confidence: 70m);
+        AnalysisSnapshot fifteen = Aligned(Fifteen, bullish: true, confidence: 68m);
+        AnalysisSnapshot five = Aligned(Five, bullish: true, confidence: 65m) with
+        {
+            Channels =
+            [
+                FlatChannel(lowerPrice: 109.5m, upperPrice: 112m, confidence: 90m)
+            ]
+        };
+
+        AgentDecision decision = await agent.EvaluateAsync(Context(five, fifteen, hour));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Buy), decision.Reason);
+            Assert.That(decision.StopSource, Does.Not.Contain("channel").IgnoreCase);
+            Assert.That(decision.TargetSource, Does.Not.Contain("channel").IgnoreCase);
+            // With the channel excluded, stop must fall through to the ATR fallback
+            // (no swings/zones/PA-setup levels exist in this fixture) and target must
+            // fall through to the "no mapped obstacle" ATR/min-R projection.
+            Assert.That(decision.StopSource, Does.Contain("ATR fallback"));
+            Assert.That(decision.TargetSource, Does.Contain("no mapped obstacle"));
+        });
+    }
+
+    [Test]
+    public async Task ImprovedAgent_WithValueLocationEvidenceEnabled_AttachesReasonCodesAndAdjustsConfidence()
+    {
+        var baseOptions = new ProgressiveStrategyOptions
+        {
+            TrendInterval = Hour,
+            ConfirmationInterval = Fifteen,
+            EntryInterval = Five,
+            MinimumRewardRisk = 1.5m,
+            PriceActionConfirmation = PriceActionConfirmationMode.Soft,
+            MinimumPriceActionConfidence = 55m
+        };
+
+        AnalysisSnapshot hour = Aligned(Hour, bullish: true, confidence: 70m);
+        AnalysisSnapshot fifteen = Aligned(Fifteen, bullish: true, confidence: 68m);
+        // Close 110.0 with an anchor at 109.5 -> |distanceAtr| = 0.5/2 = 0.25, inside
+        // the default 0.5 near-value threshold.
+        AnalysisSnapshot fiveWithAnchor = EntryWithPaSetupOnly(nearbyResistance: 114m, swingLow: 107m) with
+        {
+            ValueReferences =
+            [
+                new AnchoredValueReference
+                {
+                    AnchorId = "session:test",
+                    AnchorType = ValueAnchorType.SessionOpen,
+                    AnchoredAt = Now.AddHours(-2),
+                    Kind = ValueReferenceKind.AnchoredTwap,
+                    Value = 109.5m,
+                    DistanceAtr = 0.25m
+                }
+            ]
+        };
+
+        var disabledAgent = new ImprovedProgressiveAgent(baseOptions);
+        AgentDecision baseline = await disabledAgent.EvaluateAsync(Context(fiveWithAnchor, fifteen, hour));
+
+        var enabledAgent = new ImprovedProgressiveAgent(baseOptions with
+        {
+            ValueLocationEvidence = new ValueLocationEvidenceOptions
+            {
+                Enabled = true,
+                NearValueAtrThreshold = 0.5m,
+                StretchedFromValueAtrThreshold = 2.5m,
+                ConfidenceAdjustmentPerSignal = 3m
+            }
+        });
+        AgentDecision withEvidence = await enabledAgent.EvaluateAsync(Context(fiveWithAnchor, fifteen, hour));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(baseline.ValueLocationEvidenceReasonCodes, Is.Empty);
+            Assert.That(withEvidence.Action, Is.EqualTo(AgentAction.Buy), withEvidence.Reason);
+            Assert.That(withEvidence.ValueLocationEvidenceReasonCodes, Does.Contain("ValueNearAnchor"));
+            Assert.That(withEvidence.Confidence, Is.GreaterThan(baseline.Confidence));
+        });
+    }
+
+    [Test]
+    public async Task ImprovedAgent_WithTrendQualityEvidenceEnabled_AttachesReasonCodesAndAdjustsConfidence()
+    {
+        var baseOptions = new ProgressiveStrategyOptions
+        {
+            TrendInterval = Hour,
+            ConfirmationInterval = Fifteen,
+            EntryInterval = Five,
+            MinimumRewardRisk = 1.5m,
+            PriceActionConfirmation = PriceActionConfirmationMode.Soft,
+            MinimumPriceActionConfidence = 55m
+        };
+
+        AnalysisSnapshot hour = Aligned(Hour, bullish: true, confidence: 70m);
+        AnalysisSnapshot fifteen = Aligned(Fifteen, bullish: true, confidence: 68m);
+        AnalysisSnapshot fiveWithTrendQuality = EntryWithPaSetupOnly(nearbyResistance: 114m, swingLow: 107m) with
+        {
+            Indicators = new IndicatorSnapshot
+            {
+                Atr = 2m,
+                Rsi = null,
+                BollingerMiddle = 108m,
+                EfficiencyAnalysis = EfficiencyAnalysisSnapshot.Empty with { State = MarketEfficiencyState.HighlyEfficient },
+                AdxAnalysis = AdxAnalysisSnapshot.Empty with { IsTrendStrengthening = true }
+            }
+        };
+
+        var disabledAgent = new ImprovedProgressiveAgent(baseOptions);
+        AgentDecision baseline = await disabledAgent.EvaluateAsync(Context(fiveWithTrendQuality, fifteen, hour));
+
+        var enabledAgent = new ImprovedProgressiveAgent(baseOptions with
+        {
+            TrendQualityEvidence = new TrendQualityEvidenceOptions
+            {
+                Enabled = true,
+                ConfidenceAdjustmentPerSignal = 3m
+            }
+        });
+        AgentDecision withEvidence = await enabledAgent.EvaluateAsync(Context(fiveWithTrendQuality, fifteen, hour));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(baseline.TrendQualityReasonCodes, Is.Empty);
+            Assert.That(withEvidence.Action, Is.EqualTo(AgentAction.Buy), withEvidence.Reason);
+            Assert.That(withEvidence.TrendQualityReasonCodes, Does.Contain("MarketEfficient"));
+            Assert.That(withEvidence.TrendQualityReasonCodes, Does.Contain("AdxTrendStrengthening"));
+            Assert.That(withEvidence.Confidence, Is.GreaterThan(baseline.Confidence));
+            // Confidence is clamped to [0,100] at every composition step, not just the total.
+            Assert.That(withEvidence.Confidence, Is.LessThanOrEqualTo(100m));
+        });
+    }
+
+    [Test]
+    public async Task ImprovedAgent_EntersOnActiveRetestAlone_WithNoOtherTrigger()
+    {
+        var agent = new ImprovedProgressiveAgent(new ProgressiveStrategyOptions
+        {
+            TrendInterval = Hour,
+            ConfirmationInterval = Fifteen,
+            EntryInterval = Five,
+            MinimumRewardRisk = 1.0m,
+            MaximumActiveRetestDistanceAtr = 0.35m
+        });
+
+        AnalysisSnapshot hour = Aligned(Hour, bullish: true, confidence: 70m);
+        AnalysisSnapshot fifteen = Aligned(Fifteen, bullish: true, confidence: 68m);
+        // No PA setups, no structural DetectSide (RSI null), and BullishScore held below
+        // the confirmation threshold - only the in-progress retest can trigger entry.
+        AnalysisSnapshot five = EntryWithPaSetupOnly(nearbyResistance: 114m, swingLow: 107m) with
+        {
+            PriceAction = new PriceActionSnapshot
+            {
+                Bias = PriceActionDirection.Bullish,
+                BullishScore = 20m,
+                Setups = [],
+                ActiveRetest = new BreakRetestSnapshot
+                {
+                    State = BreakRetestState.RetestInProgress,
+                    Direction = PriceActionDirection.Bullish,
+                    ClosestRetestDistanceAtr = 0.1m
+                }
+            }
+        };
+
+        AgentDecision decision = await agent.EvaluateAsync(Context(five, fifteen, hour));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.Action, Is.EqualTo(AgentAction.Buy), decision.Reason);
+            Assert.That(decision.ReasonCode, Is.EqualTo("ActiveRetestInProgress"));
+        });
+    }
+
+    [Test]
+    public async Task ImprovedAgent_EntersOnPullbackEventAlone_WithNoOtherTrigger()
+    {
+        var agent = new ImprovedProgressiveAgent(new ProgressiveStrategyOptions
+        {
+            TrendInterval = Hour,
+            ConfirmationInterval = Fifteen,
+            EntryInterval = Five,
+            MinimumRewardRisk = 1.0m,
+            MinimumPriceActionConfidence = 55m
+        });
+
+        AnalysisSnapshot hour = Aligned(Hour, bullish: true, confidence: 70m);
+        AnalysisSnapshot fifteen = Aligned(Fifteen, bullish: true, confidence: 68m);
+        // No PA setups, no structural DetectSide (RSI null), and BullishScore held below
+        // the confirmation threshold - only the pullback event's own confidence
+        // (via PriceActionSnapshot.HasConfirmedTrigger, which now recognises
+        // BullishPullback) can trigger entry.
+        AnalysisSnapshot five = EntryWithPaSetupOnly(nearbyResistance: 114m, swingLow: 107m) with
+        {
+            PriceAction = new PriceActionSnapshot
+            {
+                Bias = PriceActionDirection.Bullish,
+                BullishScore = 20m,
+                Setups = [],
+                Events =
+                [
+                    new PriceActionEvent
+                    {
+                        EventId = "test:pullback",
+                        Type = PriceActionEventType.BullishPullback,
+                        Direction = PriceActionDirection.Bullish,
+                        ConfirmedAt = Now,
+                        ConfirmedSequence = 1,
+                        Strength = 60m,
+                        Confidence = 70m,
+                        ReasonCode = "BullishTrendPullback",
+                        Explanation = "test"
+                    }
+                ]
+            }
+        };
+
+        AgentDecision decision = await agent.EvaluateAsync(Context(five, fifteen, hour));
+
+        Assert.That(decision.Action, Is.EqualTo(AgentAction.Buy), decision.Reason);
     }
 
     [Test]
@@ -309,6 +552,31 @@ public sealed class ImprovedAgentSignalTests
         CentrePrice = (lower + upper) / 2m,
         TouchCount = 3,
         Strength = 70m,
+        Type = type
+    };
+
+    private static PriceChannel FlatChannel(decimal lowerPrice, decimal upperPrice, decimal confidence) => new()
+    {
+        LowerLine = FlatTrendline(lowerPrice, TrendlineType.Support),
+        UpperLine = FlatTrendline(upperPrice, TrendlineType.Resistance),
+        StartTime = Now.AddHours(-2),
+        EndTime = Now,
+        Direction = ChannelDirection.Sideways,
+        Width = upperPrice - lowerPrice,
+        WidthAtr = (upperPrice - lowerPrice) / 2m,
+        Confidence = confidence
+    };
+
+    private static Trendline FlatTrendline(decimal price, TrendlineType type) => new()
+    {
+        StartTime = Now.AddHours(-2),
+        EndTime = Now,
+        OriginTime = Now,
+        OriginPrice = price,
+        SlopePerSecond = 0m,
+        InlierCount = 5,
+        MeanAbsoluteError = 0.01m,
+        FitScore = 0.95m,
         Type = type
     };
 

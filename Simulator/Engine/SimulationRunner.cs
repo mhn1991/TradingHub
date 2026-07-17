@@ -136,7 +136,7 @@ public sealed class SimulationRunner
                 }
 
                 AnalysisSnapshot snapshot = await _annotator
-                    .ProcessAsync(candleEvent, cancellationToken)
+                    .ProcessAsync(candleEvent, runtimeContext: null, cancellationToken)
                     .ConfigureAwait(false);
                 _latestAnalysis[candleEvent.Interval] = snapshot;
                 triggerClosed |= candleEvent.Interval == _agent.TriggerInterval;

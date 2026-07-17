@@ -74,14 +74,39 @@ public static class ConfidenceCalibrator
         DateTimeOffset createdAt)
     {
         ArgumentNullException.ThrowIfNull(outcomes);
+        if (outcomes.Count == 0)
+        {
+            throw new ArgumentException(
+                "Cannot build a setup calibration artifact from zero setup outcomes " +
+                "(no closed trades mapped into confidence buckets).");
+        }
+
         if (bucketWidth <= 0m || bucketWidth > 100m || 100m % bucketWidth != 0m)
             throw new ArgumentOutOfRangeException(nameof(bucketWidth));
+        if (string.IsNullOrWhiteSpace(calibrationId))
+            throw new ArgumentException("CalibrationId is required.", nameof(calibrationId));
+        if (string.IsNullOrWhiteSpace(strategyVersion))
+            throw new ArgumentException("StrategyVersion is required.", nameof(strategyVersion));
+        if (string.IsNullOrWhiteSpace(featureSchemaHash))
+            throw new ArgumentException("FeatureSchemaHash is required.", nameof(featureSchemaHash));
+        if (string.IsNullOrWhiteSpace(dataHash))
+            throw new ArgumentException("DataHash is required.", nameof(dataHash));
+
+        // Validate requires a strict half-open training span (From < To). A single
+        // same-timestamp trade (or open==close) used to surface as the opaque
+        // "artifact is missing, incompatible, or invalid" message.
+        if (trainingTo <= trainingFrom)
+            trainingTo = trainingFrom.AddSeconds(1);
+
         var buckets = new List<SetupCalibrationBucket>();
         foreach (IGrouping<(string StrategyId, string InstrumentGroup, string Regime), SetupOutcome> cohort in outcomes
-                     .GroupBy(item => (item.StrategyId, item.InstrumentGroup, item.Regime))
-                     .OrderBy(item => item.Key.StrategyId, StringComparer.Ordinal)
-                     .ThenBy(item => item.Key.InstrumentGroup, StringComparer.Ordinal)
-                     .ThenBy(item => item.Key.Regime, StringComparer.Ordinal))
+                     .GroupBy(item => (
+                         string.IsNullOrWhiteSpace(item.StrategyId) ? "unknown" : item.StrategyId,
+                         string.IsNullOrWhiteSpace(item.InstrumentGroup) ? "Unknown" : item.InstrumentGroup,
+                         string.IsNullOrWhiteSpace(item.Regime) ? "Unknown" : item.Regime))
+                     .OrderBy(item => item.Key.Item1, StringComparer.Ordinal)
+                     .ThenBy(item => item.Key.Item2, StringComparer.Ordinal)
+                     .ThenBy(item => item.Key.Item3, StringComparer.Ordinal))
         {
             for (decimal from = 0m; from < 100m; from += bucketWidth)
             {
@@ -98,9 +123,9 @@ public static class ConfidenceCalibrator
                 });
                 buckets.Add(new SetupCalibrationBucket
                 {
-                    StrategyId = cohort.Key.StrategyId,
-                    InstrumentGroup = cohort.Key.InstrumentGroup,
-                    Regime = cohort.Key.Regime,
+                    StrategyId = cohort.Key.Item1,
+                    InstrumentGroup = cohort.Key.Item2,
+                    Regime = cohort.Key.Item3,
                     ConfidenceFrom = from,
                     ConfidenceTo = to,
                     Samples = sample.Length,
@@ -112,13 +137,26 @@ public static class ConfidenceCalibrator
             }
         }
 
+        if (buckets.Count == 0)
+        {
+            throw new ArgumentException(
+                $"Setup outcomes ({outcomes.Count}) produced zero confidence buckets - " +
+                "check that EntryConfidence values fall in [0, 100].");
+        }
+
+        string[] instruments = outcomes
+            .Select(item => string.IsNullOrWhiteSpace(item.InstrumentGroup) ? "Unknown" : item.InstrumentGroup)
+            .Distinct(StringComparer.Ordinal)
+            .Order()
+            .ToArray();
+
         var artifact = new SetupCalibrationArtifact
         {
             SchemaVersion = 1,
             CalibrationId = calibrationId,
             TrainingFrom = trainingFrom,
             TrainingTo = trainingTo,
-            Instruments = outcomes.Select(item => item.InstrumentGroup).Distinct(StringComparer.Ordinal).Order().ToArray(),
+            Instruments = instruments,
             StrategyVersion = strategyVersion,
             FeatureSchemaHash = featureSchemaHash,
             Parameters = new Dictionary<string, string> { ["bucketWidth"] = bucketWidth.ToString(System.Globalization.CultureInfo.InvariantCulture) },

@@ -12,7 +12,11 @@
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
     <ProjectReference Include="../DashboardContracts/DashboardContracts.csproj" />
     <ProjectReference Include="../Networking/Networking.csproj" />
+    <ProjectReference Include="../QuantResearch/QuantResearch.csproj" />
+    <ProjectReference Include="../QuantResearchRunner/QuantResearchRunner.csproj" />
     <ProjectReference Include="../RiskManager/RiskManager.csproj" />
     <ProjectReference Include="../Simulator/Simulator.csproj" />
+    <ProjectReference Include="../TradeManager/TradeManager.csproj" />
+    <ProjectReference Include="../TradingPolicies/TradingPolicies.csproj" />
   </ItemGroup>
 </Project>

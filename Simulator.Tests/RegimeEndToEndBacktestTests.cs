@@ -90,6 +90,81 @@ public sealed class RegimeEndToEndBacktestTests
         Assert.That(snapshot?.Status, Is.EqualTo(SimulationJobStatus.Completed));
     }
 
+    [Test]
+    public async Task ApplicationService_CompletesWithValueLocationEvidenceAndCurrencyStrengthEnabled()
+    {
+        // §18-19 gap found while adding Dashboard/CLI exposure: BacktestRuntimeOptions
+        // .ValueLocationEvidence and .CurrencyStrength existed and were unit-tested, but
+        // were never mapped into a real BacktestRequest's strategies/engine - a request
+        // enabling them would have silently done nothing. This proves the fix: both
+        // reach CreateDefaultStrategies and StreamingComparativeEngine through the real
+        // public BacktestApplicationService entry point without crashing.
+        InstrumentKey instrument = new("FX:EUR/USD");
+        BarInterval baseInterval = BarInterval.Minutes(1);
+        DateTimeOffset start = new(2025, 6, 2, 8, 0, 0, TimeSpan.Zero);
+        Candle[] candles = BuildSyntheticTrend(instrument, baseInterval, start, count: 400);
+
+        string tempRoot = Path.Combine(Path.GetTempPath(), "tradinghub-sim-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+
+        await using var service = new BacktestApplicationService(
+            new FileSimulationJobRepository(Path.Combine(tempRoot, "jobs")),
+            new BacktestApplicationServiceOptions { MaxConcurrentJobs = 1, QueueCapacity = 2 });
+
+        var request = new BacktestRequest
+        {
+            Instrument = instrument,
+            From = start,
+            To = start.AddHours(6),
+            Strategies = ["legacy", "improved"],
+            StartingBalance = 100_000m,
+            Quantity = 1_000m,
+            OutputDirectory = Path.Combine(tempRoot, "out"),
+            JobsDirectory = Path.Combine(tempRoot, "jobs"),
+            InlineCandles = candles,
+            Runtime = new BacktestRuntimeOptions
+            {
+                BaseInterval = baseInterval,
+                AnalysisIntervals = [BarInterval.Minutes(5), BarInterval.Minutes(15), BarInterval.Hours(1)],
+                WarmupDays = 0,
+                PrefetchCapacity = 10_000,
+                PrefetchLowWatermark = 1_000,
+                SourcePageSize = 500,
+                StrategyExecutionMode = StrategyExecutionMode.Sequential,
+                ProgressPublishIntervalMilliseconds = 50,
+                ReplayChunkSize = 50,
+                ValueLocationEvidence = new ChartAnnotator.Value.ValueLocationEvidenceOptions
+                {
+                    Enabled = true,
+                    NearValueAtrThreshold = 0.5m,
+                    StretchedFromValueAtrThreshold = 2.5m,
+                    ConfidenceAdjustmentPerSignal = 3m
+                },
+                CurrencyStrength = new PortfolioManager.CrossMarket.CurrencyStrengthOptions
+                {
+                    Enabled = true,
+                    Interval = BarInterval.Hours(1),
+                    ReturnLookbackBars = 2,
+                    VolatilityLookbackBars = 4,
+                    MinimumCurrencyCoveragePercent = 1m,
+                    Baskets = new Dictionary<string, IReadOnlyList<InstrumentKey>>
+                    {
+                        ["Majors"] = [instrument]
+                    }
+                }
+            }
+        };
+
+        ComparativeSimulationResult result = await service.RunToCompletionAsync(request);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.ProcessedBaseCandles, Is.GreaterThan(0));
+            Assert.That(result.Strategies, Has.Count.EqualTo(2));
+            Assert.That(File.Exists(Path.Combine(result.OutputDirectory, "COMPLETE")), Is.True);
+        });
+    }
+
     private static Candle[] BuildSyntheticTrend(
         InstrumentKey instrument,
         BarInterval interval,

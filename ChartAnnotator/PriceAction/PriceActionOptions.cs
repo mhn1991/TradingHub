@@ -31,6 +31,14 @@ public sealed record PriceActionOptions
     public int CalibrationLookback { get; init; } = 250;
     public int CalibrationMinimumSamples { get; init; } = 50;
     public decimal MinimumTriggerConfidence { get; init; } = 55m;
+    /// <summary>
+    /// Minimum combined consecutive-higher/lower swing count (MarketStructureSnapshot)
+    /// required before a trend counts as "established" enough for pullback detection.
+    /// </summary>
+    public int MinimumPullbackTrendStrength { get; init; } = 3;
+    /// <summary>Maximum ATR distance from a continuation reference (swing/zone/Bollinger
+    /// middle) for a retracement candle to count as a pullback rather than a fresh leg.</summary>
+    public decimal MaximumPullbackDistanceAtr { get; init; } = 0.75m;
 
     public void Validate()
     {
@@ -54,7 +62,9 @@ public sealed record PriceActionOptions
             CalibrationLookback < 10 ||
             CalibrationMinimumSamples < 2 ||
             CalibrationMinimumSamples > CalibrationLookback ||
-            MinimumTriggerConfidence is < 0m or > 100m)
+            MinimumTriggerConfidence is < 0m or > 100m ||
+            MinimumPullbackTrendStrength < 1 ||
+            MaximumPullbackDistanceAtr <= 0m)
         {
             throw new ArgumentOutOfRangeException(nameof(PriceActionOptions));
         }

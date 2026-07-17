@@ -598,7 +598,9 @@ public sealed record PriceActionSnapshot
                 PriceActionEventType.SellSideLiquiditySweep or
                 PriceActionEventType.BuySideLiquiditySweep or
                 PriceActionEventType.BullishChangeOfCharacter or
-                PriceActionEventType.BearishChangeOfCharacter));
+                PriceActionEventType.BearishChangeOfCharacter or
+                PriceActionEventType.BullishPullback or
+                PriceActionEventType.BearishPullback));
 
     public bool HasTriggeredSetup(
         PriceActionDirection direction,

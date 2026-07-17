@@ -84,28 +84,28 @@ public sealed class IndicatorAndAnnotationEdgeTests
         Assert.Multiple(() =>
         {
             Assert.That(
-                async () => await engine.ProcessAsync(null!),
+                async () => await engine.ProcessAsync(null!, null),
                 Throws.TypeOf<ArgumentNullException>());
             Assert.That(
                 async () => await engine.ProcessAsync(new CandleClosedEvent(
                     Instrument,
                     Interval,
                     valid with { IsComplete = false },
-                    1)),
+                    1), null),
                 Throws.ArgumentException.With.Message.Contains("completed"));
             Assert.That(
                 async () => await engine.ProcessAsync(new CandleClosedEvent(
                     "FX:EUR/USD",
                     Interval,
                     valid,
-                    1)),
+                    1), null),
                 Throws.ArgumentException.With.Message.Contains("identity"));
             Assert.That(
                 async () => await engine.ProcessAsync(new CandleClosedEvent(
                     Instrument,
                     Interval,
                     valid with { CloseTime = null },
-                    1)),
+                    1), null),
                 Throws.ArgumentException.With.Message.Contains("close time"));
         });
     }
@@ -115,7 +115,7 @@ public sealed class IndicatorAndAnnotationEdgeTests
     {
         var engine = new ChartAnnotationEngine();
         Candle first = Candle(0, 100m, 101m, 99m, 100m);
-        await engine.ProcessAsync(new CandleClosedEvent(Instrument, Interval, first, 1));
+        await engine.ProcessAsync(new CandleClosedEvent(Instrument, Interval, first, 1), null);
 
         Assert.Multiple(() =>
         {
@@ -124,14 +124,14 @@ public sealed class IndicatorAndAnnotationEdgeTests
                     Instrument,
                     Interval,
                     first,
-                    2)),
+                    2), null),
                 Throws.InvalidOperationException.With.Message.Contains("chronological"));
             Assert.That(
                 async () => await engine.ProcessAsync(new CandleClosedEvent(
                     Instrument,
                     Interval,
                     Candle(1, 100m, 101m, 99m, 100m),
-                    1)),
+                    1), null),
                 Throws.InvalidOperationException.With.Message.Contains("sequences"));
         });
     }
@@ -155,7 +155,7 @@ public sealed class IndicatorAndAnnotationEdgeTests
                 Instrument,
                 Interval,
                 Candle(index, 100m + index, 101m + index, 99m + index, 100m + index),
-                index + 1));
+                index + 1), null);
         }
 
         Assert.Multiple(() =>

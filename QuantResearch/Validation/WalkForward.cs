@@ -32,9 +32,18 @@ public sealed record WalkForwardFold
 public sealed record WalkForwardFoldResult
 {
     public required WalkForwardFold Window { get; init; }
+    /// <summary>Instrument this fold was run for (plans may contain multiple).</summary>
+    public required string Instrument { get; init; }
+    /// <summary>Strategy id this fold was run for (plans may contain multiple).</summary>
+    public required string StrategyId { get; init; }
+    /// <summary>In-sample window used to select parameters.</summary>
+    public required ResearchPerformance Training { get; init; }
+    /// <summary>First out-of-sample check with the selected parameters.</summary>
     public required ResearchPerformance Validation { get; init; }
+    /// <summary>Final holdout window with the selected parameters.</summary>
     public required ResearchPerformance Test { get; init; }
     public required IReadOnlyDictionary<string, string> SelectedParameters { get; init; }
+    /// <summary>Validation Sharpe minus test Sharpe (positive means test degraded).</summary>
     public required decimal ValidationToTestDegradation { get; init; }
 }
 

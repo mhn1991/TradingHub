@@ -35,6 +35,11 @@ public sealed record PortfolioRiskStatusSnapshot
     public required decimal StrategyHeat { get; init; }
     public required decimal InstrumentHeat { get; init; }
     public required IReadOnlyDictionary<string, decimal> CurrencyRisk { get; init; }
+    /// <summary>Real net (directional) notional currency exposure, distinct from <see cref="CurrencyRisk"/>'s stop-risk split.</summary>
+    public IReadOnlyDictionary<string, decimal> NetCurrencyExposure { get; init; } = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Real gross (absolute) notional currency exposure, distinct from <see cref="CurrencyRisk"/>'s stop-risk split.</summary>
+    public IReadOnlyDictionary<string, decimal> GrossCurrencyExposure { get; init; } = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+    public IReadOnlyList<string> CurrencyExposureMissingCurrencies { get; init; } = [];
     public required IReadOnlyDictionary<string, decimal> ClusterHeat { get; init; }
     public required decimal MarginUsed { get; init; }
     public required decimal ReservedMargin { get; init; }
@@ -401,6 +406,9 @@ public sealed record StrategySimulationResult
     public bool IsComplete { get; init; } = true;
     public long? FailedAtSequence { get; init; }
     public string? FailureMessage { get; init; }
+    /// <summary>Content hash of the <c>RuntimeFeaturePolicy</c> this strategy's pipeline was
+    /// built from - proves the shared pipeline factory was actually exercised for this run.</summary>
+    public string? FeaturePolicyHash { get; init; }
 }
 
 public sealed record ComparativeSimulationResult

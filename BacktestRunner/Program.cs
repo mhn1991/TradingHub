@@ -1,11 +1,14 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Agent.Strategies;
 using Brokers.Models;
 using Dashboard.Contracts;
+using QuantResearch.Training.Pipeline;
 using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
 using TradeManager;
+using TradingPolicies;
 
 namespace BacktestRunner;
 
@@ -39,6 +42,7 @@ internal static class Program
                 cancellation.Cancel();
             };
 
+            options = await ResolveCalibrationArtifactsAsync(options, cancellation.Token);
             BacktestRequest request = options.ToBacktestRequest();
             await using var service = new BacktestApplicationService(
                 new FileSimulationJobRepository(request.JobsDirectory),
@@ -56,6 +60,12 @@ internal static class Program
                     $"{update.ProgressPercent:F1}% · " +
                     $"{update.CandlesPerSecond:F0} c/s");
             });
+
+            if (options.AutoTrainCalibration)
+            {
+                await RunAutoTrainCalibrationAsync(options, request, service, cancellation.Token)
+                    .ConfigureAwait(false);
+            }
 
             var comparisonRuns = new List<(string Configuration, ComparativeSimulationResult Result)>();
             ComparativeSimulationResult result;
@@ -221,6 +231,139 @@ internal static class Program
             .ConfigureAwait(false);
     }
 
+    private static async Task<BacktestCommandOptions> ResolveCalibrationArtifactsAsync(
+        BacktestCommandOptions options, CancellationToken cancellationToken)
+    {
+        if (options.SetupCalibrationArtifactId is null &&
+            options.ManagementCalibrationArtifactId is null &&
+            options.MetaModelArtifactId is null)
+            return options;
+
+        var repository = new Simulator.Calibration.FileCalibrationArtifactRepository(
+            options.CalibrationArtifactsDirectory);
+
+        if (options.SetupCalibrationArtifactId is string setupId)
+        {
+            if (!Guid.TryParse(setupId, out Guid parsed))
+                throw new ArgumentException("--setup-calibration-artifact-id is invalid.");
+            RiskManager.Calibration.SetupCalibrationArtifact artifact = await repository
+                .GetSetupAsync(parsed, cancellationToken).ConfigureAwait(false)
+                ?? throw new ArgumentException("The referenced setup calibration artifact does not exist.");
+            options = options with { SetupCalibrationArtifact = artifact };
+        }
+
+        if (options.ManagementCalibrationArtifactId is string managementId)
+        {
+            if (!Guid.TryParse(managementId, out Guid parsed))
+                throw new ArgumentException("--management-calibration-artifact-id is invalid.");
+            TradeManagementCalibration artifact = await repository
+                .GetManagementAsync(parsed, cancellationToken).ConfigureAwait(false)
+                ?? throw new ArgumentException("The referenced management calibration artifact does not exist.");
+            options = options with { ManagementCalibrationArtifact = artifact };
+        }
+
+        if (options.MetaModelArtifactId is string metaModelId)
+        {
+            if (!Guid.TryParse(metaModelId, out Guid parsed))
+                throw new ArgumentException("--meta-model-artifact-id is invalid.");
+            Simulator.Calibration.MetaModelArtifact artifact = await repository
+                .GetMetaModelAsync(parsed, cancellationToken).ConfigureAwait(false)
+                ?? throw new ArgumentException("The referenced meta-model artifact does not exist.");
+            options = options with { MetaModelArtifact = artifact };
+        }
+
+        return options;
+    }
+
+    /// <summary>
+    /// Isolated pre-step: trains a fresh leakage-safe calibration bundle per strategy on the
+    /// window immediately preceding <see cref="BacktestCommandOptions.From"/>, via the same
+    /// <see cref="CalibrationTrainingPipeline"/>/<see cref="CalibrationBundleWorkflow"/>
+    /// <c>LiveTradingHost</c>'s scheduler uses. Deliberately never wires its output into
+    /// <paramref name="request"/> or the run this call is part of - a successful run only ever
+    /// produces a PendingReview candidate; promotion/activation stays a separate, explicit,
+    /// later step (the same discipline the live host follows).
+    /// </summary>
+    private static async Task RunAutoTrainCalibrationAsync(
+        BacktestCommandOptions options,
+        BacktestRequest request,
+        IBacktestApplicationService backtests,
+        CancellationToken cancellationToken)
+    {
+        var artifacts = new Simulator.Calibration.FileCalibrationArtifactRepository(options.CalibrationArtifactsDirectory);
+        var profiles = new FileTradingPolicyProfileStore(
+            Path.Combine(options.CalibrationArtifactsDirectory, "..", "trading-policy-profiles"));
+        ICalibrationBundleApprovalStore approvals = new FileCalibrationBundleApprovalStore(
+            Path.Combine(options.CalibrationArtifactsDirectory, "..", "calibration-bundle-candidates"),
+            artifacts,
+            profiles);
+        var pipeline = new CalibrationTrainingPipeline(backtests, artifacts);
+        var workflow = new CalibrationBundleWorkflow(pipeline, artifacts, approvals);
+
+        DateTimeOffset trainingTo = options.From;
+        DateTimeOffset trainingFrom = trainingTo.AddDays(-options.AutoTrainCalibrationWindowDays);
+
+        foreach (string strategy in options.Strategies)
+        {
+            Console.WriteLine(
+                $"Auto-training calibration for '{strategy}' on {trainingFrom:yyyy-MM-dd} → {trainingTo:yyyy-MM-dd} " +
+                "(isolated research job - not used by this run)...");
+
+            var promotionRequest = new CalibrationBundlePromotionRequest
+            {
+                Training = new CalibrationTrainingRequest
+                {
+                    Instruments = [request.Instrument],
+                    Strategies = [strategy],
+                    From = trainingFrom,
+                    To = trainingTo,
+                    Runtime = request.Runtime,
+                    StartingBalance = request.StartingBalance,
+                    Quantity = options.Quantity,
+                    // AGENT-01: sourced from the real request driving this run, so the promoted
+                    // AgentOptions (derived from these plus Runtime) match what this run actually
+                    // uses instead of silently drifting to bare defaults.
+                    MinimumRewardRisk = request.MinimumRewardRisk,
+                    PriceActionConfirmation = request.PriceActionConfirmation,
+                    MinimumPriceActionConfidence = request.MinimumPriceActionConfidence,
+                    RejectStrongOpposingPriceAction = request.RejectStrongOpposingPriceAction,
+                    Folds = options.AutoTrainCalibrationFolds,
+                    Embargo = TimeSpan.FromHours(options.AutoTrainCalibrationEmbargoHours),
+                    Description = $"auto-train (BacktestRunner) · {strategy} · {request.Instrument} · {DateTimeOffset.UtcNow:O}"
+                },
+                AgentKind = strategy.Contains("legacy", StringComparison.OrdinalIgnoreCase)
+                    ? ProgressiveAgentKind.Legacy
+                    : ProgressiveAgentKind.Improved,
+                StrategyVersion = options.AutoTrainCalibrationStrategyVersion ?? $"{strategy}-auto"
+            };
+
+            try
+            {
+                CalibrationBundlePromotionResult result = await workflow
+                    .RunAndProposeAsync(promotionRequest, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (!result.Training.Success)
+                {
+                    Console.WriteLine($"Auto-train for '{strategy}' failed: {result.Training.FailureReason}");
+                }
+                else if (result.Candidate is null)
+                {
+                    Console.WriteLine(
+                        $"Auto-train for '{strategy}' produced mutually incompatible artifacts: {result.IncompatibilityReason}");
+                }
+                else
+                {
+                    Console.WriteLine($"Auto-train for '{strategy}' produced candidate {result.Candidate.Id:N}, pending review.");
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Training must never block or fail the actual backtest run it precedes.
+                Console.WriteLine($"Auto-train for '{strategy}' failed unexpectedly: {ex.Message}");
+            }
+        }
+    }
 
     private static PositionManagementOptions DisableProfitProtection(
         PositionManagementOptions options) => options with
@@ -327,10 +470,10 @@ Options:
   --analysis-sharing shared|independent
   --ambiguous-policy stop-first|target-first|nearest-open
   --account-mode independent|shared
-  --regime
+  --no-regime (regime routing/risk is on by default)
   --er-period 14
-  --trading-conditions
-  --adaptive-risk
+  --no-trading-conditions (session/rollover/spread/stale-data protection is on by default)
+  --no-adaptive-risk (drawdown/volatility-scaled risk is on by default)
   --maximum-portfolio-heat-percent 1.5
   --fill-model MidpointPlusConfiguredSpread|VariableSyntheticSpread|StressExecution
   --stress-scenario Base|SpreadDouble|SlippageTriple|GapStress|StopAmendmentFailure|ConnectionLoss|CorrelationShock|CombinedStress
@@ -338,6 +481,19 @@ Options:
   --financing
   --financing-long-annual-percent -3.5
   --financing-short-annual-percent 1.2
+  --setup-calibration-artifact-id <guid>   (resolved from --calibration-artifacts-directory)
+  --management-calibration-artifact-id <guid>
+  --meta-model-artifact-id <guid>
+  --calibration-artifacts-directory .cache/calibration-artifacts
+  --auto-train-calibration                 (train a fresh setup/meta-model/management bundle
+                                             per strategy, on the window immediately preceding
+                                             --from, before this run starts; produces a
+                                             PendingReview candidate only - never used by this
+                                             run itself)
+  --auto-train-calibration-window-days 180
+  --auto-train-calibration-folds 5
+  --auto-train-calibration-embargo-hours 24
+  --auto-train-calibration-strategy-version <text>  (default: "{strategy}-auto")
   --warmup-days 21
   --quantity 1000                         (manual/fixed-quantity fallback)
   --position-sizing-mode fixed-fractional|fixed-cash|fixed-quantity

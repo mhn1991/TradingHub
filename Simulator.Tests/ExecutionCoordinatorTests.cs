@@ -361,6 +361,72 @@ public sealed class ExecutionCoordinatorTests
     }
 
     [Test]
+    public async Task PortfolioApprovedQuantity_IsNotSizedOrRiskMultipliedAgain()
+    {
+        var broker = new FakeTradingBroker
+        {
+            Accounts =
+            [
+                new AccountSnapshot
+                {
+                    AccountId = "account",
+                    Currency = "USD",
+                    Balance = 100_000m,
+                    MarginUsed = 0m,
+                    CanTrade = true
+                }
+            ]
+        };
+        var coordinator = new ExecutionCoordinator(positionSizer: new ThrowingPositionSizer());
+        AgentDecision decision = BuyDecision() with
+        {
+            ClientOrderId = "portfolio-approved-order",
+            SuggestedQuantity = 20_000m,
+            PortfolioOriginalQuantity = 20_000m,
+            PortfolioAllocatedQuantity = 20_000m,
+            PortfolioReservationId = "reservation-1",
+            QuantityIsPortfolioApproved = true,
+            ReferencePrice = 1.1000m,
+            StopLossPrice = 1.0950m,
+            TakeProfitPrice = 1.1100m,
+            SetupCalibrationRiskMultiplier = 0.5m,
+            MetaLabelRiskMultiplier = 0.5m,
+            TradingConditionRiskMultiplier = 0.5m
+        };
+
+        OrderSubmission result = (await coordinator.ProcessAsync(decision, broker))!;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Status, Is.EqualTo(SubmissionStatus.Accepted));
+            Assert.That(broker.PlacedRequests.Single().Quantity.Value, Is.EqualTo(20_000m));
+            Assert.That(broker.PlacedRequests.Single().ClientOrderId, Is.EqualTo("portfolio-approved-order"));
+        });
+    }
+
+    [Test]
+    public async Task PortfolioApprovedQuantity_RequiresExactReservationAllocationMatch()
+    {
+        var broker = new FakeTradingBroker();
+        AgentDecision decision = BuyDecision() with
+        {
+            SuggestedQuantity = 20_000m,
+            PortfolioAllocatedQuantity = 10_000m,
+            PortfolioReservationId = "reservation-1",
+            QuantityIsPortfolioApproved = true
+        };
+
+        OrderSubmission result = (await new ExecutionCoordinator().ProcessAsync(decision, broker))!;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Status, Is.EqualTo(SubmissionStatus.Rejected));
+            Assert.That(result.Certainty, Is.EqualTo(ExecutionCertainty.NotSent));
+            Assert.That(broker.PlacedRequests, Is.Empty);
+        });
+    }
+
+    [Test]
     public async Task PyramidingCanBeExplicitlyEnabled()
     {
         var broker = new FakeTradingBroker
@@ -449,6 +515,12 @@ public sealed class ExecutionCoordinatorTests
         Side = side,
         Quantity = quantity
     };
+
+    private sealed class ThrowingPositionSizer : IPositionSizer
+    {
+        public PositionSizingResult Calculate(PositionSizingContext context) =>
+            throw new InvalidOperationException("Portfolio-approved quantity must not be sized again.");
+    }
 
     private sealed class FakeTradingBroker : ITradingBrokerClient
     {

@@ -105,6 +105,19 @@ public sealed class PriceActionAnalyzer
         if (displacement is not null)
             events.Add(displacement);
 
+        PriceActionEvent? pullback = DetectPullback(
+            candle,
+            previousCandle,
+            swings,
+            zones,
+            structure,
+            indicators,
+            atr,
+            sequence,
+            diagnostics);
+        if (pullback is not null)
+            events.Add(pullback);
+
         PriceActionEvent? sweep = DetectSweep(
             candle,
             swings,
@@ -366,6 +379,96 @@ public sealed class PriceActionAnalyzer
         AddRejected(diagnostics, "StructuralRejection", "RejectionAwayFromStructure",
             "Candle geometry and structural proximity did not jointly satisfy the rejection rule.");
         return null;
+    }
+
+    /// <summary>
+    /// "Buy the dip in an established uptrend" (and the bearish mirror): a retracement
+    /// candle against an already-established trend, staying close to a continuation
+    /// reference (swing/zone, or the Bollinger middle as a dynamic fallback) rather than
+    /// breaking new structure. Never uses a trendline/channel reference - support/
+    /// resistance geometry only, matching DetectRejection.
+    /// </summary>
+    private PriceActionEvent? DetectPullback(
+        Candle candle,
+        Candle? previousCandle,
+        IReadOnlyList<SwingPoint> swings,
+        IReadOnlyList<PriceZone> zones,
+        MarketStructureSnapshot structure,
+        IndicatorSnapshot indicators,
+        decimal? atr,
+        long sequence,
+        ICollection<PriceActionDiagnostic> diagnostics)
+    {
+        if (atr is not > 0m || previousCandle is null)
+        {
+            AddRejected(diagnostics, "Pullback", "AtrOrHistoryNotReady", "ATR and a previous candle are required to assess a pullback.");
+            return null;
+        }
+
+        bool establishedUp = structure.Direction == MarketStructureDirection.Rising &&
+            structure.ConsecutiveHigherHighs + structure.ConsecutiveHigherLows >= _options.MinimumPullbackTrendStrength;
+        bool establishedDown = structure.Direction == MarketStructureDirection.Falling &&
+            structure.ConsecutiveLowerHighs + structure.ConsecutiveLowerLows >= _options.MinimumPullbackTrendStrength;
+        if (!establishedUp && !establishedDown)
+        {
+            AddRejected(diagnostics, "Pullback", "TrendNotEstablished", "Market structure does not yet show an established trend.");
+            return null;
+        }
+
+        bool isBuy = establishedUp;
+        bool retraces = isBuy
+            ? candle.Prices.Close < candle.Prices.Open
+            : candle.Prices.Close > candle.Prices.Open;
+        if (!retraces)
+        {
+            AddRejected(diagnostics, "Pullback", "NoRetracementCandle", "The candle did not close against the established trend direction.");
+            return null;
+        }
+
+        bool brokeOpposing = isBuy
+            ? structure.Break == MarketStructureBreak.Bearish
+            : structure.Break == MarketStructureBreak.Bullish;
+        if (brokeOpposing)
+        {
+            AddRejected(diagnostics, "Pullback", "StructureAlreadyBroken", "Structure already broke against the established trend.");
+            return null;
+        }
+
+        (decimal? Level, string? Key) reference = isBuy
+            ? FindNearestSupport(candle, swings, zones, atr.Value)
+            : FindNearestResistance(candle, swings, zones, atr.Value);
+        decimal? distanceAtr = reference.Level is decimal level
+            ? Math.Abs((isBuy ? candle.Prices.Low : candle.Prices.High) - level) / atr.Value
+            : indicators.BollingerMiddle is decimal middle
+                ? Math.Abs(candle.Prices.Close - middle) / atr.Value
+                : null;
+        if (distanceAtr is not decimal proximity || proximity > _options.MaximumPullbackDistanceAtr)
+        {
+            AddRejected(diagnostics, "Pullback", "PullbackNotNearReference", "The retracement is not close enough to a continuation reference.");
+            return null;
+        }
+
+        int consecutiveCount = isBuy
+            ? structure.ConsecutiveHigherHighs + structure.ConsecutiveHigherLows
+            : structure.ConsecutiveLowerHighs + structure.ConsecutiveLowerLows;
+        decimal depthAtr = Math.Abs(candle.Prices.Close - candle.Prices.Open) / atr.Value;
+        decimal confidence = Math.Clamp(55m - proximity * 35m + consecutiveCount * 2m, 0m, 100m);
+        PriceActionEventType type = isBuy ? PriceActionEventType.BullishPullback : PriceActionEventType.BearishPullback;
+        string reasonCode = isBuy ? "BullishTrendPullback" : "BearishTrendPullback";
+        AddAccepted(diagnostics, reasonCode, reasonCode);
+        return CreateEvent(
+            candle,
+            sequence,
+            type,
+            isBuy ? PriceActionDirection.Bullish : PriceActionDirection.Bearish,
+            reference.Level,
+            atr,
+            Math.Clamp(depthAtr * 30m, 0m, 100m),
+            confidence,
+            reasonCode,
+            $"Price pulled back {depthAtr:F2} ATR against an established {(isBuy ? "up" : "down")}trend, " +
+            $"staying within {proximity:F2} ATR of a continuation reference.")
+            with { SourceZoneKey = reference.Key };
     }
 
     private PriceActionEvent? DetectDisplacement(
@@ -887,6 +990,7 @@ public sealed class PriceActionAnalyzer
             PriceActionEventType.BullishCompressionBreakout or PriceActionEventType.BearishCompressionBreakout => 0.75m,
             PriceActionEventType.BullishRejection or PriceActionEventType.BearishRejection => 0.70m,
             PriceActionEventType.BullishDisplacement or PriceActionEventType.BearishDisplacement => 0.65m,
+            PriceActionEventType.BullishPullback or PriceActionEventType.BearishPullback => 0.55m,
             PriceActionEventType.SellSideLiquiditySweep or PriceActionEventType.BuySideLiquiditySweep => 0.60m,
             _ => 0.25m
         };
@@ -905,7 +1009,9 @@ public sealed class PriceActionAnalyzer
         PriceActionEventType.SellSideLiquiditySweep or
         PriceActionEventType.BuySideLiquiditySweep or
         PriceActionEventType.BullishChangeOfCharacter or
-        PriceActionEventType.BearishChangeOfCharacter;
+        PriceActionEventType.BearishChangeOfCharacter or
+        PriceActionEventType.BullishPullback or
+        PriceActionEventType.BearishPullback;
 
     private static BreakRetestSnapshot ToSnapshot(ActiveRetest? state) => state is null
         ? BreakRetestSnapshot.Empty

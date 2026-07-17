@@ -4,7 +4,9 @@ using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
 using RiskManager;
+using RiskManager.Calibration;
 using RiskManager.Safety;
+using Simulator.Calibration;
 using Simulator.MarketData;
 using Simulator.Jobs;
 using Simulator.Models;
@@ -15,8 +17,12 @@ using ChartAnnotator.Regime;
 using RiskManager.Conditions;
 using PortfolioManager.Risk;
 using PortfolioManager.Correlation;
+using PortfolioManager.CrossMarket;
+using ChartAnnotator.Value;
 using Simulator.Execution;
 using Simulator.Financing;
+using TradingPolicies;
+using QuantResearch.Training.Pipeline;
 
 namespace Dashboard.Live;
 
@@ -193,6 +199,8 @@ public static class SimulationApi
             CreateSimulationRequest body,
             IBacktestApplicationService service,
             SimulationBrokerCatalogService catalog,
+            ICalibrationArtifactRepository calibrationArtifacts,
+            PreRunCalibrationService preRunCalibration,
             CancellationToken cancellationToken) =>
         {
             try
@@ -201,12 +209,66 @@ public static class SimulationApi
                     body.ResolveBrokerId(),
                     body.Instrument,
                     cancellationToken);
-                BacktestRequest request = body.ToBacktestRequest(selectedBroker);
+                SetupCalibrationArtifact? setupCalibrationArtifact = await ResolveSetupCalibrationArtifactAsync(
+                    body.SetupCalibrationArtifactId, calibrationArtifacts, cancellationToken);
+                TradeManagementCalibration? managementCalibrationArtifact = await ResolveManagementCalibrationArtifactAsync(
+                    body.ManagementCalibrationArtifactId, calibrationArtifacts, cancellationToken);
+                MetaModelArtifact? metaModelArtifact = await ResolveMetaModelArtifactAsync(
+                    body.MetaModelArtifactId, calibrationArtifacts, cancellationToken);
+
+                // When auto-calibration is on and the caller did not supply manual artifact
+                // IDs, train setup→meta→management on a past window (default 2 months) ending
+                // EmbargoDays before From, with one parallel chain per strategy (legacy/improved).
+                PreRunCalibrationResult? autoCal = null;
+                if (body.ShouldAutoCalibrate(
+                        setupCalibrationArtifact,
+                        managementCalibrationArtifact,
+                        metaModelArtifact))
+                {
+                    BacktestRequest seed = body.ToBacktestRequest(selectedBroker);
+                    string[] strategies = ResolveTrainingStrategies(body);
+                    autoCal = await preRunCalibration.TrainAsync(
+                        new PreRunCalibrationRequest
+                        {
+                            Instrument = seed.Instrument,
+                            Strategies = strategies,
+                            EvaluationFrom = body.From,
+                            EvaluationTo = body.To,
+                            Runtime = seed.Runtime,
+                            StartingBalance = body.StartingBalance,
+                            Quantity = body.Quantity,
+                            TrainMonths = body.AutoCalibrateTrainMonths,
+                            EmbargoDays = body.AutoCalibrateEmbargoDays,
+                            Description =
+                                $"pre-run auto-cal before sim · {body.Instrument} · " +
+                                $"{body.From:yyyy-MM-dd}→{body.To:yyyy-MM-dd}"
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                    setupCalibrationArtifact = autoCal.Setup;
+                    metaModelArtifact = autoCal.MetaModel;
+                    managementCalibrationArtifact = autoCal.Management;
+                }
+
+                BacktestRequest request = body.ToBacktestRequest(
+                    selectedBroker, setupCalibrationArtifact, managementCalibrationArtifact, metaModelArtifact);
                 SimulationJobHandle handle = await service.StartAsync(request, cancellationToken);
                 return Results.Accepted($"/api/simulations/{handle.SimulationId:N}", new
                 {
                     simulationId = handle.SimulationId,
-                    status = handle.Status.ToString()
+                    status = handle.Status.ToString(),
+                    autoCalibration = autoCal is null
+                        ? null
+                        : new
+                        {
+                            trainFrom = autoCal.Window.TrainFrom,
+                            trainTo = autoCal.Window.TrainTo,
+                            embargoDays = autoCal.Window.EmbargoDays,
+                            trainMonths = autoCal.Window.TrainMonths,
+                            strategies = autoCal.Strategies,
+                            setupArtifactId = autoCal.SetupArtifactId,
+                            metaModelArtifactId = autoCal.MetaModelArtifactId,
+                            managementArtifactId = autoCal.ManagementArtifactId
+                        }
                 });
             }
             catch (HistoricalGranularityNotSupportedException exception)
@@ -259,6 +321,81 @@ public static class SimulationApi
         {
             SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
             return snapshot is null ? Results.NotFound() : Results.Ok(snapshot);
+        });
+
+        app.MapPost("/api/simulations/{id:guid}/policy-profiles/{strategy}", async (
+            Guid id,
+            string strategy,
+            PromoteTradingPolicyRequest promotion,
+            IBacktestApplicationService service,
+            CancellationToken cancellationToken) =>
+        {
+            SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
+            if (snapshot is null)
+                return Results.NotFound();
+            if (snapshot.Status != SimulationJobStatus.Completed || !snapshot.IsComplete)
+            {
+                return Results.Conflict(new
+                {
+                    error = "Only a completed simulation can be promoted into a live policy profile.",
+                    code = "SimulationNotCompleted"
+                });
+            }
+            if (snapshot.Request is null)
+            {
+                return Results.Conflict(new
+                {
+                    error = "The persisted simulation does not contain its originating request.",
+                    code = "SimulationRequestUnavailable"
+                });
+            }
+
+            string? normalized = TryNormalizePromotedStrategy(strategy);
+            if (normalized is null)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Unknown strategy '{strategy}'. Use legacy or improved.",
+                    code = "UnknownStrategy"
+                });
+            }
+            bool included = snapshot.Request.StrategyAssignments is { Count: > 0 } assignments
+                ? assignments.Any(item => TryNormalizePromotedStrategy(item.StrategyType) == normalized)
+                : snapshot.Request.Strategies.Any(item => TryNormalizePromotedStrategy(item) == normalized);
+            if (!included)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Strategy '{strategy}' was not part of simulation {id:N}.",
+                    code = "StrategyNotSimulated"
+                });
+            }
+
+            ProgressiveAgentKind kind = normalized == "legacy"
+                ? ProgressiveAgentKind.Legacy
+                : ProgressiveAgentKind.Improved;
+            string strategyVersion = string.IsNullOrWhiteSpace(promotion.StrategyVersion)
+                ? $"{normalized}:{snapshot.SimulationConfigurationId ?? "unversioned"}"
+                : promotion.StrategyVersion.Trim();
+            Guid profileId = DerivePolicyProfileId(id, normalized, snapshot.SimulationConfigurationId);
+            TradingPolicyProfile profile = TradingPolicyPromotion.CreateProfile(
+                snapshot.Request.Runtime,
+                normalized,
+                strategyVersion,
+                kind,
+                snapshot.Request.ResolveProgressiveStrategyOptions(),
+                profileId,
+                promotion.Revision,
+                DateTimeOffset.UtcNow,
+                promotion.ApproveForDemo
+                    ? TradingPolicyProfileStatus.ApprovedForDemo
+                    : TradingPolicyProfileStatus.Reviewed,
+                promotion.SetupCalibrationArtifactId,
+                promotion.ManagementCalibrationArtifactId,
+                promotion.MetaModelArtifactId,
+                promotion.Description);
+
+            return Results.Ok(profile);
         });
 
         app.MapPost("/api/simulations/{id:guid}/pause", async (
@@ -798,6 +935,88 @@ public static class SimulationApi
                 File.Delete(csv);
         }
     }
+
+    private static string[] ResolveTrainingStrategies(CreateSimulationRequest body)
+    {
+        if (body.StrategyAssignments is { Length: > 0 } assignments)
+        {
+            return assignments
+                .Select(item => item.StrategyType)
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => item.Trim().ToLowerInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        return body.Strategies
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Select(item => item.Trim().ToLowerInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static async Task<SetupCalibrationArtifact?> ResolveSetupCalibrationArtifactAsync(
+        string? id, ICalibrationArtifactRepository repository, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return null;
+        if (!Guid.TryParse(id, out Guid parsed))
+            throw new ArgumentException("SetupCalibrationArtifactId is invalid.");
+        return await repository.GetSetupAsync(parsed, cancellationToken)
+            ?? throw new ArgumentException("The referenced setup calibration artifact does not exist.");
+    }
+
+    private static async Task<TradeManagementCalibration?> ResolveManagementCalibrationArtifactAsync(
+        string? id, ICalibrationArtifactRepository repository, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return null;
+        if (!Guid.TryParse(id, out Guid parsed))
+            throw new ArgumentException("ManagementCalibrationArtifactId is invalid.");
+        return await repository.GetManagementAsync(parsed, cancellationToken)
+            ?? throw new ArgumentException("The referenced management calibration artifact does not exist.");
+    }
+
+    private static async Task<MetaModelArtifact?> ResolveMetaModelArtifactAsync(
+        string? id, ICalibrationArtifactRepository repository, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return null;
+        if (!Guid.TryParse(id, out Guid parsed))
+            throw new ArgumentException("MetaModelArtifactId is invalid.");
+        return await repository.GetMetaModelAsync(parsed, cancellationToken)
+            ?? throw new ArgumentException("The referenced meta-model artifact does not exist.");
+    }
+
+    private static string? TryNormalizePromotedStrategy(string value)
+    {
+        string normalized = value.Trim().ToLowerInvariant();
+        if (normalized.Contains("legacy", StringComparison.Ordinal))
+            return "legacy";
+        if (normalized.Contains("improved", StringComparison.Ordinal))
+            return "improved";
+        return null;
+    }
+
+    private static Guid DerivePolicyProfileId(
+        Guid simulationId,
+        string strategyId,
+        string? configurationId)
+    {
+        string value = $"{simulationId:N}|{strategyId}|{configurationId ?? "unversioned"}";
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(value));
+        return new Guid(hash.AsSpan(0, 16));
+    }
+}
+
+/// <summary>API-facing (plain-string) mirror of Simulator.Models.StrategyInstrumentAssignment.</summary>
+public sealed record StrategyInstrumentAssignmentDto
+{
+    /// <summary>"legacy" or "improved".</summary>
+    public required string StrategyType { get; init; }
+    public required string Instrument { get; init; }
+    public string? Id { get; init; }
 }
 
 public sealed record CreateSimulationRequest
@@ -824,6 +1043,41 @@ public sealed record CreateSimulationRequest
     /// </summary>
     public string? ImportedCandlePath { get; init; }
     public string? ImportedDatasetId { get; init; }
+    /// <summary>
+    /// Server-owned setup-calibration artifact ID from POST /api/calibrations/setup. Never a
+    /// raw artifact object or path - resolved server-side via ICalibrationArtifactRepository.
+    /// </summary>
+    public string? SetupCalibrationArtifactId { get; init; }
+    /// <summary>
+    /// Server-owned management-calibration artifact ID from POST /api/calibrations/management.
+    /// Never a raw artifact object or path - resolved server-side via ICalibrationArtifactRepository.
+    /// </summary>
+    public string? ManagementCalibrationArtifactId { get; init; }
+    /// <summary>
+    /// Server-owned meta-model artifact ID from POST /api/calibrations/metamodel. Never a
+    /// raw artifact object or path - resolved server-side via ICalibrationArtifactRepository.
+    /// </summary>
+    public string? MetaModelArtifactId { get; init; }
+
+    /// <summary>
+    /// When true (default) and no manual calibration artifact IDs are supplied, the server
+    /// trains setup → meta → management on a past window before starting the simulation:
+    /// train ends <see cref="AutoCalibrateEmbargoDays"/> before <see cref="From"/>, spanning
+    /// <see cref="AutoCalibrateTrainMonths"/> calendar months. Strategy chains (legacy/improved)
+    /// train in parallel; stages within each chain stay sequential for leakage safety.
+    /// Manual artifact IDs always win and skip auto-calibration.
+    /// </summary>
+    public bool AutoCalibrateBeforeRun { get; init; } = true;
+
+    /// <summary>Calendar months of history used for pre-run calibration (default 2).</summary>
+    public int AutoCalibrateTrainMonths { get; init; } = PreRunCalibrationPlanner.DefaultTrainMonths;
+
+    /// <summary>
+    /// Gap in days between the end of the training window and <see cref="From"/> (default 10).
+    /// Prevents training labels from leaking into the evaluation window.
+    /// </summary>
+    public int AutoCalibrateEmbargoDays { get; init; } = PreRunCalibrationPlanner.DefaultEmbargoDays;
+
     public string TrendInterval { get; init; } = "2h";
     public string[] SecondaryTrendIntervals { get; init; } = ["1h"];
     public string[] SetupIntervals { get; init; } = ["30m"];
@@ -835,6 +1089,13 @@ public sealed record CreateSimulationRequest
     public int MinimumConfirmationAlignments { get; init; } = 1;
     public bool StrongOppositionVeto { get; init; } = true;
     public string[] Strategies { get; init; } = ["legacy", "improved"];
+    /// <summary>
+    /// Optional §7 multi-instrument portfolio clock: assigns each strategy its own
+    /// instrument instead of every strategy trading the single top-level Instrument field.
+    /// Null/empty (the default) preserves today's single-instrument behaviour exactly -
+    /// see BacktestRequest.StrategyAssignments.
+    /// </summary>
+    public StrategyInstrumentAssignmentDto[]? StrategyAssignments { get; init; }
     public decimal StartingBalance { get; init; } = 100_000m;
     public decimal Quantity { get; init; } = 1_000m;
     public string PositionSizingMode { get; init; } = "FixedFractionalRisk";
@@ -858,31 +1119,63 @@ public sealed record CreateSimulationRequest
     public string StrategyExecutionMode { get; init; } = "ParallelWorkers";
     public string AmbiguousIntrabarPolicy { get; init; } = "ConservativeStopFirst";
     public string AccountMode { get; init; } = "IndependentStrategyAccounts";
-    public bool RegimeEnabled { get; init; }
+    /// <summary>
+    /// Enabled by default (2026-07-16 agent decision-quality pass) for requests that omit
+    /// this field entirely - regime routing/risk is proven and tested. The Dashboard's own
+    /// Simulator panel always sends an explicit value from its form state, so this default
+    /// only governs direct API/raw-request callers, not the Dashboard UI's own presets.
+    /// </summary>
+    public bool RegimeEnabled { get; init; } = true;
     public int EfficiencyRatioPeriod { get; init; } = 14;
     public int RegimeConfirmationBars { get; init; } = 2;
     public int RegimePersistenceBars { get; init; } = 3;
-    public decimal RegimeSoftSpreadAtr { get; init; } = 0.15m;
-    public decimal RegimeHardSpreadAtr { get; init; } = 0.30m;
-    public bool TradingConditionsEnabled { get; init; }
+    public decimal RegimeSoftSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.SoftMaximum;
+    public decimal RegimeHardSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.HardMaximum;
+    public bool TradingConditionsEnabled { get; init; } = true;
     public string[] AllowedSessions { get; init; } = ["Asian", "London", "NewYork", "LondonNewYorkOverlap"];
     public int RolloverBlackoutMinutesBefore { get; init; } = 15;
     public int RolloverBlackoutMinutesAfter { get; init; } = 15;
-    public decimal ConditionSoftSpreadAtr { get; init; } = 0.15m;
-    public decimal ConditionHardSpreadAtr { get; init; } = 0.30m;
+    public decimal ConditionSoftSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.SoftMaximum;
+    public decimal ConditionHardSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.HardMaximum;
     public bool EconomicEventFilterEnabled { get; init; }
     public decimal MaximumTotalPortfolioHeatPercent { get; init; } = 1.5m;
     public decimal MaximumPendingRiskPercent { get; init; } = 0.75m;
     public decimal MaximumStrategyRiskPercent { get; init; } = 0.75m;
     public decimal MaximumInstrumentRiskPercent { get; init; } = 0.75m;
-    public decimal MaximumCurrencyRiskPercent { get; init; } = 0.75m;
+    public decimal MaximumCurrencyStopRiskPercent { get; init; } = 0.75m;
+    public decimal MaximumNetCurrencyExposurePercent { get; init; } = 300m;
+    public decimal MaximumGrossCurrencyExposurePercent { get; init; } = 300m;
     public decimal MinimumUnallocatedMarginReservePercent { get; init; } = 30m;
     public int MaximumOpenPositions { get; init; } = 3;
     public int CorrelationLookbackBars { get; init; } = 120;
     public int CorrelationMinimumSamples { get; init; } = 60;
     public decimal CorrelationSoftThreshold { get; init; } = 0.50m;
     public decimal CorrelationHardThreshold { get; init; } = 0.75m;
-    public bool AdaptiveRiskEnabled { get; init; }
+    /// <summary>
+    /// Optional, independent value-location evidence (spec §13.3). Enabled by default
+    /// (2026-07-16 agent decision-quality pass) for requests that omit this field - see the
+    /// same caveat as <see cref="RegimeEnabled"/> about the Dashboard UI sending its own
+    /// explicit value regardless of this default.
+    /// </summary>
+    public bool ValueLocationEvidenceEnabled { get; init; } = true;
+    public decimal ValueLocationNearAtrThreshold { get; init; } = 0.5m;
+    public decimal ValueLocationStretchedAtrThreshold { get; init; } = 2.5m;
+    public decimal ValueLocationConfidenceAdjustment { get; init; } = 3m;
+    /// <summary>Cross-market currency-strength coordinator (spec §5). Disabled by default;
+    /// when enabled, CurrencyStrengthBaskets must contain at least one non-empty basket.</summary>
+    public bool CurrencyStrengthEnabled { get; init; }
+    public string CurrencyStrengthInterval { get; init; } = "1h";
+    public int CurrencyStrengthReturnLookbackBars { get; init; } = 12;
+    public int CurrencyStrengthVolatilityLookbackBars { get; init; } = 120;
+    public decimal CurrencyStrengthMinimumCoveragePercent { get; init; } = 60m;
+    public Dictionary<string, string[]> CurrencyStrengthBaskets { get; init; } = [];
+    /// <summary>
+    /// Drawdown/volatility-scaled risk-budget multiplier. Enabled by default
+    /// (2026-07-16 agent decision-quality pass) for requests that omit this field - see the
+    /// same caveat as <see cref="RegimeEnabled"/> about the Dashboard UI sending its own
+    /// explicit value regardless of this default.
+    /// </summary>
+    public bool AdaptiveRiskEnabled { get; init; } = true;
     public string ExecutionFillModel { get; init; } = "MidpointPlusConfiguredSpread";
     public string StressExecutionScenario { get; init; } = "Base";
     public decimal? MaximumFillQuantityPerFrame { get; init; }
@@ -943,7 +1236,24 @@ public sealed record CreateSimulationRequest
         };
     }
 
-    public BacktestRequest ToBacktestRequest(SimulationBrokerOption selectedBroker)
+    /// <summary>
+    /// Auto-calibration runs only when requested and the caller has not already attached
+    /// manual setup/meta/management artifact IDs (those always take precedence).
+    /// </summary>
+    public bool ShouldAutoCalibrate(
+        SetupCalibrationArtifact? setup,
+        TradeManagementCalibration? management,
+        MetaModelArtifact? metaModel) =>
+        AutoCalibrateBeforeRun &&
+        setup is null &&
+        management is null &&
+        metaModel is null;
+
+    public BacktestRequest ToBacktestRequest(
+        SimulationBrokerOption selectedBroker,
+        SetupCalibrationArtifact? resolvedSetupCalibrationArtifact = null,
+        TradeManagementCalibration? resolvedManagementCalibrationArtifact = null,
+        MetaModelArtifact? resolvedMetaModelArtifact = null)
     {
         ArgumentNullException.ThrowIfNull(selectedBroker);
         string solutionRoot = FindSolutionRoot() ?? Directory.GetCurrentDirectory();
@@ -1008,6 +1318,12 @@ public sealed record CreateSimulationRequest
             From = From,
             To = To,
             Strategies = Strategies,
+            StrategyAssignments = StrategyAssignments?.Select(assignment => new StrategyInstrumentAssignment
+            {
+                StrategyType = assignment.StrategyType,
+                Instrument = new InstrumentKey(assignment.Instrument),
+                Id = assignment.Id
+            }).ToArray(),
             StartingBalance = StartingBalance,
             Quantity = Quantity,
             Leverage = Leverage,
@@ -1122,7 +1438,9 @@ public sealed record CreateSimulationRequest
                     MaximumPendingRiskPercent = MaximumPendingRiskPercent,
                     MaximumStrategyRiskPercent = MaximumStrategyRiskPercent,
                     MaximumInstrumentRiskPercent = MaximumInstrumentRiskPercent,
-                    MaximumCurrencyRiskPercent = MaximumCurrencyRiskPercent,
+                    MaximumCurrencyStopRiskPercent = MaximumCurrencyStopRiskPercent,
+                    MaximumNetCurrencyExposurePercent = MaximumNetCurrencyExposurePercent,
+                    MaximumGrossCurrencyExposurePercent = MaximumGrossCurrencyExposurePercent,
                     MaximumMarginUsagePercent = MaximumAccountMarginUsagePercent,
                     MaximumSinglePositionMarginPercent = MaximumSinglePositionMarginPercent,
                     MinimumUnallocatedMarginReservePercent = MinimumUnallocatedMarginReservePercent,
@@ -1135,7 +1453,37 @@ public sealed record CreateSimulationRequest
                     SoftCorrelationThreshold = CorrelationSoftThreshold,
                     HardCorrelationThreshold = CorrelationHardThreshold
                 },
+                ValueLocationEvidence = new ValueLocationEvidenceOptions
+                {
+                    Enabled = ValueLocationEvidenceEnabled,
+                    NearValueAtrThreshold = ValueLocationNearAtrThreshold,
+                    StretchedFromValueAtrThreshold = ValueLocationStretchedAtrThreshold,
+                    ConfidenceAdjustmentPerSignal = ValueLocationConfidenceAdjustment
+                },
+                CurrencyStrength = new CurrencyStrengthOptions
+                {
+                    Enabled = CurrencyStrengthEnabled,
+                    Interval = BarIntervalParser.Parse(CurrencyStrengthInterval),
+                    ReturnLookbackBars = CurrencyStrengthReturnLookbackBars,
+                    VolatilityLookbackBars = CurrencyStrengthVolatilityLookbackBars,
+                    MinimumCurrencyCoveragePercent = CurrencyStrengthMinimumCoveragePercent,
+                    Baskets = CurrencyStrengthBaskets.ToDictionary(
+                        pair => pair.Key,
+                        pair => (IReadOnlyList<InstrumentKey>)pair.Value.Select(value => new InstrumentKey(value)).ToArray())
+                },
                 AdaptiveRisk = new AdaptiveRiskOptions { Enabled = AdaptiveRiskEnabled },
+                SetupCalibration = new SetupCalibrationPolicyOptions
+                {
+                    Enabled = resolvedSetupCalibrationArtifact is not null
+                },
+                SetupCalibrationArtifact = resolvedSetupCalibrationArtifact,
+                ManagementCalibration = new TradeManagementCalibrationOptions
+                {
+                    Enabled = resolvedManagementCalibrationArtifact is not null
+                },
+                ManagementCalibrationArtifact = resolvedManagementCalibrationArtifact,
+                MetaModel = new MetaModelPolicyOptions { Enabled = resolvedMetaModelArtifact is not null },
+                MetaModelArtifact = resolvedMetaModelArtifact,
                 Execution = new ExecutionModelOptions
                 {
                     FillModel = Enum.Parse<SimulationFillModel>(ExecutionFillModel, ignoreCase: true),
@@ -1324,6 +1672,17 @@ public sealed record PositionManagementRequest
             throw new ArgumentException($"Invalid UTC time '{value}'. Use HH:mm.");
         return parsed;
     }
+}
+
+public sealed record PromoteTradingPolicyRequest
+{
+    public int Revision { get; init; } = 1;
+    public bool ApproveForDemo { get; init; }
+    public string? StrategyVersion { get; init; }
+    public Guid? SetupCalibrationArtifactId { get; init; }
+    public Guid? ManagementCalibrationArtifactId { get; init; }
+    public Guid? MetaModelArtifactId { get; init; }
+    public string? Description { get; init; }
 }
 
 internal sealed record TradeIndexDto(

@@ -16,6 +16,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <ProjectReference Include="../Calibration/Calibration.csproj" />
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
     <ProjectReference Include="../Agent/Agent.csproj" />
     <ProjectReference Include="../RiskManager/RiskManager.csproj" />
@@ -24,5 +25,6 @@
     <ProjectReference Include="../TradingJournal/TradingJournal.csproj" />
     <ProjectReference Include="../TradeManager/TradeManager.csproj" />
     <ProjectReference Include="../PortfolioManager/PortfolioManager.csproj" />
+    <ProjectReference Include="../TradingPolicies/TradingPolicies.csproj" />
   </ItemGroup>
 </Project>

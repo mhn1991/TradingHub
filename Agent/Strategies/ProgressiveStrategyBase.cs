@@ -1,15 +1,22 @@
 using Agent.Abstractions;
 using Agent.Models;
 using Brokers.Models;
+using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
+using ChartAnnotator.Value;
 
 namespace Agent.Strategies;
 
 public abstract class ProgressiveStrategyBase : ITradingAgent
 {
     protected enum SetupSide { Buy, Sell }
-    protected enum SetupStage { WaitingForTrend, WaitingForConfirmation, WaitingForEntry }
+    /// <summary>
+    /// The "no scope" condition (waiting for a primary trend) is represented structurally by the
+    /// absence of a `_states[instrument]` entry, not by a member of this enum — there is no
+    /// "waiting for trend" ScopeState.
+    /// </summary>
+    protected enum SetupStage { WaitingForConfirmation, WaitingForEntry }
 
     protected sealed record ScopeState(
         string SetupId,
@@ -79,7 +86,7 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             }
         }
 
-        return regimeGate.RoutingEnabled
+        decision = regimeGate.RoutingEnabled
             ? decision with
             {
                 RegimeLabel = regime.Regime,
@@ -92,6 +99,58 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                 ReasonCode = decision.ReasonCode ?? regimeGate.ReasonCode
             }
             : decision;
+
+        if (Options.ValueLocationEvidence.Enabled && decision.Action is AgentAction.Buy or AgentAction.Sell)
+        {
+            ValueLocationEvidence evidence = ValueLocationEvidenceEvaluator.Evaluate(
+                context.Analysis.Get(Options.EntryInterval),
+                decision.Action == AgentAction.Buy,
+                Options.ValueLocationEvidence);
+            if (evidence.ReasonCodes.Count > 0)
+            {
+                decision = decision with
+                {
+                    Confidence = Math.Clamp(decision.Confidence + evidence.ConfidenceAdjustment, 0m, 100m),
+                    ValueLocationEvidenceReasonCodes = evidence.ReasonCodes,
+                    ValueLocationDistanceAtr = evidence.DistanceAtr
+                };
+            }
+        }
+
+        if (Options.TrendQualityEvidence.Enabled && decision.Action is AgentAction.Buy or AgentAction.Sell)
+        {
+            TrendQualityEvidence trendQuality = TrendQualityEvidenceEvaluator.Evaluate(
+                context.Analysis.Get(Options.EntryInterval),
+                Options.TrendQualityEvidence);
+            if (trendQuality.ReasonCodes.Count > 0)
+            {
+                decision = decision with
+                {
+                    Confidence = Math.Clamp(decision.Confidence + trendQuality.ConfidenceAdjustment, 0m, 100m),
+                    TrendQualityReasonCodes = trendQuality.ReasonCodes
+                };
+            }
+        }
+
+        if (Options.CurrencyStrengthEvidence.Enabled && decision.Action is AgentAction.Buy or AgentAction.Sell)
+        {
+            CurrencyStrengthEvidence currencyStrength = CurrencyStrengthEvidenceEvaluator.Evaluate(
+                context.Instrument,
+                context.CurrencyStrength,
+                decision.Action == AgentAction.Buy,
+                Options.CurrencyStrengthEvidence);
+            if (currencyStrength.ReasonCodes.Count > 0)
+            {
+                decision = decision with
+                {
+                    Confidence = Math.Clamp(decision.Confidence + currencyStrength.ConfidenceAdjustment, 0m, 100m),
+                    CurrencyStrengthReasonCodes = currencyStrength.ReasonCodes,
+                    CurrencyStrengthDifferential = currencyStrength.Differential
+                };
+            }
+        }
+
+        return decision;
     }
 
     private Task<AgentDecision> EvaluateCoreAsync(
@@ -124,7 +183,7 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                 entry));
         }
 
-        SetupSide? trendSide = DetectSide(trend, Options.MinimumTrendConfidence);
+        SetupSide? trendSide = DetectSide(trend, Options.MinimumTrendConfidence, out string? trendVetoReasonCode);
         ScopeState? state = _states.GetValueOrDefault(context.Instrument);
 
         if (state is null)
@@ -135,7 +194,7 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                     context,
                     $"Waiting for a valid primary trend on {Options.TrendInterval}.") with
                 {
-                    ReasonCode = "PrimaryTrendNotReady"
+                    ReasonCode = trendVetoReasonCode ?? "PrimaryTrendNotReady"
                 });
             }
 
@@ -153,7 +212,7 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                         context,
                         "The new primary-trend candle invalidated the scoped setup.") with
                     {
-                        ReasonCode = "PrimaryTrendInvalidated"
+                        ReasonCode = trendVetoReasonCode ?? "PrimaryTrendInvalidated"
                     });
                 }
 
@@ -243,6 +302,15 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
 
         if (state.Stage == SetupStage.WaitingForConfirmation)
         {
+            // AGENT-07: HandleEvidenceFailure's `!Satisfied` branch (ConsensusNotReady) never
+            // removes _states here — the scope is deliberately RETAINED while still waiting for
+            // its first confirmation, so a still-forming setup is not thrown away just because
+            // this particular candle didn't (yet) reach consensus. This is intentionally
+            // asymmetric with the WaitingForEntry branch below, which clears state on the
+            // equivalent "confirmation no longer satisfied" condition: once a setup has already
+            // reached the entry window on the strength of a prior satisfied confirmation, losing
+            // that confirmation is judged a more decisive signal that the setup has broken down,
+            // not merely "still waiting."
             AgentDecision? confirmationFailure = HandleEvidenceFailure(
                 context,
                 state,
@@ -276,6 +344,10 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
 
             if (!confirmationAssessment.Satisfied)
             {
+                // AGENT-07: deliberately asymmetric with the WaitingForConfirmation branch above
+                // — see the comment there. State IS cleared here because this setup already had
+                // a satisfied confirmation once (that's how it reached WaitingForEntry); losing
+                // it now is treated as an invalidation, not as "still waiting."
                 _states.Remove(context.Instrument);
                 return Task.FromResult(Observe(
                     context,
@@ -412,6 +484,11 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         // confirmed RSI relationship / Bollinger squeeze release.
         SetupSide? entrySide = DetectSide(entry, Options.MinimumEntryConfidence);
         bool structuralEntry = entrySide == state.Side;
+        bool activeRetestSupportsEntry =
+            entry.PriceAction.ActiveRetest.State == BreakRetestState.RetestInProgress &&
+            entry.PriceAction.ActiveRetest.Direction == expectedPriceAction &&
+            entry.PriceAction.ActiveRetest.ClosestRetestDistanceAtr is decimal retestDistance &&
+            retestDistance <= Options.MaximumActiveRetestDistanceAtr;
         bool priceActionEntry =
             paGate.TriggeredSetup is not null ||
             entry.PriceAction.HasTriggeredSetup(
@@ -422,7 +499,8 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                 expectedPriceAction,
                 Options.MinimumPriceActionConfidence) ||
             entry.PriceAction.Bias == expectedPriceAction &&
-            alignedPaScore >= Options.MinimumPriceActionConfidence;
+            alignedPaScore >= Options.MinimumPriceActionConfidence ||
+            activeRetestSupportsEntry;
         bool indicatorEntry = indicatorGate.HasEntryTrigger ||
             zoneVolumeGate.HasConfluenceTrigger;
 
@@ -528,7 +606,8 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
                     0m,
                     100m),
                 ReasonCode = decision.ReasonCode ??
-                    (indicatorEntry ? "RsiBollingerTrigger" : null),
+                    (indicatorEntry ? "RsiBollingerTrigger" :
+                        activeRetestSupportsEntry ? "ActiveRetestInProgress" : null),
                 Reason = decision.Reason +
                     $" MTF evidence: secondary {secondaryAssessment.Aligned}/" +
                     $"{secondaryAssessment.Required}, setup {setupAssessment.Aligned}/" +
@@ -763,6 +842,30 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         return Math.Clamp((aligned - opposing) * 0.10m, -10m, 10m);
     }
 
+    /// <summary>
+    /// Soft confidence boost when price is currently retesting a broken structure level
+    /// in the trade's direction - real, already-computed evidence
+    /// (AnalysisSnapshot.PriceAction.ActiveRetest) that was previously discarded.
+    /// Deliberately capped below PriceActionConfidenceAdjustment's ±10 clamp since this
+    /// is a single supplementary signal, not the primary price-action assessment.
+    /// </summary>
+    protected decimal ActiveRetestConfidenceAdjustment(AnalysisSnapshot snapshot, SetupSide side)
+    {
+        BreakRetestSnapshot retest = snapshot.PriceAction.ActiveRetest;
+        PriceActionDirection direction = side == SetupSide.Buy
+            ? PriceActionDirection.Bullish
+            : PriceActionDirection.Bearish;
+        if (retest.State != BreakRetestState.RetestInProgress ||
+            retest.Direction != direction ||
+            retest.ClosestRetestDistanceAtr is not decimal distance)
+        {
+            return 0m;
+        }
+
+        decimal proximity = Math.Clamp(1m - distance / Options.MaximumActiveRetestDistanceAtr, 0m, 1m);
+        return proximity * 6m;
+    }
+
     protected static string PriceActionSummary(AnalysisSnapshot snapshot, SetupSide side)
     {
         PriceActionDirection direction = side == SetupSide.Buy
@@ -779,8 +882,22 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
 
     protected SetupSide? DetectSide(
         AnalysisSnapshot snapshot,
-        decimal minimumConfidence)
+        decimal minimumConfidence) =>
+        DetectSide(snapshot, minimumConfidence, out _);
+
+    /// <summary>
+    /// AGENT-11: same detection logic as the two-argument overload, but also reports whether a
+    /// DMI hard veto specifically was the reason no side was detected — distinct from "no
+    /// structural/tactical candidate at all" — so the small number of call sites that surface a
+    /// reason code directly from a null result (the primary-trend-not-ready/invalidated checks)
+    /// can tell the two apart in diagnostics. Does not change the veto's actual effect.
+    /// </summary>
+    protected SetupSide? DetectSide(
+        AnalysisSnapshot snapshot,
+        decimal minimumConfidence,
+        out string? vetoReasonCode)
     {
+        vetoReasonCode = null;
         if (snapshot.Indicators.Rsi is null)
             return null;
         decimal close = snapshot.LatestCandle.Prices.Close;
@@ -806,7 +923,8 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             // Contradictory structure and candle evidence used to fall through to the
             // bullish branch first. Only let a strong, directionally agreeing DMI reading
             // resolve that conflict; otherwise wait for confirmation.
-            candidate = DmiSupports(snapshot, structuralSide.Value, minimumAdx: 25m)
+            candidate = Options.EnableDmiConfirmation &&
+                DmiSupports(snapshot, structuralSide.Value, minimumAdx: 25m)
                 ? structuralSide
                 : null;
         }
@@ -815,8 +933,14 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             candidate = structuralSide ?? tacticalSide;
         }
 
-        if (candidate is null || DmiOpposes(snapshot, candidate.Value, minimumAdx: 20m))
+        if (candidate is null)
             return null;
+
+        if (Options.EnableDmiConfirmation && DmiOpposes(snapshot, candidate.Value, minimumAdx: 20m))
+        {
+            vetoReasonCode = "DmiVetoed";
+            return null;
+        }
 
         RsiBollingerSignalAssessment indicators = RsiBollingerSignalPolicy.Evaluate(
             snapshot,

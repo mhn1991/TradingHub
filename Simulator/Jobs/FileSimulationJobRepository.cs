@@ -265,6 +265,7 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
         }
         catch (Exception exception) when (
             exception is JsonException or
+                ArgumentException or
                 IOException or
                 UnauthorizedAccessException or
                 NotSupportedException or
@@ -272,6 +273,9 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
                 InvalidOperationException or
                 UnsupportedPersistedJobSchemaException)
         {
+            // ArgumentException covers ArgumentOutOfRangeException from domain types such as
+            // BarInterval(value<=0) when a legacy snapshot stored default(BarInterval). That
+            // must quarantine rather than poison MarkInterruptedJobsAsync / StartAsync.
             if (quarantineOnFailure)
                 QuarantineUnsafe(path, ClassifyFailure(exception));
             return null;
@@ -307,6 +311,7 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
     {
         UnsupportedPersistedJobSchemaException => "unsupported-schema",
         JsonException or FormatException or InvalidOperationException => "invalid-json",
+        ArgumentException => "invalid-domain",
         UnauthorizedAccessException => "access-denied",
         IOException => "io-error",
         _ => "unsupported-content"

@@ -174,6 +174,16 @@ public record PositionManagementOptions
     public decimal StagnationMinimumMfeAdvanceR { get; init; } = 0.10m;
     public decimal StagnationReductionFraction { get; init; } = 0.15m;
 
+    /// <summary>
+    /// When true, the stagnation-bars threshold is interpolated by
+    /// <see cref="ManagedTradeState.EntryConfidence"/> instead of using the fixed
+    /// <see cref="StagnationBars"/> value: low-confidence entries are given less patience
+    /// (reduced sooner), high-confidence entries more (held longer before reducing).
+    /// </summary>
+    public bool EnableConfidenceScaledStagnation { get; init; }
+    public int MinimumStagnationBarsAtLowConfidence { get; init; } = 8;
+    public int MaximumStagnationBarsAtHighConfidence { get; init; } = 20;
+
     public bool EnableStructuralDeteriorationReduction { get; init; }
     public decimal StructuralDeteriorationReductionFraction { get; init; } = 0.20m;
     public int MaximumStructuralDeteriorationReductions { get; init; } = 1;
@@ -368,6 +378,8 @@ public record PositionManagementOptions
             MinimumChannelConfidenceForManagement is < 0m or > 100m ||
             StagnationMinimumOpenProfitR < 0m || StagnationBars < 1 ||
             StagnationMinimumMfeAdvanceR < 0m ||
+            MinimumStagnationBarsAtLowConfidence < 1 ||
+            MaximumStagnationBarsAtHighConfidence < MinimumStagnationBarsAtLowConfidence ||
             StagnationReductionFraction is <= 0m or >= 1m ||
             StructuralDeteriorationReductionFraction is <= 0m or >= 1m ||
             MaximumStructuralDeteriorationReductions < 0 ||
@@ -988,7 +1000,7 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         if (mainStructure && _options.EnableStagnationReduction &&
             !trade.StagnationReductionCompleted &&
             openProfitR >= _options.StagnationMinimumOpenProfitR &&
-            trade.AnalysisBarsWithoutNewMfe >= _options.StagnationBars)
+            trade.AnalysisBarsWithoutNewMfe >= EffectiveStagnationBars(trade))
         {
             return CreateReduction(
                 trade,
@@ -999,6 +1011,18 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         }
 
         return null;
+    }
+
+    private int EffectiveStagnationBars(ManagedTradeState trade)
+    {
+        if (!_options.EnableConfidenceScaledStagnation)
+            return _options.StagnationBars;
+
+        decimal confidenceFraction = Math.Clamp(trade.EntryConfidence, 0m, 100m) / 100m;
+        decimal interpolated = _options.MinimumStagnationBarsAtLowConfidence +
+            confidenceFraction *
+            (_options.MaximumStagnationBarsAtHighConfidence - _options.MinimumStagnationBarsAtLowConfidence);
+        return (int)Math.Round(interpolated, MidpointRounding.AwayFromZero);
     }
 
     private bool IsInsideRiskWindow(DateTimeOffset timestamp)

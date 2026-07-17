@@ -24,7 +24,6 @@ public sealed class ConfidenceScorer
         priceAction ??= PriceActionSnapshot.Empty;
         var contributions = new List<ConfidenceContribution>();
         decimal close = candle.Prices.Close;
-        DateTimeOffset at = candle.CloseTime ?? candle.OpenTime;
 
         if (indicators.Rsi is decimal rsi)
         {
@@ -109,11 +108,13 @@ public sealed class ConfidenceScorer
                 "Normalized ATR is extremely low relative to recent history."));
         }
 
-        PriceChannel? bestChannel = channels
-            .OrderByDescending(channel => channel.Confidence)
-            .ThenByDescending(channel => channel.EndTime)
-            .FirstOrDefault();
-
+        // AGENT-08: trendlines and channels no longer contribute to Total here. They were
+        // already deliberately excluded from stop/target selection (ImprovedProgressiveAgent)
+        // as "not considered reliable enough to anchor invalidation levels" — the same judgment
+        // applies to whether they should be allowed to influence setup-detection/confirmation
+        // gating (DetectSide's confidence floor, checked at every timeframe layer) either.
+        // `trendlines`/`channels` parameters are kept (still used by other ChartAnnotator
+        // consumers/diagnostics) but are intentionally not read for scoring purposes below.
         if (indicators.Atr is decimal atr && atr > 0m)
         {
             PriceZone? nearestZone = zones
@@ -136,61 +137,7 @@ public sealed class ConfidenceScorer
                         $"{nearestZone.Type} zone; direction is scored by the agent."));
                 }
             }
-
-            // A high-fit line is relevant only when its current projection is near
-            // price. Selecting the globally best historical line inflated scores for
-            // stale structures far away from the latest candle.
-            TrendlineContext? nearestRelevantLine = trendlines
-                .Select(line => new TrendlineContext(
-                    line,
-                    Math.Abs(line.PriceAt(at) - close) / atr))
-                .Where(item => item.DistanceAtr <= 1m)
-                .OrderByDescending(item =>
-                    item.Line.FitScore - item.DistanceAtr * 20m)
-                .ThenByDescending(item => item.Line.EndTime)
-                .FirstOrDefault();
-            if (nearestRelevantLine is not null)
-            {
-                decimal lineScore = bestChannel is null
-                    ? nearestRelevantLine.Line.FitScore / 10m
-                    : nearestRelevantLine.Line.FitScore / 20m;
-                contributions.Add(new ConfidenceContribution(
-                    "Relevant trendline",
-                    Math.Min(10m, lineScore),
-                    $"A {nearestRelevantLine.Line.Type} trendline is " +
-                    $"{nearestRelevantLine.DistanceAtr:F2} ATR from price with " +
-                    $"fit {nearestRelevantLine.Line.FitScore:F1}."));
-            }
         }
-
-        if (bestChannel is not null)
-        {
-            contributions.Add(new ConfidenceContribution(
-                "Price channel",
-                bestChannel.Confidence / 10m,
-                $"A {bestChannel.Direction} channel has " +
-                $"{bestChannel.Confidence:F1} confidence."));
-
-            decimal alignmentScore = ChannelMatchesStructure(
-                bestChannel.Direction,
-                structure.Direction)
-                ? 4m
-                : ChannelOpposesStructure(
-                    bestChannel.Direction,
-                    structure.Direction)
-                    ? -6m
-                    : 0m;
-            if (alignmentScore != 0m)
-            {
-                contributions.Add(new ConfidenceContribution(
-                    "Channel/structure alignment",
-                    alignmentScore,
-                    alignmentScore > 0m
-                        ? "The active channel agrees with market structure."
-                        : "The active channel opposes market structure."));
-            }
-        }
-
 
         AdxAnalysisSnapshot adx = indicators.AdxAnalysis;
         if (adx.Adx is decimal adxValue)
@@ -287,29 +234,4 @@ public sealed class ConfidenceScorer
         return 0m;
     }
 
-    private static bool ChannelMatchesStructure(
-        ChannelDirection channel,
-        MarketStructureDirection structure) =>
-        channel switch
-        {
-            ChannelDirection.Rising =>
-                structure == MarketStructureDirection.Rising,
-            ChannelDirection.Falling =>
-                structure == MarketStructureDirection.Falling,
-            ChannelDirection.Sideways =>
-                structure == MarketStructureDirection.Sideways,
-            _ => false
-        };
-
-    private static bool ChannelOpposesStructure(
-        ChannelDirection channel,
-        MarketStructureDirection structure) =>
-        channel == ChannelDirection.Rising &&
-        structure == MarketStructureDirection.Falling ||
-        channel == ChannelDirection.Falling &&
-        structure == MarketStructureDirection.Rising;
-
-    private sealed record TrendlineContext(
-        Trendline Line,
-        decimal DistanceAtr);
 }

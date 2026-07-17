@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using Agent.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
 using ChartAnnotator.Models;
+using PortfolioManager.CrossMarket;
 using Simulator.Abstractions;
 using Simulator.MarketData;
 using Simulator.Models;
@@ -40,11 +43,11 @@ public sealed class StreamingComparativeEngineOptions
 public sealed class StreamingComparativeEngine
 {
     private readonly IHistoricalCandleStream _stream;
-    private readonly IReadOnlyList<(string Id, ITradingAgent Agent)> _strategies;
+    private readonly IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> _strategies;
 
     public StreamingComparativeEngine(
         IHistoricalCandleStream stream,
-        IReadOnlyList<(string Id, ITradingAgent Agent)> strategies)
+        IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> strategies)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _strategies = strategies ?? throw new ArgumentNullException(nameof(strategies));
@@ -61,40 +64,37 @@ public sealed class StreamingComparativeEngine
         ArgumentNullException.ThrowIfNull(candleRequest);
         // Capability + timeframe validation (rejects OANDA+1s, misaligned intervals, etc.).
         options.Runtime.Validate(_strategies.Count);
+        bool isSharedPortfolio = options.Runtime.AccountMode == SimulationAccountMode.SharedPortfolioAccount;
         SimulationTimeframeOptions timeframes = options.Runtime.ToTimeframeOptions();
         IReadOnlyList<BarInterval> effectiveAnalysis = timeframes.EffectiveAnalysisIntervals(
             _strategies.SelectMany(s => s.Agent.RequiredIntervals)
-                .Concat(_strategies.SelectMany(s => options.Runtime.ResolveManagementIntervals(s.Id))));
+                .Concat(_strategies.SelectMany(s => options.Runtime.ResolveManagementIntervals(s.Id)))
+                .Concat(isSharedPortfolio ? [options.Runtime.CorrelationRisk.Interval] : []));
 
         var stopwatch = Stopwatch.StartNew();
         await RaiseStatusAsync(options, SimulationJobStatus.PreparingData).ConfigureAwait(false);
 
-        var quality = new MarketDataQualityTracker(options.Runtime.ExecutionInterval);
-        // Stage 1: execution → analysis base (e.g. 5s → 1m). Stage 2: multi-TF from analysis base.
-        var analysisBaseAggregator = new AnalysisBaseAggregator(
-            options.Instrument,
-            timeframes.ExecutionInterval,
-            timeframes.AnalysisBaseInterval,
-            options.Runtime.BaseCandleGapPolicy,
-            options.Runtime.CandleCapacity);
-        var aggregator = new MultiTimeframeAggregator(
-            options.Instrument,
-            effectiveAnalysis,
-            options.Runtime.CandleCapacity,
-            options.Runtime.BaseCandleGapPolicy);
+        // Per-instrument candle sourcing/aggregation/quality state is constructed further
+        // down, once the traded-instrument set and the wrapped candle stream are known
+        // (see InstrumentPipelineState). The annotator stays a single shared instance
+        // across instruments - it is already partitioned internally by
+        // ChartKey(instrument, interval).
         var sharedAnnotator = new ChartAnnotationEngine(options.AnnotationOptions);
-        var latestSnapshots = new Dictionary<BarInterval, AnalysisSnapshot>();
 
         var sessions = new List<StrategySimulationSession>(_strategies.Count);
-        SharedPortfolioRuntime? sharedPortfolio = options.Runtime.AccountMode == SimulationAccountMode.SharedPortfolioAccount
+        SharedPortfolioRuntime? sharedPortfolio = isSharedPortfolio
             ? new SharedPortfolioRuntime(
                 options.SimulationOptions,
                 options.Runtime.PortfolioRisk,
                 options.Runtime.PositionSizing,
                 options.Runtime.AdaptiveRisk,
-                options.Runtime.SafetyOptions)
+                options.Runtime.SafetyOptions,
+                options.Runtime.CorrelationRisk)
             : null;
-        foreach ((string id, ITradingAgent agent) in _strategies)
+        CrossMarketAnalysisCoordinator? crossMarket = options.Runtime.CurrencyStrength.Enabled
+            ? new CrossMarketAnalysisCoordinator(options.Runtime.CurrencyStrength)
+            : null;
+        foreach ((string id, ITradingAgent agent, InstrumentKey _) in _strategies)
         {
             StrategySimulationSession session = StrategySimulationSession.Create(
                 id,
@@ -114,7 +114,21 @@ public sealed class StreamingComparativeEngine
                 metaModel: options.MetaLabelModel,
                 managementCalibrationOptions: options.Runtime.ManagementCalibration,
                 managementCalibrationArtifact: options.Runtime.ManagementCalibrationArtifact,
-                executionDecorator: sharedPortfolio is null ? null : sharedPortfolio.Decorate);
+                executionDecorator: sharedPortfolio is null ? null : sharedPortfolio.Decorate,
+                crossMarket: crossMarket,
+                detailedExcursionTracking: options.Runtime.DetailedExcursionTracking,
+                featurePolicy: new TradingCore.Pipeline.RuntimeFeaturePolicy
+                {
+                    AnnotationOptions = options.AnnotationOptions ?? new(),
+                    MarketRegimeRouting = options.Runtime.MarketRegimeRouting,
+                    ValueLocationEvidence = options.Runtime.ValueLocationEvidence,
+                    CurrencyStrengthEvidence = options.Runtime.CurrencyStrengthEvidence,
+                    RsiBollingerSignals = options.Runtime.RsiBollingerSignals,
+                    DmiConfirmationEnabled = options.Runtime.DmiConfirmationEnabled,
+                    CurrencyStrength = options.Runtime.CurrencyStrength,
+                    SetupCalibration = options.Runtime.SetupCalibration
+                },
+                strategyVersion: id);
             sessions.Add(session);
             sharedPortfolio?.Register(session);
         }
@@ -131,6 +145,27 @@ public sealed class StreamingComparativeEngine
             }
         }
 
+        // sessions/workerHosts are index-correlated 1:1 with _strategies (built via the
+        // same-order loops above), so this groups each by its assigned instrument once,
+        // up front, for routing frames only to the strategies that trade that instrument
+        // (see D3 in the §7 multi-instrument-clock plan) without re-deriving the mapping
+        // on every batch.
+        var sessionsByInstrument = new Dictionary<InstrumentKey, List<StrategySimulationSession>>();
+        var hostsByInstrument = new Dictionary<InstrumentKey, List<StrategyWorkerHost>>();
+        for (int strategyIndex = 0; strategyIndex < _strategies.Count; strategyIndex++)
+        {
+            InstrumentKey instrument = _strategies[strategyIndex].Instrument;
+            if (!sessionsByInstrument.TryGetValue(instrument, out List<StrategySimulationSession>? sessionList))
+                sessionsByInstrument[instrument] = sessionList = [];
+            sessionList.Add(sessions[strategyIndex]);
+            if (workerHosts.Count > strategyIndex)
+            {
+                if (!hostsByInstrument.TryGetValue(instrument, out List<StrategyWorkerHost>? hostList))
+                    hostsByInstrument[instrument] = hostList = [];
+                hostList.Add(workerHosts[strategyIndex]);
+            }
+        }
+
         await using var replayWriter = new ChunkedReplayWriter(
             options.OutputDirectory,
             options.Runtime.ReplayChunkSize,
@@ -142,6 +177,9 @@ public sealed class StreamingComparativeEngine
             SimulationId = options.SimulationId,
             SchemaVersion = 2,
             Instrument = options.Instrument.Value,
+            Instruments = _strategies.Select(item => item.Instrument).Distinct()
+                .Select(instrument => instrument.Value).ToArray(),
+            StrategyInstruments = _strategies.ToDictionary(item => item.Id, item => item.Instrument.Value),
             From = options.EvaluationFrom,
             To = options.EvaluationTo,
             WarmupFrom = options.StreamFrom < options.EvaluationFrom ? options.StreamFrom : null,
@@ -185,176 +223,140 @@ public sealed class StreamingComparativeEngine
 
         IHistoricalCandleStream stream = CreatePrefetchStream(_stream, options.Runtime);
 
+        // Side-channel basket fetch: cross-market currency-strength analysis needs
+        // instruments beyond whatever this run is trading. Pre-fetched up front (not
+        // incrementally streamed) since baskets are read-only analysis inputs, never
+        // traded - this does not require the multi-instrument portfolio clock.
+        var basketCandles = new Dictionary<InstrumentKey, Candle[]>();
+        var basketCursors = new Dictionary<InstrumentKey, int>();
+        if (crossMarket is not null)
+        {
+            foreach (InstrumentKey basketInstrument in options.Runtime.CurrencyStrength.AllBasketInstruments())
+            {
+                var candles = new List<Candle>();
+                await foreach (MarketCandle basketCandle in _stream.StreamAsync(
+                    new HistoricalCandleRequest(
+                        basketInstrument,
+                        options.Runtime.CurrencyStrength.Interval,
+                        options.StreamFrom,
+                        options.EvaluationTo),
+                    cancellationToken).ConfigureAwait(false))
+                {
+                    if (basketCandle.Mid.IsComplete)
+                        candles.Add(basketCandle.Mid);
+                }
+                basketCandles[basketInstrument] = candles.OrderBy(candle => candle.OpenTime).ToArray();
+                basketCursors[basketInstrument] = 0;
+            }
+        }
+
         long sequence = 0;
         long processed = 0;
         DateTimeOffset? currentMarketTime = null;
         DateTimeOffset lastProgressPublish = DateTimeOffset.MinValue;
         var strategyResults = new List<StrategySimulationResult>();
-        bool enteredEvaluation = false;
-        AnalysisSnapshotSet snapshotSet = new()
-        {
-            Version = 0,
-            Snapshots = new Dictionary<BarInterval, AnalysisSnapshot>()
-        };
+        bool enteredEvaluationGlobally = false;
         IReadOnlySet<BarInterval> emptyClosed = new HashSet<BarInterval>();
         var pendingExecutionBatch = new List<MarketFrame>();
+        InstrumentKey? pendingBatchInstrument = null;
+
+        IReadOnlyList<InstrumentKey> tradedInstruments = _strategies
+            .Select(item => item.Instrument)
+            .Distinct()
+            .ToArray();
+        var pipelines = new Dictionary<InstrumentKey, InstrumentPipelineState>();
 
         try
         {
-            // Peek buffer so we can mark the final candle.
-            var lookAhead = new Queue<MarketCandle>();
-            await using IAsyncEnumerator<MarketCandle> enumerator =
-                stream.StreamAsync(candleRequest, cancellationToken).GetAsyncEnumerator(cancellationToken);
-
-            async Task<bool> MoveNextBufferedAsync()
+            foreach (InstrumentKey instrument in tradedInstruments)
             {
-                if (lookAhead.Count > 0)
-                    return true;
-                if (await enumerator.MoveNextAsync().ConfigureAwait(false))
-                {
-                    lookAhead.Enqueue(enumerator.Current);
-                    return true;
-                }
-
-                return false;
+                pipelines[instrument] = new InstrumentPipelineState(
+                    instrument,
+                    stream,
+                    candleRequest with { Instrument = instrument },
+                    timeframes.ExecutionInterval,
+                    timeframes.AnalysisBaseInterval,
+                    effectiveAnalysis,
+                    options.Runtime.BaseCandleGapPolicy,
+                    options.Runtime.CandleCapacity,
+                    cancellationToken);
             }
 
-            async Task<MarketCandle?> TakeNextAsync()
+            // Chronological k-way merge across every traded instrument's own candle
+            // stream/lookahead buffer (see InstrumentPipelineState). Ties break on
+            // instrument value for determinism. For a single traded instrument this
+            // degenerates to exactly the old single-stream lookahead pattern - there is
+            // only ever one candidate to pick.
+            async Task<(InstrumentPipelineState Pipeline, MarketCandle Candle, bool IsLast)?> TakeNextMergedAsync()
             {
-                if (!await MoveNextBufferedAsync().ConfigureAwait(false))
+                foreach (InstrumentPipelineState candidatePipeline in pipelines.Values)
+                    await candidatePipeline.MoveNextBufferedAsync().ConfigureAwait(false);
+
+                InstrumentPipelineState? winner = null;
+                MarketCandle? winnerCandle = null;
+                foreach (InstrumentPipelineState candidatePipeline in pipelines.Values)
+                {
+                    MarketCandle? candidate = candidatePipeline.PeekBuffered();
+                    if (candidate is null)
+                        continue;
+                    if (winner is null ||
+                        candidate.AvailableAt < winnerCandle!.AvailableAt ||
+                        (candidate.AvailableAt == winnerCandle.AvailableAt &&
+                         string.CompareOrdinal(candidatePipeline.Instrument.Value, winner.Instrument.Value) < 0))
+                    {
+                        winner = candidatePipeline;
+                        winnerCandle = candidate;
+                    }
+                }
+
+                if (winner is null)
                     return null;
-                MarketCandle current = lookAhead.Dequeue();
-                // Prefetch one more to know if current is last.
-                _ = await MoveNextBufferedAsync().ConfigureAwait(false);
-                return current;
+
+                (MarketCandle candle, bool isLast) = await winner.TakeBufferedAsync().ConfigureAwait(false);
+                return (winner, candle, isLast);
             }
 
-            await RaiseStatusAsync(options, SimulationJobStatus.WarmingUp).ConfigureAwait(false);
-
-            while (true)
+            // One worker enqueue/barrier per pending batch, gated to the strategies that
+            // trade pendingBatchInstrument only (D3). An execution batch never spans an
+            // instrument switch (D4): SharedPortfolioRuntime must observe strictly
+            // increasing (Sequence, AvailableAt) across the whole run, and flushing
+            // whenever the merge hands us a different instrument's candle is what keeps
+            // that true. For a single traded instrument this is called at exactly the
+            // same points, in the same order, as the original single-stream code.
+            async Task FlushPendingBatchAsync()
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                // Pause only between committed frames.
-                if (options.PauseGate is not null)
-                    await options.PauseGate.WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
+                if (pendingExecutionBatch.Count == 0 || pendingBatchInstrument is not InstrumentKey batchInstrument)
+                    return;
 
-                MarketCandle? marketCandle = await TakeNextAsync().ConfigureAwait(false);
-                if (marketCandle is null)
-                    break;
-
-                bool isLast = lookAhead.Count == 0;
-                Candle baseCandle = marketCandle.Mid;
-                quality.Observe(baseCandle);
-                sequence++;
-                processed++;
-                currentMarketTime = marketCandle.AvailableAt;
-                bool isWarmup = baseCandle.OpenTime < options.EvaluationFrom;
-
-                if (!isWarmup && !enteredEvaluation)
-                {
-                    enteredEvaluation = true;
-                    if (sharedAnnotator is ICalibratableChartAnnotator sharedCalibration)
-                        sharedCalibration.FreezeCalibration(options.EvaluationFrom);
-                    foreach (StrategySimulationSession session in sessions)
-                    {
-                        if (session.IndependentAnnotator is ICalibratableChartAnnotator independentCalibration)
-                            independentCalibration.FreezeCalibration(options.EvaluationFrom);
-                    }
-                    await RaiseStatusAsync(options, SimulationJobStatus.Running).ConfigureAwait(false);
-                }
-                else if (isWarmup && processed == 1)
-                {
-                    await RaiseStatusAsync(options, SimulationJobStatus.WarmingUp).ConfigureAwait(false);
-                }
-
-                // Two-stage aggregation:
-                //   execution candle → analysis-base (e.g. 1m)
-                //   analysis-base → higher analysis intervals (3m/5m/15m/…)
-                // ChartAnnotator only sees completed analysis candles, never raw 1s/5s.
-                long incompleteBefore = analysisBaseAggregator.IncompleteAggregateCount;
-                IReadOnlyList<Candle> analysisBaseClosed =
-                    analysisBaseAggregator.ApplyExecutionCandle(baseCandle);
-                quality.RecordIncompleteAggregate(
-                    analysisBaseAggregator.IncompleteAggregateCount - incompleteBefore);
-
-                var closed = new HashSet<BarInterval>();
-                foreach (Candle analysisBaseCandle in analysisBaseClosed)
-                {
-                    incompleteBefore = aggregator.IncompleteAggregateCount;
-                    IReadOnlyList<CandleClosedEvent> closedEvents = aggregator.Apply(analysisBaseCandle);
-                    quality.RecordIncompleteAggregate(
-                        aggregator.IncompleteAggregateCount - incompleteBefore);
-                    foreach (CandleClosedEvent closedEvent in closedEvents)
-                    {
-                        closed.Add(closedEvent.Interval);
-                        AnalysisSnapshot snapshot = await sharedAnnotator
-                            .ProcessAsync(closedEvent, cancellationToken)
-                            .ConfigureAwait(false);
-                        if (options.Runtime.AnalysisSharingMode == AnalysisSharingMode.IndependentPerStrategy)
-                        {
-                            foreach (StrategySimulationSession session in sessions)
-                            {
-                                if (session.IndependentAnnotator is not null)
-                                {
-                                    await session.IndependentAnnotator
-                                        .ProcessAsync(closedEvent, cancellationToken)
-                                        .ConfigureAwait(false);
-                                }
-                            }
-                        }
-
-                        latestSnapshots[closedEvent.Interval] = snapshot;
-                    }
-                }
-
-                IReadOnlySet<BarInterval> closedIntervals = closed.Count == 0
-                    ? emptyClosed
-                    : closed;
-                if (closed.Count > 0)
-                {
-                    snapshotSet = new AnalysisSnapshotSet
-                    {
-                        Version = snapshotSet.Version + 1,
-                        Snapshots = new Dictionary<BarInterval, AnalysisSnapshot>(latestSnapshots)
-                    };
-                }
-
-                // Frame is always on the execution clock for fills; strategy evaluates only
-                // when its trigger interval is in ClosedIntervals (after analysis-base close).
-                var frame = new MarketFrame
-                {
-                    Sequence = sequence,
-                    AvailableAt = marketCandle.AvailableAt,
-                    ExecutionCandle = marketCandle,
-                    AnalysisBaseCandle = analysisBaseClosed.LastOrDefault(),
-                    ClosedIntervals = closedIntervals,
-                    Snapshots = snapshotSet.Snapshots,
-                    InputStreamId = options.InputStreamId,
-                    IsWarmup = isWarmup,
-                    IsLastCandle = isLast
-                };
-
-                pendingExecutionBatch.Add(frame);
-                if (frame.AnalysisBaseCandle is null && !frame.IsLastCandle)
-                    continue;
-
-                // One worker enqueue/barrier per analysis-base bucket. Each isolated
-                // strategy still processes every execution frame in strict order.
                 MarketFrame[] executionBatch = pendingExecutionBatch.ToArray();
                 pendingExecutionBatch.Clear();
+                pendingBatchInstrument = null;
 
-                // Only active (non-failed) strategies participate in the barrier.
-                List<StrategyWorkerHost> activeHosts = workerHosts
+                // Only active (non-failed) strategies trading this batch's instrument
+                // participate in the barrier.
+                List<StrategyWorkerHost> activeHosts = hostsByInstrument
+                    .GetValueOrDefault(batchInstrument, [])
                     .Where(host => !host.Session.IsFailed)
                     .ToList();
-                List<StrategySimulationSession> activeSessions = sessions
+                List<StrategySimulationSession> activeSessions = sessionsByInstrument
+                    .GetValueOrDefault(batchInstrument, [])
                     .Where(session => !session.IsFailed)
                     .ToList();
 
                 if (activeSessions.Count == 0)
                 {
-                    throw new InvalidOperationException(
-                        "All strategies have failed; stopping comparison.");
+                    if (sessions.All(s => s.IsFailed))
+                    {
+                        throw new InvalidOperationException(
+                            "All strategies have failed; stopping comparison.");
+                    }
+
+                    // Every strategy trading THIS instrument has failed, but other
+                    // instruments' strategies may still be healthy - skip this batch
+                    // rather than aborting the whole run (D9 in the §7 plan). The global
+                    // StopEntireComparison check below the main loop still catches a
+                    // genuine cross-instrument failure once it actually happens.
+                    return;
                 }
 
                 StrategyFrameResult[][] batchResults;
@@ -419,7 +421,7 @@ public sealed class StreamingComparativeEngine
                     culprit?.MarkFailed(executionBatch[^1].Sequence, exception.ToString());
                     if (sessions.All(s => s.IsFailed))
                         throw;
-                    continue;
+                    return;
                 }
 
                 for (int batchIndex = 0; batchIndex < executionBatch.Length; batchIndex++)
@@ -450,6 +452,182 @@ public sealed class StreamingComparativeEngine
                         }
                     }
                 }
+            }
+
+            await RaiseStatusAsync(options, SimulationJobStatus.WarmingUp).ConfigureAwait(false);
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                // Pause only between committed frames.
+                if (options.PauseGate is not null)
+                    await options.PauseGate.WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
+
+                (InstrumentPipelineState Pipeline, MarketCandle Candle, bool IsLast)? merged =
+                    await TakeNextMergedAsync().ConfigureAwait(false);
+                if (merged is null)
+                    break;
+                InstrumentPipelineState pipeline = merged.Value.Pipeline;
+                MarketCandle marketCandle = merged.Value.Candle;
+                bool isLast = merged.Value.IsLast;
+
+                Candle baseCandle = marketCandle.Mid;
+                pipeline.Quality.Observe(baseCandle);
+                IReadOnlyList<string> dataQualityIssueCodes = pipeline.Quality.DrainPendingIssueCodes();
+                var runtimeContext = new AnalysisRuntimeContext
+                {
+                    ExecutableSpread = baseCandle.Prices.Close *
+                        options.SimulationOptions.SpreadBasisPoints / 10_000m,
+                    DataQualityOk = dataQualityIssueCodes.Count == 0,
+                    DataQualityIssueCodes = dataQualityIssueCodes
+                };
+
+                if (crossMarket is not null)
+                {
+                    var ready = new List<(InstrumentKey Instrument, DateTimeOffset CloseTime, decimal Close)>();
+                    foreach (InstrumentKey basketInstrument in basketCandles.Keys)
+                    {
+                        Candle[] candles = basketCandles[basketInstrument];
+                        int index = basketCursors[basketInstrument];
+                        while (index < candles.Length)
+                        {
+                            Candle basketCandle = candles[index];
+                            DateTimeOffset closeTime = basketCandle.CloseTime ?? basketCandle.OpenTime;
+                            if (closeTime > marketCandle.AvailableAt) break;
+                            ready.Add((basketInstrument, closeTime, basketCandle.Prices.Close));
+                            index++;
+                        }
+                        basketCursors[basketInstrument] = index;
+                    }
+                    foreach (var group in ready.GroupBy(item => item.CloseTime).OrderBy(group => group.Key))
+                        crossMarket.Update(group.Key, group.ToDictionary(item => item.Instrument, item => item.Close));
+                }
+
+                sequence++;
+                processed++;
+                currentMarketTime = marketCandle.AvailableAt;
+                bool isWarmup = baseCandle.OpenTime < options.EvaluationFrom;
+
+                if (!isWarmup && !pipeline.EnteredEvaluation)
+                {
+                    pipeline.EnteredEvaluation = true;
+                    // Freezing is idempotent - PriceActionAnalyzer/MarketRegimeCalibration
+                    // snapshot-and-lock current state, and an already-frozen state stops
+                    // accumulating new calibration data, so re-freezing it just reproduces
+                    // the same frozen snapshot. Triggering per-instrument-first-crossing
+                    // (rather than once globally) is required for multi-instrument runs:
+                    // ChartAnnotationEngine creates chart state lazily on first candle, so
+                    // an instrument whose first candle arrives after another instrument's
+                    // crossing would otherwise never get frozen at all.
+                    if (sharedAnnotator is ICalibratableChartAnnotator sharedCalibration)
+                        sharedCalibration.FreezeCalibration(options.EvaluationFrom);
+                    foreach (StrategySimulationSession session in sessionsByInstrument.GetValueOrDefault(pipeline.Instrument, []))
+                    {
+                        if (session.IndependentAnnotator is ICalibratableChartAnnotator independentCalibration)
+                            independentCalibration.FreezeCalibration(options.EvaluationFrom);
+                    }
+                    if (!enteredEvaluationGlobally)
+                    {
+                        enteredEvaluationGlobally = true;
+                        await RaiseStatusAsync(options, SimulationJobStatus.Running).ConfigureAwait(false);
+                    }
+                }
+                else if (isWarmup && processed == 1)
+                {
+                    await RaiseStatusAsync(options, SimulationJobStatus.WarmingUp).ConfigureAwait(false);
+                }
+
+                // Two-stage aggregation:
+                //   execution candle → analysis-base (e.g. 1m)
+                //   analysis-base → higher analysis intervals (3m/5m/15m/…)
+                // ChartAnnotator only sees completed analysis candles, never raw 1s/5s.
+                long incompleteBefore = pipeline.AnalysisBaseAggregator.IncompleteAggregateCount;
+                IReadOnlyList<Candle> analysisBaseClosed =
+                    pipeline.AnalysisBaseAggregator.ApplyExecutionCandle(baseCandle);
+                pipeline.Quality.RecordIncompleteAggregate(
+                    pipeline.AnalysisBaseAggregator.IncompleteAggregateCount - incompleteBefore);
+
+                var closed = new HashSet<BarInterval>();
+                foreach (Candle analysisBaseCandle in analysisBaseClosed)
+                {
+                    incompleteBefore = pipeline.MultiTimeframeAggregator.IncompleteAggregateCount;
+                    IReadOnlyList<CandleClosedEvent> closedEvents = pipeline.MultiTimeframeAggregator.Apply(analysisBaseCandle);
+                    pipeline.Quality.RecordIncompleteAggregate(
+                        pipeline.MultiTimeframeAggregator.IncompleteAggregateCount - incompleteBefore);
+                    foreach (CandleClosedEvent closedEvent in closedEvents)
+                    {
+                        closed.Add(closedEvent.Interval);
+                        AnalysisSnapshot snapshot = await sharedAnnotator
+                            .ProcessAsync(closedEvent, runtimeContext, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (options.Runtime.AnalysisSharingMode == AnalysisSharingMode.IndependentPerStrategy)
+                        {
+                            foreach (StrategySimulationSession session in sessionsByInstrument.GetValueOrDefault(pipeline.Instrument, []))
+                            {
+                                if (session.IndependentAnnotator is not null)
+                                {
+                                    await session.IndependentAnnotator
+                                        .ProcessAsync(closedEvent, runtimeContext, cancellationToken)
+                                        .ConfigureAwait(false);
+                                }
+                            }
+                        }
+
+                        pipeline.LatestSnapshots[closedEvent.Interval] = snapshot;
+
+                        if (sharedPortfolio is not null && closedEvent.Interval == options.Runtime.CorrelationRisk.Interval)
+                        {
+                            decimal close = closedEvent.Candle.Prices.Close;
+                            if (pipeline.LastCorrelationClose is decimal previousClose && previousClose > 0m && close > 0m)
+                            {
+                                decimal logReturn = (decimal)Math.Log((double)(close / previousClose));
+                                sharedPortfolio.ObserveCompletedReturns(
+                                    closedEvent.Candle.CloseTime ?? marketCandle.AvailableAt,
+                                    new Dictionary<InstrumentKey, decimal> { [closedEvent.Instrument] = logReturn });
+                            }
+                            pipeline.LastCorrelationClose = close;
+                        }
+                    }
+                }
+
+                IReadOnlySet<BarInterval> closedIntervals = closed.Count == 0
+                    ? emptyClosed
+                    : closed;
+                if (closed.Count > 0)
+                {
+                    pipeline.SnapshotSet = new AnalysisSnapshotSet
+                    {
+                        Version = pipeline.SnapshotSet.Version + 1,
+                        Snapshots = new Dictionary<BarInterval, AnalysisSnapshot>(pipeline.LatestSnapshots)
+                    };
+                }
+
+                // Frame is always on the execution clock for fills; strategy evaluates only
+                // when its trigger interval is in ClosedIntervals (after analysis-base close).
+                var frame = new MarketFrame
+                {
+                    Sequence = sequence,
+                    AvailableAt = marketCandle.AvailableAt,
+                    ExecutionCandle = marketCandle,
+                    AnalysisBaseCandle = analysisBaseClosed.LastOrDefault(),
+                    ClosedIntervals = closedIntervals,
+                    Snapshots = pipeline.SnapshotSet.Snapshots,
+                    InputStreamId = options.InputStreamId,
+                    IsWarmup = isWarmup,
+                    IsLastCandle = isLast
+                };
+
+                if (pendingExecutionBatch.Count > 0 && pendingBatchInstrument != pipeline.Instrument)
+                    await FlushPendingBatchAsync().ConfigureAwait(false);
+
+                pendingBatchInstrument = pipeline.Instrument;
+                pendingExecutionBatch.Add(frame);
+                if (frame.AnalysisBaseCandle is null && !frame.IsLastCandle)
+                    continue;
+
+                // One worker enqueue/barrier per analysis-base bucket. Each isolated
+                // strategy still processes every execution frame in strict order.
+                await FlushPendingBatchAsync().ConfigureAwait(false);
 
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 if ((now - lastProgressPublish).TotalMilliseconds >=
@@ -492,11 +670,13 @@ public sealed class StreamingComparativeEngine
                     Metrics = metrics,
                     IsComplete = !session.IsFailed,
                     FailedAtSequence = session.FailedSequence,
-                    FailureMessage = session.FailureMessage
+                    FailureMessage = session.FailureMessage,
+                    FeaturePolicyHash = session.FeaturePolicyHash
                 });
             }
 
-            MarketDataQualityReport qualityReport = quality.BuildReport();
+            MarketDataQualityReport qualityReport = CombineQualityReports(
+                pipelines.Values.Select(pipeline => pipeline.Quality.BuildReport()).ToArray());
             await replayWriter.CompleteAsync(strategyResults, qualityReport, cancellationToken)
                 .ConfigureAwait(false);
 
@@ -505,6 +685,9 @@ public sealed class StreamingComparativeEngine
                 SimulationId = options.SimulationId,
                 SchemaVersion = 2,
                 Instrument = options.Instrument.Value,
+            Instruments = _strategies.Select(item => item.Instrument).Distinct()
+                .Select(instrument => instrument.Value).ToArray(),
+            StrategyInstruments = _strategies.ToDictionary(item => item.Id, item => item.Instrument.Value),
                 From = options.EvaluationFrom,
                 To = options.EvaluationTo,
                 WarmupFrom = options.StreamFrom < options.EvaluationFrom ? options.StreamFrom : null,
@@ -581,7 +764,38 @@ public sealed class StreamingComparativeEngine
                 foreach (StrategySimulationSession session in sessions)
                     await session.DisposeAsync().ConfigureAwait(false);
             }
+            foreach (InstrumentPipelineState pipeline in pipelines.Values)
+                await pipeline.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Combines per-instrument quality reports into one aggregate for back-compat
+    /// consumers of the single top-level DataQuality/InputHash fields. For a single
+    /// traded instrument this returns the one report unchanged, byte-for-byte.
+    /// </summary>
+    private static MarketDataQualityReport CombineQualityReports(IReadOnlyList<MarketDataQualityReport> reports)
+    {
+        if (reports.Count == 1)
+            return reports[0];
+
+        string combinedHash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(
+                    string.Join('|', reports.Select(report => report.InputHash).OrderBy(hash => hash, StringComparer.Ordinal)))))
+            .ToLowerInvariant();
+        return new MarketDataQualityReport
+        {
+            CandleCount = reports.Sum(report => report.CandleCount),
+            DuplicateCount = reports.Sum(report => report.DuplicateCount),
+            OutOfOrderCount = reports.Sum(report => report.OutOfOrderCount),
+            MissingIntervalCount = reports.Sum(report => report.MissingIntervalCount),
+            WeekendGapCount = reports.Sum(report => report.WeekendGapCount),
+            SessionGapCount = reports.Sum(report => report.SessionGapCount),
+            IncompleteAggregateCount = reports.Sum(report => report.IncompleteAggregateCount),
+            FirstCandle = reports.Min(report => report.FirstCandle),
+            LastCandle = reports.Max(report => report.LastCandle),
+            InputHash = combinedHash
+        };
     }
 
     private static IHistoricalCandleStream CreatePrefetchStream(

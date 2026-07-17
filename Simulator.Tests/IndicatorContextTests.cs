@@ -274,7 +274,7 @@ public sealed class IndicatorContextTests
                 Instrument,
                 Interval,
                 candle,
-                index + 1));
+                index + 1), null);
         }
 
         IReadOnlyList<IndicatorPoint> history = engine.GetIndicatorHistory(Instrument, Interval);

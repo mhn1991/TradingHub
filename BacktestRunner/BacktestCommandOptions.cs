@@ -4,13 +4,18 @@ using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Engine;
 using RiskManager;
+using RiskManager.Calibration;
 using RiskManager.Safety;
+using Simulator.Calibration;
 using Simulator.MarketData;
 using Simulator.Models;
 using TradeManager;
 using ChartAnnotator.Regime;
 using RiskManager.Conditions;
 using PortfolioManager.Risk;
+using PortfolioManager.CrossMarket;
+using ChartAnnotator.CurrencyStrength;
+using ChartAnnotator.Value;
 using Simulator.Execution;
 using Simulator.Financing;
 
@@ -76,6 +81,14 @@ internal sealed record BacktestCommandOptions
     public int WarmupDays { get; init; } = RecommendedSimulationDefaults.WarmupDays;
     public int ProgressIntervalMs { get; init; } = 500;
     public IReadOnlyList<string> Strategies { get; init; } = ["legacy", "improved"];
+    /// <summary>
+    /// Optional §7 multi-instrument portfolio clock: assigns each strategy its own
+    /// instrument instead of every strategy trading <see cref="Instrument"/>. JSON/
+    /// programmatic only for now, matching AnnotationOptions/MarketRegimeRouting -
+    /// no individual --flag yet. Null/empty preserves today's single-instrument
+    /// behaviour exactly.
+    /// </summary>
+    public IReadOnlyList<StrategyInstrumentAssignment>? StrategyAssignments { get; init; }
     public string StrategyExecution { get; init; } = "parallel";
     public int StrategyChannelCapacity { get; init; } = 4;
     public int MaxParallelStrategies { get; init; } = 4;
@@ -97,12 +110,86 @@ internal sealed record BacktestCommandOptions
     /// this directly; no individual --flag parsing yet.
     /// </summary>
     public MarketRegimePolicyOptions MarketRegimeRouting { get; init; } = new();
+    /// <summary>
+    /// Optional, independent value-location evidence (spec §13.3). Programmatic/JSON
+    /// callers may set this directly; no individual --flag parsing yet. Enabled by
+    /// default (2026-07-16 agent decision-quality pass) - it's a proven, tested, soft
+    /// confidence nudge, not a new/unvalidated capability.
+    /// </summary>
+    public ValueLocationEvidenceOptions ValueLocationEvidence { get; init; } = new() { Enabled = true };
+    /// <summary>
+    /// Cross-market currency-strength coordinator (spec §5). Programmatic/JSON callers
+    /// may set this directly; no individual --flag parsing yet.
+    /// </summary>
+    public CurrencyStrengthOptions CurrencyStrength { get; init; } = new();
+    /// <summary>
+    /// Optional currency-strength confluence/opposition evidence (2026-07-16 agent
+    /// decision-quality pass). Programmatic/JSON callers may set this directly; no
+    /// individual --flag parsing yet. Disabled by default - a new capability, and also
+    /// depends on <see cref="CurrencyStrength"/> being separately enabled with baskets.
+    /// </summary>
+    public CurrencyStrengthEvidenceOptions CurrencyStrengthEvidence { get; init; } = new();
+    /// <summary>
+    /// Setup-calibration policy configuration (audit §16). Programmatic/JSON callers may set
+    /// this directly; no individual --flag parsing yet - use --setup-calibration-artifact-id
+    /// to enable via a server-owned artifact from the calibration repository instead.
+    /// </summary>
+    public SetupCalibrationPolicyOptions SetupCalibration { get; init; } = new();
+    public SetupCalibrationArtifact? SetupCalibrationArtifact { get; init; }
+    /// <summary>Resolved via <see cref="ICalibrationArtifactRepository"/> at startup when set.</summary>
+    public string? SetupCalibrationArtifactId { get; init; }
+    /// <summary>
+    /// Trade-management calibration configuration (audit §16). Programmatic/JSON callers may
+    /// set this directly; no individual --flag parsing yet - use
+    /// --management-calibration-artifact-id to enable via a server-owned artifact instead.
+    /// </summary>
+    public TradeManagementCalibrationOptions ManagementCalibration { get; init; } = new();
+    public TradeManagementCalibration? ManagementCalibrationArtifact { get; init; }
+    /// <summary>Resolved via <see cref="ICalibrationArtifactRepository"/> at startup when set.</summary>
+    public string? ManagementCalibrationArtifactId { get; init; }
+    /// <summary>
+    /// Statistical meta-model policy (audit §17). Programmatic/JSON callers may set this
+    /// directly; no individual --flag parsing yet - use --meta-model-artifact-id to enable
+    /// via a server-owned artifact from the calibration repository instead.
+    /// </summary>
+    public MetaModelPolicyOptions MetaModel { get; init; } = new();
+    public MetaModelArtifact? MetaModelArtifact { get; init; }
+    /// <summary>Resolved via <see cref="ICalibrationArtifactRepository"/> at startup when set.</summary>
+    public string? MetaModelArtifactId { get; init; }
+    /// <summary>
+    /// Root directory <see cref="SetupCalibrationArtifactId"/>/<see cref="ManagementCalibrationArtifactId"/>/
+    /// <see cref="MetaModelArtifactId"/> are resolved from.
+    /// </summary>
+    public string CalibrationArtifactsDirectory { get; init; } = Path.Combine(".cache", "calibration-artifacts");
+    /// <summary>
+    /// Opt-in: before the main evaluation run, train a fresh leakage-safe calibration bundle
+    /// (setup + meta-model + management, via <c>QuantResearch.Training.CalibrationTrainingPipeline</c>)
+    /// per strategy in <see cref="Strategies"/>, on the window immediately preceding <see cref="From"/>.
+    /// This is an isolated research job - it never wires its output into the run it's part of; it
+    /// only produces a PendingReview <c>CalibrationBundleCandidate</c> for later explicit review/
+    /// promotion (use --setup-calibration-artifact-id etc., or the promotion API, to actually use
+    /// an approved artifact). Default false preserves today's behaviour exactly.
+    /// </summary>
+    public bool AutoTrainCalibration { get; init; }
+    public int AutoTrainCalibrationWindowDays { get; init; } = 180;
+    public int AutoTrainCalibrationFolds { get; init; } = 5;
+    public int AutoTrainCalibrationEmbargoHours { get; init; } = 24;
+    /// <summary>Optional; defaults to "{strategy}-auto" per strategy when unset.</summary>
+    public string? AutoTrainCalibrationStrategyVersion { get; init; }
     public SimulationAccountMode AccountMode { get; init; } = SimulationAccountMode.IndependentStrategyAccounts;
-    public bool RegimeEnabled { get; init; }
+    /// <summary>Enabled by default (2026-07-16 agent decision-quality pass) - regime routing/risk is proven and tested.</summary>
+    public bool RegimeEnabled { get; init; } = true;
     public int EfficiencyRatioPeriod { get; init; } = 14;
-    public bool TradingConditionsEnabled { get; init; }
-    public bool AdaptiveRiskEnabled { get; init; }
+    /// <summary>AGENT-03: enabled by default - session/rollover/spread/stale-data protection
+    /// must not be silently off for any caller that doesn't know to opt in explicitly;
+    /// --no-trading-conditions opts out. --trading-conditions is still accepted as a harmless
+    /// legacy no-op.</summary>
+    public bool TradingConditionsEnabled { get; init; } = true;
+    /// <summary>Enabled by default (2026-07-16 agent decision-quality pass) - drawdown/volatility-scaled risk is proven and tested.</summary>
+    public bool AdaptiveRiskEnabled { get; init; } = true;
     public decimal MaximumPortfolioHeatPercent { get; init; } = 1.5m;
+    public decimal MaximumNetCurrencyExposurePercent { get; init; } = 300m;
+    public decimal MaximumGrossCurrencyExposurePercent { get; init; } = 300m;
     public SimulationFillModel ExecutionFillModel { get; init; } = SimulationFillModel.MidpointPlusConfiguredSpread;
     public StressExecutionScenario StressScenario { get; init; } = StressExecutionScenario.Base;
     public decimal? MaximumFillQuantityPerFrame { get; init; }
@@ -142,7 +229,9 @@ internal sealed record BacktestCommandOptions
                 "legacy-no-momentum-reduction" or "improved-no-momentum-reduction" or
                 "legacy-no-volatility-reduction" or "improved-no-volatility-reduction" or
                 "legacy-enable-cost-stress-reduction" or "improved-enable-cost-stress-reduction" or
-                "regime" or "trading-conditions" or "adaptive-risk" or "financing")
+                "regime" or "no-regime" or "trading-conditions" or "no-trading-conditions" or
+                "adaptive-risk" or "no-adaptive-risk" or "financing" or
+                "auto-train-calibration")
             {
                 values[key] = "true";
                 continue;
@@ -317,10 +406,16 @@ internal sealed record BacktestCommandOptions
             LegacyPositionManagement = legacyManagement,
             ImprovedPositionManagement = improvedManagement
             ,AccountMode = ParseAccountMode(values.GetValueOrDefault("account-mode"))
-            ,RegimeEnabled = values.ContainsKey("regime")
+            // Enabled by default (2026-07-16 agent decision-quality pass); --no-regime opts out.
+            // --regime is still accepted as a harmless legacy no-op.
+            ,RegimeEnabled = !values.ContainsKey("no-regime")
             ,EfficiencyRatioPeriod = ParseInt(values.GetValueOrDefault("er-period"), 14, 2, 10_000, "er-period")
-            ,TradingConditionsEnabled = values.ContainsKey("trading-conditions")
-            ,AdaptiveRiskEnabled = values.ContainsKey("adaptive-risk")
+            // AGENT-03: enabled by default; --no-trading-conditions opts out.
+            // --trading-conditions is still accepted as a harmless legacy no-op.
+            ,TradingConditionsEnabled = !values.ContainsKey("no-trading-conditions")
+            // Enabled by default (2026-07-16 agent decision-quality pass); --no-adaptive-risk opts out.
+            // --adaptive-risk is still accepted as a harmless legacy no-op.
+            ,AdaptiveRiskEnabled = !values.ContainsKey("no-adaptive-risk")
             ,MaximumPortfolioHeatPercent = ParseDecimal(values.GetValueOrDefault("maximum-portfolio-heat-percent"), 1.5m, 0m, "maximum-portfolio-heat-percent")
             ,ExecutionFillModel = Enum.Parse<SimulationFillModel>(values.GetValueOrDefault("fill-model") ?? "MidpointPlusConfiguredSpread", true)
             ,StressScenario = Enum.Parse<StressExecutionScenario>(values.GetValueOrDefault("stress-scenario") ?? "Base", true)
@@ -328,6 +423,19 @@ internal sealed record BacktestCommandOptions
             ,FinancingEnabled = values.ContainsKey("financing")
             ,FinancingLongAnnualPercent = ParseSignedDecimal(values.GetValueOrDefault("financing-long-annual-percent"), 0m, "financing-long-annual-percent")
             ,FinancingShortAnnualPercent = ParseSignedDecimal(values.GetValueOrDefault("financing-short-annual-percent"), 0m, "financing-short-annual-percent")
+            ,SetupCalibrationArtifactId = values.GetValueOrDefault("setup-calibration-artifact-id")
+            ,ManagementCalibrationArtifactId = values.GetValueOrDefault("management-calibration-artifact-id")
+            ,MetaModelArtifactId = values.GetValueOrDefault("meta-model-artifact-id")
+            ,CalibrationArtifactsDirectory = values.GetValueOrDefault("calibration-artifacts-directory")
+                ?? Path.Combine(".cache", "calibration-artifacts")
+            ,AutoTrainCalibration = values.ContainsKey("auto-train-calibration")
+            ,AutoTrainCalibrationWindowDays = ParseInt(
+                values.GetValueOrDefault("auto-train-calibration-window-days"), 180, 30, 3650, "auto-train-calibration-window-days")
+            ,AutoTrainCalibrationFolds = ParseInt(
+                values.GetValueOrDefault("auto-train-calibration-folds"), 5, 3, 50, "auto-train-calibration-folds")
+            ,AutoTrainCalibrationEmbargoHours = ParseInt(
+                values.GetValueOrDefault("auto-train-calibration-embargo-hours"), 24, 0, 24 * 30, "auto-train-calibration-embargo-hours")
+            ,AutoTrainCalibrationStrategyVersion = values.GetValueOrDefault("auto-train-calibration-strategy-version")
         };
     }
 
@@ -338,6 +446,7 @@ internal sealed record BacktestCommandOptions
         To = To,
         Environment = Environment,
         Strategies = Strategies,
+        StrategyAssignments = StrategyAssignments,
         StartingBalance = StartingBalance,
         BaseCurrency = BaseCurrency ?? ResolveBaseCurrency(),
         Quantity = Quantity,
@@ -395,16 +504,33 @@ internal sealed record BacktestCommandOptions
                 MarketRegime = AnnotationOptions.MarketRegime with { Enabled = RegimeEnabled }
             },
             MarketRegimeRouting = MarketRegimeRouting with { Enabled = RegimeEnabled },
+            ValueLocationEvidence = ValueLocationEvidence,
+            CurrencyStrengthEvidence = CurrencyStrengthEvidence,
+            CurrencyStrength = CurrencyStrength,
             RegimeManagement = new RegimeManagementOptions { Enabled = RegimeEnabled },
             TradingConditions = new TradingConditionOptions { Enabled = TradingConditionsEnabled },
             AdaptiveRisk = new AdaptiveRiskOptions { Enabled = AdaptiveRiskEnabled },
+            SetupCalibration = SetupCalibrationArtifact is null
+                ? SetupCalibration
+                : SetupCalibration with { Enabled = true },
+            SetupCalibrationArtifact = SetupCalibrationArtifact,
+            ManagementCalibration = ManagementCalibrationArtifact is null
+                ? ManagementCalibration
+                : ManagementCalibration with { Enabled = true },
+            ManagementCalibrationArtifact = ManagementCalibrationArtifact,
+            MetaModel = MetaModelArtifact is null
+                ? MetaModel
+                : MetaModel with { Enabled = true },
+            MetaModelArtifact = MetaModelArtifact,
             PortfolioRisk = new PortfolioRiskOptions
             {
                 MaximumTotalOpenRiskPercent = MaximumPortfolioHeatPercent,
                 MaximumPendingRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent),
                 MaximumStrategyRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent),
                 MaximumInstrumentRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent),
-                MaximumCurrencyRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent)
+                MaximumCurrencyStopRiskPercent = Math.Min(0.75m, MaximumPortfolioHeatPercent),
+                MaximumNetCurrencyExposurePercent = MaximumNetCurrencyExposurePercent,
+                MaximumGrossCurrencyExposurePercent = MaximumGrossCurrencyExposurePercent
             },
             Execution = new ExecutionModelOptions
             {

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Calibration</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- Calibration artifact persistence uses System.Text.Json; keep trim-friendly but
+         full native AOT publish is not required (mirrors Simulator.csproj). -->
+    <IsAotCompatible>false</IsAotCompatible>
+    <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Agent/Agent.csproj" />
+    <ProjectReference Include="../RiskManager/RiskManager.csproj" />
+    <ProjectReference Include="../TradeManager/TradeManager.csproj" />
+  </ItemGroup>
+</Project>

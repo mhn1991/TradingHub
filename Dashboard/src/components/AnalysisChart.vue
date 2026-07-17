@@ -1049,16 +1049,29 @@ function bodyHeight(openY: number, closeY: number): number {
   return Math.max(1.5, Math.abs(closeY - openY))
 }
 
+// Marker size tracks candle spacing so triangles stay small relative to bars.
+const markerHalfWidth = computed(() => {
+  const spacing = step.value
+  // Readable minimum, never dominate the candle slot.
+  return Math.max(2.5, Math.min(4.5, spacing * 0.38))
+})
+
 function priceActionPoints(bullish: boolean, x: number, y: number): string {
+  const half = markerHalfWidth.value
+  const height = half * 1.7
+  const base = half * 0.35
   return bullish
-    ? `${x},${y - 12} ${x - 7},${y + 2} ${x + 7},${y + 2}`
-    : `${x},${y + 12} ${x - 7},${y - 2} ${x + 7},${y - 2}`
+    ? `${x},${y - height} ${x - half},${y + base} ${x + half},${y + base}`
+    : `${x},${y + height} ${x - half},${y - base} ${x + half},${y - base}`
 }
 
 function swingPoints(swing: SwingPoint, x: number, y: number): string {
+  const half = markerHalfWidth.value
+  const height = half * 1.55
+  const tip = Math.max(1, half * 0.3)
   return swing.type === 'High'
-    ? `${x - 6},${y - 11} ${x + 6},${y - 11} ${x},${y - 2}`
-    : `${x - 6},${y + 11} ${x + 6},${y + 11} ${x},${y + 2}`
+    ? `${x - half},${y - height} ${x + half},${y - height} ${x},${y - tip}`
+    : `${x - half},${y + height} ${x + half},${y + height} ${x},${y + tip}`
 }
 </script>
 

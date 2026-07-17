@@ -253,7 +253,8 @@ public sealed class EnumerablePagedCandleSource : IPagedHistoricalCandleSource, 
     {
         cancellationToken.ThrowIfCancellationRequested();
         MarketCandle[] page = _candles
-            .Where(c => c.OpenTime >= request.Cursor &&
+            .Where(c => c.Instrument == request.Instrument &&
+                        c.OpenTime >= request.Cursor &&
                         c.OpenTime >= request.From &&
                         c.OpenTime < request.To)
             .Take(request.PageSize)
@@ -279,6 +280,8 @@ public sealed class EnumerablePagedCandleSource : IPagedHistoricalCandleSource, 
         foreach (MarketCandle candle in _candles)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (candle.Instrument != request.Instrument)
+                continue;
             if (candle.OpenTime < request.From || candle.OpenTime >= request.To)
                 continue;
             yield return candle;

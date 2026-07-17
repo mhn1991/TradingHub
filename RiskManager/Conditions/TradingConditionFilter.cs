@@ -4,6 +4,18 @@ namespace RiskManager.Conditions;
 
 public sealed class TradingConditionFilter : ITradingConditionFilter
 {
+    // London/New York session hours are defined in LOCAL exchange time (matching the
+    // original UTC-hour literals' implied local hours: 07:00-16:00 was correct only
+    // during GMT/winter for London, 12:00-21:00 UTC was correct only during EDT/summer
+    // for New York) and converted per-timestamp via IANA zones, so the session actually
+    // tracks UK/US daylight-saving transitions instead of drifting an hour twice a year.
+    private static readonly TimeZoneInfo LondonTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+    private static readonly TimeZoneInfo NewYorkTimeZone = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+    private static readonly TimeSpan LondonSessionStart = TimeSpan.FromHours(7);
+    private static readonly TimeSpan LondonSessionEnd = TimeSpan.FromHours(16);
+    private static readonly TimeSpan NewYorkSessionStart = TimeSpan.FromHours(8);
+    private static readonly TimeSpan NewYorkSessionEnd = TimeSpan.FromHours(17);
+
     private readonly TradingConditionOptions _options;
     private readonly IEconomicEventProvider? _events;
     private readonly TimeZoneInfo _brokerTimeZone;
@@ -12,6 +24,15 @@ public sealed class TradingConditionFilter : ITradingConditionFilter
     {
         _options = options ?? new TradingConditionOptions();
         _options.Validate();
+        if (_options.EconomicEventFilterEnabled && events is null)
+        {
+            throw new ArgumentException(
+                "EconomicEventFilterEnabled requires a real IEconomicEventProvider. No production " +
+                "provider is currently configured, so silently continuing would report event " +
+                "protection as active while never actually blocking an entry. Either supply a " +
+                "provider or leave EconomicEventFilterEnabled disabled.",
+                nameof(events));
+        }
         _events = events;
         _brokerTimeZone = TimeZoneInfo.FindSystemTimeZoneById(_options.BrokerTimeZoneId);
     }
@@ -89,9 +110,10 @@ public sealed class TradingConditionFilter : ITradingConditionFilter
             brokerLocal <= rollover.AddMinutes(_options.RolloverBlackoutMinutesAfter))
             return TradingSession.BrokerRollover;
 
-        int hour = utc.Hour;
-        bool london = hour is >= 7 and < 16;
-        bool newYork = hour is >= 12 and < 21;
+        TimeSpan londonLocal = TimeZoneInfo.ConvertTime(utc, LondonTimeZone).TimeOfDay;
+        TimeSpan newYorkLocal = TimeZoneInfo.ConvertTime(utc, NewYorkTimeZone).TimeOfDay;
+        bool london = londonLocal >= LondonSessionStart && londonLocal < LondonSessionEnd;
+        bool newYork = newYorkLocal >= NewYorkSessionStart && newYorkLocal < NewYorkSessionEnd;
         if (london && newYork) return TradingSession.LondonNewYorkOverlap;
         if (london) return TradingSession.London;
         if (newYork) return TradingSession.NewYork;

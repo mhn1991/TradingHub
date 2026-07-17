@@ -11,6 +11,8 @@ export interface PlaybackRow {
   close: number
   volume?: number
   isWarmup?: boolean
+  /** Additive (§7 multi-instrument clock); absent on rows from a single-instrument run. */
+  instrument?: string
   analysis?: {
     indicators: ReplayFrame['indicators']
     swings: ReplayFrame['swings']

@@ -84,6 +84,27 @@ internal sealed class OandaGetPendingOrdersCommand(
         $"v3/accounts/{Uri.EscapeDataString(accountId)}/pendingOrders");
 }
 
+internal sealed class OandaGetTransactionsSinceCommand(
+    TransportId transportId,
+    string accountId,
+    string lastTransactionId) : OandaHttpCommand<OandaTransactionsResponse>(transportId)
+{
+    public override HttpRequestMessage CreateRequest() => new(
+        HttpMethod.Get,
+        $"v3/accounts/{Uri.EscapeDataString(accountId)}/transactions/sinceid" +
+        $"?id={Uri.EscapeDataString(lastTransactionId)}");
+}
+
+
+internal sealed class OandaGetOpenTradesCommand(
+    TransportId transportId,
+    string accountId) : OandaHttpCommand<OandaOpenTradesResponse>(transportId)
+{
+    public override HttpRequestMessage CreateRequest() => new(
+        HttpMethod.Get,
+        $"v3/accounts/{Uri.EscapeDataString(accountId)}/openTrades");
+}
+
 internal sealed class OandaGetOpenPositionsCommand(
     TransportId transportId,
     string accountId) : OandaHttpCommand<OandaOpenPositionsResponse>(transportId)
@@ -132,4 +153,43 @@ internal sealed class OandaCancelOrderCommand(
         HttpMethod.Put,
         $"v3/accounts/{Uri.EscapeDataString(accountId)}/orders/" +
         $"{Uri.EscapeDataString(orderId)}/cancel");
+}
+
+internal sealed class OandaCloseTradeCommand(
+    TransportId transportId,
+    string accountId,
+    string tradeId,
+    OandaTradeCloseRequest payload) : OandaHttpCommand<OandaOrderMutationResponse>(transportId)
+{
+    public override bool IsIdempotent => false;
+    public override int MaxTransientRetries => 0;
+
+    public override HttpRequestMessage CreateRequest() => new(
+        HttpMethod.Put,
+        $"v3/accounts/{Uri.EscapeDataString(accountId)}/trades/{Uri.EscapeDataString(tradeId)}/close")
+    {
+        Content = JsonContent.Create(
+            payload,
+            BrokerJsonSerializerContext.Default.OandaTradeCloseRequest)
+    };
+}
+
+internal sealed class OandaReplaceTradeDependentOrdersCommand(
+    TransportId transportId,
+    string accountId,
+    string tradeId,
+    OandaTradeDependentOrdersRequest payload)
+    : OandaHttpCommand<OandaTradeDependentOrdersResponse>(transportId)
+{
+    public override bool IsIdempotent => false;
+    public override int MaxTransientRetries => 0;
+
+    public override HttpRequestMessage CreateRequest() => new(
+        HttpMethod.Put,
+        $"v3/accounts/{Uri.EscapeDataString(accountId)}/trades/{Uri.EscapeDataString(tradeId)}/orders")
+    {
+        Content = JsonContent.Create(
+            payload,
+            BrokerJsonSerializerContext.Default.OandaTradeDependentOrdersRequest)
+    };
 }

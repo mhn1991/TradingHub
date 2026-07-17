@@ -20,8 +20,8 @@ public sealed record MarketRegimeOptions
     /// once that regime stops being reconfirmed, since confidence is capped at 100).
     /// </summary>
     public decimal SwitchConfidenceMargin { get; init; } = 10m;
-    public decimal MaximumTradeableSpreadAtr { get; init; } = 0.15m;
-    public decimal HardMaximumSpreadAtr { get; init; } = 0.30m;
+    public decimal MaximumTradeableSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.SoftMaximum;
+    public decimal HardMaximumSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.HardMaximum;
 
     public int AdxCalibrationHistoryPeriod { get; init; } = 100;
     public int AdxCalibrationMinimumSamples { get; init; } = 30;

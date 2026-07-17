@@ -24,6 +24,7 @@ public sealed record BrokerOrder
 {
     public required string BrokerOrderId { get; init; }
     public string? ClientOrderId { get; init; }
+    public string? BrokerTradeId { get; init; }
     public string? StrategyId { get; init; }
     public string? DecisionId { get; init; }
     public string? SetupId { get; init; }

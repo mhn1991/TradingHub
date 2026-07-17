@@ -45,6 +45,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
 
     public ValueTask<AnalysisSnapshot> ProcessAsync(
         CandleClosedEvent candleEvent,
+        AnalysisRuntimeContext? runtimeContext,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -74,7 +75,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         AnalysisState state = GetOrCreate(key);
         lock (state.SyncRoot)
         {
-            return ValueTask.FromResult(ProcessCore(candleEvent, key, state, closeTime));
+            return ValueTask.FromResult(ProcessCore(candleEvent, key, state, closeTime, runtimeContext));
         }
     }
 
@@ -82,7 +83,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         CandleClosedEvent candleEvent,
         ChartKey key,
         AnalysisState state,
-        DateTimeOffset closeTime)
+        DateTimeOffset closeTime,
+        AnalysisRuntimeContext? runtimeContext)
     {
         if (state.LastCloseTime is not null && closeTime <= state.LastCloseTime)
         {
@@ -222,11 +224,20 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             priceAction,
             candleEvent.Candle,
             candleEvent.Sequence);
+        // MarketRegimeClassifier wants spread expressed as a ratio to ATR - the same
+        // shape TradingConditionFilter computes independently - so both consumers
+        // read the same executable-spread signal instead of drifting apart.
+        decimal? spreadAtr = runtimeContext?.ExecutableSpread is decimal executableSpread &&
+            indicators.Atr is decimal currentAtrForSpread && currentAtrForSpread > 0m
+                ? executableSpread / currentAtrForSpread
+                : null;
         MarketRegimeSnapshot regime = state.MarketRegime?.Update(
             candleEvent.Candle,
             indicators,
             structure,
-            priceAction) ?? MarketRegimeSnapshot.Unknown;
+            priceAction,
+            spreadAtr,
+            runtimeContext?.DataQualityOk ?? true) ?? MarketRegimeSnapshot.Unknown;
         IReadOnlyList<AnchoredValueReference> valueReferences = state.AnchoredValueReferences.Update(
             candleEvent.Candle,
             state.Candles.Snapshot(),

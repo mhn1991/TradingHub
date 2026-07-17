@@ -330,7 +330,7 @@ public sealed class Phase3PrecisionAndTimeframesTests
         {
             var engine = new StreamingComparativeEngine(
                 new EnumerableMarketCandleStream(candles),
-                [("observe", agent)]);
+                [("observe", agent, instrument)]);
             ComparativeSimulationResult result = await engine.RunAsync(
                 new StreamingComparativeEngineOptions
                 {
@@ -419,7 +419,7 @@ public sealed class Phase3PrecisionAndTimeframesTests
         {
             var engine = new StreamingComparativeEngine(
                 new ImportedSecondCandleSource(csv, instrument, BarInterval.Seconds(1)),
-                [("observe", agent)]);
+                [("observe", agent, instrument)]);
             ComparativeSimulationResult result = await engine.RunAsync(
                 new StreamingComparativeEngineOptions
                 {

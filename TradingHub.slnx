@@ -3,6 +3,7 @@
   <Project Path="Agent/Agent.csproj" />
   <Project Path="Brokers.IntegrationTests/Brokers.IntegrationTests.csproj" />
   <Project Path="Brokers/Brokers.csproj" />
+  <Project Path="Calibration/Calibration.csproj" />
   <Project Path="ChartAnnotator/ChartAnnotator.csproj" />
   <Project Path="DashboardContracts/DashboardContracts.csproj" />
   <Project Path="DashboardExporter/DashboardExporter.csproj" />
@@ -10,11 +11,18 @@
   <Project Path="Networking/Networking.csproj" />
   <Project Path="PortfolioManager/PortfolioManager.csproj" />
   <Project Path="QuantResearch/QuantResearch.csproj" />
+  <Project Path="QuantResearchRunner/QuantResearchRunner.csproj" />
+  <Project Path="QuantResearchRunner.Tests/QuantResearchRunner.Tests.csproj" />
   <Project Path="Simulator.AotSmoke/Simulator.AotSmoke.csproj" />
   <Project Path="Simulator.Tests/Simulator.Tests.csproj" />
   <Project Path="Simulator/Simulator.csproj" />
   <Project Path="TradingHub.UnitTests/TradingHub.UnitTests.csproj" />
+  <Project Path="TradingCore.Tests/TradingCore.Tests.csproj" />
   <Project Path="ExecutionManager/ExecutionManager.csproj" />
+  <Project Path="LiveTrading/LiveTrading.csproj" />
+  <Project Path="LiveTrading.Oanda/LiveTrading.Oanda.csproj" />
+  <Project Path="LiveTradingHost/LiveTradingHost.csproj" />
+  <Project Path="LiveTrading.Tests/LiveTrading.Tests.csproj" />
   <Project Path="RiskManager/RiskManager.csproj" />
   <Project Path="TradeManager/TradeManager.csproj" />
   <Project Path="TradingCore/TradingCore.csproj" />

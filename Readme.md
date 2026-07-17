@@ -21,7 +21,7 @@ The runtime is split by responsibility so strategy code does not own trading saf
 `ExecutionManager` intentionally coordinates broker safety and risk policy, but it does not define either policy. Broker-specific/account-order checks live in `Brokers.Safety`; financial risk thresholds live in `RiskManager`; and the comparison portion of reconciliation lives in `Brokers.Reconciliation`.
 
 
-The current quantitative-risk upgrade adds risk-based position sizing, role-based multi-timeframe confirmation, and multi-speed position management. See [`QUANTITATIVE_RISK_AND_MTF.md`](QUANTITATIVE_RISK_AND_MTF.md) for the execution order, defaults, invariants, and the deliberate boundary between independent strategy comparison and a future shared portfolio allocator.
+The current quantitative-risk upgrade adds risk-based position sizing, role-based multi-timeframe confirmation, and multi-speed position management. See [`QUANTITATIVE_RISK_AND_MTF.md`](QUANTITATIVE_RISK_AND_MTF.md) for the execution order, defaults, invariants, and the deliberate boundary between independent strategy comparison and shared portfolio allocation. A `SharedPortfolioAccount` mode now exists with real combined heat, correlation, currency-exposure risk, and a shared account ledger (balance + net-per-instrument margin). The simulator can also stream more than one instrument in a single run (§7 multi-instrument portfolio clock — strategies are assigned an instrument via the Dashboard Simulator panel or `BacktestRequest.StrategyAssignments`), so correlation and cross-instrument capital competition are no longer architecturally inert. See [`ARCHITECTURE_SIMULATOR.md`](ARCHITECTURE_SIMULATOR.md) § Quantitative risk / portfolio layer for what's real versus still limited (positions themselves remain a federation of independent broker accounts rather than one netted broker-side position — deliberately out of scope, see § Known limitations).
 
 ## Implemented Phase 1: safe trading foundation
 
@@ -170,8 +170,10 @@ See [`PROFIT_PROTECTION_AND_LONG_RUN_FIX.md`](PROFIT_PROTECTION_AND_LONG_RUN_FIX
 - Add a historical bid/ask candle source; current historical fills remain midpoint plus configured spread/slippage.
 - Persist the audit journal and safety state to PostgreSQL rather than memory only.
 - Run long soak tests with forced disconnects, restarts, partial fills, and position reconciliation failures.
-- Add portfolio-level currency/correlation exposure controls before expanding the live instrument universe.
+- Portfolio-level currency/correlation exposure controls exist and gate admission in `SharedPortfolioAccount` mode, and the simulator can now stream more than one instrument in a run (§7 multi-instrument portfolio clock — see `ARCHITECTURE_SIMULATOR.md` § Quantitative risk / portfolio layer), so correlation/cross-instrument competition can actually be exercised in production. Remaining gap: no dedicated test proves an exact-correlated real streamed pair trips a correlation penalty end-to-end, and Dashboard replay trade markers aren't yet instrument-filtered (only the candle series is).
+- `SharedPortfolioAccount` mode's account ledger now nets for real: one shared balance pool and margin computed from real net exposure per instrument across strategies, not summed independently (see `ARCHITECTURE_SIMULATOR.md` § Known limitations). Remaining gap is position-level: same-instrument positions across strategies still can't be reconciled to one broker-side netted position, deliberately deferred because it needs every exit-management code path in `StrategySimulationSession` retrofitted to a virtual-lot model first.
 - Generate Phase 3 ML training rows from historical annotations using time-split, lookahead-safe labels.
+- Wire an operational QuantResearch runner (walk-forward/ablation/sensitivity/calibration CLI) and a calibration-artifact repository — the library primitives exist but have no end-to-end workflow yet.
 
 ## Price action and warm-up calibration
 

@@ -38,6 +38,11 @@ public sealed class CurrencyExposureCalculator : ICurrencyExposureCalculator
         ArgumentNullException.ThrowIfNull(reservations);
         ArgumentNullException.ThrowIfNull(conversion);
         var signedNative = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        // Gross accumulates the absolute value of EACH lot's contribution separately from
+        // the signed (net, offsettable) accumulation above - two offsetting positions in
+        // the same currency (e.g. long GBP/USD + short GBP/JPY) must show large gross
+        // exposure even though their net exposure cancels toward zero.
+        var grossNative = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var reservedAccount = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var stopRisk = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
@@ -45,8 +50,12 @@ public sealed class CurrencyExposureCalculator : ICurrencyExposureCalculator
         {
             (string Base, string Quote) = ParseCurrencies(lot.Instrument);
             decimal sign = lot.Side == OrderSide.Buy ? 1m : -1m;
-            Add(signedNative, Base, sign * lot.Quantity * lot.ContractMultiplier);
-            Add(signedNative, Quote, -sign * lot.Quantity * lot.CurrentPrice * lot.ContractMultiplier);
+            decimal baseNative = sign * lot.Quantity * lot.ContractMultiplier;
+            decimal quoteNative = -sign * lot.Quantity * lot.CurrentPrice * lot.ContractMultiplier;
+            Add(signedNative, Base, baseNative);
+            Add(signedNative, Quote, quoteNative);
+            Add(grossNative, Base, Math.Abs(baseNative));
+            Add(grossNative, Quote, Math.Abs(quoteNative));
             if (lot.ProtectiveStopPrice is decimal stop)
             {
                 decimal lossDistance = lot.Side == OrderSide.Buy
@@ -86,7 +95,7 @@ public sealed class CurrencyExposureCalculator : ICurrencyExposureCalculator
                 continue;
             }
             net[currency] = native * rate;
-            gross[currency] = Math.Abs(native * rate);
+            gross[currency] = grossNative.GetValueOrDefault(currency) * rate;
         }
         foreach ((string currency, decimal amount) in reservedAccount.OrderBy(item => item.Key, StringComparer.Ordinal))
         {

@@ -14,6 +14,10 @@ public sealed record AccountSnapshot
     public decimal? Available { get; init; }
     public decimal? MarginUsed { get; init; }
     public decimal? UnrealizedProfitLoss { get; init; }
+    /// <summary>Broker-authoritative net asset value/equity when the venue provides it.</summary>
+    public decimal? Equity { get; init; }
+
+    public string? LastTransactionId { get; init; }
     public bool? CanTrade { get; init; }
     public IReadOnlyList<AssetBalance> AssetBalances { get; init; } = [];
 }

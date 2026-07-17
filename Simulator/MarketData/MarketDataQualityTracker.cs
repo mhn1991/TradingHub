@@ -20,6 +20,7 @@ public sealed class MarketDataQualityTracker
     private long _weekendGaps;
     private long _sessionGaps;
     private long _incompleteAggregates;
+    private readonly List<string> _pendingIssueCodes = [];
 
     public MarketDataQualityTracker(BarInterval baseInterval)
     {
@@ -48,10 +49,12 @@ public sealed class MarketDataQualityTracker
             if (candle.OpenTime < previous)
             {
                 _outOfOrder++;
+                _pendingIssueCodes.Add("OutOfOrder");
             }
             else if (candle.OpenTime == previous)
             {
                 _duplicates++;
+                _pendingIssueCodes.Add("Duplicate");
             }
             else
             {
@@ -63,12 +66,28 @@ public sealed class MarketDataQualityTracker
                     if (IsWeekendGap(previous, candle.OpenTime))
                         _weekendGaps++;
                     else
+                    {
                         _sessionGaps++;
+                        _pendingIssueCodes.Add("SessionGap");
+                    }
                 }
             }
         }
 
         _previousOpen = candle.OpenTime;
+    }
+
+    /// <summary>
+    /// Data-quality issue codes observed since the last call, so a caller can attach
+    /// "was data healthy just before this analysis close" to regime/trading-condition
+    /// evaluation without waiting for the end-of-run report. Clears on read.
+    /// </summary>
+    public IReadOnlyList<string> DrainPendingIssueCodes()
+    {
+        if (_pendingIssueCodes.Count == 0) return [];
+        string[] codes = _pendingIssueCodes.ToArray();
+        _pendingIssueCodes.Clear();
+        return codes;
     }
 
     public void RecordIncompleteAggregate(long count = 1)

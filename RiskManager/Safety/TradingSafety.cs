@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 
 namespace RiskManager.Safety;
 
@@ -144,6 +145,7 @@ public sealed record EquityHighWatermarkSnapshot
     public required decimal DrawdownFromPeak { get; init; }
     public required decimal DrawdownPercent { get; init; }
     public required decimal ProtectedFloor { get; init; }
+    [JsonConverter(typeof(ReadOnlyStringSetJsonConverter))]
     public required IReadOnlySet<string> ActivatedTierIds { get; init; }
     public decimal CurrentRiskMultiplier { get; init; } = 1m;
 
@@ -230,6 +232,7 @@ public interface ITradingSafetyController
     TradingSafetySnapshot Pause(string message, DateTimeOffset timestamp);
     TradingSafetySnapshot Resume(DateTimeOffset timestamp);
     TradingSafetySnapshot Trip(SafetyTripReason reason, string message, DateTimeOffset timestamp);
+    TradingSafetySnapshot Restore(TradingSafetySnapshot snapshot, DateTimeOffset timestamp);
     TradingSafetySnapshot Reset(DateTimeOffset timestamp);
 }
 
@@ -546,6 +549,44 @@ public sealed class TradingSafetyController : ITradingSafetyController
         lock (_sync)
         {
             TripCore(reason, message, timestamp);
+            return CreateSnapshot();
+        }
+    }
+
+    public TradingSafetySnapshot Restore(TradingSafetySnapshot snapshot, DateTimeOffset timestamp)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        lock (_sync)
+        {
+            _state = snapshot.State;
+            _reason = snapshot.Reason;
+            _message = snapshot.Message;
+            _changedAt = snapshot.ChangedAt ?? timestamp;
+            DateTime utc = timestamp.UtcDateTime;
+            _currentDay = DateOnly.FromDateTime(utc);
+            _currentIsoYear = ISOWeek.GetYear(utc);
+            _currentIsoWeek = ISOWeek.GetWeekOfYear(utc);
+            _dailyRealizedProfitLoss = snapshot.DailyRealizedProfitLoss;
+            _weeklyRealizedProfitLoss = snapshot.WeeklyRealizedProfitLoss;
+            _consecutiveLosses = snapshot.ConsecutiveLosses;
+            _dailyEquityProfitLoss = snapshot.DailyEquityProfitLoss;
+            _peakDailyEquityProfitLoss = snapshot.PeakDailyEquityProfitLoss;
+            _currentEquity = snapshot.EquityProtection.CurrentEquity;
+            _dailyEquityBaseline = _currentEquity - _dailyEquityProfitLoss;
+            _startingEquity = snapshot.EquityProtection.StartingEquity > 0m
+                ? snapshot.EquityProtection.StartingEquity
+                : null;
+            _peakEquity = snapshot.EquityProtection.PeakEquity;
+            _activatedEquityProtectionTierIds.Clear();
+            _activatedEquityProtectionTierIds.UnionWith(snapshot.EquityProtection.ActivatedTierIds);
+            _everActivatedEquityProtectionTierIds.Clear();
+            _everActivatedEquityProtectionTierIds.UnionWith(snapshot.EquityProtection.ActivatedTierIds);
+            _equityProtectionRiskMultiplier = Math.Clamp(
+                snapshot.EquityProtection.CurrentRiskMultiplier, 0m, 1m);
+            _pausedForEquityProtection = snapshot.Reason == SafetyTripReason.EquityProtectionTier;
+            _pendingPositionTier = snapshot.EquityProtection.PendingPositionTierId is string tierId
+                ? _options.EquityProtection.Tiers.FirstOrDefault(tier => tier.TierId == tierId)
+                : null;
             return CreateSnapshot();
         }
     }

@@ -7,6 +7,7 @@ using TradingCore.MarketData;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Models;
+using PortfolioManager.Risk;
 using RiskManager.Conditions;
 using RiskManager.Calibration;
 
@@ -210,7 +211,8 @@ public sealed class SafeTradingPipeline
             metaLabel = _metaModel.Evaluate(MetaLabelFeatureFactory.Create(
                 decision,
                 context.Analysis,
-                condition?.SpreadAtr ?? decision.SpreadAtr));
+                condition?.SpreadAtr ?? decision.SpreadAtr,
+                currencyStrengthDifferential: CurrencyStrengthDifferential(context.CurrencyStrength, decision.Instrument)));
             metaLabel.Validate();
             Append(
                 TradeJournalEventType.MetaLabelEvaluated,
@@ -333,5 +335,21 @@ public sealed class SafeTradingPipeline
         string value = instrument.Value;
         int separator = value.IndexOf(':');
         return separator > 0 ? value[..separator].ToUpperInvariant() : "Unknown";
+    }
+
+    /// <summary>
+    /// Base-minus-quote currency strength for the traded instrument. The context's
+    /// snapshot is already leave-one-out for this instrument (see
+    /// CrossMarketAnalysisCoordinator.GetSnapshot). Null (not zero) when either
+    /// currency has no score - soft evidence must never masquerade as "neutral".
+    /// </summary>
+    private static decimal? CurrencyStrengthDifferential(CurrencyStrengthSnapshot? snapshot, InstrumentKey instrument)
+    {
+        if (snapshot is null) return null;
+        (string baseCurrency, string quoteCurrency) = CurrencyExposureCalculator.ParseCurrencies(instrument);
+        if (!snapshot.Scores.TryGetValue(baseCurrency, out decimal baseScore) ||
+            !snapshot.Scores.TryGetValue(quoteCurrency, out decimal quoteScore))
+            return null;
+        return baseScore - quoteScore;
     }
 }

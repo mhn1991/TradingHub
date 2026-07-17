@@ -8,7 +8,30 @@ public sealed record PortfolioRiskOptions
     public decimal MaximumPendingRiskPercent { get; init; } = 0.75m;
     public decimal MaximumStrategyRiskPercent { get; init; } = 0.75m;
     public decimal MaximumInstrumentRiskPercent { get; init; } = 0.75m;
-    public decimal MaximumCurrencyRiskPercent { get; init; } = 0.75m;
+
+    /// <summary>
+    /// Limits currency concentration measured as planned stop-loss risk (not notional
+    /// exposure) attributed half to the base currency and half to the quote currency.
+    /// See <see cref="MaximumNetCurrencyExposurePercent"/> and
+    /// <see cref="MaximumGrossCurrencyExposurePercent"/> for true notional-exposure
+    /// limits - the three are deliberately distinct metrics, not one "currency heat".
+    /// </summary>
+    public decimal MaximumCurrencyStopRiskPercent { get; init; } = 0.75m;
+
+    /// <summary>
+    /// Limits net (directional, offsettable) notional currency exposure as a percent of
+    /// equity, computed from real position notional via <see cref="CurrencyExposureCalculator"/>.
+    /// Notional exposure is naturally larger than stop risk under leverage, so this
+    /// defaults well above 100%.
+    /// </summary>
+    public decimal MaximumNetCurrencyExposurePercent { get; init; } = 300m;
+
+    /// <summary>
+    /// Limits gross (non-offsetting, absolute) notional currency exposure as a percent
+    /// of equity, computed from real position notional via <see cref="CurrencyExposureCalculator"/>.
+    /// </summary>
+    public decimal MaximumGrossCurrencyExposurePercent { get; init; } = 300m;
+
     public decimal MaximumMarginUsagePercent { get; init; } = 30m;
     public decimal MaximumSinglePositionMarginPercent { get; init; } = 10m;
     public decimal MinimumUnallocatedMarginReservePercent { get; init; } = 30m;
@@ -22,12 +45,14 @@ public sealed record PortfolioRiskOptions
             MaximumPendingRiskPercent,
             MaximumStrategyRiskPercent,
             MaximumInstrumentRiskPercent,
-            MaximumCurrencyRiskPercent,
+            MaximumCurrencyStopRiskPercent,
             MaximumMarginUsagePercent,
             MaximumSinglePositionMarginPercent,
             MinimumUnallocatedMarginReservePercent
         ];
         if (percentages.Any(value => value is <= 0m or > 100m) ||
+            MaximumNetCurrencyExposurePercent <= 0m ||
+            MaximumGrossCurrencyExposurePercent <= 0m ||
             MaximumPendingRiskPercent > MaximumTotalOpenRiskPercent ||
             MaximumStrategyRiskPercent > MaximumTotalOpenRiskPercent ||
             MaximumInstrumentRiskPercent > MaximumTotalOpenRiskPercent ||

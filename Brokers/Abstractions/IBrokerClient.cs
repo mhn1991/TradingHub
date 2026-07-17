@@ -61,3 +61,14 @@ public interface ICostClient
         InstrumentKey instrument,
         CancellationToken cancellationToken = default);
 }
+
+public interface IInstrumentMetadataBrokerClient : IBrokerClient
+{
+    IInstrumentMetadataClient InstrumentMetadata { get; }
+}
+
+public interface IInstrumentMetadataClient
+{
+    Task<IReadOnlyList<InstrumentTradingMetadata>> GetInstrumentMetadataAsync(
+        CancellationToken cancellationToken = default);
+}

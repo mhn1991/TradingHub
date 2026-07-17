@@ -146,6 +146,85 @@ public sealed class FileSimulationJobRepositoryCompatibilityTests
         }
     }
 
+    [Test]
+    public async Task LegacySnapshotWithInvalidBarInterval_IsQuarantinedWithoutBlockingStart()
+    {
+        // Regression for InvalidSimulationRequest ("Parameter 'value'") when recovery
+        // scanned jobs that persisted default(BarInterval) as { "value": 0, "unit": "Second" }.
+        // MarkInterruptedJobsAsync must quarantine those files, not throw ArgumentOutOfRangeException.
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            $"tradinghub-invalid-barinterval-jobs-{Guid.NewGuid():N}");
+        var repository = new FileSimulationJobRepository(directory);
+        Guid corruptId = Guid.NewGuid();
+
+        try
+        {
+            string corruptJson = $$"""
+                {
+                  "schemaVersion": 2,
+                  "snapshot": {
+                    "id": "{{corruptId}}",
+                    "revision": 1,
+                    "status": "Failed",
+                    "createdAt": "2026-07-16T00:00:00+00:00",
+                    "instrument": "FX:EUR/USD",
+                    "requestedFrom": "2026-06-01T00:00:00+00:00",
+                    "requestedTo": "2026-07-01T00:00:00+00:00",
+                    "processedBaseCandles": 0,
+                    "progressPercent": 0,
+                    "candlesPerSecond": 0,
+                    "strategies": [],
+                    "isComplete": true,
+                    "request": {
+                      "instrument": "FX:EUR/USD",
+                      "from": "2026-06-01T00:00:00+00:00",
+                      "to": "2026-07-01T00:00:00+00:00",
+                      "strategies": ["legacy"],
+                      "startingBalance": 100000,
+                      "quantity": 1000,
+                      "leverage": 20,
+                      "runtime": {
+                        "accountMode": "IndependentStrategyAccounts",
+                        "baseInterval": { "value": 0, "unit": "Second", "isValid": false },
+                        "executionInterval": { "value": 0, "unit": "Second", "isValid": false },
+                        "analysisBaseInterval": { "value": 1, "unit": "Minute", "isValid": true },
+                        "analysisIntervals": [{ "value": 5, "unit": "Minute", "isValid": true }]
+                      }
+                    }
+                  }
+                }
+                """;
+            await File.WriteAllTextAsync(
+                Path.Combine(directory, $"{corruptId:N}.json"),
+                corruptJson);
+
+            Assert.That(async () => await repository.MarkInterruptedJobsAsync(), Throws.Nothing);
+
+            SimulationJobSnapshot valid = CreateQueuedSnapshot(Guid.NewGuid());
+            await repository.SaveAsync(valid);
+            IReadOnlyList<SimulationJobSnapshot> jobs = await repository.ListAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(jobs.Any(item => item.Id == valid.Id), Is.True);
+                Assert.That(jobs.Any(item => item.Id == corruptId), Is.False);
+                Assert.That(repository.LastRecoveryReport.QuarantinedFiles, Is.EqualTo(1));
+                Assert.That(repository.LastRecoveryReport.WarningCodes, Does.Contain("PersistedJobsQuarantined"));
+                Assert.That(
+                    Directory.EnumerateFiles(Path.Combine(directory, "quarantine"), "*.json")
+                        .Any(path => path.Contains("invalid-domain", StringComparison.Ordinal) ||
+                                     path.Contains("invalid-json", StringComparison.Ordinal)),
+                    Is.True);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [TestCase("{ \"schemaVersion\": \"bad\", \"snapshot\": {} }")]
     [TestCase("{ \"schemaVersion\": 999, \"snapshot\": {} }")]
     public async Task InvalidPersistedEnvelope_IsQuarantinedWithoutPoisoningRepository(string json)

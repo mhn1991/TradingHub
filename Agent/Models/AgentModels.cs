@@ -16,6 +16,8 @@ public enum AgentAction
 public sealed record AgentDecision
 {
     public string? DecisionId { get; init; }
+    /// <summary>Optional caller-owned idempotency key for broker submission.</summary>
+    public string? ClientOrderId { get; init; }
     public string? SetupId { get; init; }
     public string? StrategyName { get; init; }
     public string? StrategyId { get; init; }
@@ -79,6 +81,24 @@ public sealed record AgentDecision
     public decimal? PortfolioOriginalQuantity { get; init; }
     public decimal? PortfolioAllocatedQuantity { get; init; }
     public decimal? FinalRiskBudgetMultiplier { get; init; }
+    /// <summary>
+    /// True only when a central portfolio coordinator has already performed monetary sizing,
+    /// ranked the opportunity, and reserved the exact quantity. Execution must still repeat
+    /// broker/account safety and hard pre-trade risk checks, but must not size the quantity a
+    /// second time or reapply risk multipliers.
+    /// </summary>
+    public bool QuantityIsPortfolioApproved { get; init; }
+
+    /// <summary>
+    /// Optional, independent value-location evidence (spec §13.3). Empty when the
+    /// feature is disabled or no anchor with a distance was available, so disabled
+    /// behaviour stays byte-identical to before this feature.
+    /// </summary>
+    public IReadOnlyList<string> ValueLocationEvidenceReasonCodes { get; init; } = [];
+    public decimal? ValueLocationDistanceAtr { get; init; }
+    public IReadOnlyList<string> TrendQualityReasonCodes { get; init; } = [];
+    public IReadOnlyList<string> CurrencyStrengthReasonCodes { get; init; } = [];
+    public decimal? CurrencyStrengthDifferential { get; init; }
 }
 
 public sealed class MultiTimeframeAnalysis
@@ -119,4 +139,5 @@ public sealed record AgentMarketContext
     public decimal? ExecutableSpread { get; init; }
     public DateTimeOffset? MarketDataAvailableAt { get; init; }
     public string? StrategyId { get; init; }
+    public CurrencyStrengthSnapshot? CurrencyStrength { get; init; }
 }

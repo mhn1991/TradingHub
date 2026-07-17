@@ -1,5 +1,7 @@
 using Brokers.Models;
+using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Models;
+using ChartAnnotator.Value;
 
 namespace Agent.Strategies;
 
@@ -32,6 +34,11 @@ public sealed record ProgressiveStrategyOptions
     public int MinimumSetupAlignments { get; init; }
     public int MinimumConfirmationAlignments { get; init; } = 1;
     public bool StrongOppositionVeto { get; init; } = true;
+    /// <summary>
+    /// Enables ADX/DMI directional confirmation during side detection. Disabling
+    /// removes DMI's opinion entirely (no support, no veto) rather than inverting it.
+    /// </summary>
+    public bool EnableDmiConfirmation { get; init; } = true;
 
     public decimal Quantity { get; init; } = 1_000m;
     public decimal MinimumTrendConfidence { get; init; } = 55m;
@@ -63,6 +70,12 @@ public sealed record ProgressiveStrategyOptions
     public PriceActionConfirmationMode PriceActionConfirmation { get; init; } = PriceActionConfirmationMode.Soft;
     public decimal MinimumPriceActionConfidence { get; init; } = 55m;
     public bool RejectStrongOpposingPriceAction { get; init; } = true;
+    /// <summary>
+    /// Maximum ATR distance from an in-progress break-retest for it to count as an
+    /// entry trigger by itself. Slightly looser than PriceActionOptions.RetestProximityAtr
+    /// since this is soft entry evidence, not the primary retest-hold trigger.
+    /// </summary>
+    public decimal MaximumActiveRetestDistanceAtr { get; init; } = 0.35m;
     /// <summary>
     /// Direction-aware RSI divergence/convergence and Bollinger %B/width context.
     /// Aligned evidence can confirm an entry; strong opposing evidence vetoes it.
@@ -98,6 +111,14 @@ public sealed record ProgressiveStrategyOptions
     /// default; when disabled, routing has no effect on decisions.
     /// </summary>
     public MarketRegimePolicyOptions MarketRegime { get; init; } = new();
+
+    /// <summary>
+    /// Optional, independent value-location evidence (audit §13.3). Disabled by
+    /// default; when disabled, has no effect on decisions.
+    /// </summary>
+    public ValueLocationEvidenceOptions ValueLocationEvidence { get; init; } = new();
+    public TrendQualityEvidenceOptions TrendQualityEvidence { get; init; } = new();
+    public CurrencyStrengthEvidenceOptions CurrencyStrengthEvidence { get; init; } = new();
 
     public IReadOnlyList<BarInterval> ConfirmationIntervals =>
         [ConfirmationInterval, .. AdditionalConfirmationIntervals];
@@ -188,6 +209,8 @@ public sealed record ProgressiveStrategyOptions
         {
             throw new ArgumentOutOfRangeException(nameof(MinimumPriceActionConfidence));
         }
+        if (MaximumActiveRetestDistanceAtr <= 0m)
+            throw new ArgumentOutOfRangeException(nameof(MaximumActiveRetestDistanceAtr));
 
         ArgumentNullException.ThrowIfNull(MultiTimeframePriceAction);
         ArgumentNullException.ThrowIfNull(AllowedPriceActionSetups);
@@ -198,6 +221,9 @@ public sealed record ProgressiveStrategyOptions
         RsiBollingerSignals.Validate();
         ZoneVolumeSignals.Validate();
         MarketRegime.Validate();
+        ValueLocationEvidence.Validate();
+        TrendQualityEvidence.Validate();
+        CurrencyStrengthEvidence.Validate();
 
         if (RegimeInterval is BarInterval regimeInterval && !regimeInterval.IsValid)
         {

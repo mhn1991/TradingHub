@@ -1,23 +1,7 @@
 using Brokers.Models;
+using ChartAnnotator.Models;
 
 namespace PortfolioManager.CurrencyStrength;
-
-public sealed record CurrencyPairReturn
-{
-    public required InstrumentKey Instrument { get; init; }
-    public required decimal LogReturn { get; init; }
-    public required decimal RealizedVolatility { get; init; }
-    public decimal DataQualityWeight { get; init; } = 1m;
-    public decimal LiquidityWeight { get; init; } = 1m;
-}
-
-public sealed record CurrencyStrengthSnapshot
-{
-    public required DateTimeOffset AvailableAt { get; init; }
-    public required IReadOnlyDictionary<string, decimal> Scores { get; init; }
-    public required IReadOnlyDictionary<string, decimal> Coverage { get; init; }
-    public required string MethodVersion { get; init; }
-}
 
 public sealed class CurrencyStrengthCalculator
 {
@@ -29,8 +13,12 @@ public sealed class CurrencyStrengthCalculator
         InstrumentKey? leaveOutInstrument = null)
     {
         ArgumentNullException.ThrowIfNull(returns);
-        var sums = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-        var weights = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        // Volatility-normalized weight/return ratios use double, not decimal: a very
+        // quiet/illiquid pair can have realized volatility many orders of magnitude
+        // smaller than its return, and decimal's ~28-digit range overflows on that
+        // division/multiplication chain where double's much wider exponent range does not.
+        var sums = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        var weights = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         foreach (CurrencyPairReturn observation in returns
                      .Where(item => leaveOutInstrument is null || item.Instrument != leaveOutInstrument.Value)
                      .OrderBy(item => item.Instrument.Value, StringComparer.Ordinal))
@@ -39,9 +27,12 @@ public sealed class CurrencyStrengthCalculator
                 observation.LiquidityWeight <= 0m)
                 continue;
             (string baseCurrency, string quoteCurrency) = Risk.CurrencyExposureCalculator.ParseCurrencies(observation.Instrument);
-            decimal weight = observation.DataQualityWeight * observation.LiquidityWeight /
-                observation.RealizedVolatility;
-            decimal normalized = observation.LogReturn / observation.RealizedVolatility;
+            double volatility = (double)observation.RealizedVolatility;
+            double weight = (double)observation.DataQualityWeight * (double)observation.LiquidityWeight / volatility;
+            double normalized = (double)observation.LogReturn / volatility;
+            if (double.IsNaN(weight) || double.IsInfinity(weight) ||
+                double.IsNaN(normalized) || double.IsInfinity(normalized))
+                continue;
             Add(sums, baseCurrency, normalized * weight);
             Add(sums, quoteCurrency, -normalized * weight);
             Add(weights, baseCurrency, weight);
@@ -49,16 +40,33 @@ public sealed class CurrencyStrengthCalculator
         }
 
         string[] currencies = weights.Keys.OrderBy(item => item, StringComparer.Ordinal).ToArray();
-        decimal maximumWeight = weights.Count == 0 ? 0m : weights.Values.Max();
+        double maximumWeight = weights.Count == 0 ? 0d : weights.Values.Max();
         return new CurrencyStrengthSnapshot
         {
             AvailableAt = availableAt,
-            Scores = currencies.ToDictionary(currency => currency, currency => sums[currency] / weights[currency], StringComparer.OrdinalIgnoreCase),
-            Coverage = currencies.ToDictionary(currency => currency, currency => maximumWeight <= 0m ? 0m : weights[currency] / maximumWeight * 100m, StringComparer.OrdinalIgnoreCase),
+            Scores = currencies.ToDictionary(
+                currency => currency,
+                currency => ToDecimalScore(sums[currency] / weights[currency]),
+                StringComparer.OrdinalIgnoreCase),
+            Coverage = currencies.ToDictionary(
+                currency => currency,
+                currency => maximumWeight <= 0d ? 0m : (decimal)(weights[currency] / maximumWeight * 100d),
+                StringComparer.OrdinalIgnoreCase),
             MethodVersion = Version
         };
     }
 
-    private static void Add(Dictionary<string, decimal> values, string key, decimal amount) =>
+    private static void Add(Dictionary<string, double> values, string key, double amount) =>
         values[key] = values.GetValueOrDefault(key) + amount;
+
+    /// <summary>Clamps into decimal's representable range instead of throwing on a
+    /// pathological ratio - an extreme score is still meaningful ("very strong/weak"),
+    /// an unhandled overflow crash is not.</summary>
+    private static decimal ToDecimalScore(double value)
+    {
+        if (double.IsNaN(value)) return 0m;
+        if (value >= (double)decimal.MaxValue) return decimal.MaxValue;
+        if (value <= (double)decimal.MinValue) return decimal.MinValue;
+        return (decimal)value;
+    }
 }

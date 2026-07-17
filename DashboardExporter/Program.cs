@@ -60,7 +60,7 @@ internal static class Program
             foreach (CandleClosedEvent candleEvent in aggregator.Apply(baseCandle))
             {
                 long started = Stopwatch.GetTimestamp();
-                AnalysisSnapshot snapshot = await annotator.ProcessAsync(candleEvent);
+                AnalysisSnapshot snapshot = await annotator.ProcessAsync(candleEvent, runtimeContext: null);
                 double elapsedMicroseconds = Stopwatch.GetElapsedTime(started).TotalMicroseconds;
                 List<ReplayFrame> intervalFrames = frames[candleEvent.Interval];
                 intervalFrames.Add(ReplayContractMapper.ToFrame(

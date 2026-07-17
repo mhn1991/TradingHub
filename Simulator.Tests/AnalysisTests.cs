@@ -580,6 +580,50 @@ public sealed class AnalysisTests
     }
 
     [Test]
+    public void ConfidenceScorer_TrendlinesAndChannelsDoNotContributeToTotal()
+    {
+        // AGENT-08: trendlines/channels were already judged unreliable enough to exclude from
+        // Agent stop/target selection; this proves the same evidence no longer moves the
+        // aggregate confidence score that gates setup detection/confirmation at every timeframe
+        // layer (DetectSide's confidence floor) either.
+        var candleTime = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        Candle candle = TestCandles.Create(
+            new InstrumentKey("FX:EUR/USD"),
+            candleTime,
+            BarInterval.Minutes(5),
+            100m, 101m, 99m, 100m);
+        var scorer = new ConfidenceScorer();
+        var indicators = new IndicatorSnapshot { Atr = 1m };
+
+        Trendline nearbyLine = Line(
+            candleTime.AddMinutes(-30), candleTime, 100m, TrendlineType.Support);
+        var channel = new PriceChannel
+        {
+            LowerLine = nearbyLine,
+            UpperLine = Line(candleTime.AddMinutes(-30), candleTime, 105m, TrendlineType.Resistance),
+            StartTime = candleTime.AddMinutes(-30),
+            EndTime = candleTime,
+            Direction = ChannelDirection.Rising,
+            Width = 5m,
+            WidthAtr = 5m,
+            Confidence = 90m
+        };
+
+        ConfidenceScore withoutLines = scorer.Calculate(candle, indicators, [], [], []);
+        ConfidenceScore withLinesAndChannel = scorer.Calculate(
+            candle, indicators, [], [nearbyLine], [channel]);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(withLinesAndChannel.Total, Is.EqualTo(withoutLines.Total));
+            Assert.That(
+                withLinesAndChannel.Contributions.Any(item =>
+                    item.Rule is "Relevant trendline" or "Price channel" or "Channel/structure alignment"),
+                Is.False);
+        });
+    }
+
+    [Test]
     public async Task AnnotationEngine_KeepsOnlyConfiguredCandleCapacity()
     {
         InstrumentKey instrument = new("CRYPTO:BTC/USDT");
@@ -610,7 +654,7 @@ public sealed class AnalysisTests
                 instrument,
                 interval,
                 candle,
-                index));
+                index), null);
         }
 
         IReadOnlyList<Candle> candles = engine.GetCandles(instrument, interval);
@@ -646,7 +690,7 @@ public sealed class AnalysisTests
                 instrument,
                 interval,
                 candle,
-                Sequence: 0));
+                Sequence: 0), null);
         })));
 
         Assert.That(

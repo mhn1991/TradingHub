@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Brokers.Models;
 
 public enum BarUnit
@@ -10,6 +12,15 @@ public enum BarUnit
     Month
 }
 
+/// <summary>
+/// Custom-converted because <see cref="BarInterval"/>'s only public constructor validates its
+/// arguments: System.Text.Json's reflection-based deserializer prefers a record struct's implicit
+/// parameterless constructor over a custom one when both exist, then cannot populate the get-only
+/// <see cref="Value"/>/<see cref="Unit"/> properties afterward, silently producing
+/// <c>default(BarInterval)</c> (an invalid, zeroed interval) on every round trip without this
+/// converter.
+/// </summary>
+[JsonConverter(typeof(BarIntervalJsonConverter))]
 public readonly record struct BarInterval
 {
     public BarInterval(int value, BarUnit unit)

@@ -25,7 +25,7 @@ public sealed class BacktestApplicationServiceOptions
     public int MaxConcurrentJobs { get; init; } = 1;
     public int QueueCapacity { get; init; } = 8;
     public Func<BacktestRequest, IHistoricalCandleStream>? StreamFactory { get; init; }
-    public Func<BacktestRequest, IReadOnlyList<(string Id, ITradingAgent Agent)>>? StrategyFactory { get; init; }
+    public Func<BacktestRequest, IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)>>? StrategyFactory { get; init; }
 }
 
 /// <summary>
@@ -412,7 +412,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         await UpdateStatusAsync(job, SimulationJobStatus.PreparingData, cancellationToken)
             .ConfigureAwait(false);
 
-        IReadOnlyList<(string Id, ITradingAgent Agent)> strategies =
+        IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> strategies =
             (_options.StrategyFactory ?? CreateDefaultStrategies)(request);
         IHistoricalCandleStream stream = (_options.StreamFactory ?? CreateDefaultStream)(request);
         await using IAsyncDisposable? ownedStream = stream as IAsyncDisposable;
@@ -530,6 +530,12 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                     strategies.SelectMany(s => s.Agent.RequiredIntervals)),
             Runtime = runtime,
             AnnotationOptions = runtime.AnnotationOptions,
+            // Previously never set from any Runtime field - meta-labeling was 100% dead in
+            // every production run regardless of what BacktestRuntimeOptions.MetaModel asked
+            // for (2026-07-16 audit §14-17 fix).
+            MetaLabelModel = runtime.MetaModel.Enabled
+                ? new Simulator.Calibration.CalibratedSetupMetaModel(runtime.MetaModelArtifact!, runtime.MetaModel)
+                : null,
             SimulationOptions = simulationOptions,
             OutputDirectory = job.OutputDirectory,
             InputStreamId = inputStreamId,
@@ -592,13 +598,18 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
     private static string BuildInputRequestId(BacktestRequest request)
     {
-        // Deterministic identity of the candle request only — not strategies/risk.
+        // Deterministic identity of the candle request(s) only — not strategies/risk.
+        // Folds in every distinct traded instrument (not just the primary Instrument
+        // field) so two multi-instrument requests trading different instrument sets
+        // never collide on cache/replay identity.
         DateTimeOffset streamFrom = request.ResolveWarmupFrom();
         string source = request.Runtime.SourceKind.ToString();
         string exec = BarIntervalParser.Format(request.Runtime.ExecutionInterval);
+        string instruments = string.Join(
+            ',', request.TradedInstruments().Select(instrument => instrument.Value).OrderBy(v => v, StringComparer.Ordinal));
         return string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"{source}|{request.Environment}|{request.Instrument.Value}|exec:{exec}|{streamFrom:O}|{request.To:O}|mid|v3");
+            $"{source}|{request.Environment}|{instruments}|exec:{exec}|{streamFrom:O}|{request.To:O}|mid|v3");
     }
 
     private static string BuildSimulationConfigurationId(
@@ -610,6 +621,13 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         {
             Converters = { new JsonStringEnumConverter() }
         });
+        // Only present for §7 multi-instrument requests, so a plain single-instrument
+        // request's configuration identity stays byte-for-byte unchanged from before.
+        string assignmentsSegment = request.StrategyAssignments is { Count: > 0 } assignmentsForId
+            ? "assignments:" + string.Join(',', assignmentsForId
+                .Select(assignment => $"{assignment.StrategyType}@{assignment.Instrument.Value}")
+                .OrderBy(v => v, StringComparer.Ordinal)) + "|"
+            : string.Empty;
         string canonical = string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
             $"{inputRequestId}|analysis-base:{BarIntervalParser.Format(runtime.AnalysisBaseInterval)}|" +
@@ -624,7 +642,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             $"{runtime.StrategyTimeframes.MinimumSetupAlignments}/" +
             $"{runtime.StrategyTimeframes.MinimumConfirmationAlignments}," +
             $"veto={runtime.StrategyTimeframes.StrongOppositionVeto}|" +
-            $"strategies:{string.Join(',', request.Strategies)}|balance:{request.StartingBalance}|" +
+            $"strategies:{string.Join(',', request.Strategies)}|" +
+            $"{assignmentsSegment}" +
+            $"balance:{request.StartingBalance}|" +
             $"base-currency:{request.BaseCurrency}|quantity:{request.Quantity}|" +
             $"leverage:{request.Leverage}|commission:{request.CommissionRate}|" +
             $"sizing:{runtime.PositionSizing.Mode},{runtime.PositionSizing.FixedQuantity}," +
@@ -758,42 +778,42 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             oanda);
     }
 
-    private static IReadOnlyList<(string Id, ITradingAgent Agent)> CreateDefaultStrategies(
+    private static IReadOnlyList<(string Id, ITradingAgent Agent, InstrumentKey Instrument)> CreateDefaultStrategies(
         BacktestRequest request)
     {
-        ProgressiveStrategyTimeframes tf = request.Runtime.StrategyTimeframes;
-        var strategyOptions = new ProgressiveStrategyOptions
-        {
-            TrendInterval = tf.TrendInterval,
-            SecondaryTrendIntervals = tf.SecondaryTrendIntervals,
-            SetupIntervals = tf.SetupIntervals,
-            ConfirmationInterval = tf.ConfirmationInterval,
-            AdditionalConfirmationIntervals = tf.AdditionalConfirmationIntervals,
-            EntryInterval = tf.EntryInterval,
-            MinimumSecondaryTrendAlignments = tf.MinimumSecondaryTrendAlignments,
-            MinimumSetupAlignments = tf.MinimumSetupAlignments,
-            MinimumConfirmationAlignments = tf.MinimumConfirmationAlignments,
-            StrongOppositionVeto = tf.StrongOppositionVeto,
-            Quantity = request.Quantity,
-            MinimumRewardRisk = request.MinimumRewardRisk,
-            PriceActionConfirmation = request.PriceActionConfirmation,
-            MinimumPriceActionConfidence = request.MinimumPriceActionConfidence,
-            RejectStrongOpposingPriceAction = request.RejectStrongOpposingPriceAction,
-            MarketRegime = request.Runtime.MarketRegimeRouting
-        };
+        ProgressiveStrategyOptions strategyOptions = request.ResolveProgressiveStrategyOptions();
 
-        var list = new List<(string, ITradingAgent)>();
+        if (request.StrategyAssignments is { Count: > 0 } assignments)
+        {
+            return assignments
+                .Select(assignment => (
+                    assignment.Id ?? $"{assignment.StrategyType}:{assignment.Instrument.Value}",
+                    assignment.StrategyType switch
+                    {
+                        "legacy" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, strategyOptions),
+                        "improved" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, strategyOptions),
+                        _ => throw new ArgumentException(
+                            $"Unknown strategy type '{assignment.StrategyType}'. Use legacy or improved.")
+                    },
+                    assignment.Instrument))
+                .ToArray();
+        }
+
+        var list = new List<(string, ITradingAgent, InstrumentKey)>();
         foreach (string raw in request.Strategies)
         {
             string id = NormalizeStrategyId(raw);
             ITradingAgent agent = id switch
             {
-                "legacy" or "legacy-progressive" => new LegacyProgressiveAgent(strategyOptions),
-                "improved" or "improved-progressive" => new ImprovedProgressiveAgent(strategyOptions),
+                "legacy" or "legacy-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, strategyOptions),
+                "improved" or "improved-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, strategyOptions),
                 _ => throw new ArgumentException($"Unknown strategy '{raw}'. Use legacy or improved.")
             };
-            list.Add((id.StartsWith("legacy", StringComparison.Ordinal) ? "legacy" :
-                id.StartsWith("improved", StringComparison.Ordinal) ? "improved" : id, agent));
+            list.Add((
+                id.StartsWith("legacy", StringComparison.Ordinal) ? "legacy" :
+                id.StartsWith("improved", StringComparison.Ordinal) ? "improved" : id,
+                agent,
+                request.Instrument));
         }
 
         return list;

@@ -2,14 +2,17 @@ using System.Text.Json.Serialization;
 using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
+using ChartAnnotator.CurrencyStrength;
 using ChartAnnotator.Engine;
 using ChartAnnotator.MarketData;
+using ChartAnnotator.Value;
 using RiskManager;
 using RiskManager.Safety;
 using RiskManager.Conditions;
 using Simulator.MarketData;
 using TradeManager;
 using PortfolioManager.Correlation;
+using PortfolioManager.CrossMarket;
 using PortfolioManager.Risk;
 using Simulator.Execution;
 using Simulator.Financing;
@@ -160,17 +163,56 @@ public sealed record BacktestRuntimeOptions
     /// to both Legacy and Improved. Disabled by default.
     /// </summary>
     public MarketRegimePolicyOptions MarketRegimeRouting { get; init; } = new();
+    /// <summary>
+    /// Optional, independent value-location evidence (spec §13.3), applied to both
+    /// Legacy and Improved. Disabled by default.
+    /// </summary>
+    public ValueLocationEvidenceOptions ValueLocationEvidence { get; init; } = new();
+    /// <summary>
+    /// Optional currency-strength confluence/opposition evidence (2026-07-16 agent
+    /// decision-quality pass), applied to both Legacy and Improved. Disabled by default -
+    /// also depends on <see cref="CurrencyStrength"/> being separately enabled with
+    /// baskets configured, or the strategy's context never receives a snapshot to evaluate.
+    /// </summary>
+    public CurrencyStrengthEvidenceOptions CurrencyStrengthEvidence { get; init; } = new();
+    /// <summary>
+    /// RSI-relationship and Bollinger-context signal evidence, applied to both Legacy
+    /// and Improved. Previously unreachable from any Runtime/CLI/Dashboard path -
+    /// <see cref="Agent.Strategies.ProgressiveStrategyOptions.RsiBollingerSignals"/> was
+    /// always hard-defaulted, regardless of what a request asked for.
+    /// </summary>
+    public RsiBollingerSignalOptions RsiBollingerSignals { get; init; } = new();
+    /// <summary>
+    /// Enables ADX/DMI directional confirmation. Enabled by default (existing behavior);
+    /// disabling removes the DMI opinion entirely rather than inverting it.
+    /// </summary>
+    public bool DmiConfirmationEnabled { get; init; } = true;
     public TradingConditionOptions TradingConditions { get; init; } = new();
     public PortfolioRiskOptions PortfolioRisk { get; init; } = new();
     public CorrelationRiskOptions CorrelationRisk { get; init; } = new();
+    public CurrencyStrengthOptions CurrencyStrength { get; init; } = new();
     public AdaptiveRiskOptions AdaptiveRisk { get; init; } = new();
     public SetupCalibrationPolicyOptions SetupCalibration { get; init; } = new();
     public SetupCalibrationArtifact? SetupCalibrationArtifact { get; init; }
     public RegimeManagementOptions RegimeManagement { get; init; } = new();
     public TradeManagementCalibrationOptions ManagementCalibration { get; init; } = new();
     public TradeManagementCalibration? ManagementCalibrationArtifact { get; init; }
+    /// <summary>
+    /// Statistical meta-model policy (audit §17). <c>BacktestApplicationService</c>
+    /// uses this to populate <c>StreamingComparativeEngineOptions.MetaLabelModel</c> - before
+    /// the 2026-07-16 pass this was never set from any Runtime field, so meta-labeling was
+    /// 100% dead in every production run even when other plumbing suggested it was wired.
+    /// </summary>
+    public Simulator.Calibration.MetaModelPolicyOptions MetaModel { get; init; } = new();
+    public Simulator.Calibration.MetaModelArtifact? MetaModelArtifact { get; init; }
     public ExecutionModelOptions Execution { get; init; } = new();
     public FinancingOptions Financing { get; init; } = new();
+    /// <summary>
+    /// Records a bar-by-bar MFE/MAE excursion path per trade (<see cref="SimulatedTradeRecord.ExcursionPath"/>),
+    /// needed for management-calibration research but not by default trading - off by
+    /// default, zero size/behavior change for every run that doesn't opt in.
+    /// </summary>
+    public bool DetailedExcursionTracking { get; init; }
 
     public SimulationTimeframeOptions ToTimeframeOptions() => new()
     {
@@ -178,6 +220,48 @@ public sealed record BacktestRuntimeOptions
         AnalysisBaseInterval = AnalysisBaseInterval,
         AnalysisIntervals = AnalysisIntervals
     };
+
+    /// <summary>
+    /// AGENT-01: the shared derivation body behind <see cref="BacktestRequest.ResolveProgressiveStrategyOptions"/>,
+    /// extracted so any caller with a <see cref="BacktestRuntimeOptions"/> - not only a full
+    /// <see cref="BacktestRequest"/> - can derive the exact environment-neutral Agent options
+    /// that runtime implies, instead of falling back to a bare <c>new ProgressiveStrategyOptions()</c>
+    /// that silently drifts from what a backtest driven by this same runtime would actually use.
+    /// </summary>
+    public ProgressiveStrategyOptions ResolveProgressiveStrategyOptions(
+        decimal quantity,
+        decimal minimumRewardRisk,
+        PriceActionConfirmationMode priceActionConfirmation,
+        decimal minimumPriceActionConfidence,
+        bool rejectStrongOpposingPriceAction)
+    {
+        ProgressiveStrategyTimeframes tf = StrategyTimeframes;
+        var options = new ProgressiveStrategyOptions
+        {
+            TrendInterval = tf.TrendInterval,
+            SecondaryTrendIntervals = tf.SecondaryTrendIntervals,
+            SetupIntervals = tf.SetupIntervals,
+            ConfirmationInterval = tf.ConfirmationInterval,
+            AdditionalConfirmationIntervals = tf.AdditionalConfirmationIntervals,
+            EntryInterval = tf.EntryInterval,
+            MinimumSecondaryTrendAlignments = tf.MinimumSecondaryTrendAlignments,
+            MinimumSetupAlignments = tf.MinimumSetupAlignments,
+            MinimumConfirmationAlignments = tf.MinimumConfirmationAlignments,
+            StrongOppositionVeto = tf.StrongOppositionVeto,
+            Quantity = quantity,
+            MinimumRewardRisk = minimumRewardRisk,
+            PriceActionConfirmation = priceActionConfirmation,
+            MinimumPriceActionConfidence = minimumPriceActionConfidence,
+            RejectStrongOpposingPriceAction = rejectStrongOpposingPriceAction,
+            MarketRegime = MarketRegimeRouting,
+            ValueLocationEvidence = ValueLocationEvidence,
+            CurrencyStrengthEvidence = CurrencyStrengthEvidence,
+            RsiBollingerSignals = RsiBollingerSignals,
+            EnableDmiConfirmation = DmiConfirmationEnabled
+        };
+        options.Validate();
+        return options;
+    }
 
     public void Validate(int selectedStrategyCount = 1)
     {
@@ -198,9 +282,13 @@ public sealed record BacktestRuntimeOptions
         PositionSizing.Validate();
         AnnotationOptions.Validate();
         MarketRegimeRouting.Validate();
+        ValueLocationEvidence.Validate();
+        CurrencyStrengthEvidence.Validate();
+        RsiBollingerSignals.Validate();
         TradingConditions.Validate();
         PortfolioRisk.Validate();
         CorrelationRisk.Validate();
+        CurrencyStrength.Validate();
         AdaptiveRisk.Validate();
         SetupCalibration.Validate();
         if (SetupCalibration.Enabled)
@@ -216,6 +304,13 @@ public sealed record BacktestRuntimeOptions
             if (ManagementCalibrationArtifact is null)
                 throw new ArgumentException("Enabled trade-management calibration requires a versioned artifact.");
             ManagementCalibrationArtifact.Validate();
+        }
+        MetaModel.Validate();
+        if (MetaModel.Enabled)
+        {
+            if (MetaModelArtifact is null)
+                throw new ArgumentException("Enabled meta-model policy requires a versioned artifact.");
+            MetaModelArtifact.Validate();
         }
         Execution.Validate();
         Financing.Validate();
@@ -353,14 +448,42 @@ public sealed record BacktestRuntimeOptions
     }
 }
 
+/// <summary>
+/// Assigns one strategy type to one instrument for the §7 multi-instrument portfolio
+/// clock. When a request supplies these, they replace <see cref="BacktestRequest.Strategies"/>
+/// entirely rather than combining with it - each strategy's instrument must be explicit,
+/// not inferred, to avoid silently mixing single-instrument and multi-instrument semantics.
+/// </summary>
+public sealed record StrategyInstrumentAssignment
+{
+    /// <summary>"legacy" or "improved" - the same catalog <see cref="BacktestRequest.Strategies"/> uses.</summary>
+    public required string StrategyType { get; init; }
+    public required InstrumentKey Instrument { get; init; }
+    /// <summary>Optional override; defaults to "{StrategyType}:{Instrument.Value}".</summary>
+    public string? Id { get; init; }
+}
+
 /// <summary>User/API request that starts a simulation job.</summary>
 public sealed record BacktestRequest
 {
+    /// <summary>
+    /// Default/back-compat single traded instrument, and the candle-request template
+    /// (interval/from/to/cache options) every per-instrument request is derived from when
+    /// <see cref="StrategyAssignments"/> is set. Still required even for multi-instrument
+    /// requests for that reason.
+    /// </summary>
     public required InstrumentKey Instrument { get; init; }
     public required DateTimeOffset From { get; init; }
     public required DateTimeOffset To { get; init; }
     public BrokerEnvironment Environment { get; init; } = BrokerEnvironment.Demo;
     public IReadOnlyList<string> Strategies { get; init; } = ["legacy", "improved"];
+    /// <summary>
+    /// Optional per-strategy instrument assignment for the §7 multi-instrument portfolio
+    /// clock. Null/empty (the default) preserves today's behaviour exactly: every name in
+    /// <see cref="Strategies"/> trades <see cref="Instrument"/>. When set, this replaces
+    /// <see cref="Strategies"/> entirely - see <see cref="Validate"/>.
+    /// </summary>
+    public IReadOnlyList<StrategyInstrumentAssignment>? StrategyAssignments { get; init; }
     public decimal StartingBalance { get; init; } = 100_000m;
     public string? BaseCurrency { get; init; }
     public decimal Quantity { get; init; } = 1_000m;
@@ -384,6 +507,28 @@ public sealed record BacktestRequest
     [JsonIgnore]
     public string? AccessToken { get; init; }
 
+    /// <summary>
+    /// Every distinct instrument this request actually trades - <see cref="StrategyAssignments"/>'s
+    /// instruments when set (§7 multi-instrument clock), otherwise just <see cref="Instrument"/>.
+    /// </summary>
+    public IReadOnlyList<InstrumentKey> TradedInstruments() =>
+        StrategyAssignments is { Count: > 0 }
+            ? StrategyAssignments.Select(assignment => assignment.Instrument).Distinct().ToArray()
+            : [Instrument];
+
+    /// <summary>
+    /// Resolves the exact environment-neutral Agent options used by the simulator. Policy
+    /// promotion calls this same method, so OANDA Demo cannot silently reconstruct a different
+    /// strategy from a second live-only settings model.
+    /// </summary>
+    public ProgressiveStrategyOptions ResolveProgressiveStrategyOptions() =>
+        Runtime.ResolveProgressiveStrategyOptions(
+            Quantity,
+            MinimumRewardRisk,
+            PriceActionConfirmation,
+            MinimumPriceActionConfidence,
+            RejectStrongOpposingPriceAction);
+
     public void Validate()
     {
         if (Instrument.IsEmpty)
@@ -399,16 +544,59 @@ public sealed record BacktestRequest
         if (InlineCandles is null && Runtime.SourceKind == HistoricalDataSourceKind.InlineTestData)
             throw new ArgumentException("InlineTestData requires InlineCandles and is not an external source.");
 
+        if (StrategyAssignments is { Count: > 0 } assignments)
+        {
+            foreach (StrategyInstrumentAssignment assignment in assignments)
+            {
+                if (assignment.Instrument.IsEmpty)
+                    throw new ArgumentException("Every strategy assignment requires an instrument.");
+                if (assignment.StrategyType is not ("legacy" or "improved"))
+                {
+                    throw new ArgumentException(
+                        $"Unknown strategy type '{assignment.StrategyType}' in StrategyAssignments. " +
+                        "Use legacy or improved.");
+                }
+            }
+            string[] ids = assignments
+                .Select(assignment => assignment.Id ?? $"{assignment.StrategyType}:{assignment.Instrument.Value}")
+                .ToArray();
+            if (ids.Distinct(StringComparer.Ordinal).Count() != ids.Length)
+                throw new ArgumentException("StrategyAssignments produced duplicate strategy ids.");
+        }
+
         // Inline fixtures use the inline capability set (includes 1s for tests).
         BacktestRuntimeOptions runtime = InlineCandles is not null
             ? Runtime with { SourceKind = HistoricalDataSourceKind.InlineTestData }
             : Runtime;
-        runtime.Validate(Strategies.Count);
-        if (runtime.Financing.Enabled &&
-            !runtime.Financing.InstrumentRates.ContainsKey(Instrument.Value))
+        int selectedStrategyCount = StrategyAssignments is { Count: > 0 } assigned
+            ? assigned.Count
+            : Strategies.Count;
+        runtime.Validate(selectedStrategyCount);
+        if (runtime.Financing.Enabled)
+        {
+            InstrumentKey[] missingRates = TradedInstruments()
+                .Where(instrument => !runtime.Financing.InstrumentRates.ContainsKey(instrument.Value))
+                .ToArray();
+            if (missingRates.Length > 0)
+            {
+                throw new ArgumentException(
+                    "Enabled financing requires an explicit long/short rate for " +
+                    string.Join(", ", missingRates.Select(instrument => instrument.Value)) + ".");
+            }
+        }
+
+        // No production IEconomicEventProvider is wired into this request pipeline yet
+        // (StrategySimulationSession always defaults it to null). Enabling the flag here
+        // would silently report event protection as active while never blocking an
+        // entry - see TradingHub_Quantitative_Enhancements audit §10. Reject rather than
+        // continue unprotected.
+        if (runtime.TradingConditions.EconomicEventFilterEnabled)
         {
             throw new ArgumentException(
-                $"Enabled financing requires an explicit long/short rate for {Instrument.Value}.");
+                "EconomicEventFilterEnabled requires a configured IEconomicEventProvider. No " +
+                "production provider is wired into this request pipeline, so this configuration " +
+                "would run unprotected while claiming to be protected. Leave it disabled until a " +
+                "provider is implemented and wired.");
         }
     }
 
