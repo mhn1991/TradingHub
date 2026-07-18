@@ -2,11 +2,14 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Brokers.Models;
+using ChartAnnotator.Confluence;
 using ChartAnnotator.Engine;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.MarketData;
 using ChartAnnotator.Models;
 using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
+using ChartAnnotator.SupplyDemand;
 using Dashboard.Contracts;
 
 namespace DashboardExporter;
@@ -48,7 +51,10 @@ internal static class Program
                 MinimumPersistenceBars = 2,
                 AdxCalibrationMinimumSamples = 20
             },
-            NeoWave = new NeoWaveOptions { Enabled = true }
+            NeoWave = new NeoWaveOptions { Enabled = true },
+            SupplyDemand = new SupplyDemandCalculationProfile { Enabled = true },
+            Liquidity = new LiquidityCalculationProfile { Enabled = true },
+            SupplyDemandLiquidityConfluence = new SupplyDemandLiquidityConfluenceOptions { Enabled = true }
         };
         BarInterval[] intervals = [FiveMinutes, FifteenMinutes, OneHour];
         var aggregator = new MultiTimeframeAggregator(Instrument, intervals);

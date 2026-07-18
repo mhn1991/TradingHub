@@ -872,10 +872,19 @@ async function loadActiveWorkspace() {
     return
   }
   if (broker.id === 'oanda') {
+    const generation = sourceGeneration
     const query = new URLSearchParams({ symbol: workspace.symbol, interval: workspace.interval })
-    connectLive(`api/workspaces/oanda/events?${query}`, false)
-    void loadOandaAccount(sourceGeneration)
-    connectOandaOrderEvents(sourceGeneration)
+    // Load the heavy warmup snapshot over HTTP — EventSource truncates multi-MB indicator payloads
+    // mid-parse ("Unexpected end of JSON input") while candles are still being annotated.
+    void loadOandaSnapshot(query, generation).then((ok) => {
+      if (generation !== sourceGeneration) return
+      if (ok) {
+        // Keep the HTTP snapshot; SSE only streams small closed-candle deltas.
+        connectLive(`api/workspaces/oanda/events?${query}&updatesOnly=1`, false, { preserveDataset: true })
+      }
+    })
+    void loadOandaAccount(generation)
+    connectOandaOrderEvents(generation)
     return
   }
   loading.value = false
@@ -1014,11 +1023,17 @@ function toggleLayer(layer: keyof ChartLayers) {
   layers[layer] = !layers[layer]
 }
 
-async function connectLive(eventsPath = 'api/live/events', allowOneShot = true) {
+async function connectLive(
+  eventsPath = 'api/live/events',
+  allowOneShot = true,
+  options: { preserveDataset?: boolean } = {},
+) {
   const generation = sourceGeneration
-  dataset.value = null
-  loading.value = true
-  loadError.value = null
+  if (!options.preserveDataset) {
+    dataset.value = null
+    loading.value = true
+    loadError.value = null
+  }
   if (allowOneShot && new URLSearchParams(window.location.search).get('once') === '1') {
     try {
       const response = await fetch(`${import.meta.env.BASE_URL}api/live/snapshot`, {
@@ -1040,16 +1055,23 @@ async function connectLive(eventsPath = 'api/live/events', allowOneShot = true) 
   liveEvents.addEventListener('snapshot', (event) => {
     if (generation !== sourceGeneration) return
     try {
-      applyLiveSnapshot(JSON.parse((event as MessageEvent<string>).data) as LiveReplayPayload)
+      const raw = (event as MessageEvent<string>).data
+      if (!raw || !raw.trim()) throw new Error('The live snapshot was empty.')
+      applyLiveSnapshot(JSON.parse(raw) as LiveReplayPayload)
     } catch (error) {
-      loadError.value = messageFrom(error, 'The live update was invalid.')
+      const detail = messageFrom(error, 'The live snapshot was invalid.')
+      loadError.value = detail.includes('JSON')
+        ? 'Live snapshot was truncated or incomplete. Restart DashboardLive and hard-refresh the page.'
+        : detail
       loading.value = false
     }
   })
   liveEvents.addEventListener('update', (event) => {
     if (generation !== sourceGeneration) return
     try {
-      const update = JSON.parse((event as MessageEvent<string>).data) as LiveReplayUpdate
+      const raw = (event as MessageEvent<string>).data
+      if (!raw || !raw.trim()) return
+      const update = JSON.parse(raw) as LiveReplayUpdate
       liveStatus.value = update.status
       const currentDataset = dataset.value
       const currentSeries = currentDataset?.series[0]
@@ -1068,7 +1090,10 @@ async function connectLive(eventsPath = 'api/live/events', allowOneShot = true) 
       }
       loadError.value = null
     } catch (error) {
-      loadError.value = messageFrom(error, 'The live update was invalid.')
+      const detail = messageFrom(error, 'The live update was invalid.')
+      loadError.value = detail.includes('JSON')
+        ? 'A live update was truncated. The connection will keep retrying.'
+        : detail
     }
   })
   liveEvents.onerror = () => {
@@ -1086,16 +1111,65 @@ async function loadOandaAccount(generation = sourceGeneration) {
       signal: sourceAbortController?.signal,
     })
     if (!response.ok) {
-      const problem = await response.json().catch(() => null) as { error?: string; detail?: string } | null
+      const problem = await readJsonSafe<{ error?: string; detail?: string }>(response)
       throw new Error(problem?.error ?? problem?.detail ?? `OANDA account request failed with HTTP ${response.status}.`)
     }
-    const account = await response.json() as OandaWorkspaceAccount
+    const account = await readJsonSafe<OandaWorkspaceAccount>(response)
+    if (!account) throw new Error('OANDA account response was empty.')
     if (generation === sourceGeneration) oandaAccount.value = account
   } catch (error) {
     if (isAbortError(error)) return
     if (generation === sourceGeneration) loadError.value = messageFrom(error, 'OANDA account data could not be loaded.')
   } finally {
     if (generation === sourceGeneration) oandaAccountLoading.value = false
+  }
+}
+
+async function loadOandaSnapshot(query: URLSearchParams, generation = sourceGeneration): Promise<boolean> {
+  if (generation !== sourceGeneration) return false
+  loading.value = true
+  loadError.value = null
+  try {
+    const response = await fetch(`${import.meta.env.BASE_URL}api/workspaces/oanda/snapshot?${query}`, {
+      signal: sourceAbortController?.signal,
+    })
+    if (!response.ok) {
+      const problem = await readJsonSafe<{ error?: string; detail?: string; title?: string }>(response)
+      throw new Error(
+        problem?.error ??
+          problem?.detail ??
+          problem?.title ??
+          `OANDA snapshot failed with HTTP ${response.status}.`,
+      )
+    }
+    const payload = await readJsonSafe<LiveReplayPayload>(response)
+    if (!payload?.dataset) throw new Error('OANDA snapshot response was empty or incomplete.')
+    if (generation !== sourceGeneration) return false
+    applyLiveSnapshot(payload)
+    return true
+  } catch (error) {
+    if (generation !== sourceGeneration) return false
+    if (isAbortError(error)) return false
+    const detail = messageFrom(error, 'OANDA workspace snapshot failed.')
+    loadError.value = detail.includes('JSON')
+      ? 'OANDA snapshot was truncated while indicators were calculating. Retry the workspace or reduce WarmupCandles.'
+      : detail
+    loading.value = false
+    return false
+  }
+}
+
+async function readJsonSafe<T>(response: Response): Promise<T | null> {
+  const text = await response.text()
+  if (!text.trim()) return null
+  try {
+    return JSON.parse(text) as T
+  } catch (error) {
+    throw new Error(
+      error instanceof Error && error.message.includes('JSON')
+        ? error.message
+        : 'Unexpected end of JSON input',
+    )
   }
 }
 

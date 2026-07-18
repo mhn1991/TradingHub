@@ -6,6 +6,9 @@
   <Project Path="Calibration/Calibration.csproj" />
   <Project Path="ChartAnnotator/ChartAnnotator.csproj" />
   <Project Path="DashboardContracts/DashboardContracts.csproj" />
+  <Project Path="DBManager.Abstractions/DBManager.Abstractions.csproj" />
+  <Project Path="DBManager.Postgres/DBManager.Postgres.csproj" />
+  <Project Path="DBManager.Tests/DBManager.Tests.csproj" />
   <Project Path="DashboardExporter/DashboardExporter.csproj" />
   <Project Path="DashboardLive/DashboardLive.csproj" />
   <Project Path="Networking/Networking.csproj" />

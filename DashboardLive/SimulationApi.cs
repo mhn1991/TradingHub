@@ -12,9 +12,12 @@ using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
 using TradeManager;
+using ChartAnnotator.Confluence;
 using ChartAnnotator.Engine;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.Regime;
 using ChartAnnotator.NeoWave;
+using ChartAnnotator.SupplyDemand;
 using RiskManager.Conditions;
 using PortfolioManager.Risk;
 using PortfolioManager.Correlation;
@@ -1429,7 +1432,11 @@ public sealed record CreateSimulationRequest
                     NeoWave = new NeoWaveOptions
                     {
                         Enabled = NeoWaveEnabled
-                    }
+                    },
+                    // Dashboard chart layers expect zones/pools; detection defaults off for backtest identity.
+                    SupplyDemand = new SupplyDemandCalculationProfile { Enabled = true },
+                    Liquidity = new LiquidityCalculationProfile { Enabled = true },
+                    SupplyDemandLiquidityConfluence = new SupplyDemandLiquidityConfluenceOptions { Enabled = true }
                 },
                 MarketRegimeRouting = new MarketRegimePolicyOptions { Enabled = RegimeEnabled },
                 RegimeManagement = new RegimeManagementOptions { Enabled = RegimeEnabled },

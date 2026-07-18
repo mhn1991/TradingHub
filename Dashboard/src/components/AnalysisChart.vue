@@ -449,7 +449,8 @@ const zoneVisuals = computed(() => (analysisFrame.value?.priceZones ?? [])
 const supplyDemandZoneVisuals = computed(() => {
   const snapshot = analysisFrame.value?.supplyDemand
   if (!snapshot?.isEnabled) return []
-  const zones = snapshot.zones ?? snapshot.activeZones
+  const zones = snapshot.zones ?? snapshot.activeZones ?? []
+  const events = snapshot.recentEvents ?? []
   return zones
     .filter((zone) => Math.max(zone.proximalPrice, zone.distalPrice) >= priceDomain.value.min
       && Math.min(zone.proximalPrice, zone.distalPrice) <= priceDomain.value.max)
@@ -458,14 +459,14 @@ const supplyDemandZoneVisuals = computed(() => {
     .map((zone) => {
       const upper = Math.min(priceDomain.value.max, Math.max(zone.proximalPrice, zone.distalPrice))
       const lower = Math.max(priceDomain.value.min, Math.min(zone.proximalPrice, zone.distalPrice))
-      const terminal = snapshot.recentEvents
+      const terminal = events
         .filter((event) => event.zoneId === zone.zoneId
           && ['Invalidated', 'Expired', 'Merged'].includes(event.eventType))
         .at(-1)
       const startX = xForTime(zone.availableAt)
       const endX = terminal ? xForTime(terminal.availableAt) : plotLeft + plotWidth
       const confluenceCount = analysisFrame.value?.supplyDemandLiquidityConfluence?.relationships
-        .filter((item) => item.zoneId === zone.zoneId).length ?? 0
+        ?.filter((item) => item.zoneId === zone.zoneId).length ?? 0
       return {
         ...zone,
         x: startX,
@@ -480,25 +481,35 @@ const supplyDemandZoneVisuals = computed(() => {
 const liquidityPoolVisuals = computed(() => {
   const snapshot = analysisFrame.value?.liquidity
   if (!snapshot?.isEnabled) return []
-  return (snapshot.pools ?? snapshot.activePools)
+  const events = snapshot.recentEvents ?? []
+  return (snapshot.pools ?? snapshot.activePools ?? [])
     .filter((pool) => pool.upperPrice >= priceDomain.value.min && pool.lowerPrice <= priceDomain.value.max)
     .sort((left, right) => right.qualityScore - left.qualityScore)
     .slice(0, 40)
     .map((pool) => {
-      const terminal = snapshot.recentEvents
+      const upper = Math.min(priceDomain.value.max, Math.max(pool.upperPrice, pool.lowerPrice))
+      const lower = Math.max(priceDomain.value.min, Math.min(pool.upperPrice, pool.lowerPrice))
+      const terminal = events
         .filter((event) => event.poolId === pool.poolId
           && ['Sweep', 'AcceptedBreak', 'Consumption', 'Failure'].includes(event.eventType))
         .at(-1)
       const startX = xForTime(pool.availableAt)
       const endX = terminal ? xForTime(terminal.availableAt) : plotLeft + plotWidth
-      return { ...pool, x: startX, width: Math.max(1, endX - startX), y: yPrice(pool.referencePrice) }
+      return {
+        ...pool,
+        x: startX,
+        width: Math.max(1, endX - startX),
+        y: yPrice(upper),
+        height: Math.max(3, yPrice(lower) - yPrice(upper)),
+        centreY: yPrice(pool.referencePrice),
+      }
     })
 })
 
 const liquidityEventVisuals = computed(() => {
   const snapshot = analysisFrame.value?.liquidity
   if (!snapshot?.isEnabled) return []
-  return snapshot.recentEvents
+  return (snapshot.recentEvents ?? [])
     .filter((event) => isTimeVisible(event.availableAt)
       && ['Sweep', 'AcceptedBreak', 'Consumption'].includes(event.eventType))
     .map((event) => ({ ...event, x: xForTime(event.availableAt), y: yPrice(event.price) }))
@@ -1519,8 +1530,9 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
             :key="pool.poolId"
             :class="[`liquidity-${pool.side.toLowerCase()}`, `liquidity-state-${pool.state.toLowerCase()}`]"
           >
-            <line :x1="pool.x" :x2="pool.x + pool.width" :y1="pool.y" :y2="pool.y" />
-            <text :x="pool.x + 4" :y="pool.y - 4">{{ pool.type }} · {{ pool.state }}</text>
+            <rect :x="pool.x" :y="pool.y" :width="pool.width" :height="pool.height" class="liquidity-band" />
+            <line :x1="pool.x" :x2="pool.x + pool.width" :y1="pool.centreY" :y2="pool.centreY" />
+            <text :x="pool.x + 4" :y="pool.y + 11">{{ pool.type }} · {{ pool.state }}</text>
             <title>ID {{ pool.poolId }} · {{ pool.side }} {{ pool.type }} · {{ pool.state }} · {{ price(pool.lowerPrice) }}–{{ price(pool.upperPrice) }} · available {{ timestamp(pool.availableAt) }} · confirmed {{ timestamp(pool.confirmedAt) }} · quality {{ pool.qualityScore.toFixed(2) }} · equalness {{ pool.equalnessScore.toFixed(2) }} · visibility {{ pool.visibilityScore.toFixed(2) }} · compression {{ pool.compressionScore.toFixed(2) }} · prominence {{ pool.prominenceScore.toFixed(2) }} · freshness {{ pool.freshnessScore.toFixed(2) }} · touches {{ pool.touchCount }} · profile {{ pool.profileHash }}</title>
           </g>
           <g

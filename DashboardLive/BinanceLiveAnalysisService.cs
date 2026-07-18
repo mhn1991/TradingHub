@@ -228,14 +228,22 @@ internal sealed class BinanceLiveAnalysisService : BackgroundService
             _instrument,
             _interval,
             _timeProvider.GetUtcNow());
+        // Publish once after warmup — per-candle publish floods SSE with multi-MB payloads while
+        // indicators are still calculating and commonly truncates browser JSON parsing.
+        DateTimeOffset? latestClosedCandle = null;
         foreach (Candle candle in candles)
         {
             ReplayFrame? frame = await _analysis.ProcessAsync(candle, cancellationToken)
                 .ConfigureAwait(false);
             if (frame is not null)
             {
-                PublishClosedCandle(frame.AvailableAt);
+                latestClosedCandle = frame.AvailableAt;
             }
+        }
+
+        if (latestClosedCandle is not null)
+        {
+            PublishClosedCandle(latestClosedCandle.Value);
         }
     }
 

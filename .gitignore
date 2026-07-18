@@ -16,8 +16,19 @@ dist/
 !.env.example
 !.env.integration.example
 .cache/
+
+# Dashboard generated / local market data (regenerate sample via DashboardExporter)
 Dashboard/public/data/backtests/*.json
 !Dashboard/public/data/backtests/.gitkeep
 Dashboard/public/data/simulations/
+Dashboard/public/data/sample-replay.json
 *.json.gz
-!Dashboard/public/data/sample-replay.json
+
+# Large source snapshots / package dumps (keep markdown reports if desired)
+artifacts/*.zip
+artifacts/*.zip.sha256
+
+# Local editor / session scratch
+resume
+resume~
+*~

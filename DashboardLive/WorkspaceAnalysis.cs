@@ -1,7 +1,10 @@
 using Brokers.Models;
+using ChartAnnotator.Confluence;
 using ChartAnnotator.Engine;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
+using ChartAnnotator.SupplyDemand;
 using Dashboard.Contracts;
 
 namespace Dashboard.Live;
@@ -19,9 +22,12 @@ internal static class WorkspaceAnalysis
         SwingLeftBars = 2,
         SwingRightBars = 2,
         HeavyAnalysisEveryCandles = 6,
-        // Chart layers (NEoWave, regime) need explicit enable — options default off for backtest identity.
+        // Chart layers need explicit enable — detection profiles default off for backtest identity.
         MarketRegime = new MarketRegimeOptions { Enabled = true },
-        NeoWave = new NeoWaveOptions { Enabled = true }
+        NeoWave = new NeoWaveOptions { Enabled = true },
+        SupplyDemand = new SupplyDemandCalculationProfile { Enabled = true },
+        Liquidity = new LiquidityCalculationProfile { Enabled = true },
+        SupplyDemandLiquidityConfluence = new SupplyDemandLiquidityConfluenceOptions { Enabled = true }
     };
 
     public static BarInterval ParseInterval(string value) => value switch

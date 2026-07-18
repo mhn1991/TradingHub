@@ -142,7 +142,7 @@ if (Directory.Exists(dashboardPath))
 }
 
 app.MapGet("/api/live/snapshot", (BinanceLiveAnalysisService service) =>
-    Results.Ok(service.GetPayload()));
+    Results.Ok(LiveSseFrameProjector.ProjectSnapshot(service.GetPayload())));
 
 app.MapGet("/api/workspaces/catalog", async (
     BinanceWorkspaceMarketData marketData,
@@ -161,7 +161,7 @@ app.MapGet("/api/workspaces/binance/snapshot", async (
             symbol,
             interval,
             cancellationToken);
-        return Results.Ok(snapshot);
+        return Results.Ok(LiveSseFrameProjector.ProjectWorkspaceSnapshot(snapshot));
     }
     catch (ArgumentException exception)
     {
@@ -203,6 +203,62 @@ app.MapGet("/api/workspaces/oanda/account", async (
     {
         return Results.Problem(
             title: "OANDA rejected the account request",
+            detail: exception.Message,
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+});
+
+// HTTP snapshot avoids multi-megabyte EventSource payloads that browsers truncate while
+// indicators are still warming ("Unexpected end of JSON input").
+app.MapGet("/api/workspaces/oanda/snapshot", async (
+    string symbol,
+    string interval,
+    OandaWorkspaceService service,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        OandaLiveAnalysisSession session = await service.GetSessionAsync(symbol, interval, cancellationToken);
+        // Wait briefly for warmup so the first paint has candles when possible.
+        LiveReplayPayload payload = session.GetPayload();
+        if (payload.Dataset.Series.All(series => series.Frames.Count == 0))
+        {
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            wait.CancelAfter(TimeSpan.FromSeconds(25));
+            try
+            {
+                long revision = payload.Revision;
+                while (payload.Dataset.Series.All(series => series.Frames.Count == 0) &&
+                       !wait.IsCancellationRequested)
+                {
+                    await session.WaitForChangeAsync(revision, wait.Token);
+                    payload = session.GetPayload();
+                    revision = payload.Revision;
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Return whatever is available (WarmingUp with 0 frames) rather than failing.
+            }
+        }
+
+        return Results.Ok(LiveSseFrameProjector.ProjectSnapshot(payload));
+    }
+    catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or KeyNotFoundException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+    catch (HttpRequestException exception)
+    {
+        return Results.Problem(
+            title: "OANDA market data is unavailable",
+            detail: exception.Message,
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+    catch (Brokers.Exceptions.BrokerApiException exception)
+    {
+        return Results.Problem(
+            title: "OANDA rejected the market-data request",
             detail: exception.Message,
             statusCode: StatusCodes.Status502BadGateway);
     }
@@ -303,6 +359,12 @@ app.MapGet("/api/workspaces/oanda/events", async (
         return;
     }
 
+    // Prefer HTTP /snapshot for the heavy initial payload; SSE then only streams deltas.
+    bool updatesOnly = string.Equals(
+        context.Request.Query["updatesOnly"],
+        "1",
+        StringComparison.Ordinal);
+
     using var requestLifetime = CancellationTokenSource.CreateLinkedTokenSource(
         requestAborted,
         applicationLifetime.ApplicationStopping);
@@ -329,9 +391,30 @@ app.MapGet("/api/workspaces/oanda/events", async (
                     payload.Dataset.Series.SelectMany(series => series.Frames).ToArray();
                 if (!initialSnapshotSent)
                 {
-                    await context.Response.WriteAsync("event: snapshot\ndata: ", cancellationToken);
-                    await JsonSerializer.SerializeAsync(
-                        context.Response.Body, payload, jsonOptions, cancellationToken);
+                    if (updatesOnly)
+                    {
+                        // Client already loaded /snapshot; only seed the cursor.
+                        if (frames.Count > 0)
+                        {
+                            lastFrameIndex = frames[^1].Index;
+                        }
+
+                        var seed = new LiveReplayUpdate(
+                            payload.Revision,
+                            payload.Status,
+                            Array.Empty<Dashboard.Contracts.ReplayFrame>());
+                        await context.Response.WriteAsync("event: update\ndata: ", cancellationToken);
+                        await JsonSerializer.SerializeAsync(
+                            context.Response.Body, seed, jsonOptions, cancellationToken);
+                    }
+                    else
+                    {
+                        LiveReplayPayload projected = LiveSseFrameProjector.ProjectSnapshot(payload);
+                        await context.Response.WriteAsync("event: snapshot\ndata: ", cancellationToken);
+                        await JsonSerializer.SerializeAsync(
+                            context.Response.Body, projected, jsonOptions, cancellationToken);
+                    }
+
                     initialSnapshotSent = true;
                 }
                 else
@@ -339,7 +422,8 @@ app.MapGet("/api/workspaces/oanda/events", async (
                     var update = new LiveReplayUpdate(
                         payload.Revision,
                         payload.Status,
-                        frames.Where(frame => frame.Index > lastFrameIndex).ToArray());
+                        LiveSseFrameProjector.ProjectUpdateFrames(
+                            frames.Where(frame => frame.Index > lastFrameIndex).ToArray()));
                     await context.Response.WriteAsync("event: update\ndata: ", cancellationToken);
                     await JsonSerializer.SerializeAsync(
                         context.Response.Body, update, jsonOptions, cancellationToken);
@@ -480,10 +564,11 @@ app.MapGet("/api/live/events", async (
                     payload.Dataset.Series.SelectMany(series => series.Frames).ToArray();
                 if (!initialSnapshotSent)
                 {
+                    LiveReplayPayload projected = LiveSseFrameProjector.ProjectSnapshot(payload);
                     await context.Response.WriteAsync("event: snapshot\ndata: ", cancellationToken);
                     await JsonSerializer.SerializeAsync(
                         context.Response.Body,
-                        payload,
+                        projected,
                         jsonOptions,
                         cancellationToken);
                     initialSnapshotSent = true;
@@ -496,7 +581,7 @@ app.MapGet("/api/live/events", async (
                     var update = new LiveReplayUpdate(
                         payload.Revision,
                         payload.Status,
-                        additions);
+                        LiveSseFrameProjector.ProjectUpdateFrames(additions));
                     await context.Response.WriteAsync("event: update\ndata: ", cancellationToken);
                     await JsonSerializer.SerializeAsync(
                         context.Response.Body,
