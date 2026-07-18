@@ -130,6 +130,23 @@ public sealed record ProgressiveStrategyOptions
     public BarInterval? NeoWaveInterval { get; init; }
     public BarInterval EffectiveNeoWaveInterval => NeoWaveInterval ?? TrendInterval;
 
+    // Price-derived supply/demand and price-inferred liquidity are observable by default but
+    // behaviorally neutral until an explicit soft mode or geometry switch is enabled.
+    public bool SupplyDemandEnabled { get; init; } = true;
+    public StructuralEvidenceMode SupplyDemandEvidenceMode { get; init; } = StructuralEvidenceMode.RecordOnly;
+    public StructuralEvidenceOptions SupplyDemandEvidence { get; init; } = new();
+    public bool SupplyDemandStructuralStopsEnabled { get; init; }
+    public bool SupplyDemandTargetsEnabled { get; init; }
+    public bool SupplyDemandManagementEnabled { get; init; }
+    public bool LiquidityEnabled { get; init; } = true;
+    public StructuralEvidenceMode LiquidityEvidenceMode { get; init; } = StructuralEvidenceMode.RecordOnly;
+    public StructuralEvidenceOptions LiquidityEvidence { get; init; } = new();
+    public bool LiquidityTargetsEnabled { get; init; }
+    public bool LiquidityStopAvoidanceEnabled { get; init; }
+    public bool LiquidityManagementEnabled { get; init; }
+    public bool SupplyDemandLiquidityConfluenceEnabled { get; init; }
+    public string StructuralManagementPolicyRevision { get; init; } = "structural-management-v1";
+
     public IReadOnlyList<BarInterval> ConfirmationIntervals =>
         [ConfirmationInterval, .. AdditionalConfirmationIntervals];
 
@@ -247,6 +264,13 @@ public sealed record ProgressiveStrategyOptions
         TrendQualityEvidence.Validate();
         CurrencyStrengthEvidence.Validate();
         NeoWaveEvidence.Validate();
+        SupplyDemandEvidence.Validate();
+        LiquidityEvidence.Validate();
+        if (!Enum.IsDefined(SupplyDemandEvidenceMode) || !Enum.IsDefined(LiquidityEvidenceMode) ||
+            string.IsNullOrWhiteSpace(StructuralManagementPolicyRevision))
+        {
+            throw new ArgumentOutOfRangeException(nameof(SupplyDemandEvidenceMode));
+        }
 
         if (NeoWaveInterval is BarInterval neoWaveInterval && !neoWaveInterval.IsValid)
         {

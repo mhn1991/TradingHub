@@ -1,6 +1,7 @@
 using System.Threading.Channels;
 using Brokers.Models;
 using Microsoft.Extensions.Logging;
+using TradingCore.Pipeline;
 
 namespace LiveTrading.Agents;
 
@@ -23,6 +24,11 @@ public sealed record LiveDecisionEpochBatch
     public required DateTimeOffset EpochCloseTime { get; init; }
     public required IReadOnlyList<LiveTradeCandidate> OrderedCandidates { get; init; }
     public required IReadOnlyList<InstrumentKey> UnavailableInstruments { get; init; }
+    public IReadOnlyList<AgentInstanceKey> ExpectedAgents { get; init; } = [];
+    public IReadOnlyList<AgentInstanceKey> CompletedAgents { get; init; } = [];
+    public IReadOnlyList<AgentInstanceKey> FailedAgents { get; init; } = [];
+    public IReadOnlyList<AgentInstanceKey> TimedOutAgents { get; init; } = [];
+    public IReadOnlyList<AgentInstanceKey> MissingAgents { get; init; } = [];
     /// <summary>Multi-agent architecture Phase 6: candidates rejected by <see
     /// cref="LiveDecisionEpochCoordinator.SubmitCandidate"/> for this epoch because their
     /// <c>MarketSequence</c> was stale relative to the instrument's latest known sequence - the
@@ -32,6 +38,14 @@ public sealed record LiveDecisionEpochBatch
     /// <summary>Multi-agent architecture Phase 6: exact-duplicate
     /// (Instrument, StrategyId, DecisionId) submissions rejected for this epoch.</summary>
     public int RejectedDuplicateCandidateCount { get; init; }
+    public TimeSpan Duration { get; init; }
+}
+
+public enum AgentEvaluationOutcome
+{
+    Completed,
+    Failed,
+    TimedOut
 }
 
 /// <summary>
@@ -106,6 +120,44 @@ public sealed class LiveDecisionEpochCoordinator
         }
     }
 
+    /// <summary>Declares the exact agent barrier membership before dispatch begins.</summary>
+    public void ExpectAgents(long epoch, InstrumentKey instrument, IReadOnlyCollection<AgentInstanceKey> agents)
+    {
+        ArgumentNullException.ThrowIfNull(agents);
+        lock (_gate)
+        {
+            if (_completedEpochs.Contains(epoch))
+                return;
+            EpochGroup group = GetOrCreateGroupUnsafe(epoch);
+            foreach (AgentInstanceKey agent in agents)
+            {
+                if (agent.Instrument != instrument)
+                    throw new ArgumentException("Expected agent does not belong to the declared instrument.", nameof(agents));
+                group.ExpectedAgents.Add(agent);
+            }
+        }
+    }
+
+    public void NotifyAgentEvaluated(long epoch, AgentInstanceKey agent, AgentEvaluationOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(agent);
+        lock (_gate)
+        {
+            if (_completedEpochs.Contains(epoch))
+                return;
+            EpochGroup group = GetOrCreateGroupUnsafe(epoch);
+            if (!group.ExpectedAgents.Contains(agent))
+            {
+                _logger.LogWarning(
+                    "Ignoring evaluation notification from unexpected agent {Agent} for epoch {Epoch}.",
+                    agent,
+                    epoch);
+                return;
+            }
+            group.AgentOutcomes[agent] = outcome;
+        }
+    }
+
     public void SubmitCandidate(LiveTradeCandidate candidate)
     {
         ArgumentNullException.ThrowIfNull(candidate);
@@ -143,7 +195,7 @@ public sealed class LiveDecisionEpochCoordinator
             }
 
             EpochGroup group = GetOrCreateGroupUnsafe(candidate.DecisionEpoch);
-            var decisionKey = (candidate.Instrument, candidate.StrategyId, candidate.DecisionId);
+            var decisionKey = (candidate.AgentInstance, candidate.Instrument, candidate.StrategyId, candidate.DecisionId);
             if (!group.SubmittedDecisions.Add(decisionKey))
             {
                 _logger.LogWarning(
@@ -196,7 +248,8 @@ public sealed class LiveDecisionEpochCoordinator
         var group = new EpochGroup
         {
             Epoch = epoch,
-            EpochCloseTime = DateTimeOffset.FromUnixTimeMilliseconds(epoch)
+            EpochCloseTime = DateTimeOffset.FromUnixTimeMilliseconds(epoch),
+            StartedAt = _timeProvider.GetUtcNow()
         };
         _openEpochs[epoch] = group;
         _ = RunBarrierAsync(group);
@@ -226,18 +279,36 @@ public sealed class LiveDecisionEpochCoordinator
                 .Where(instrument => !group.ReportedInstruments.Contains(instrument))
                 .ToArray();
             LiveTradeCandidate[] ordered = group.Candidates
-                .OrderBy(c => c.Instrument.Value, StringComparer.Ordinal)
+                .OrderBy(c => c.AgentInstance?.DeploymentId ?? string.Empty, StringComparer.Ordinal)
+                .ThenBy(c => c.Instrument.Value, StringComparer.Ordinal)
                 .ThenBy(c => c.StrategyId, StringComparer.Ordinal)
+                .ThenBy(c => c.PolicyBundleId)
+                .ThenBy(c => c.PolicyRevision)
                 .ThenBy(c => c.DecisionId, StringComparer.Ordinal)
                 .ToArray();
+            AgentInstanceKey[] expectedAgents = OrderAgents(group.ExpectedAgents);
+            AgentInstanceKey[] completedAgents = OrderAgents(group.AgentOutcomes
+                .Where(item => item.Value == AgentEvaluationOutcome.Completed).Select(item => item.Key));
+            AgentInstanceKey[] failedAgents = OrderAgents(group.AgentOutcomes
+                .Where(item => item.Value == AgentEvaluationOutcome.Failed).Select(item => item.Key));
+            AgentInstanceKey[] timedOutAgents = OrderAgents(group.AgentOutcomes
+                .Where(item => item.Value == AgentEvaluationOutcome.TimedOut).Select(item => item.Key));
+            AgentInstanceKey[] missingAgents = OrderAgents(group.ExpectedAgents
+                .Where(agent => !group.AgentOutcomes.ContainsKey(agent)));
             batch = new LiveDecisionEpochBatch
             {
                 Epoch = group.Epoch,
                 EpochCloseTime = group.EpochCloseTime,
                 OrderedCandidates = ordered,
                 UnavailableInstruments = unavailable,
+                ExpectedAgents = expectedAgents,
+                CompletedAgents = completedAgents,
+                FailedAgents = failedAgents,
+                TimedOutAgents = timedOutAgents,
+                MissingAgents = missingAgents,
                 RejectedStaleCandidateCount = group.RejectedStaleCandidateCount,
-                RejectedDuplicateCandidateCount = group.RejectedDuplicateCandidateCount
+                RejectedDuplicateCandidateCount = group.RejectedDuplicateCandidateCount,
+                Duration = _timeProvider.GetUtcNow() - group.StartedAt
             };
         }
 
@@ -260,6 +331,14 @@ public sealed class LiveDecisionEpochCoordinator
         }
     }
 
+    private static AgentInstanceKey[] OrderAgents(IEnumerable<AgentInstanceKey> agents) => agents
+        .OrderBy(agent => agent.DeploymentId, StringComparer.Ordinal)
+        .ThenBy(agent => agent.Instrument.Value, StringComparer.Ordinal)
+        .ThenBy(agent => agent.StrategyId, StringComparer.Ordinal)
+        .ThenBy(agent => agent.PolicyBundleId)
+        .ThenBy(agent => agent.Revision)
+        .ToArray();
+
     private void RememberCompletedEpochUnsafe(long epoch)
     {
         if (!_completedEpochs.Add(epoch))
@@ -273,9 +352,12 @@ public sealed class LiveDecisionEpochCoordinator
     {
         public required long Epoch { get; init; }
         public required DateTimeOffset EpochCloseTime { get; init; }
+        public required DateTimeOffset StartedAt { get; init; }
         public List<LiveTradeCandidate> Candidates { get; } = [];
         public HashSet<InstrumentKey> ReportedInstruments { get; } = [];
-        public HashSet<(InstrumentKey Instrument, string StrategyId, string DecisionId)> SubmittedDecisions { get; } = [];
+        public HashSet<AgentInstanceKey> ExpectedAgents { get; } = [];
+        public Dictionary<AgentInstanceKey, AgentEvaluationOutcome> AgentOutcomes { get; } = [];
+        public HashSet<(AgentInstanceKey? Agent, InstrumentKey Instrument, string StrategyId, string DecisionId)> SubmittedDecisions { get; } = [];
         public int RejectedStaleCandidateCount { get; set; }
         public int RejectedDuplicateCandidateCount { get; set; }
         public TaskCompletionSource Complete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

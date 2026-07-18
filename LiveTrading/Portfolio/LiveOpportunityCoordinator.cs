@@ -104,7 +104,8 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
                 EquityProtectionMultiplier = equityMultiplier,
                 CalibrationMultiplier = Clamp(candidate.SetupCalibration.RiskMultiplier),
                 MetaLabelMultiplier = Clamp(candidate.MetaLabel.RiskMultiplier),
-                NeoWaveMultiplier = Clamp(candidate.NeoWaveRiskMultiplier)
+                NeoWaveMultiplier = Clamp(candidate.NeoWaveRiskMultiplier),
+                StructuralEvidenceMultiplier = Clamp(candidate.StructuralEvidenceRiskMultiplier)
             });
             decimal combined = Clamp(risk.CombinedMultiplier * conditionMultiplier);
             var riskAudit = new LiveRiskBudgetAudit
@@ -113,6 +114,7 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
                 SetupMultiplier = risk.CalibrationMultiplier,
                 MetaLabelMultiplier = risk.MetaLabelMultiplier,
                 NeoWaveMultiplier = risk.NeoWaveMultiplier,
+                StructuralEvidenceMultiplier = risk.StructuralEvidenceMultiplier,
                 RegimeMultiplier = risk.RegimeMultiplier,
                 TradingConditionMultiplier = conditionMultiplier,
                 DrawdownMultiplier = risk.DrawdownMultiplier,
@@ -332,6 +334,7 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
         if (candidate.MetaLabel.RiskMultiplier is < 0m or > 1m ||
             candidate.SetupCalibration.RiskMultiplier is < 0m or > 1m ||
             candidate.NeoWaveRiskMultiplier is < 0m or > 1m ||
+            candidate.StructuralEvidenceRiskMultiplier is < 0m or > 1m ||
             candidate.TradingCondition?.RiskMultiplier is < 0m or > 1m)
             return Reject(candidate, "InvalidRiskMultiplier", "All candidate risk multipliers must remain within 0..1.");
         return null;
@@ -383,6 +386,18 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
             NeoWaveStructuralScore = candidate.NeoWaveStructuralScore,
             NeoWaveConflictScore = candidate.NeoWaveConflictScore,
             NeoWaveInvalidationPrice = candidate.NeoWaveInvalidationPrice,
+            StructuralEvidenceRiskMultiplier = candidate.StructuralEvidenceRiskMultiplier,
+            EntrySupplyDemandZoneId = candidate.EntrySupplyDemandZoneId,
+            EntrySupplyDemandZoneLowerPrice = candidate.EntrySupplyDemandZoneLowerPrice,
+            EntrySupplyDemandZoneUpperPrice = candidate.EntrySupplyDemandZoneUpperPrice,
+            EntrySupplyDemandZoneState = candidate.EntrySupplyDemandZoneState,
+            EntrySupplyDemandProfileHash = candidate.EntrySupplyDemandProfileHash,
+            TargetLiquidityPoolId = candidate.TargetLiquidityPoolId,
+            TargetLiquidityProfileHash = candidate.TargetLiquidityProfileHash,
+            StructuralInvalidationReference = candidate.StructuralInvalidationReference,
+            EntrySupplyDemandManagementEnabled = candidate.EntrySupplyDemandManagementEnabled,
+            EntryLiquidityManagementEnabled = candidate.EntryLiquidityManagementEnabled,
+            StructuralManagementPolicyRevision = candidate.StructuralManagementPolicyRevision,
             FinalRiskBudgetMultiplier = combinedMultiplier
         };
     }

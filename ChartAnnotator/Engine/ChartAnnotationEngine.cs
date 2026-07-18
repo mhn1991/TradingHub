@@ -1,12 +1,15 @@
 using System.Collections.Concurrent;
 using Brokers.Models;
 using ChartAnnotator.Collections;
+using ChartAnnotator.Confluence;
 using ChartAnnotator.Indicators;
 using ChartAnnotator.Models;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.NeoWave;
 using ChartAnnotator.PriceAction;
 using ChartAnnotator.Regime;
 using ChartAnnotator.Structure;
+using ChartAnnotator.SupplyDemand;
 using ChartAnnotator.Value;
 
 namespace ChartAnnotator.Engine;
@@ -243,6 +246,25 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             candleEvent.Candle,
             indicators.Atr,
             state.IndicatorHistory.Snapshot());
+        SupplyDemandAnalysisSnapshot supplyDemand = state.SupplyDemand.Update(
+            candleEvent.Candle,
+            state.Candles.Snapshot(),
+            state.SwingSnapshot,
+            indicators.Atr,
+            candleEvent.Sequence);
+        LiquidityAnalysisSnapshot liquidity = state.Liquidity.Update(
+            candleEvent.Candle,
+            state.Candles.Snapshot(),
+            state.SwingSnapshot,
+            indicators.Atr,
+            structure,
+            priceAction,
+            candleEvent.Sequence);
+        SupplyDemandLiquidityConfluenceSnapshot confluence = state.SupplyDemandLiquidityConfluence.Update(
+            supplyDemand,
+            liquidity,
+            indicators.Atr,
+            closeTime);
         MarketRegimeSnapshot regime = state.MarketRegime?.Update(
             candleEvent.Candle,
             indicators,
@@ -280,6 +302,9 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             PriceAction = priceAction,
             MarketRegime = regime,
             NeoWave = neoWave,
+            SupplyDemand = supplyDemand,
+            Liquidity = liquidity,
+            SupplyDemandLiquidityConfluence = confluence,
             ValueReferences = valueReferences,
             Confidence = confidence
         };
@@ -431,6 +456,10 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
                 new TimeOnly(options.SessionValueAnchorHourUtc, 0));
             MarketRegime = options.MarketRegime.Enabled ? new MarketRegimeClassifier(options.MarketRegime) : null;
             NeoWave = new NeoWaveAnalyzer(options.NeoWave);
+            SupplyDemand = new SupplyDemandAnalyzer(options.SupplyDemand);
+            Liquidity = new LiquidityAnalyzer(options.Liquidity);
+            SupplyDemandLiquidityConfluence = new SupplyDemandLiquidityConfluenceAnalyzer(
+                options.SupplyDemandLiquidityConfluence);
         }
 
         public object SyncRoot { get; } = new();
@@ -455,6 +484,9 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         public AnchoredValueReferenceState AnchoredValueReferences { get; }
         public MarketRegimeClassifier? MarketRegime { get; }
         public NeoWaveAnalyzer NeoWave { get; }
+        public SupplyDemandAnalyzer SupplyDemand { get; }
+        public LiquidityAnalyzer Liquidity { get; }
+        public SupplyDemandLiquidityConfluenceAnalyzer SupplyDemandLiquidityConfluence { get; }
         public SwingDetector SwingDetector { get; }
         public PriceActionAnalyzer PriceAction { get; }
         public PriceActionSetupComposer SetupComposer { get; }

@@ -72,6 +72,11 @@ public sealed class LiveTradingPersistenceTests
             Assert.That(loaded!.LastBrokerTransactionId, Is.EqualTo("6412"));
             Assert.That(loaded.Registry.AppliedEventIds, Is.EqualTo(new[] { "6410", "6412" }).AsCollection);
             Assert.That(loaded.LastReconciliationId, Is.EqualTo("reconcile-1"));
+            Assert.That(persistence.Metrics.Capacity, Is.EqualTo(32));
+            Assert.That(persistence.Metrics.QueueDepth, Is.Zero);
+            Assert.That(persistence.Metrics.Enqueued, Is.EqualTo(1));
+            Assert.That(persistence.Metrics.Completed, Is.EqualTo(1));
+            Assert.That(persistence.Metrics.Failed, Is.Zero);
         });
     }
     [Test]

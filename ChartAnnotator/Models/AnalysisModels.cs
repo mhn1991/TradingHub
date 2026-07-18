@@ -1,6 +1,9 @@
 using Brokers.Models;
 using ChartAnnotator.Regime;
 using ChartAnnotator.NeoWave;
+using ChartAnnotator.SupplyDemand;
+using ChartAnnotator.Confluence;
+using ChartAnnotator.Liquidity;
 
 namespace ChartAnnotator.Models;
 
@@ -419,6 +422,10 @@ public sealed record AnalysisSnapshot
     public PriceActionSnapshot PriceAction { get; init; } = PriceActionSnapshot.Empty;
     public MarketRegimeSnapshot MarketRegime { get; init; } = MarketRegimeSnapshot.Unknown;
     public NeoWaveSnapshot NeoWave { get; init; } = NeoWaveSnapshot.Disabled;
+    public SupplyDemandAnalysisSnapshot SupplyDemand { get; init; } = SupplyDemandAnalysisSnapshot.Disabled;
+    public LiquidityAnalysisSnapshot Liquidity { get; init; } = LiquidityAnalysisSnapshot.Disabled;
+    public SupplyDemandLiquidityConfluenceSnapshot SupplyDemandLiquidityConfluence { get; init; } =
+        SupplyDemandLiquidityConfluenceSnapshot.Disabled;
     public IReadOnlyList<AnchoredValueReference> ValueReferences { get; init; } = [];
     public required ConfidenceScore Confidence { get; init; }
 }

@@ -238,7 +238,9 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                         EquityProtectionMultiplier = decision.EquityProtectionRiskMultiplier ??
                             _safety?.Snapshot.EquityProtection.CurrentRiskMultiplier ?? 1m,
                         CalibrationMultiplier = decision.SetupCalibrationRiskMultiplier ?? 1m,
-                        MetaLabelMultiplier = decision.MetaLabelRiskMultiplier ?? 1m
+                        MetaLabelMultiplier = decision.MetaLabelRiskMultiplier ?? 1m,
+                        NeoWaveMultiplier = decision.NeoWaveRiskMultiplier ?? 1m,
+                        StructuralEvidenceMultiplier = decision.StructuralEvidenceRiskMultiplier ?? 1m
                     });
                     if (riskBudget.CombinedMultiplier <= 0m)
                     {

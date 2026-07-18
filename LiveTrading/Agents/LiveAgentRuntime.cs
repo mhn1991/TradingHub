@@ -6,6 +6,13 @@ using TradingCore.Pipeline;
 
 namespace LiveTrading.Agents;
 
+/// <summary>Live-specific result retained inside the environment-neutral runtime envelope.</summary>
+public sealed record LiveAgentEvaluation
+{
+    public required AgentMarketContext Context { get; init; }
+    public required TradingPipelineResult PipelineResult { get; init; }
+}
+
 /// <summary>
 /// One isolated, serialized live Agent runtime. Extracted from the pipeline-evaluation body
 /// previously inlined in <c>AgentSupervisor.EvaluateAsync</c> (broker snapshot fetch + one
@@ -15,9 +22,9 @@ namespace LiveTrading.Agents;
 /// consumes this runtime's <see cref="AgentRuntimeResult"/> - those are orchestration concerns
 /// spanning every registered runtime, not something one isolated runtime should own. A per-runtime
 /// <see cref="SemaphoreSlim"/> guarantees this runtime's own pipeline state never observes two
-/// concurrent evaluations, so many different runtimes' <see cref="EvaluateAsync"/> calls can be
+/// concurrent evaluations, so many different runtimes' <c>EvaluateAsync</c> calls can be
 /// dispatched concurrently (Phase 6) while each individual runtime stays serialized - exactly the
-/// live host's existing "one call per closed candle" cadence, just no longer forcing every OTHER
+/// live host's existing "one call per closed candle" cadence, just no longer forcing every other
 /// runtime to wait for it.
 /// </summary>
 public sealed class LiveAgentRuntime : IAgentRuntime, IDisposable
@@ -25,6 +32,8 @@ public sealed class LiveAgentRuntime : IAgentRuntime, IDisposable
     private readonly IBrokerClient _broker;
     private readonly SafeTradingPipeline _pipeline;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private long _lastCompletedSnapshotVersion;
+    private DateTimeOffset? _lastCompletedAvailableAt;
 
     public LiveAgentRuntime(
         AgentInstanceKey key,
@@ -44,20 +53,42 @@ public sealed class LiveAgentRuntime : IAgentRuntime, IDisposable
     public AnalysisProfileKey AnalysisProfile { get; }
     public AgentExecutionMode Mode { get; }
 
-    /// <summary>Set by the caller before each <see cref="EvaluateAsync"/> call - the current
-    /// executable spread is quote-driven and changes far more often than this runtime evaluates,
-    /// so it cannot be captured once at construction. Not part of <see cref="MarketAnalysisSnapshot"/>
-    /// itself, which carries only shared, environment-neutral analysis content.</summary>
-    public decimal? ExecutableSpread { get; set; }
+    public Task<AgentRuntimeResult> EvaluateAsync(
+        MarketAnalysisSnapshot snapshot,
+        CancellationToken cancellationToken = default) =>
+        EvaluateAsync(snapshot, executableSpread: null, cancellationToken);
 
+    /// <summary>The quote-derived spread is an input to this evaluation, not mutable runtime
+    /// state. Passing it through the serialized call prevents a queued epoch from overwriting the
+    /// value used by the epoch currently holding the runtime gate.</summary>
     public async Task<AgentRuntimeResult> EvaluateAsync(
         MarketAnalysisSnapshot snapshot,
+        decimal? executableSpread,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (snapshot.Instrument != Key.Instrument)
+            {
+                throw new InvalidOperationException(
+                    $"Snapshot instrument {snapshot.Instrument} does not match runtime instrument {Key.Instrument}.");
+            }
+            if (snapshot.Profile != AnalysisProfile)
+            {
+                throw new InvalidOperationException(
+                    $"Snapshot profile {snapshot.Profile.ProfileHash} does not match runtime profile {AnalysisProfile.ProfileHash}.");
+            }
+            if (snapshot.SnapshotVersion < _lastCompletedSnapshotVersion ||
+                snapshot.SnapshotVersion == _lastCompletedSnapshotVersion &&
+                _lastCompletedAvailableAt is { } lastAvailableAt && snapshot.AvailableAt != lastAvailableAt)
+            {
+                throw new InvalidOperationException(
+                    $"Stale or conflicting snapshot {snapshot.SnapshotVersion}/{snapshot.AvailableAt:O}; " +
+                    $"runtime completed {_lastCompletedSnapshotVersion}/{_lastCompletedAvailableAt:O}.");
+            }
+
             AccountSnapshot account = (await _broker.Accounts.GetAccountsAsync(cancellationToken)
                 .ConfigureAwait(false)).Single();
             IReadOnlyList<BrokerPosition> positions = await _broker.Positions
@@ -74,7 +105,7 @@ public sealed class LiveAgentRuntime : IAgentRuntime, IDisposable
                 Account = account,
                 Positions = positions,
                 OpenOrders = openOrders,
-                ExecutableSpread = ExecutableSpread,
+                ExecutableSpread = executableSpread,
                 MarketDataAvailableAt = snapshot.AvailableAt,
                 StrategyId = Key.StrategyId,
                 CurrencyStrength = snapshot.CrossMarket
@@ -85,13 +116,20 @@ public sealed class LiveAgentRuntime : IAgentRuntime, IDisposable
                 .ProcessAsync(context, shadowBroker, cancellationToken)
                 .ConfigureAwait(false);
 
+            _lastCompletedSnapshotVersion = snapshot.SnapshotVersion;
+            _lastCompletedAvailableAt = snapshot.AvailableAt;
+
             return new AgentRuntimeResult
             {
                 Key = Key,
                 EvaluatedAt = snapshot.AvailableAt,
                 SnapshotVersion = snapshot.SnapshotVersion,
                 Decision = result.Decision,
-                Native = result
+                Native = new LiveAgentEvaluation
+                {
+                    Context = context,
+                    PipelineResult = result
+                }
             };
         }
         catch (Exception exception) when (exception is not OperationCanceledException)

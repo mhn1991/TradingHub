@@ -446,6 +446,64 @@ const zoneVisuals = computed(() => (analysisFrame.value?.priceZones ?? [])
     }
   }))
 
+const supplyDemandZoneVisuals = computed(() => {
+  const snapshot = analysisFrame.value?.supplyDemand
+  if (!snapshot?.isEnabled) return []
+  const zones = snapshot.zones ?? snapshot.activeZones
+  return zones
+    .filter((zone) => Math.max(zone.proximalPrice, zone.distalPrice) >= priceDomain.value.min
+      && Math.min(zone.proximalPrice, zone.distalPrice) <= priceDomain.value.max)
+    .sort((left, right) => right.qualityScore - left.qualityScore)
+    .slice(0, 32)
+    .map((zone) => {
+      const upper = Math.min(priceDomain.value.max, Math.max(zone.proximalPrice, zone.distalPrice))
+      const lower = Math.max(priceDomain.value.min, Math.min(zone.proximalPrice, zone.distalPrice))
+      const terminal = snapshot.recentEvents
+        .filter((event) => event.zoneId === zone.zoneId
+          && ['Invalidated', 'Expired', 'Merged'].includes(event.eventType))
+        .at(-1)
+      const startX = xForTime(zone.availableAt)
+      const endX = terminal ? xForTime(terminal.availableAt) : plotLeft + plotWidth
+      const confluenceCount = analysisFrame.value?.supplyDemandLiquidityConfluence?.relationships
+        .filter((item) => item.zoneId === zone.zoneId).length ?? 0
+      return {
+        ...zone,
+        x: startX,
+        width: Math.max(1, endX - startX),
+        y: yPrice(upper),
+        height: Math.max(2, yPrice(lower) - yPrice(upper)),
+        confluenceCount,
+      }
+    })
+})
+
+const liquidityPoolVisuals = computed(() => {
+  const snapshot = analysisFrame.value?.liquidity
+  if (!snapshot?.isEnabled) return []
+  return (snapshot.pools ?? snapshot.activePools)
+    .filter((pool) => pool.upperPrice >= priceDomain.value.min && pool.lowerPrice <= priceDomain.value.max)
+    .sort((left, right) => right.qualityScore - left.qualityScore)
+    .slice(0, 40)
+    .map((pool) => {
+      const terminal = snapshot.recentEvents
+        .filter((event) => event.poolId === pool.poolId
+          && ['Sweep', 'AcceptedBreak', 'Consumption', 'Failure'].includes(event.eventType))
+        .at(-1)
+      const startX = xForTime(pool.availableAt)
+      const endX = terminal ? xForTime(terminal.availableAt) : plotLeft + plotWidth
+      return { ...pool, x: startX, width: Math.max(1, endX - startX), y: yPrice(pool.referencePrice) }
+    })
+})
+
+const liquidityEventVisuals = computed(() => {
+  const snapshot = analysisFrame.value?.liquidity
+  if (!snapshot?.isEnabled) return []
+  return snapshot.recentEvents
+    .filter((event) => isTimeVisible(event.availableAt)
+      && ['Sweep', 'AcceptedBreak', 'Consumption'].includes(event.eventType))
+    .map((event) => ({ ...event, x: xForTime(event.availableAt), y: yPrice(event.price) }))
+})
+
 const trendVisuals = computed(() => {
   const frames = visibleFrames.value
   if (!frames.length) return []
@@ -1440,6 +1498,38 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
               text-anchor="end"
             >{{ zone.type }} · {{ price(zone.centrePrice) }}</text>
             <title>{{ zone.type }} zone · {{ zone.touchCount }} touches · {{ zone.strength.toFixed(0) }} strength</title>
+          </g>
+        </g>
+
+        <g v-if="layers.supplyDemand" class="supply-demand-zones" clip-path="url(#price-clip)">
+          <g
+            v-for="zone in supplyDemandZoneVisuals"
+            :key="zone.zoneId"
+            :class="[`supply-demand-${zone.type.toLowerCase()}`, `lifecycle-${zone.state.toLowerCase()}`]"
+          >
+            <rect :x="zone.x" :y="zone.y" :width="zone.width" :height="zone.height" />
+            <text :x="zone.x + 4" :y="zone.y + 11">{{ zone.type }} · {{ zone.state }}</text>
+            <title>ID {{ zone.zoneId }} · {{ zone.pattern }} · {{ zone.state }} · {{ price(zone.distalPrice) }}–{{ price(zone.proximalPrice) }} · available {{ timestamp(zone.availableAt) }} · confirmed {{ timestamp(zone.confirmedAt) }} · quality {{ zone.qualityScore.toFixed(2) }} · freshness {{ zone.freshnessScore.toFixed(2) }} · touches {{ zone.touchCount }} · penetration {{ zone.penetrationRatio.toFixed(2) }} · profile {{ zone.profileHash }} · confluence {{ zone.confluenceCount }}</title>
+          </g>
+        </g>
+
+        <g v-if="layers.liquidity" class="liquidity-pools" clip-path="url(#price-clip)">
+          <g
+            v-for="pool in liquidityPoolVisuals"
+            :key="pool.poolId"
+            :class="[`liquidity-${pool.side.toLowerCase()}`, `liquidity-state-${pool.state.toLowerCase()}`]"
+          >
+            <line :x1="pool.x" :x2="pool.x + pool.width" :y1="pool.y" :y2="pool.y" />
+            <text :x="pool.x + 4" :y="pool.y - 4">{{ pool.type }} · {{ pool.state }}</text>
+            <title>ID {{ pool.poolId }} · {{ pool.side }} {{ pool.type }} · {{ pool.state }} · {{ price(pool.lowerPrice) }}–{{ price(pool.upperPrice) }} · available {{ timestamp(pool.availableAt) }} · confirmed {{ timestamp(pool.confirmedAt) }} · quality {{ pool.qualityScore.toFixed(2) }} · equalness {{ pool.equalnessScore.toFixed(2) }} · visibility {{ pool.visibilityScore.toFixed(2) }} · compression {{ pool.compressionScore.toFixed(2) }} · prominence {{ pool.prominenceScore.toFixed(2) }} · freshness {{ pool.freshnessScore.toFixed(2) }} · touches {{ pool.touchCount }} · profile {{ pool.profileHash }}</title>
+          </g>
+          <g
+            v-for="event in liquidityEventVisuals"
+            :key="`${event.poolId}-${event.availableAt}-${event.eventType}`"
+            :class="`liquidity-event liquidity-event-${event.eventType.toLowerCase()}`"
+          >
+            <path :d="`M ${event.x - 5} ${event.y - 8} L ${event.x + 5} ${event.y - 8} L ${event.x} ${event.y} Z`" />
+            <title>{{ event.eventType }} · pool {{ event.poolId }} · {{ price(event.price) }} · {{ timestamp(event.availableAt) }}</title>
           </g>
         </g>
 

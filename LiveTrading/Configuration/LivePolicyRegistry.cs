@@ -7,12 +7,12 @@ namespace LiveTrading.Configuration;
 
 /// <summary>
 /// Gives the portfolio, management, and API layers the exact policy revision assigned to each
-/// instrument/strategy Agent. <see cref="Register"/> (the startup path) still requires duplicate
-/// registrations to be byte-for-byte equivalent - a host never silently overwrites its initial
-/// wiring. <see cref="Activate"/> is the separate, explicit hot-swap path (see
+/// instrument/strategy Agent. <see cref="Register"/> (the startup path) keeps every exact Agent
+/// revision and only treats a conflicting re-registration of that same exact identity as an
+/// error. <see cref="Activate"/> is the separate, explicit hot-swap path (see
 /// <c>LiveTradingRuntimeCoordinator.ActivatePolicyRevisionAsync</c>, which is the only intended
 /// caller - it holds the coordinator's serial epoch lock so a swap can only land strictly between
-/// two decision epochs): it may change what <see cref="Resolve(string, InstrumentKey)"/>/<see cref="ResolveMode"/>/
+/// two decision epochs): it may change what <see cref="Resolve(string, InstrumentKey)"/>/<see cref="ResolveMode(string, InstrumentKey)"/>/
 /// <see cref="ResolveManagement"/> return for a key going forward, but every prior revision stays
 /// permanently retrievable via <see cref="TryResolveManagementByRevision"/> so an already-open
 /// position (which remembers the exact <c>PolicyBundleId</c>/<c>Revision</c> it was opened under -
@@ -37,6 +37,7 @@ public interface ILivePolicyRegistry
     void Activate(AgentInstanceKey key, LivePolicyRegistration registration);
 
     LiveTradingPolicyBundle Resolve(LiveTradeCandidate candidate);
+    StrategyActivationMode ResolveMode(LiveTradeCandidate candidate);
     LiveTradingPolicyBundle Resolve(string strategyId, InstrumentKey instrument);
     StrategyActivationMode ResolveMode(string strategyId, InstrumentKey instrument);
     LiveManagementPolicy ResolveManagement(string strategyId, InstrumentKey instrument);
@@ -110,17 +111,25 @@ public sealed class LivePolicyRegistry : ILivePolicyRegistry
         var slot = (key.DeploymentId, key.Instrument, key.StrategyId);
         lock (_sync)
         {
-            if (_current.TryGetValue(slot, out LivePolicyRegistration? existing))
+            if (_history.TryGetValue(key, out LivePolicyRegistration? exact))
             {
-                if (existing.Policy.ConfigurationHash != policy.ConfigurationHash || existing.Mode != mode)
+                if (exact.Policy.ConfigurationHash != policy.ConfigurationHash || exact.Mode != mode)
                 {
                     throw new InvalidOperationException(
-                        $"Policy for {key.StrategyId}/{key.Instrument} is already registered with a different revision or mode.");
+                        $"Agent instance {key} is already registered with different policy content or mode.");
                 }
                 return;
             }
-            _current.Add(slot, registration);
-            _history[key] = registration;
+
+            _history.Add(key, registration);
+            if (!_current.TryGetValue(slot, out LivePolicyRegistration? existing))
+            {
+                _current.Add(slot, registration);
+            }
+            else
+            {
+                _current[slot] = SelectCurrent(existing, registration);
+            }
         }
     }
 
@@ -140,7 +149,17 @@ public sealed class LivePolicyRegistry : ILivePolicyRegistry
     public LiveTradingPolicyBundle Resolve(LiveTradeCandidate candidate)
     {
         ArgumentNullException.ThrowIfNull(candidate);
-        return Resolve(candidate.StrategyId, candidate.Instrument);
+        return candidate.AgentInstance is null
+            ? Resolve(candidate.StrategyId, candidate.Instrument)
+            : RequireExact(candidate).Policy;
+    }
+
+    public StrategyActivationMode ResolveMode(LiveTradeCandidate candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        return candidate.AgentInstance is null
+            ? ResolveMode(candidate.StrategyId, candidate.Instrument)
+            : RequireExact(candidate).Mode;
     }
 
     public LiveTradingPolicyBundle Resolve(string strategyId, InstrumentKey instrument) =>
@@ -186,9 +205,11 @@ public sealed class LivePolicyRegistry : ILivePolicyRegistry
         {
             lock (_sync)
             {
-                return _current.Values
+                return _history.Values
                     .OrderBy(item => item.Key.Instrument.Value, StringComparer.Ordinal)
                     .ThenBy(item => item.Key.StrategyId, StringComparer.Ordinal)
+                    .ThenBy(item => item.Key.Revision)
+                    .ThenBy(item => item.Key.PolicyBundleId)
                     .ToArray();
             }
         }
@@ -203,6 +224,53 @@ public sealed class LivePolicyRegistry : ILivePolicyRegistry
                 ? item
                 : throw new KeyNotFoundException($"No active policy is registered for {strategyId}/{instrument}.");
         }
+    }
+
+    private LivePolicyRegistration RequireExact(LiveTradeCandidate candidate)
+    {
+        AgentInstanceKey key = candidate.AgentInstance!;
+        if (key.Instrument != candidate.Instrument ||
+            !string.Equals(key.StrategyId, candidate.StrategyId, StringComparison.Ordinal) ||
+            candidate.PolicyBundleId != key.PolicyBundleId ||
+            candidate.PolicyRevision != key.Revision)
+        {
+            throw new InvalidOperationException(
+                $"Candidate {candidate.CandidateId} has inconsistent agent/policy lineage.");
+        }
+
+        lock (_sync)
+        {
+            return _history.TryGetValue(key, out LivePolicyRegistration? registration)
+                ? registration
+                : throw new KeyNotFoundException($"No exact policy is registered for agent instance {key}.");
+        }
+    }
+
+    private static LivePolicyRegistration SelectCurrent(
+        LivePolicyRegistration existing,
+        LivePolicyRegistration candidate)
+    {
+        bool existingExecutable = existing.Mode is StrategyActivationMode.ManualApproval or StrategyActivationMode.Automatic;
+        bool candidateExecutable = candidate.Mode is StrategyActivationMode.ManualApproval or StrategyActivationMode.Automatic;
+        if (existingExecutable && candidateExecutable)
+        {
+            throw new InvalidOperationException(
+                $"Executable policy for {candidate.Key.StrategyId}/{candidate.Key.Instrument} is already registered.");
+        }
+        if (existingExecutable)
+            return existing;
+        if (candidateExecutable)
+            return candidate;
+
+        int revision = candidate.Key.Revision.CompareTo(existing.Key.Revision);
+        if (revision != 0)
+            return revision > 0 ? candidate : existing;
+        int mode = candidate.Mode.CompareTo(existing.Mode);
+        if (mode != 0)
+            return mode > 0 ? candidate : existing;
+        return candidate.Key.PolicyBundleId.CompareTo(existing.Key.PolicyBundleId) > 0
+            ? candidate
+            : existing;
     }
 
     private static LivePolicyRegistration Validate(

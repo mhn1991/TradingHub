@@ -135,4 +135,23 @@ public sealed class LiveAgentRuntimeTests
         Assert.That(runtimeA.Key, Is.Not.EqualTo(runtimeB.Key));
         Assert.That(runtimeA.Key.StrategyId, Is.EqualTo(runtimeB.Key.StrategyId));
     }
+
+    [Test]
+    public async Task EvaluateAsync_OlderSnapshotAfterCompletedNewerSnapshot_ReturnsStructuredFailure()
+    {
+        var agent = BuildAgent(Observe);
+        using LiveAgentRuntime runtime = BuildRuntime(agent);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        AgentRuntimeResult newer = await runtime.EvaluateAsync(Snapshot(now.AddMinutes(1), version: 2));
+        AgentRuntimeResult stale = await runtime.EvaluateAsync(Snapshot(now, version: 1));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(newer.Failure, Is.Null);
+            Assert.That(stale.Failure, Is.TypeOf<InvalidOperationException>());
+            Assert.That(stale.SnapshotVersion, Is.EqualTo(1));
+            Assert.That(agent.EvaluationCount, Is.EqualTo(1));
+        });
+    }
 }

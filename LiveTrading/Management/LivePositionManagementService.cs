@@ -262,7 +262,12 @@ public sealed class LivePositionManagementService(
                 EntryRegime = entryRegime,
                 EntryManagementProfileId = position.EntryManagementProfileId,
                 EntryNeoWaveHypothesisId = position.EntryNeoWaveHypothesisId,
-                EntryNeoWaveInvalidationPrice = position.EntryNeoWaveInvalidationPrice
+                EntryNeoWaveInvalidationPrice = position.EntryNeoWaveInvalidationPrice,
+                EntrySupplyDemandZoneId = position.EntrySupplyDemandZoneId,
+                TargetLiquidityPoolId = position.TargetLiquidityPoolId,
+                EntrySupplyDemandManagementEnabled = position.EntrySupplyDemandManagementEnabled,
+                EntryLiquidityManagementEnabled = position.EntryLiquidityManagementEnabled,
+                StructuralManagementPolicyRevision = position.StructuralManagementPolicyRevision
             },
             analysis,
             scope,

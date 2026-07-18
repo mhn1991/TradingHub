@@ -35,7 +35,7 @@ public sealed class LiveExecutionActivationGuardTests
         Assert.Multiple(() =>
         {
             Assert.That(program, Does.Contain("execution.BrokerWritesEnabled"));
-            Assert.That(program, Does.Contain("oanda.Environment != Brokers.Models.BrokerEnvironment.Demo"));
+            Assert.That(program, Does.Contain("oanda.Environment != Brokers.Abstractions.BrokerEnvironment.Demo"));
             Assert.That(program, Does.Contain("Broker writes are permitted only for OANDA Practice/Demo"));
         });
     }

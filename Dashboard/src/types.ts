@@ -442,6 +442,9 @@ export interface ReplayFrame {
   priceAction?: PriceActionSnapshot
   marketRegime?: MarketRegimeSnapshot
   neoWave?: NeoWaveSnapshot
+  supplyDemand?: SupplyDemandAnalysisSnapshot
+  liquidity?: LiquidityAnalysisSnapshot
+  supplyDemandLiquidityConfluence?: SupplyDemandLiquidityConfluenceSnapshot
   confidence: ConfidenceScore
   analysisMicroseconds: number
 }
@@ -725,6 +728,103 @@ export interface PriceZone {
   type: PriceZoneType
 }
 
+export type SupplyDemandZoneState = 'Forming' | 'ConfirmedFresh' | 'Approached' | 'Tested' | 'PartiallyMitigated' | 'Mitigated' | 'Invalidated' | 'Expired' | 'Merged'
+export interface SupplyDemandZone {
+  zoneId: string
+  type: 'Demand' | 'Supply'
+  pattern: string
+  proximalPrice: number
+  distalPrice: number
+  baseStartedAt: string
+  baseEndedAt: string
+  departureStartedAt: string
+  confirmedAt: string
+  availableAt: string
+  state: SupplyDemandZoneState
+  touchCount: number
+  penetrationRatio: number
+  freshnessScore: number
+  qualityScore: number
+  brokeStructure: boolean
+  hasFairValueGap: boolean
+  boundaryMode: string
+  profileHash: string
+}
+
+export interface SupplyDemandAnalysisSnapshot {
+  isEnabled: boolean
+  profileHash: string
+  snapshotVersion: number
+  availableAt: string
+  zones?: SupplyDemandZone[]
+  activeZones: SupplyDemandZone[]
+  recentEvents: Array<{ zoneId: string; eventType: string; availableAt: string }>
+}
+
+export type LiquidityPoolState = 'Forming' | 'Active' | 'Approached' | 'Touched' | 'Swept' | 'Consumed' | 'AcceptedBreak' | 'Broken' | 'Expired' | 'Merged'
+export interface LiquidityPool {
+  poolId: string
+  side: 'BuySide' | 'SellSide'
+  type: string
+  lowerPrice: number
+  upperPrice: number
+  referencePrice: number
+  originatedAt: string
+  confirmedAt: string
+  availableAt: string
+  state: LiquidityPoolState
+  sourcePointCount: number
+  touchCount: number
+  equalnessScore: number
+  visibilityScore: number
+  compressionScore: number
+  prominenceScore: number
+  freshnessScore: number
+  qualityScore: number
+  profileHash: string
+}
+
+export interface LiquiditySweepEvent {
+  sweepId: string
+  poolId: string
+  sweepStartedAt: string
+  confirmedAt: string
+  availableAt: string
+  extremePrice: number
+  penetrationAtr: number
+  closedBackInside: boolean
+  displacementConfirmed: boolean
+  structureShiftConfirmed: boolean
+  rejectionStrength: number
+  qualityScore: number
+}
+
+export interface LiquidityAnalysisSnapshot {
+  isEnabled: boolean
+  profileHash: string
+  snapshotVersion: number
+  availableAt: string
+  pools?: LiquidityPool[]
+  activePools: LiquidityPool[]
+  recentEvents: Array<{ poolId: string; eventType: string; availableAt: string; price: number }>
+  recentSweeps?: LiquiditySweepEvent[]
+}
+
+export interface SupplyDemandLiquidityConfluenceSnapshot {
+  isEnabled: boolean
+  snapshotVersion: number
+  availableAt: string
+  relationships: Array<{
+    confluenceId: string
+    zoneId: string
+    poolId?: string | null
+    sweepId?: string | null
+    direction: 'Bullish' | 'Bearish'
+    qualityScore: number
+    availableAt: string
+  }>
+}
+
 export type TrendlineType = 'Support' | 'Resistance'
 
 export interface Trendline {
@@ -907,6 +1007,8 @@ export interface ChartLayers {
   volume: boolean
   swings: boolean
   zones: boolean
+  supplyDemand?: boolean
+  liquidity?: boolean
   trendlines: boolean
   channels: boolean
   donchian: boolean

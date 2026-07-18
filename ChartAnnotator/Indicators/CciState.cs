@@ -47,12 +47,13 @@ public sealed class CciState
             deviationSum += Math.Abs(_typicalPrices[index] - average);
         decimal meanDeviation = deviationSum / _period;
 
-        if (meanDeviation == 0m)
+        decimal denominator = LambertConstant * meanDeviation;
+        if (denominator == 0m)
         {
             Current = 0m;
             return;
         }
 
-        Current = (typicalPrice - average) / (LambertConstant * meanDeviation);
+        Current = (typicalPrice - average) / denominator;
     }
 }

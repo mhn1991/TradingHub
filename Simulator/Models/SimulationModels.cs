@@ -235,6 +235,18 @@ public sealed record SimulatedTradeRecord
     public decimal? SetupCalibrationRiskMultiplier { get; init; }
     public decimal? MetaLabelRiskMultiplier { get; init; }
     public decimal? NeoWaveRiskMultiplier { get; init; }
+    public decimal? StructuralEvidenceRiskMultiplier { get; init; }
+    public Guid? EntrySupplyDemandZoneId { get; init; }
+    public decimal? EntrySupplyDemandZoneLowerPrice { get; init; }
+    public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
+    public string? EntrySupplyDemandZoneState { get; init; }
+    public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? TargetLiquidityPoolId { get; init; }
+    public string? TargetLiquidityProfileHash { get; init; }
+    public decimal? StructuralInvalidationReference { get; init; }
+    public bool EntrySupplyDemandManagementEnabled { get; init; }
+    public bool EntryLiquidityManagementEnabled { get; init; }
+    public string? StructuralManagementPolicyRevision { get; init; }
     public string? EntryNeoWaveHypothesisId { get; init; }
     public decimal? EntryNeoWaveInvalidationPrice { get; init; }
     public string? EntryNeoWavePatternType { get; init; }

@@ -20,20 +20,64 @@ export interface LiveMarketStatus {
 }
 
 export interface LiveAgentStatus {
+  deploymentId: string
   strategyId: string
   instrument: string
+  policyBundleId: string
+  policyRevision: number
+  analysisProfileHash: string
   mode: string
   lastStatus: string | null
+  health: string
+  lastEvaluatedEpoch: number
+  lastSnapshotVersion: number
   lastEvaluatedAt: string | null
+  evaluations: number
+  timeouts: number
+  averageEvaluationDurationMilliseconds: number
+  p95EvaluationDurationMilliseconds: number
+  mailboxDepth: number
   candidatesObserved: number
   candidatesBuy: number
   candidatesSell: number
   rejectedBySetupCalibration: number
   rejectedByMetaLabel: number
   rejectedByTradingCondition: number
+  rejectedByDataQuality: number
+  lastDecisionId: string | null
+  lastCandidateId: string | null
+  lastAction: string | null
+  lastReferencePrice: number | null
+  lastStopLossPrice: number | null
+  lastTakeProfitPrice: number | null
   lastMetaLabelProbability: number | null
   lastMetaLabelRiskMultiplier: number | null
   lastError: string | null
+  lastRejection: string | null
+}
+
+export interface LiveAnalysisProfileStatus {
+  profileHash: string
+  instrument: string
+  requiredIntervals: string[]
+  lastSnapshotVersion: number
+  lastAvailableAt: string | null
+  lastBuildDurationMilliseconds: number
+  cacheHits: number
+  cacheMisses: number
+  failureCount: number
+  dependentAgentCount: number
+}
+
+export interface LiveDecisionEpochStatus {
+  epoch: number
+  expectedAgents: number
+  completedAgents: number
+  failedAgents: number
+  timedOutAgents: number
+  missingAgents: number
+  candidateCount: number
+  durationMilliseconds: number
 }
 
 export interface LiveRuntimeStatus {
@@ -60,6 +104,8 @@ export interface LiveEngineStatus {
   connections: LiveConnectionsHealth
   markets: LiveMarketStatus[]
   agents: LiveAgentStatus[]
+  analysisProfiles: LiveAnalysisProfileStatus[]
+  lastDecisionEpoch: LiveDecisionEpochStatus | null
   runtime: LiveRuntimeStatus | null
   asOf: string
   message: string | null

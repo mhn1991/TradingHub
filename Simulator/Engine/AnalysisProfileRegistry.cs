@@ -66,16 +66,14 @@ public sealed class AnalysisProfileRegistry
         CurrencyStrengthSnapshot? crossMarket,
         DataQualityResult dataQuality)
     {
-        return new MarketAnalysisSnapshot
-        {
-            Instrument = instrument,
-            Profile = profile,
-            SnapshotVersion = snapshotVersion,
-            DecisionEpoch = decisionEpoch,
-            AvailableAt = availableAt,
-            Timeframes = new Dictionary<BarInterval, AnalysisSnapshot>(timeframes),
-            CrossMarket = crossMarket,
-            DataQuality = dataQuality
-        };
+        return MarketAnalysisSnapshot.Create(
+            instrument,
+            profile,
+            snapshotVersion,
+            decisionEpoch,
+            availableAt,
+            timeframes,
+            crossMarket,
+            dataQuality);
     }
 }

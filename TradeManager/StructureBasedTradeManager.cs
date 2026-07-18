@@ -1,6 +1,8 @@
 using Brokers.Models;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
+using ChartAnnotator.SupplyDemand;
 
 namespace TradeManager;
 
@@ -29,7 +31,9 @@ public enum TradeManagementExitReason
     ProfitFloorBreached,
     MaximumGivebackBreached,
     EquityProtectionBreach,
-    NeoWaveInvalidation
+    NeoWaveInvalidation,
+    EntrySupplyDemandZoneInvalidated,
+    TargetLiquidityAcceptedBreak
 }
 
 /// <summary>
@@ -135,6 +139,21 @@ public record PositionManagementOptions
     /// price. Zero means the executable price only needs to cross the invalidation level.
     /// </summary>
     public decimal NeoWaveInvalidationBufferAtr { get; init; } = 0.10m;
+
+    /// <summary>
+    /// Opt-in, entry-pinned supply/demand thesis management. Record-only analysis remains the
+    /// default and cannot change an existing position while this is false.
+    /// </summary>
+    public bool SupplyDemandManagementEnabled { get; init; }
+
+    /// <summary>
+    /// Opt-in, entry-pinned inferred-liquidity thesis management. Disabled by default pending
+    /// held-out outcome attribution.
+    /// </summary>
+    public bool LiquidityManagementEnabled { get; init; }
+
+    /// <summary>Must match the revision pinned to the position at entry.</summary>
+    public string StructuralManagementPolicyRevision { get; init; } = "structural-management-v1";
 
     public bool PreserveBracketTarget { get; init; } = true;
     public bool IncludeEstimatedExitCostsAtBreakEven { get; init; } = true;
@@ -386,6 +405,7 @@ public record PositionManagementOptions
             MinimumStopImprovementAtr < 0m || MinimumStopImprovementTicks < 0m ||
             MinimumAnalysisBarsBetweenAmendments < 1 ||
             NeoWaveInvalidationBufferAtr < 0m ||
+            string.IsNullOrWhiteSpace(StructuralManagementPolicyRevision) ||
             MinimumRunnerFraction is < 0m or >= 1m ||
             OpposingStructureProximityAtr < 0m ||
             MinimumAnalysisBarsBetweenReductions < 1 ||
@@ -530,6 +550,21 @@ public sealed record ManagedTradeState
     /// is explicitly enabled.
     /// </summary>
     public decimal? EntryNeoWaveInvalidationPrice { get; init; }
+
+    /// <summary>Immutable supply/demand thesis reference captured at entry.</summary>
+    public Guid? EntrySupplyDemandZoneId { get; init; }
+
+    /// <summary>Immutable inferred-liquidity target captured at entry.</summary>
+    public Guid? TargetLiquidityPoolId { get; init; }
+
+    /// <summary>Management policy revision captured at entry.</summary>
+    public string? StructuralManagementPolicyRevision { get; init; }
+
+    /// <summary>Supply/demand management opt-in captured at entry.</summary>
+    public bool EntrySupplyDemandManagementEnabled { get; init; }
+
+    /// <summary>Liquidity management opt-in captured at entry.</summary>
+    public bool EntryLiquidityManagementEnabled { get; init; }
 }
 
 public sealed record PositionReductionRecommendation
@@ -691,6 +726,45 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                     $"Price crossed the {hypothesis} invalidation level {neoWaveInvalidation} " +
                     $"with an ATR confirmation buffer of {confirmationBuffer}.");
             }
+        }
+
+        bool structuralPolicyMatches = string.Equals(
+            trade.StructuralManagementPolicyRevision,
+            _options.StructuralManagementPolicyRevision,
+            StringComparison.Ordinal);
+
+        if (includeThesis && structuralPolicyMatches &&
+            _options.SupplyDemandManagementEnabled &&
+            trade.EntrySupplyDemandManagementEnabled &&
+            trade.EntrySupplyDemandZoneId is Guid entryZoneId &&
+            analysis.SupplyDemand.RecentEvents.Any(evt =>
+                evt.ZoneId == entryZoneId &&
+                evt.EventType == SupplyDemandZoneEventType.Invalidated &&
+                evt.AvailableAt == analysis.AvailableAt))
+        {
+            return Exit(
+                openProfitR,
+                TradeManagementExitReason.EntrySupplyDemandZoneInvalidated,
+                "EntrySupplyDemandZoneInvalidated",
+                $"The entry-pinned supply/demand zone '{entryZoneId}' was invalidated by the current causal snapshot.");
+        }
+
+        if (includeThesis && structuralPolicyMatches &&
+            _options.LiquidityManagementEnabled &&
+            trade.EntryLiquidityManagementEnabled &&
+            trade.TargetLiquidityPoolId is Guid targetPoolId &&
+            analysis.Liquidity.RecentEvents.Any(evt =>
+                evt.PoolId == targetPoolId &&
+                evt.EventType == LiquidityEventType.AcceptedBreak &&
+                evt.AvailableAt == analysis.AvailableAt) &&
+            analysis.Liquidity.Pools.FirstOrDefault(pool => pool.PoolId == targetPoolId) is { } targetPool &&
+            IsAdverseLiquiditySide(trade.Side, targetPool.Side))
+        {
+            return Exit(
+                openProfitR,
+                TradeManagementExitReason.TargetLiquidityAcceptedBreak,
+                "EntryTargetLiquidityAcceptedBreak",
+                $"The entry-pinned {targetPool.Side} inferred-liquidity pool '{targetPoolId}' recorded an adverse accepted break.");
         }
 
         if (includeThesis && _options.ExitOnAdverseStructureBreak && adverseBreak)
@@ -1471,6 +1545,14 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         {
             OrderSide.Buy => structureBreak == MarketStructureBreak.Bearish,
             OrderSide.Sell => structureBreak == MarketStructureBreak.Bullish,
+            _ => false
+        };
+
+    private static bool IsAdverseLiquiditySide(OrderSide side, LiquiditySide liquiditySide) =>
+        side switch
+        {
+            OrderSide.Buy => liquiditySide == LiquiditySide.SellSide,
+            OrderSide.Sell => liquiditySide == LiquiditySide.BuySide,
             _ => false
         };
 

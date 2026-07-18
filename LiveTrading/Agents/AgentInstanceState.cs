@@ -1,4 +1,5 @@
 using LiveTrading.Configuration;
+using Agent.Models;
 using TradingCore.Pipeline;
 
 namespace LiveTrading.Agents;
@@ -15,9 +16,17 @@ public sealed class AgentInstanceState
     public required StrategyDecisionRuntime Runtime { get; init; }
     public required LiveTradingPolicyBundle PolicyBundle { get; init; }
     public required LiveStrategyAssignment Assignment { get; init; }
+    /// <summary>The exact immutable analysis configuration pinned at startup.</summary>
+    public AnalysisProfileKey? AnalysisProfile { get; init; }
+    /// <summary>Production runtime boundary. Null is retained only for legacy/test construction.</summary>
+    public IAgentRuntime? IsolatedRuntime { get; init; }
 
     public long LastEvaluatedMarketSequence { get; set; }
     public DateTimeOffset? LastEvaluatedAt { get; set; }
+    public long LastEvaluatedEpoch { get; set; }
+    public long LastSnapshotVersion { get; set; }
+    public int MailboxDepth;
+    public int PeakMailboxDepth;
 
     /// <summary>AGENT-10: total pipeline evaluations, regardless of outcome - the missing
     /// "Evaluations" counter the diagnostics audit flagged as absent.</summary>
@@ -50,6 +59,7 @@ public sealed class AgentInstanceState
     public long DuplicateDecisions { get; set; }
     public LiveTradeCandidate? LastCandidate { get; set; }
     public string? LastStatus { get; set; }
+    public string? LastRejection { get; set; }
 
     /// <summary>Phase 4: the most recent evaluation's decision identity, recorded independently
     /// of <see cref="LastCandidate"/> so a Phase 6 per-agent timeout can still record which
@@ -58,15 +68,42 @@ public sealed class AgentInstanceState
     /// <c>string</c> type, not a synthesized <c>Guid</c> - this codebase's decision identity is
     /// always a deterministic string derived from ordered inputs (see <c>ProgressiveStrategyBase</c>).</summary>
     public string? LastDecisionId { get; set; }
+    public AgentAction? LastAction { get; set; }
+    public decimal? LastConfidence { get; set; }
+    public string? LastReasonCode { get; set; }
 
     /// <summary>Multi-agent architecture Phase 6: incremented each time this instance's
     /// evaluation does not complete within <c>AgentSupervisor</c>'s per-agent timeout. The
-    /// evaluation task itself is never abandoned - it keeps running under this instance's own
-    /// concurrency slot, and a late result is discarded by
-    /// <c>LiveDecisionEpochCoordinator.SubmitCandidate</c>'s stale-sequence rejection if it
-    /// arrives after a newer market update has already begun.</summary>
+    /// evaluation is cancelled cooperatively and its instance gate stays held until the task has
+    /// actually stopped; a late synchronous return is rejected before it can mutate diagnostics
+    /// or emit a candidate.</summary>
     public long TimeoutCount { get; set; }
 
     public Exception? LastEvaluationError { get; set; }
     public DateTimeOffset? LastEvaluationErrorAt { get; set; }
+
+    private readonly object _durationSync = new();
+    private readonly Queue<double> _recentEvaluationMilliseconds = new();
+
+    public void RecordEvaluationDuration(TimeSpan duration)
+    {
+        lock (_durationSync)
+        {
+            _recentEvaluationMilliseconds.Enqueue(duration.TotalMilliseconds);
+            while (_recentEvaluationMilliseconds.Count > 256)
+                _recentEvaluationMilliseconds.Dequeue();
+        }
+    }
+
+    public (double Average, double P95) EvaluationDurationSummary()
+    {
+        lock (_durationSync)
+        {
+            if (_recentEvaluationMilliseconds.Count == 0)
+                return (0, 0);
+            double[] ordered = _recentEvaluationMilliseconds.Order().ToArray();
+            int p95Index = Math.Clamp((int)Math.Ceiling(ordered.Length * 0.95) - 1, 0, ordered.Length - 1);
+            return (ordered.Average(), ordered[p95Index]);
+        }
+    }
 }

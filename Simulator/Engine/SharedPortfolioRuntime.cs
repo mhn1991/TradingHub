@@ -733,7 +733,8 @@ public sealed class SharedPortfolioRuntime
             EquityProtectionMultiplier = safety.CurrentRiskMultiplier,
             CalibrationMultiplier = decision.SetupCalibrationRiskMultiplier ?? 1m,
             MetaLabelMultiplier = decision.MetaLabelRiskMultiplier ?? 1m,
-            NeoWaveMultiplier = decision.NeoWaveRiskMultiplier ?? 1m
+            NeoWaveMultiplier = decision.NeoWaveRiskMultiplier ?? 1m,
+            StructuralEvidenceMultiplier = decision.StructuralEvidenceRiskMultiplier ?? 1m
         }).CombinedMultiplier;
     }
 

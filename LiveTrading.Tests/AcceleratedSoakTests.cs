@@ -102,7 +102,7 @@ public sealed class AcceleratedSoakTests
 
         Task actorTask = actor.RunAsync(input.Reader, output.Writer, CancellationToken.None);
 
-        Task writerTask = Task.Run(async () =>
+        async Task WriteInputAsync()
         {
             DateTimeOffset liveStart = clock.GetUtcNow();
             for (int i = 0; i < CandlesPerInstrument; i++)
@@ -122,14 +122,14 @@ public sealed class AcceleratedSoakTests
             }
 
             input.Writer.Complete();
-        });
+        }
 
         long lastSequence = 0;
         int sequenceGaps = 0;
         bool anyIncomplete = false;
         int maxBacklog = 0;
 
-        Task readerTask = Task.Run(async () =>
+        async Task ReadOutputAsync()
         {
             await foreach (MarketAnalysisUpdate update in output.Reader.ReadAllAsync())
             {
@@ -145,9 +145,28 @@ public sealed class AcceleratedSoakTests
                     anyIncomplete = true;
                 }
             }
-        });
+        }
 
-        await Task.WhenAll(actorTask, writerTask, readerTask).WaitAsync(TimeSpan.FromSeconds(30));
+        // Channel I/O is already asynchronous. Starting these operations directly avoids
+        // consuming worker threads solely to wait on bounded-channel backpressure.
+        Task writerTask = WriteInputAsync();
+        Task readerTask = ReadOutputAsync();
+
+        // Keep the full 5 x 120-candle workload. Profile-aware analysis adds measurable work to
+        // slower debug/CI hosts, so this is a deadlock guard rather than a 30-second performance
+        // assertion; performance budgets are covered by the dedicated capacity fixture.
+        try
+        {
+            await Task.WhenAll(actorTask, writerTask, readerTask).WaitAsync(TimeSpan.FromSeconds(90));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"{instrument} soak stalled: actor={actorTask.Status}, writer={writerTask.Status}, " +
+                $"reader={readerTask.Status}, last-sequence={lastSequence}, input={input.Reader.Count}, " +
+                $"output={output.Reader.Count}, actor-error={actorTask.Exception?.Flatten().InnerException}.",
+                ex);
+        }
 
         return new MarketOutcome(
             instrument,

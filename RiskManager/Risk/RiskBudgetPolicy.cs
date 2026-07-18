@@ -67,6 +67,7 @@ public sealed record RiskBudgetContext
     public decimal CalibrationMultiplier { get; init; } = 1m;
     public decimal MetaLabelMultiplier { get; init; } = 1m;
     public decimal NeoWaveMultiplier { get; init; } = 1m;
+    public decimal StructuralEvidenceMultiplier { get; init; } = 1m;
 }
 
 public sealed record RiskBudgetDecision
@@ -81,6 +82,7 @@ public sealed record RiskBudgetDecision
     public required decimal CalibrationMultiplier { get; init; }
     public required decimal MetaLabelMultiplier { get; init; }
     public decimal NeoWaveMultiplier { get; init; } = 1m;
+    public decimal StructuralEvidenceMultiplier { get; init; } = 1m;
     public required decimal CombinedMultiplier { get; init; }
     public required string ReasonCode { get; init; }
     public required string Explanation { get; init; }
@@ -118,7 +120,9 @@ public sealed class RiskBudgetPolicy : IRiskBudgetPolicy
         decimal calibration = Cap(context.CalibrationMultiplier);
         decimal metaLabel = Cap(context.MetaLabelMultiplier);
         decimal neoWave = Cap(context.NeoWaveMultiplier);
-        decimal raw = drawdown * volatility * regime * liquidity * correlation * allocation * equity * calibration * metaLabel * neoWave;
+        decimal structuralEvidence = Cap(context.StructuralEvidenceMultiplier);
+        decimal raw = drawdown * volatility * regime * liquidity * correlation * allocation * equity * calibration *
+            metaLabel * neoWave * structuralEvidence;
         decimal combined = Math.Clamp(raw, _options.MinimumCombinedRiskMultiplier, _options.MaximumCombinedRiskMultiplier);
         return new RiskBudgetDecision
         {
@@ -132,12 +136,14 @@ public sealed class RiskBudgetPolicy : IRiskBudgetPolicy
             CalibrationMultiplier = calibration,
             MetaLabelMultiplier = metaLabel,
             NeoWaveMultiplier = neoWave,
+            StructuralEvidenceMultiplier = structuralEvidence,
             CombinedMultiplier = combined,
             ReasonCode = combined <= 0m ? "RiskBudgetRejected" : combined < 1m ? "RiskBudgetAdjusted" : "BaseRiskBudget",
             Explanation = $"risk multipliers: drawdown={drawdown:F3}, volatility={volatility:F3}, " +
                 $"regime={regime:F3}, liquidity={liquidity:F3}, correlation={correlation:F3}, " +
                 $"allocation={allocation:F3}, equity={equity:F3}, calibration={calibration:F3}, " +
-                $"metaLabel={metaLabel:F3}, neoWave={neoWave:F3}; combined={combined:F3}."
+                $"metaLabel={metaLabel:F3}, neoWave={neoWave:F3}, " +
+                $"structuralEvidence={structuralEvidence:F3}; combined={combined:F3}."
         };
     }
 

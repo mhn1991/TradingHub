@@ -173,6 +173,81 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
             };
         }
 
+        if (decision.Action is AgentAction.Buy or AgentAction.Sell &&
+            (Options.SupplyDemandEnabled || Options.LiquidityEnabled))
+        {
+            AnalysisSnapshot entry = context.Analysis.Get(Options.EntryInterval);
+            bool buy = decision.Action == AgentAction.Buy;
+            SupplyDemandDecisionEvidence supplyDemand = StructuralEvidenceEvaluator.EvaluateSupplyDemand(
+                entry,
+                buy,
+                Options.SupplyDemandEnabled,
+                Options.SupplyDemandEvidenceMode,
+                Options.SupplyDemandEvidence);
+            LiquidityDecisionEvidence liquidity = StructuralEvidenceEvaluator.EvaluateLiquidity(
+                entry,
+                buy,
+                Options.LiquidityEnabled,
+                Options.SupplyDemandLiquidityConfluenceEnabled,
+                Options.LiquidityEvidenceMode,
+                Options.LiquidityEvidence);
+            decimal structuralRisk = Math.Clamp(
+                supplyDemand.RiskMultiplier * liquidity.RiskMultiplier,
+                0m,
+                1m);
+            var entryZone = supplyDemand.EntryZone;
+            var selectedZone = supplyDemand.SelectedZone;
+            var selectedPool = liquidity.SelectedPool;
+            var targetPool = liquidity.TargetPool;
+            decision = decision with
+            {
+                Confidence = Math.Clamp(
+                    decision.Confidence + supplyDemand.ConfidenceAdjustment + liquidity.ConfidenceAdjustment,
+                    0m,
+                    100m),
+                SupplyDemandZoneId = selectedZone?.ZoneId,
+                SupplyDemandZoneType = selectedZone?.Type,
+                SupplyDemandZoneState = selectedZone?.State,
+                SupplyDemandZoneQuality = selectedZone?.QualityScore,
+                SupplyDemandZoneDistanceAtr = supplyDemand.SelectedDistanceAtr,
+                SupplyDemandProfileHash = entry.SupplyDemand.IsEnabled ? entry.SupplyDemand.ProfileHash : null,
+                SupplyDemandReasonCodes = supplyDemand.ReasonCodes,
+                SupplyDemandRiskMultiplier = supplyDemand.RiskMultiplier,
+                LiquidityPoolId = selectedPool?.PoolId,
+                LiquidityPoolType = selectedPool?.Type,
+                LiquidityPoolState = selectedPool?.State,
+                LiquiditySide = selectedPool?.Side,
+                LiquidityPoolQuality = selectedPool?.QualityScore,
+                LiquidityPoolDistanceAtr = liquidity.SelectedDistanceAtr,
+                LiquiditySweepId = liquidity.SelectedSweep?.SweepId,
+                SupplyDemandLiquidityConfluenceId = liquidity.Confluence?.ConfluenceId,
+                LiquidityProfileHash = entry.Liquidity.IsEnabled ? entry.Liquidity.ProfileHash : null,
+                LiquidityReasonCodes = liquidity.ReasonCodes,
+                LiquidityEvidenceRiskMultiplier = liquidity.RiskMultiplier,
+                StructuralEvidenceRiskMultiplier = structuralRisk,
+                EntrySupplyDemandZoneId = entryZone?.ZoneId,
+                EntrySupplyDemandZoneLowerPrice = entryZone is null
+                    ? null
+                    : Math.Min(entryZone.ProximalPrice, entryZone.DistalPrice),
+                EntrySupplyDemandZoneUpperPrice = entryZone is null
+                    ? null
+                    : Math.Max(entryZone.ProximalPrice, entryZone.DistalPrice),
+                EntrySupplyDemandZoneState = entryZone?.State,
+                EntrySupplyDemandProfileHash = entryZone?.ProfileHash,
+                TargetLiquidityPoolId = targetPool?.PoolId,
+                TargetLiquidityProfileHash = targetPool?.ProfileHash,
+                StructuralInvalidationReference = entryZone is null
+                    ? null
+                    : buy
+                        ? Math.Min(entryZone.ProximalPrice, entryZone.DistalPrice)
+                        : Math.Max(entryZone.ProximalPrice, entryZone.DistalPrice),
+                EntrySupplyDemandManagementEnabled = Options.SupplyDemandManagementEnabled,
+                EntryLiquidityManagementEnabled = Options.LiquidityManagementEnabled,
+                StructuralManagementPolicyRevision = Options.StructuralManagementPolicyRevision
+            };
+            decision = StructuralTradeGeometry.Apply(decision, entry, Options, supplyDemand, liquidity);
+        }
+
         return decision;
     }
 

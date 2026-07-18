@@ -694,6 +694,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             $"{options.BreakEvenBufferAtr},{options.MinimumStopImprovementAtr},{options.MinimumStopImprovementTicks}," +
             $"{options.MinimumAnalysisBarsBetweenAmendments},{options.ExitOnAdverseStructureBreak}," +
             $"neo-wave-exit={options.EnableNeoWaveInvalidationExit}:{options.NeoWaveInvalidationBufferAtr}," +
+            $"supply-demand-management={options.SupplyDemandManagementEnabled}," +
+            $"liquidity-management={options.LiquidityManagementEnabled}," +
+            $"structural-management-policy={options.StructuralManagementPolicyRevision}," +
             $"{options.PreserveBracketTarget},{options.IncludeEstimatedExitCostsAtBreakEven}," +
             $"{options.EnableScaleOut},{options.MinimumRunnerFraction},{options.OpposingStructureProximityAtr}," +
             $"{options.MinimumAnalysisBarsBetweenReductions},{scaleOut}," +

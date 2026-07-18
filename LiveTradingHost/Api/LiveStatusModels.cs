@@ -7,9 +7,37 @@ public sealed record LiveEngineStatusDto
     public required ConnectionsHealthDto Connections { get; init; }
     public required IReadOnlyList<MarketStatusDto> Markets { get; init; }
     public required IReadOnlyList<AgentStatusDto> Agents { get; init; }
+    public required IReadOnlyList<AnalysisProfileStatusDto> AnalysisProfiles { get; init; }
+    public DecisionEpochStatusDto? LastDecisionEpoch { get; init; }
     public LiveRuntimeStatusDto? Runtime { get; init; }
     public required DateTimeOffset AsOf { get; init; }
     public string? Message { get; init; }
+}
+
+public sealed record AnalysisProfileStatusDto
+{
+    public required string ProfileHash { get; init; }
+    public required string Instrument { get; init; }
+    public required IReadOnlyList<string> RequiredIntervals { get; init; }
+    public required long LastSnapshotVersion { get; init; }
+    public DateTimeOffset? LastAvailableAt { get; init; }
+    public required double LastBuildDurationMilliseconds { get; init; }
+    public required long CacheHits { get; init; }
+    public required long CacheMisses { get; init; }
+    public required long FailureCount { get; init; }
+    public required int DependentAgentCount { get; init; }
+}
+
+public sealed record DecisionEpochStatusDto
+{
+    public required long Epoch { get; init; }
+    public required int ExpectedAgents { get; init; }
+    public required int CompletedAgents { get; init; }
+    public required int FailedAgents { get; init; }
+    public required int TimedOutAgents { get; init; }
+    public required int MissingAgents { get; init; }
+    public required int CandidateCount { get; init; }
+    public required double DurationMilliseconds { get; init; }
 }
 
 public sealed record ConnectionsHealthDto
@@ -37,20 +65,40 @@ public sealed record MarketStatusDto
 /// visible proof point for the acceptance criterion "meta multiplier never exceeds one."</summary>
 public sealed record AgentStatusDto
 {
+    public string DeploymentId { get; init; } = string.Empty;
     public required string StrategyId { get; init; }
     public required string Instrument { get; init; }
+    public Guid PolicyBundleId { get; init; }
+    public int PolicyRevision { get; init; }
+    public string AnalysisProfileHash { get; init; } = string.Empty;
     public required string Mode { get; init; }
     public string? LastStatus { get; init; }
+    public string Health { get; init; } = "Unknown";
+    public long LastEvaluatedEpoch { get; init; }
+    public long LastSnapshotVersion { get; init; }
     public DateTimeOffset? LastEvaluatedAt { get; init; }
+    public long Evaluations { get; init; }
+    public long Timeouts { get; init; }
+    public double AverageEvaluationDurationMilliseconds { get; init; }
+    public double P95EvaluationDurationMilliseconds { get; init; }
+    public int MailboxDepth { get; init; }
     public required long CandidatesObserved { get; init; }
     public required long CandidatesBuy { get; init; }
     public required long CandidatesSell { get; init; }
     public required long RejectedBySetupCalibration { get; init; }
     public required long RejectedByMetaLabel { get; init; }
     public required long RejectedByTradingCondition { get; init; }
+    public long RejectedByDataQuality { get; init; }
+    public string? LastDecisionId { get; init; }
+    public string? LastCandidateId { get; init; }
+    public string? LastAction { get; init; }
+    public decimal? LastReferencePrice { get; init; }
+    public decimal? LastStopLossPrice { get; init; }
+    public decimal? LastTakeProfitPrice { get; init; }
     public decimal? LastMetaLabelProbability { get; init; }
     public decimal? LastMetaLabelRiskMultiplier { get; init; }
     public string? LastError { get; init; }
+    public string? LastRejection { get; init; }
 }
 
 public sealed record LiveRuntimeStatusDto

@@ -1,5 +1,6 @@
 using ChartAnnotator.Engine;
 using Brokers.Models;
+using System.Collections.Frozen;
 
 namespace TradingCore.Pipeline;
 
@@ -37,7 +38,10 @@ public sealed record AnalysisProfileKey
         return new AnalysisProfileKey
         {
             ProfileHash = ChartAnnotationOptionsHasher.ComputeHash(options),
-            RequiredIntervals = requiredIntervals,
+            // Never retain a caller-owned set. Profile keys are dictionary keys for the lifetime
+            // of a run, so mutating the source set after registration must not change equality or
+            // its hash code underneath those dictionaries.
+            RequiredIntervals = requiredIntervals.ToFrozenSet(),
             FeatureSchemaHash = featureSchemaHash
         };
     }

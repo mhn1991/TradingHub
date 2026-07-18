@@ -3,9 +3,13 @@ using Brokers.Models;
 using ChartAnnotator.Models;
 using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
+using ChartAnnotator.SupplyDemand;
 using RiskManager.Calibration;
 using RiskManager.Conditions;
 using TradingCore.Pipeline;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace LiveTrading.Agents;
 
@@ -88,6 +92,10 @@ public sealed record LiveTradeCandidate
     public string? SetupId { get; init; }
     public required string StrategyId { get; init; }
     public required InstrumentKey Instrument { get; init; }
+    public AgentInstanceKey? AgentInstance { get; init; }
+    public string AnalysisProfileHash { get; init; } = string.Empty;
+    public Guid PolicyBundleId { get; init; }
+    public int PolicyRevision { get; init; }
     public required AgentAction Action { get; init; }
     public required DateTimeOffset DecisionTime { get; init; }
     public required long DecisionEpoch { get; init; }
@@ -108,12 +116,24 @@ public sealed record LiveTradeCandidate
     public required MetaLabelAudit MetaLabel { get; init; }
     public required TradingConditionDecision? TradingCondition { get; init; }
     public decimal NeoWaveRiskMultiplier { get; init; } = 1m;
+    public decimal StructuralEvidenceRiskMultiplier { get; init; } = 1m;
     public string? NeoWaveHypothesisId { get; init; }
     public NeoWavePatternType? NeoWavePatternType { get; init; }
     public NeoWaveDirection? NeoWaveDirection { get; init; }
     public decimal? NeoWaveStructuralScore { get; init; }
     public decimal? NeoWaveConflictScore { get; init; }
     public decimal? NeoWaveInvalidationPrice { get; init; }
+    public Guid? EntrySupplyDemandZoneId { get; init; }
+    public decimal? EntrySupplyDemandZoneLowerPrice { get; init; }
+    public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
+    public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
+    public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? TargetLiquidityPoolId { get; init; }
+    public string? TargetLiquidityProfileHash { get; init; }
+    public decimal? StructuralInvalidationReference { get; init; }
+    public bool EntrySupplyDemandManagementEnabled { get; init; }
+    public bool EntryLiquidityManagementEnabled { get; init; }
+    public string? StructuralManagementPolicyRevision { get; init; }
 }
 
 /// <summary>Turns one <see cref="TradingPipelineResult"/> that survived the pipeline as a
@@ -127,7 +147,9 @@ public static class SignalFunnel
         AgentMarketContext context,
         TradingPipelineResult result,
         long decisionEpoch,
-        long marketSequence)
+        long marketSequence,
+        AgentInstanceKey? agentInstance = null,
+        AnalysisProfileKey? analysisProfile = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
         ArgumentNullException.ThrowIfNull(context);
@@ -137,14 +159,38 @@ public static class SignalFunnel
 
         decimal alignment = MetaLabelFeatureFactory.ComputeMultiTimeframeAlignment(decision.Action, context.Analysis);
         MarketRegime entryRegime = decision.RegimeLabel ?? ShortestSnapshot(context.Analysis).MarketRegime.Regime;
+        string identity = agentInstance is null
+            ? $"legacy|{context.Instrument.Value}|{strategyId}"
+            : $"{agentInstance.DeploymentId}|{agentInstance.Instrument.Value}|{agentInstance.StrategyId}|" +
+              $"{agentInstance.PolicyBundleId:N}|{agentInstance.Revision}";
+        string decisionId = decision.DecisionId ?? StableId(
+            "decision",
+            identity,
+            context.Timestamp.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+            decisionEpoch.ToString(CultureInfo.InvariantCulture),
+            marketSequence.ToString(CultureInfo.InvariantCulture),
+            decision.Action.ToString(),
+            Invariant(decision.ReferencePrice),
+            Invariant(decision.StopLossPrice),
+            Invariant(decision.TakeProfitPrice));
 
         return new LiveTradeCandidate
         {
-            CandidateId = Guid.NewGuid().ToString("N"),
-            DecisionId = decision.DecisionId ?? Guid.NewGuid().ToString("N"),
+            CandidateId = StableId(
+                "candidate",
+                identity,
+                analysisProfile?.ProfileHash ?? string.Empty,
+                decisionId,
+                decisionEpoch.ToString(CultureInfo.InvariantCulture),
+                marketSequence.ToString(CultureInfo.InvariantCulture)),
+            DecisionId = decisionId,
             SetupId = decision.SetupId,
             StrategyId = strategyId,
             Instrument = context.Instrument,
+            AgentInstance = agentInstance,
+            AnalysisProfileHash = analysisProfile?.ProfileHash ?? string.Empty,
+            PolicyBundleId = agentInstance?.PolicyBundleId ?? Guid.Empty,
+            PolicyRevision = agentInstance?.Revision ?? 0,
             Action = decision.Action,
             DecisionTime = context.Timestamp,
             DecisionEpoch = decisionEpoch,
@@ -168,7 +214,20 @@ public static class SignalFunnel
             NeoWaveDirection = decision.NeoWaveDirection,
             NeoWaveStructuralScore = decision.NeoWaveStructuralScore,
             NeoWaveConflictScore = decision.NeoWaveConflictScore,
-            NeoWaveInvalidationPrice = decision.NeoWaveInvalidationPrice
+            NeoWaveInvalidationPrice = decision.NeoWaveInvalidationPrice,
+            StructuralEvidenceRiskMultiplier = Math.Clamp(
+                decision.StructuralEvidenceRiskMultiplier ?? 1m, 0m, 1m),
+            EntrySupplyDemandZoneId = decision.EntrySupplyDemandZoneId,
+            EntrySupplyDemandZoneLowerPrice = decision.EntrySupplyDemandZoneLowerPrice,
+            EntrySupplyDemandZoneUpperPrice = decision.EntrySupplyDemandZoneUpperPrice,
+            EntrySupplyDemandZoneState = decision.EntrySupplyDemandZoneState,
+            EntrySupplyDemandProfileHash = decision.EntrySupplyDemandProfileHash,
+            TargetLiquidityPoolId = decision.TargetLiquidityPoolId,
+            TargetLiquidityProfileHash = decision.TargetLiquidityProfileHash,
+            StructuralInvalidationReference = decision.StructuralInvalidationReference,
+            EntrySupplyDemandManagementEnabled = decision.EntrySupplyDemandManagementEnabled,
+            EntryLiquidityManagementEnabled = decision.EntryLiquidityManagementEnabled,
+            StructuralManagementPolicyRevision = decision.StructuralManagementPolicyRevision
         };
     }
 
@@ -177,4 +236,13 @@ public static class SignalFunnel
     /// exposed for reuse.</summary>
     private static AnalysisSnapshot ShortestSnapshot(MultiTimeframeAnalysis analysis) =>
         analysis.Timeframes.OrderBy(kv => BarIntervalParser.ApproximateSeconds(kv.Key)).First().Value;
+
+    private static string StableId(params string[] components)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\u001f', components)));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string Invariant(decimal? value) =>
+        value?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
 }

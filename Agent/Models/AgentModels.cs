@@ -2,6 +2,8 @@ using Brokers.Models;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
 using ChartAnnotator.NeoWave;
+using ChartAnnotator.Liquidity;
+using ChartAnnotator.SupplyDemand;
 
 namespace Agent.Models;
 
@@ -113,6 +115,43 @@ public sealed record AgentDecision
     public IReadOnlyList<string> NeoWaveReasonCodes { get; init; } = [];
     /// <summary>Bounded to 0..1; NEoWave evidence can reduce but never increase risk.</summary>
     public decimal? NeoWaveRiskMultiplier { get; init; }
+
+    public Guid? SupplyDemandZoneId { get; init; }
+    public SupplyDemandZoneType? SupplyDemandZoneType { get; init; }
+    public SupplyDemandZoneState? SupplyDemandZoneState { get; init; }
+    public decimal? SupplyDemandZoneQuality { get; init; }
+    public decimal? SupplyDemandZoneDistanceAtr { get; init; }
+    public string? SupplyDemandProfileHash { get; init; }
+    public IReadOnlyList<string> SupplyDemandReasonCodes { get; init; } = [];
+    public decimal? SupplyDemandRiskMultiplier { get; init; }
+
+    public Guid? LiquidityPoolId { get; init; }
+    public LiquidityPoolType? LiquidityPoolType { get; init; }
+    public LiquidityPoolState? LiquidityPoolState { get; init; }
+    public LiquiditySide? LiquiditySide { get; init; }
+    public decimal? LiquidityPoolQuality { get; init; }
+    public decimal? LiquidityPoolDistanceAtr { get; init; }
+    public Guid? LiquiditySweepId { get; init; }
+    public Guid? SupplyDemandLiquidityConfluenceId { get; init; }
+    public string? LiquidityProfileHash { get; init; }
+    public IReadOnlyList<string> LiquidityReasonCodes { get; init; } = [];
+    public decimal? LiquidityEvidenceRiskMultiplier { get; init; }
+    /// <summary>Combined structural evidence multiplier, always capped to 0..1.</summary>
+    public decimal? StructuralEvidenceRiskMultiplier { get; init; }
+
+    // Immutable entry-time thesis. Trade managers may observe newer analysis, but must not
+    // silently replace these references.
+    public Guid? EntrySupplyDemandZoneId { get; init; }
+    public decimal? EntrySupplyDemandZoneLowerPrice { get; init; }
+    public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
+    public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
+    public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? TargetLiquidityPoolId { get; init; }
+    public string? TargetLiquidityProfileHash { get; init; }
+    public decimal? StructuralInvalidationReference { get; init; }
+    public bool EntrySupplyDemandManagementEnabled { get; init; }
+    public bool EntryLiquidityManagementEnabled { get; init; }
+    public string? StructuralManagementPolicyRevision { get; init; }
 }
 
 public sealed class MultiTimeframeAnalysis

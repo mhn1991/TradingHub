@@ -44,18 +44,35 @@ public interface ILiveTradingPersistence
     Task<LiveEngineCheckpoint?> LoadCheckpointAsync(CancellationToken cancellationToken);
 }
 
+public sealed record LivePersistenceMetrics(
+    int Capacity,
+    int QueueDepth,
+    long Enqueued,
+    long Completed,
+    long Failed);
+
+/// <summary>Optional bounded-writer telemetry without widening the critical persistence contract.</summary>
+public interface ILiveTradingPersistenceDiagnostics
+{
+    LivePersistenceMetrics Metrics { get; }
+}
+
 /// <summary>
 /// Single bounded persistence writer. Journals are append-only SHA-256 envelopes and checkpoints
 /// use a hashed envelope, temporary file, and atomic move. Any write failure is returned to the
 /// caller so the live safety
 /// layer can pause new entries rather than silently losing broker/account history.
 /// </summary>
-public sealed class FileLiveTradingPersistence : ILiveTradingPersistence
+public sealed class FileLiveTradingPersistence : ILiveTradingPersistence, ILiveTradingPersistenceDiagnostics
 {
     private readonly LiveTradingPersistenceOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly JsonSerializerOptions _json;
     private readonly Channel<PersistenceCommand> _commands;
+    private int _queueDepth;
+    private long _enqueued;
+    private long _completed;
+    private long _failed;
 
     public FileLiveTradingPersistence(
         LiveTradingPersistenceOptions options,
@@ -79,6 +96,13 @@ public sealed class FileLiveTradingPersistence : ILiveTradingPersistence
         });
     }
 
+    public LivePersistenceMetrics Metrics => new(
+        _options.QueueCapacity,
+        Volatile.Read(ref _queueDepth),
+        Interlocked.Read(ref _enqueued),
+        Interlocked.Read(ref _completed),
+        Interlocked.Read(ref _failed));
+
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(_options.RootDirectory);
@@ -87,6 +111,7 @@ public sealed class FileLiveTradingPersistence : ILiveTradingPersistence
             await foreach (PersistenceCommand command in _commands.Reader.ReadAllAsync(cancellationToken)
                                .ConfigureAwait(false))
             {
+                Interlocked.Decrement(ref _queueDepth);
                 try
                 {
                     switch (command)
@@ -99,10 +124,12 @@ public sealed class FileLiveTradingPersistence : ILiveTradingPersistence
                                 .ConfigureAwait(false);
                             break;
                     }
+                    Interlocked.Increment(ref _completed);
                     command.Completion.TrySetResult(true);
                 }
                 catch (Exception ex)
                 {
+                    Interlocked.Increment(ref _failed);
                     command.Completion.TrySetException(ex);
                 }
             }
@@ -110,7 +137,11 @@ public sealed class FileLiveTradingPersistence : ILiveTradingPersistence
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             while (_commands.Reader.TryRead(out PersistenceCommand? pending))
+            {
+                Interlocked.Decrement(ref _queueDepth);
+                Interlocked.Increment(ref _failed);
                 pending.Completion.TrySetCanceled(cancellationToken);
+            }
         }
     }
 
@@ -128,7 +159,7 @@ public sealed class FileLiveTradingPersistence : ILiveTradingPersistence
             PayloadType = payload.GetType(),
             Timestamp = _timeProvider.GetUtcNow()
         };
-        await _commands.Writer.WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        await EnqueueAsync(command, cancellationToken).ConfigureAwait(false);
         await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -138,8 +169,26 @@ public sealed class FileLiveTradingPersistence : ILiveTradingPersistence
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
         var command = new CheckpointCommand { Checkpoint = checkpoint };
-        await _commands.Writer.WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        await EnqueueAsync(command, cancellationToken).ConfigureAwait(false);
         await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask EnqueueAsync(
+        PersistenceCommand command,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _queueDepth);
+        Interlocked.Increment(ref _enqueued);
+        try
+        {
+            await _commands.Writer.WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            Interlocked.Decrement(ref _queueDepth);
+            Interlocked.Increment(ref _failed);
+            throw;
+        }
     }
 
     public async Task<LiveEngineCheckpoint?> LoadCheckpointAsync(CancellationToken cancellationToken)

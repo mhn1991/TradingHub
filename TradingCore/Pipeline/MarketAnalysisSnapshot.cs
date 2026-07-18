@@ -1,6 +1,7 @@
 using Brokers.Models;
 using ChartAnnotator.Models;
 using TradingCore.MarketData;
+using System.Collections.Frozen;
 
 namespace TradingCore.Pipeline;
 
@@ -34,4 +35,40 @@ public sealed record MarketAnalysisSnapshot
 
     public required CurrencyStrengthSnapshot? CrossMarket { get; init; }
     public required DataQualityResult DataQuality { get; init; }
+
+    /// <summary>Creates the immutable publish boundary used by both live and simulation.</summary>
+    public static MarketAnalysisSnapshot Create(
+        InstrumentKey instrument,
+        AnalysisProfileKey profile,
+        long snapshotVersion,
+        long decisionEpoch,
+        DateTimeOffset availableAt,
+        IReadOnlyDictionary<BarInterval, AnalysisSnapshot> timeframes,
+        CurrencyStrengthSnapshot? crossMarket,
+        DataQualityResult dataQuality)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(timeframes);
+        ArgumentNullException.ThrowIfNull(dataQuality);
+        if (snapshotVersion < 0)
+            throw new ArgumentOutOfRangeException(nameof(snapshotVersion));
+        if (timeframes.Count == 0)
+            throw new ArgumentException("At least one timeframe is required.", nameof(timeframes));
+        if (timeframes.Any(item => item.Value.Instrument != instrument || item.Key != item.Value.Interval))
+            throw new ArgumentException("Every timeframe snapshot must match the published instrument and interval.", nameof(timeframes));
+        if (timeframes.Any(item => item.Value.AvailableAt > availableAt))
+            throw new ArgumentException("A published snapshot cannot contain future analysis.", nameof(timeframes));
+
+        return new MarketAnalysisSnapshot
+        {
+            Instrument = instrument,
+            Profile = profile,
+            SnapshotVersion = snapshotVersion,
+            DecisionEpoch = decisionEpoch,
+            AvailableAt = availableAt,
+            Timeframes = timeframes.ToFrozenDictionary(),
+            CrossMarket = crossMarket,
+            DataQuality = dataQuality
+        };
+    }
 }

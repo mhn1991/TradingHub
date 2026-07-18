@@ -109,6 +109,8 @@ const layers = reactive<ChartLayers>({
   volume: true,
   swings: true,
   zones: true,
+  supplyDemand: true,
+  liquidity: true,
   trendlines: true,
   channels: true,
   donchian: true,

@@ -838,6 +838,9 @@ const replayFrames = computed<ReplayFrame[]>(() => filteredReplayRows.value.map(
   priceAction: row.analysis?.priceAction,
   marketRegime: row.analysis?.marketRegime,
   neoWave: row.analysis?.neoWave,
+  supplyDemand: row.analysis?.supplyDemand,
+  liquidity: row.analysis?.liquidity,
+  supplyDemandLiquidityConfluence: row.analysis?.supplyDemandLiquidityConfluence,
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
@@ -860,6 +863,9 @@ const executionDetailFrames = computed<ReplayFrame[]>(() => executionDetailRows.
   priceAction: row.analysis?.priceAction,
   marketRegime: row.analysis?.marketRegime,
   neoWave: row.analysis?.neoWave,
+  supplyDemand: row.analysis?.supplyDemand,
+  liquidity: row.analysis?.liquidity,
+  supplyDemandLiquidityConfluence: row.analysis?.supplyDemandLiquidityConfluence,
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
@@ -874,6 +880,8 @@ const replayLayers = reactive<ChartLayers>({
   volume: true,
   swings: true,
   zones: true,
+  supplyDemand: true,
+  liquidity: true,
   trendlines: true,
   channels: true,
   donchian: true,

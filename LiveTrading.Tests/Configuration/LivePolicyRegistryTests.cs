@@ -7,8 +7,9 @@ using TradingCore.Pipeline;
 namespace LiveTrading.Tests.Configuration;
 
 /// <summary>
-/// Covers the Phase 3 hot-swap/position-continuity contract: <see cref="LivePolicyRegistry.Register"/>
-/// keeps its original immutable-at-startup behavior, <see cref="LivePolicyRegistry.Activate"/> is
+/// Covers policy revision isolation and the Phase 3 hot-swap/position-continuity contract:
+/// <see cref="LivePolicyRegistry.Register"/> retains simultaneous exact Agent revisions,
+/// <see cref="LivePolicyRegistry.Activate"/> is
 /// the separate path that changes what new candidates resolve, and
 /// <see cref="LivePolicyRegistry.TryResolveManagementByRevision"/> keeps every prior revision
 /// permanently retrievable so an already-open position can keep being managed under its own
@@ -28,7 +29,7 @@ public sealed class LivePolicyRegistryTests
         new(AgentInstanceKey.DefaultDeploymentId, Phase3TestData.Instrument, StrategyId, policy.PolicyBundleId, policy.Revision);
 
     [Test]
-    public void Register_ConflictingReRegistration_Throws()
+    public void Register_DifferentAgentRevisions_CoexistAndResolveExactly()
     {
         var registry = new LivePolicyRegistry();
         LiveTradingPolicyBundle revisionOne = Phase3TestData.Policy() with { Revision = 1, ConfigurationHash = "hash-r1" };
@@ -36,8 +37,17 @@ public sealed class LivePolicyRegistryTests
 
         registry.Register(KeyFor(revisionOne), revisionOne, StrategyActivationMode.Shadow);
 
-        Assert.Throws<InvalidOperationException>(
-            () => registry.Register(KeyFor(revisionTwo), revisionTwo, StrategyActivationMode.Shadow));
+        registry.Register(KeyFor(revisionTwo), revisionTwo, StrategyActivationMode.Shadow);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(registry.Snapshot, Has.Count.EqualTo(2));
+            Assert.That(registry.Resolve(StrategyId, Phase3TestData.Instrument).Revision, Is.EqualTo(2));
+            Assert.That(registry.TryResolveManagementByRevision(
+                StrategyId, Phase3TestData.Instrument, revisionOne.PolicyBundleId, 1), Is.Not.Null);
+            Assert.That(registry.TryResolveManagementByRevision(
+                StrategyId, Phase3TestData.Instrument, revisionTwo.PolicyBundleId, 2), Is.Not.Null);
+        });
     }
 
     [Test]

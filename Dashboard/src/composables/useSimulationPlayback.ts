@@ -23,6 +23,9 @@ export interface PlaybackRow {
     priceAction?: ReplayFrame['priceAction']
     marketRegime?: ReplayFrame['marketRegime']
     neoWave?: ReplayFrame['neoWave']
+    supplyDemand?: ReplayFrame['supplyDemand']
+    liquidity?: ReplayFrame['liquidity']
+    supplyDemandLiquidityConfluence?: ReplayFrame['supplyDemandLiquidityConfluence']
     confidence: ReplayFrame['confidence']
   } | null
 }

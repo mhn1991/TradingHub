@@ -1,8 +1,11 @@
 using Brokers.Models;
+using ChartAnnotator.Confluence;
 using ChartAnnotator.Engine;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
 using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
+using ChartAnnotator.SupplyDemand;
 
 namespace Dashboard.Contracts;
 
@@ -145,7 +148,10 @@ public sealed record ReplayFrame(
     ConfidenceScore Confidence,
     double AnalysisMicroseconds,
     IReadOnlyList<AnchoredValueReference>? ValueReferences = null,
-    NeoWaveSnapshot? NeoWave = null);
+    NeoWaveSnapshot? NeoWave = null,
+    SupplyDemandAnalysisSnapshot? SupplyDemand = null,
+    LiquidityAnalysisSnapshot? Liquidity = null,
+    SupplyDemandLiquidityConfluenceSnapshot? SupplyDemandLiquidityConfluence = null);
 
 public sealed record ReplayCandle(
     DateTimeOffset OpenTime,
@@ -192,7 +198,10 @@ public static class ReplayContractMapper
             Confidence: snapshot.Confidence,
             AnalysisMicroseconds: analysisMicroseconds,
             ValueReferences: snapshot.ValueReferences,
-            NeoWave: snapshot.NeoWave);
+            NeoWave: snapshot.NeoWave,
+            SupplyDemand: snapshot.SupplyDemand,
+            Liquidity: snapshot.Liquidity,
+            SupplyDemandLiquidityConfluence: snapshot.SupplyDemandLiquidityConfluence);
     }
 }
 

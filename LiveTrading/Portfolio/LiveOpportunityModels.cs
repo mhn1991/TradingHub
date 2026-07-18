@@ -12,6 +12,7 @@ public sealed record LiveRiskBudgetAudit
     public required decimal SetupMultiplier { get; init; }
     public required decimal MetaLabelMultiplier { get; init; }
     public decimal NeoWaveMultiplier { get; init; } = 1m;
+    public decimal StructuralEvidenceMultiplier { get; init; } = 1m;
     public required decimal RegimeMultiplier { get; init; }
     public required decimal TradingConditionMultiplier { get; init; }
     public required decimal DrawdownMultiplier { get; init; }

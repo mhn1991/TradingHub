@@ -14,6 +14,7 @@ public sealed class LiveEngineState(TimeProvider timeProvider)
     private readonly object _sync = new();
     private readonly Dictionary<string, MarketStatusDto> _markets = [];
     private readonly Dictionary<string, AgentStatusDto> _agents = [];
+    private readonly Dictionary<string, AnalysisProfileStatusDto> _analysisProfiles = [];
     private int _revision;
     private string _engineState = "Starting";
     private string? _message;
@@ -22,6 +23,7 @@ public sealed class LiveEngineState(TimeProvider timeProvider)
     private bool _restReachable;
     private string _leaseState = "Unknown";
     private LiveRuntimeStatusDto? _runtime;
+    private DecisionEpochStatusDto? _lastDecisionEpoch;
 
     public void SetRunning()
     {
@@ -125,7 +127,26 @@ public sealed class LiveEngineState(TimeProvider timeProvider)
     {
         lock (_sync)
         {
-            _agents[$"{agent.StrategyId}:{agent.Instrument}"] = agent;
+            _agents[$"{agent.DeploymentId}:{agent.Instrument}:{agent.StrategyId}:" +
+                    $"{agent.PolicyBundleId:N}:{agent.PolicyRevision}"] = agent;
+            _revision++;
+        }
+    }
+
+    public void UpdateAnalysisProfile(AnalysisProfileStatusDto profile)
+    {
+        lock (_sync)
+        {
+            _analysisProfiles[$"{profile.Instrument}:{profile.ProfileHash}"] = profile;
+            _revision++;
+        }
+    }
+
+    public void UpdateDecisionEpoch(DecisionEpochStatusDto epoch)
+    {
+        lock (_sync)
+        {
+            _lastDecisionEpoch = epoch;
             _revision++;
         }
     }
@@ -150,7 +171,14 @@ public sealed class LiveEngineState(TimeProvider timeProvider)
                 Agents = _agents.Values
                     .OrderBy(a => a.Instrument, StringComparer.Ordinal)
                     .ThenBy(a => a.StrategyId, StringComparer.Ordinal)
+                    .ThenBy(a => a.PolicyBundleId)
+                    .ThenBy(a => a.PolicyRevision)
                     .ToList(),
+                AnalysisProfiles = _analysisProfiles.Values
+                    .OrderBy(profile => profile.Instrument, StringComparer.Ordinal)
+                    .ThenBy(profile => profile.ProfileHash, StringComparer.Ordinal)
+                    .ToList(),
+                LastDecisionEpoch = _lastDecisionEpoch,
                 Runtime = _runtime,
                 AsOf = timeProvider.GetUtcNow()
             };

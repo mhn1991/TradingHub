@@ -1,5 +1,6 @@
 using Brokers.Models;
 using LiveTrading.Portfolio;
+using ChartAnnotator.SupplyDemand;
 
 namespace LiveTrading.Registry;
 
@@ -25,6 +26,8 @@ public sealed record LiveOrderRecord
     public string? BrokerOrderId { get; init; }
     public string? BrokerTradeId { get; init; }
     public required string StrategyId { get; init; }
+    public string AgentDeploymentId { get; init; } = string.Empty;
+    public string AnalysisProfileHash { get; init; } = string.Empty;
     public required InstrumentKey Instrument { get; init; }
     public required string CandidateId { get; init; }
     public required string DecisionId { get; init; }
@@ -42,6 +45,17 @@ public sealed record LiveOrderRecord
     public string EntrySetupType { get; init; } = "Unknown";
     public string? EntryNeoWaveHypothesisId { get; init; }
     public decimal? EntryNeoWaveInvalidationPrice { get; init; }
+    public Guid? EntrySupplyDemandZoneId { get; init; }
+    public decimal? EntrySupplyDemandZoneLowerPrice { get; init; }
+    public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
+    public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
+    public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? TargetLiquidityPoolId { get; init; }
+    public string? TargetLiquidityProfileHash { get; init; }
+    public decimal? StructuralInvalidationReference { get; init; }
+    public bool EntrySupplyDemandManagementEnabled { get; init; }
+    public bool EntryLiquidityManagementEnabled { get; init; }
+    public string? StructuralManagementPolicyRevision { get; init; }
     /// <summary>Regime-routed management profile the decision selected (see <c>Agent.Models.AgentDecision.RegimeManagementProfileId</c>), or "default" when regime routing is disabled - mirrors <c>Simulator.Models.SimulatedTradeRecord.EntryManagementProfileId</c>.</summary>
     public string EntryManagementProfileId { get; init; } = "default";
     public decimal? ProtectiveStopPrice { get; init; }
@@ -60,6 +74,8 @@ public sealed record LivePositionRecord
     public required string PositionId { get; init; }
     public string? BrokerTradeId { get; init; }
     public required string StrategyId { get; init; }
+    public string AgentDeploymentId { get; init; } = string.Empty;
+    public string AnalysisProfileHash { get; init; } = string.Empty;
     public required InstrumentKey Instrument { get; init; }
     public required string DecisionId { get; init; }
     public string? SetupId { get; init; }
@@ -76,6 +92,17 @@ public sealed record LivePositionRecord
     public string EntrySetupType { get; init; } = "Unknown";
     public string? EntryNeoWaveHypothesisId { get; init; }
     public decimal? EntryNeoWaveInvalidationPrice { get; init; }
+    public Guid? EntrySupplyDemandZoneId { get; init; }
+    public decimal? EntrySupplyDemandZoneLowerPrice { get; init; }
+    public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
+    public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
+    public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? TargetLiquidityPoolId { get; init; }
+    public string? TargetLiquidityProfileHash { get; init; }
+    public decimal? StructuralInvalidationReference { get; init; }
+    public bool EntrySupplyDemandManagementEnabled { get; init; }
+    public bool EntryLiquidityManagementEnabled { get; init; }
+    public string? StructuralManagementPolicyRevision { get; init; }
     /// <summary>Regime-routed management profile this position was opened under - carried unchanged from <see cref="LiveOrderRecord.EntryManagementProfileId"/>, never re-derived after entry.</summary>
     public string EntryManagementProfileId { get; init; } = "default";
     public decimal? AveragePrice { get; init; }
@@ -160,6 +187,8 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
         {
             ClientOrderId = clientOrderId,
             StrategyId = decision.Candidate.StrategyId,
+            AgentDeploymentId = decision.Candidate.AgentInstance?.DeploymentId ?? string.Empty,
+            AnalysisProfileHash = decision.Candidate.AnalysisProfileHash,
             Instrument = decision.Candidate.Instrument,
             CandidateId = decision.Candidate.CandidateId,
             DecisionId = decision.Candidate.DecisionId,
@@ -178,6 +207,17 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                 decision.Candidate.SetupId ?? "Unknown",
             EntryNeoWaveHypothesisId = decision.Decision.NeoWaveHypothesisId,
             EntryNeoWaveInvalidationPrice = decision.Decision.NeoWaveInvalidationPrice,
+            EntrySupplyDemandZoneId = decision.Decision.EntrySupplyDemandZoneId,
+            EntrySupplyDemandZoneLowerPrice = decision.Decision.EntrySupplyDemandZoneLowerPrice,
+            EntrySupplyDemandZoneUpperPrice = decision.Decision.EntrySupplyDemandZoneUpperPrice,
+            EntrySupplyDemandZoneState = decision.Decision.EntrySupplyDemandZoneState,
+            EntrySupplyDemandProfileHash = decision.Decision.EntrySupplyDemandProfileHash,
+            TargetLiquidityPoolId = decision.Decision.TargetLiquidityPoolId,
+            TargetLiquidityProfileHash = decision.Decision.TargetLiquidityProfileHash,
+            StructuralInvalidationReference = decision.Decision.StructuralInvalidationReference,
+            EntrySupplyDemandManagementEnabled = decision.Decision.EntrySupplyDemandManagementEnabled,
+            EntryLiquidityManagementEnabled = decision.Decision.EntryLiquidityManagementEnabled,
+            StructuralManagementPolicyRevision = decision.Decision.StructuralManagementPolicyRevision,
             EntryManagementProfileId = decision.Decision.RegimeManagementProfileId ?? "default",
             ProtectiveStopPrice = decision.Decision.StopLossPrice,
             TakeProfitPrice = decision.Decision.TakeProfitPrice,
@@ -308,6 +348,8 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                         PositionId = positionId,
                         BrokerTradeId = brokerEvent.BrokerTradeId ?? existing?.BrokerTradeId,
                         StrategyId = updatedOrder.StrategyId,
+                        AgentDeploymentId = updatedOrder.AgentDeploymentId,
+                        AnalysisProfileHash = updatedOrder.AnalysisProfileHash,
                         Instrument = updatedOrder.Instrument,
                         DecisionId = updatedOrder.DecisionId,
                         SetupId = updatedOrder.SetupId,
@@ -326,6 +368,26 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                             updatedOrder.EntryNeoWaveHypothesisId,
                         EntryNeoWaveInvalidationPrice = existing?.EntryNeoWaveInvalidationPrice ??
                             updatedOrder.EntryNeoWaveInvalidationPrice,
+                        EntrySupplyDemandZoneId = existing?.EntrySupplyDemandZoneId ?? updatedOrder.EntrySupplyDemandZoneId,
+                        EntrySupplyDemandZoneLowerPrice = existing?.EntrySupplyDemandZoneLowerPrice ??
+                            updatedOrder.EntrySupplyDemandZoneLowerPrice,
+                        EntrySupplyDemandZoneUpperPrice = existing?.EntrySupplyDemandZoneUpperPrice ??
+                            updatedOrder.EntrySupplyDemandZoneUpperPrice,
+                        EntrySupplyDemandZoneState = existing?.EntrySupplyDemandZoneState ??
+                            updatedOrder.EntrySupplyDemandZoneState,
+                        EntrySupplyDemandProfileHash = existing?.EntrySupplyDemandProfileHash ??
+                            updatedOrder.EntrySupplyDemandProfileHash,
+                        TargetLiquidityPoolId = existing?.TargetLiquidityPoolId ?? updatedOrder.TargetLiquidityPoolId,
+                        TargetLiquidityProfileHash = existing?.TargetLiquidityProfileHash ??
+                            updatedOrder.TargetLiquidityProfileHash,
+                        StructuralInvalidationReference = existing?.StructuralInvalidationReference ??
+                            updatedOrder.StructuralInvalidationReference,
+                        EntrySupplyDemandManagementEnabled = existing?.EntrySupplyDemandManagementEnabled ??
+                            updatedOrder.EntrySupplyDemandManagementEnabled,
+                        EntryLiquidityManagementEnabled = existing?.EntryLiquidityManagementEnabled ??
+                            updatedOrder.EntryLiquidityManagementEnabled,
+                        StructuralManagementPolicyRevision = existing?.StructuralManagementPolicyRevision ??
+                            updatedOrder.StructuralManagementPolicyRevision,
                         EntryManagementProfileId = existing?.EntryManagementProfileId ?? updatedOrder.EntryManagementProfileId,
                         AveragePrice = WeightedAverage(existing?.AveragePrice, previousQuantity, brokerEvent.FillPrice, fillQuantity),
                         InitialStopPrice = existing?.InitialStopPrice ?? updatedOrder.ProtectiveStopPrice,
@@ -528,6 +590,8 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                     BrokerTradeId = brokerPosition.PositionId,
                     StrategyId = existing?.StrategyId ?? ownershipOrder?.StrategyId ??
                         brokerPosition.StrategyId ?? "unowned",
+                    AgentDeploymentId = existing?.AgentDeploymentId ?? ownershipOrder?.AgentDeploymentId ?? string.Empty,
+                    AnalysisProfileHash = existing?.AnalysisProfileHash ?? ownershipOrder?.AnalysisProfileHash ?? string.Empty,
                     Instrument = brokerPosition.Instrument,
                     DecisionId = existing?.DecisionId ?? ownershipOrder?.DecisionId ??
                         brokerPosition.DecisionId ?? "unknown",
@@ -549,6 +613,26 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                         ownershipOrder?.EntryNeoWaveHypothesisId,
                     EntryNeoWaveInvalidationPrice = existing?.EntryNeoWaveInvalidationPrice ??
                         ownershipOrder?.EntryNeoWaveInvalidationPrice,
+                    EntrySupplyDemandZoneId = existing?.EntrySupplyDemandZoneId ?? ownershipOrder?.EntrySupplyDemandZoneId,
+                    EntrySupplyDemandZoneLowerPrice = existing?.EntrySupplyDemandZoneLowerPrice ??
+                        ownershipOrder?.EntrySupplyDemandZoneLowerPrice,
+                    EntrySupplyDemandZoneUpperPrice = existing?.EntrySupplyDemandZoneUpperPrice ??
+                        ownershipOrder?.EntrySupplyDemandZoneUpperPrice,
+                    EntrySupplyDemandZoneState = existing?.EntrySupplyDemandZoneState ??
+                        ownershipOrder?.EntrySupplyDemandZoneState,
+                    EntrySupplyDemandProfileHash = existing?.EntrySupplyDemandProfileHash ??
+                        ownershipOrder?.EntrySupplyDemandProfileHash,
+                    TargetLiquidityPoolId = existing?.TargetLiquidityPoolId ?? ownershipOrder?.TargetLiquidityPoolId,
+                    TargetLiquidityProfileHash = existing?.TargetLiquidityProfileHash ??
+                        ownershipOrder?.TargetLiquidityProfileHash,
+                    StructuralInvalidationReference = existing?.StructuralInvalidationReference ??
+                        ownershipOrder?.StructuralInvalidationReference,
+                    EntrySupplyDemandManagementEnabled = existing?.EntrySupplyDemandManagementEnabled ??
+                        ownershipOrder?.EntrySupplyDemandManagementEnabled ?? false,
+                    EntryLiquidityManagementEnabled = existing?.EntryLiquidityManagementEnabled ??
+                        ownershipOrder?.EntryLiquidityManagementEnabled ?? false,
+                    StructuralManagementPolicyRevision = existing?.StructuralManagementPolicyRevision ??
+                        ownershipOrder?.StructuralManagementPolicyRevision,
                     EntryManagementProfileId = existing?.EntryManagementProfileId ?? ownershipOrder?.EntryManagementProfileId ?? "default",
                     AveragePrice = brokerPosition.AveragePrice,
                     InitialStopPrice = existing?.InitialStopPrice ?? ownershipOrder?.ProtectiveStopPrice ??

@@ -1044,6 +1044,18 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 SetupCalibrationRiskMultiplier = decision.SetupCalibrationRiskMultiplier,
                 MetaLabelRiskMultiplier = decision.MetaLabelRiskMultiplier,
                 NeoWaveRiskMultiplier = decision.NeoWaveRiskMultiplier,
+                StructuralEvidenceRiskMultiplier = decision.StructuralEvidenceRiskMultiplier,
+                EntrySupplyDemandZoneId = decision.EntrySupplyDemandZoneId,
+                EntrySupplyDemandZoneLowerPrice = decision.EntrySupplyDemandZoneLowerPrice,
+                EntrySupplyDemandZoneUpperPrice = decision.EntrySupplyDemandZoneUpperPrice,
+                EntrySupplyDemandZoneState = decision.EntrySupplyDemandZoneState?.ToString(),
+                EntrySupplyDemandProfileHash = decision.EntrySupplyDemandProfileHash,
+                TargetLiquidityPoolId = decision.TargetLiquidityPoolId,
+                TargetLiquidityProfileHash = decision.TargetLiquidityProfileHash,
+                StructuralInvalidationReference = decision.StructuralInvalidationReference,
+                EntrySupplyDemandManagementEnabled = decision.EntrySupplyDemandManagementEnabled,
+                EntryLiquidityManagementEnabled = decision.EntryLiquidityManagementEnabled,
+                StructuralManagementPolicyRevision = decision.StructuralManagementPolicyRevision,
                 EntryNeoWaveHypothesisId = decision.NeoWaveHypothesisId,
                 EntryNeoWaveInvalidationPrice = decision.NeoWaveInvalidationPrice,
                 EntryNeoWavePatternType = decision.NeoWavePatternType?.ToString(),
@@ -1825,7 +1837,12 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 EntryRegime = _activeTrade.EntryRegime,
                 EntryManagementProfileId = _activeTrade.EntryManagementProfileId,
                 EntryNeoWaveHypothesisId = _activeTrade.EntryNeoWaveHypothesisId,
-                EntryNeoWaveInvalidationPrice = _activeTrade.EntryNeoWaveInvalidationPrice
+                EntryNeoWaveInvalidationPrice = _activeTrade.EntryNeoWaveInvalidationPrice,
+                EntrySupplyDemandZoneId = _activeTrade.EntrySupplyDemandZoneId,
+                TargetLiquidityPoolId = _activeTrade.TargetLiquidityPoolId,
+                EntrySupplyDemandManagementEnabled = _activeTrade.EntrySupplyDemandManagementEnabled,
+                EntryLiquidityManagementEnabled = _activeTrade.EntryLiquidityManagementEnabled,
+                StructuralManagementPolicyRevision = _activeTrade.StructuralManagementPolicyRevision
             },
             analysis,
             scope,
@@ -2292,7 +2309,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         (decision.EquityProtectionRiskMultiplier ?? 1m) *
         (decision.SetupCalibrationRiskMultiplier ?? 1m) *
         (decision.MetaLabelRiskMultiplier ?? 1m) *
-        (decision.NeoWaveRiskMultiplier ?? 1m),
+        (decision.NeoWaveRiskMultiplier ?? 1m) *
+        (decision.StructuralEvidenceRiskMultiplier ?? 1m),
         0m,
         1m);
 
@@ -2306,7 +2324,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             ["equityProtection"] = trade.EquityProtectionRiskMultiplier ?? 1m,
             ["setupCalibration"] = trade.SetupCalibrationRiskMultiplier ?? 1m,
             ["metaLabel"] = trade.MetaLabelRiskMultiplier ?? 1m,
-            ["neoWave"] = trade.NeoWaveRiskMultiplier ?? 1m
+            ["neoWave"] = trade.NeoWaveRiskMultiplier ?? 1m,
+            ["structuralEvidence"] = trade.StructuralEvidenceRiskMultiplier ?? 1m
         };
 
     private static int IncrementSaturating(int value) =>

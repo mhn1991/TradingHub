@@ -1,6 +1,9 @@
+using ChartAnnotator.Confluence;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.PriceAction;
 using ChartAnnotator.NeoWave;
 using ChartAnnotator.Regime;
+using ChartAnnotator.SupplyDemand;
 
 namespace ChartAnnotator.Engine;
 
@@ -66,6 +69,9 @@ public sealed record ChartAnnotationOptions
 
     public MarketRegimeOptions MarketRegime { get; init; } = new();
     public NeoWaveOptions NeoWave { get; init; } = new();
+    public SupplyDemandCalculationProfile SupplyDemand { get; init; } = new();
+    public LiquidityCalculationProfile Liquidity { get; init; } = new();
+    public SupplyDemandLiquidityConfluenceOptions SupplyDemandLiquidityConfluence { get; init; } = new();
 
     public void Validate()
     {
@@ -146,5 +152,8 @@ public sealed record ChartAnnotationOptions
         PriceActionSetups.Validate();
         MarketRegime.Validate();
         NeoWave.Validate();
+        SupplyDemand.Validate();
+        Liquidity.Validate();
+        SupplyDemandLiquidityConfluence.Validate();
     }
 }

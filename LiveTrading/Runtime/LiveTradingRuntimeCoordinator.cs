@@ -251,6 +251,7 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
         ArgumentNullException.ThrowIfNull(batch);
         ArgumentNullException.ThrowIfNull(policyResolver);
         ArgumentNullException.ThrowIfNull(activationModeResolver);
+        await PersistAsync("decision-epochs", batch, cancellationToken).ConfigureAwait(false);
         if (batch.OrderedCandidates.Count == 0)
             return;
 
@@ -298,7 +299,11 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
                 return;
             }
 
-            if (_options.RejectEpochWhenAnyMarketUnavailable && batch.UnavailableInstruments.Count > 0)
+            if (_options.RejectEpochWhenAnyMarketUnavailable &&
+                (batch.UnavailableInstruments.Count > 0 ||
+                 batch.FailedAgents.Count > 0 ||
+                 batch.TimedOutAgents.Count > 0 ||
+                 batch.MissingAgents.Count > 0))
             {
                 foreach (LiveTradeCandidate candidate in executableCandidates)
                 {
@@ -307,10 +312,9 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
                         Candidate = candidate,
                         Approved = false,
                         ReasonCode = "IncompleteDecisionEpoch",
-                        Explanation = "At least one expected market failed to report before the deterministic epoch barrier closed."
+                        Explanation = "At least one expected market or agent failed to complete the deterministic epoch barrier."
                     });
                 }
-                await PersistAsync("decision-epochs", batch, cancellationToken).ConfigureAwait(false);
                 return;
             }
 

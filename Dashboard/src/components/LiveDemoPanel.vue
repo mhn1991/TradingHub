@@ -5,6 +5,7 @@ import {
   type LivePosition,
   useLiveEngineStatus,
 } from '../composables/useLiveEngineStatus'
+import LiveDecisionChart from './LiveDecisionChart.vue'
 
 const {
   status,
@@ -247,9 +248,21 @@ function moveStop(item: LivePosition) {
       </section>
 
       <section class="live-demo-section">
+        <h2>Shared market and Agent overlays</h2>
+        <LiveDecisionChart :markets="status.markets" :agents="status.agents" />
+      </section>
+
+      <section class="live-demo-section">
+        <h2>Analysis profiles</h2>
+        <p v-if="status.analysisProfiles.length === 0" class="live-demo-loading">No analysis profile has published yet.</p>
+        <div v-else class="table-wrap"><table class="live-demo-table"><thead><tr><th>Instrument</th><th>Profile</th><th>Intervals</th><th>Version</th><th>Available</th><th>Build ms</th><th>Hits</th><th>Misses</th><th>Failures</th><th>Agents</th></tr></thead><tbody><tr v-for="profile in status.analysisProfiles" :key="`${profile.instrument}:${profile.profileHash}`"><td>{{ profile.instrument }}</td><td :title="profile.profileHash">{{ profile.profileHash.slice(0, 10) }}</td><td>{{ profile.requiredIntervals.join(', ') }}</td><td>{{ profile.lastSnapshotVersion }}</td><td>{{ formatTime(profile.lastAvailableAt) }}</td><td>{{ profile.lastBuildDurationMilliseconds.toFixed(2) }}</td><td>{{ profile.cacheHits }}</td><td>{{ profile.cacheMisses }}</td><td>{{ profile.failureCount }}</td><td>{{ profile.dependentAgentCount }}</td></tr></tbody></table></div>
+        <div v-if="status.lastDecisionEpoch" class="live-demo-meta">Last epoch {{ status.lastDecisionEpoch.epoch }} · {{ status.lastDecisionEpoch.completedAgents }}/{{ status.lastDecisionEpoch.expectedAgents }} completed · {{ status.lastDecisionEpoch.candidateCount }} candidates · {{ status.lastDecisionEpoch.durationMilliseconds.toFixed(2) }} ms · {{ status.lastDecisionEpoch.failedAgents }} failed · {{ status.lastDecisionEpoch.timedOutAgents }} timed out · {{ status.lastDecisionEpoch.missingAgents }} missing</div>
+      </section>
+
+      <section class="live-demo-section">
         <h2>Agents</h2>
         <p v-if="status.agents.length === 0" class="live-demo-loading">No agents configured.</p>
-        <div v-else class="table-wrap"><table class="live-demo-table"><thead><tr><th>Strategy</th><th>Instrument</th><th>Mode</th><th>Status</th><th>Last evaluated</th><th>Observed</th><th>Buy</th><th>Sell</th><th>Setup rejects</th><th>Meta rejects</th><th>Condition rejects</th><th>Meta p</th><th>Risk×</th></tr></thead><tbody><tr v-for="agent in status.agents" :key="`${agent.strategyId}:${agent.instrument}`"><td>{{ agent.strategyId }}</td><td>{{ agent.instrument }}</td><td>{{ agent.mode }}</td><td>{{ agent.lastStatus ?? '—' }}</td><td>{{ formatTime(agent.lastEvaluatedAt) }}</td><td>{{ agent.candidatesObserved }}</td><td>{{ agent.candidatesBuy }}</td><td>{{ agent.candidatesSell }}</td><td>{{ agent.rejectedBySetupCalibration }}</td><td>{{ agent.rejectedByMetaLabel }}</td><td>{{ agent.rejectedByTradingCondition }}</td><td>{{ formatRatio(agent.lastMetaLabelProbability) }}</td><td>{{ formatRatio(agent.lastMetaLabelRiskMultiplier) }}</td></tr></tbody></table></div>
+        <div v-else class="table-wrap"><table class="live-demo-table"><thead><tr><th>Strategy</th><th>Instrument</th><th>Policy rev</th><th>Profile</th><th>Mode</th><th>Health</th><th>Status</th><th>Epoch</th><th>Snapshot</th><th>Last evaluated</th><th>Evaluations</th><th>Avg/p95 ms</th><th>Mailbox</th><th>Timeouts</th><th>Action</th><th>Reference</th><th>Stop</th><th>Target</th><th>Decision</th><th>Candidate</th><th>Observed</th><th>Buy</th><th>Sell</th><th>Data rejects</th><th>Setup rejects</th><th>Meta rejects</th><th>Condition rejects</th><th>Last rejection</th><th>Meta p</th><th>Risk×</th></tr></thead><tbody><tr v-for="agent in status.agents" :key="`${agent.deploymentId}:${agent.instrument}:${agent.strategyId}:${agent.policyBundleId}:${agent.policyRevision}`"><td>{{ agent.strategyId }}</td><td>{{ agent.instrument }}</td><td>{{ agent.policyRevision }}</td><td :title="agent.analysisProfileHash">{{ agent.analysisProfileHash.slice(0, 10) }}</td><td>{{ agent.mode }}</td><td>{{ agent.health }}</td><td>{{ agent.lastStatus ?? '—' }}</td><td>{{ agent.lastEvaluatedEpoch || '—' }}</td><td>{{ agent.lastSnapshotVersion || '—' }}</td><td>{{ formatTime(agent.lastEvaluatedAt) }}</td><td>{{ agent.evaluations }}</td><td>{{ agent.averageEvaluationDurationMilliseconds.toFixed(2) }} / {{ agent.p95EvaluationDurationMilliseconds.toFixed(2) }}</td><td>{{ agent.mailboxDepth }}</td><td>{{ agent.timeouts }}</td><td>{{ agent.lastAction ?? '—' }}</td><td>{{ formatPrice(agent.lastReferencePrice) }}</td><td>{{ formatPrice(agent.lastStopLossPrice) }}</td><td>{{ formatPrice(agent.lastTakeProfitPrice) }}</td><td :title="agent.lastDecisionId ?? ''">{{ agent.lastDecisionId?.slice(0, 10) ?? '—' }}</td><td :title="agent.lastCandidateId ?? ''">{{ agent.lastCandidateId?.slice(0, 10) ?? '—' }}</td><td>{{ agent.candidatesObserved }}</td><td>{{ agent.candidatesBuy }}</td><td>{{ agent.candidatesSell }}</td><td>{{ agent.rejectedByDataQuality }}</td><td>{{ agent.rejectedBySetupCalibration }}</td><td>{{ agent.rejectedByMetaLabel }}</td><td>{{ agent.rejectedByTradingCondition }}</td><td :title="agent.lastRejection ?? ''">{{ agent.lastRejection ?? '—' }}</td><td>{{ formatRatio(agent.lastMetaLabelProbability) }}</td><td>{{ formatRatio(agent.lastMetaLabelRiskMultiplier) }}</td></tr></tbody></table></div>
       </section>
     </template>
 

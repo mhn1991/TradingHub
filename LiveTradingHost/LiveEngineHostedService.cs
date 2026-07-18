@@ -350,7 +350,18 @@ public sealed class LiveEngineHostedService(
                 batch.Epoch,
                 batch.OrderedCandidates.Count,
                 batch.UnavailableInstruments.Count);
-            await _runtime.ProcessEpochAsync(batch, _policies.Resolve, candidate => _policies.ResolveMode(candidate.StrategyId, candidate.Instrument), cancellationToken).ConfigureAwait(false);
+            await _runtime.ProcessEpochAsync(batch, _policies.Resolve, _policies.ResolveMode, cancellationToken).ConfigureAwait(false);
+            state.UpdateDecisionEpoch(new DecisionEpochStatusDto
+            {
+                Epoch = batch.Epoch,
+                ExpectedAgents = batch.ExpectedAgents.Count,
+                CompletedAgents = batch.CompletedAgents.Count,
+                FailedAgents = batch.FailedAgents.Count,
+                TimedOutAgents = batch.TimedOutAgents.Count,
+                MissingAgents = batch.MissingAgents.Count,
+                CandidateCount = batch.OrderedCandidates.Count,
+                DurationMilliseconds = batch.Duration.TotalMilliseconds
+            });
             RefreshRuntimeStatus();
             await PublishAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -409,27 +420,75 @@ public sealed class LiveEngineHostedService(
 
             await _positionManagement.OnAnalysisAsync(update, actor.LatestQuote, cancellationToken)
                 .ConfigureAwait(false);
-            await _agentSupervisor.ApplyAsync(update, actor.LatestQuote?.Spread, cancellationToken)
+            IReadOnlyList<AgentEvaluationAudit> evaluationAudits = await _agentSupervisor
+                .ApplyAsync(update, actor.LatestQuote?.Spread, cancellationToken)
                 .ConfigureAwait(false);
+            if (evaluationAudits.Count > 0)
+            {
+                await _persistence.AppendAsync("agent-evaluations", evaluationAudits, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            foreach (AnalysisProfileActorStatus profile in actor.ProfileStatuses)
+            {
+                state.UpdateAnalysisProfile(new AnalysisProfileStatusDto
+                {
+                    ProfileHash = profile.Profile.ProfileHash,
+                    Instrument = profile.Instrument.Value,
+                    RequiredIntervals = profile.Profile.RequiredIntervals
+                        .OrderBy(interval => interval)
+                        .Select(interval => interval.ToString())
+                        .ToArray(),
+                    LastSnapshotVersion = profile.LastSnapshotVersion,
+                    LastAvailableAt = profile.LastAvailableAt,
+                    LastBuildDurationMilliseconds = profile.LastBuildDuration.TotalMilliseconds,
+                    CacheHits = profile.CacheHits,
+                    CacheMisses = profile.CacheMisses,
+                    FailureCount = profile.FailureCount,
+                    DependentAgentCount = profile.DependentAgentCount
+                });
+            }
             foreach (AgentInstanceState instance in _agentSupervisor.Instances.Where(instance =>
                          instance.Key.Instrument == market.Instrument))
             {
+                (double averageDuration, double p95Duration) = instance.EvaluationDurationSummary();
                 state.UpdateAgent(new AgentStatusDto
                 {
+                    DeploymentId = instance.Key.DeploymentId,
                     StrategyId = instance.Key.StrategyId,
                     Instrument = instance.Key.Instrument.Value,
+                    PolicyBundleId = instance.Key.PolicyBundleId,
+                    PolicyRevision = instance.Key.Revision,
+                    AnalysisProfileHash = instance.AnalysisProfile?.ProfileHash ?? string.Empty,
                     Mode = instance.Assignment.Mode.ToString(),
                     LastStatus = instance.LastStatus,
+                    Health = instance.LastEvaluationError is not null || instance.LastStatus is "Failed" or "TimedOut"
+                        ? "Unhealthy"
+                        : instance.LastEvaluatedAt is null ? "Starting" : "Healthy",
+                    LastEvaluatedEpoch = instance.LastEvaluatedEpoch,
+                    LastSnapshotVersion = instance.LastSnapshotVersion,
                     LastEvaluatedAt = instance.LastEvaluatedAt,
+                    Evaluations = instance.Evaluations,
+                    Timeouts = instance.TimeoutCount,
+                    AverageEvaluationDurationMilliseconds = averageDuration,
+                    P95EvaluationDurationMilliseconds = p95Duration,
+                    MailboxDepth = Volatile.Read(ref instance.MailboxDepth),
                     CandidatesObserved = instance.CandidatesObserved,
                     CandidatesBuy = instance.CandidatesBuy,
                     CandidatesSell = instance.CandidatesSell,
                     RejectedBySetupCalibration = instance.CandidatesRejectedBySetupCalibration,
                     RejectedByMetaLabel = instance.CandidatesRejectedByMetaLabel,
                     RejectedByTradingCondition = instance.CandidatesRejectedByTradingCondition,
+                    RejectedByDataQuality = instance.CandidatesRejectedByDataQuality,
+                    LastDecisionId = instance.LastDecisionId,
+                    LastCandidateId = instance.LastCandidate?.CandidateId,
+                    LastAction = instance.LastCandidate?.Action.ToString(),
+                    LastReferencePrice = instance.LastCandidate?.ReferencePrice,
+                    LastStopLossPrice = instance.LastCandidate?.StopLossPrice,
+                    LastTakeProfitPrice = instance.LastCandidate?.TakeProfitPrice,
                     LastMetaLabelProbability = instance.LastCandidate?.MetaLabel.Probability,
                     LastMetaLabelRiskMultiplier = instance.LastCandidate?.MetaLabel.RiskMultiplier,
-                    LastError = instance.LastEvaluationError?.Message
+                    LastError = instance.LastEvaluationError?.Message,
+                    LastRejection = instance.LastRejection
                 });
             }
 
@@ -445,11 +504,8 @@ public sealed class LiveEngineHostedService(
         LivePolicyBundleFactory bundleFactory = services.GetRequiredService<LivePolicyBundleFactory>();
         IStrategyDecisionPipelineFactory pipelineFactory = services.GetRequiredService<IStrategyDecisionPipelineFactory>();
         LiveExecutionRuntimeOptions executionOptions = services.GetRequiredService<LiveExecutionRuntimeOptions>();
-        // Phase 5: LivePolicyRegistry.Register/AgentSupervisor.Register both silently accept an
-        // exact-duplicate AgentInstanceKey (dedup no-op / dictionary overwrite respectively) -
-        // fine for idempotent re-registration, but a genuine configuration mistake (the same
-        // strategy/instrument/policy-bundle/revision listed twice) should fault startup instead
-        // of silently registering once.
+        // Reject duplicate assignment rows before either exact-key registry performs its own
+        // idempotency/conflict validation, so configuration errors fail startup with context.
         var registeredKeys = new HashSet<AgentInstanceKey>();
 
         foreach (LiveMarketDefinition market in markets.Value.Markets.Where(market => market.Enabled))
@@ -552,24 +608,38 @@ public sealed class LiveEngineHostedService(
                     Key = key,
                     Runtime = runtime,
                     PolicyBundle = resolved.Bundle,
-                    Assignment = assignment
+                    Assignment = assignment,
+                    AnalysisProfile = profile,
+                    IsolatedRuntime = new LiveAgentRuntime(
+                        key,
+                        profile,
+                        assignment.Mode is StrategyActivationMode.ManualApproval or StrategyActivationMode.Automatic
+                            ? AgentExecutionMode.Executable
+                            : AgentExecutionMode.Shadow,
+                        runtime.Pipeline,
+                        _broker)
                 });
             }
-
-            // AgentSupervisor.ApplyAsync/LiveDecisionEpochCoordinator today assume exactly one
-            // analysis update stream per instrument per epoch (see LiveAnalysisProfileRegistry's
-            // remarks) - true multi-actor-per-instrument dispatch is Phase 6 work. Until then, a
-            // market whose registered assignments resolve to more than one distinct analysis
-            // profile must fail configuration rather than silently evaluate some agents against
-            // analysis computed under another agent's AnnotationOptions.
-            if (_profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? distinctProfiles) &&
-                distinctProfiles.Count > 1)
-            {
-                return FaultConfiguration(
-                    $"{market.Instrument} has {distinctProfiles.Count} distinct analysis profiles across its " +
-                    "registered assignments (differing AnnotationOptions). Multi-profile dispatch on one " +
-                    "instrument is not yet supported - align the assignments' policy bundles' AnnotationOptions.");
-            }
+        }
+        AgentInstanceState[] instances = _agentSupervisor.Instances
+            .OrderBy(instance => instance.Key.DeploymentId, StringComparer.Ordinal)
+            .ThenBy(instance => instance.Key.Instrument.Value, StringComparer.Ordinal)
+            .ThenBy(instance => instance.Key.StrategyId, StringComparer.Ordinal)
+            .ThenBy(instance => instance.Key.PolicyBundleId)
+            .ThenBy(instance => instance.Key.Revision)
+            .ToArray();
+        if (instances.Length > 0)
+        {
+            await _persistence.AppendAsync(
+                "agent-assignments",
+                instances.Select(instance => new
+                {
+                    Agent = instance.Key,
+                    AnalysisProfileHash = instance.AnalysisProfile?.ProfileHash ?? string.Empty,
+                    ActivationMode = instance.Assignment.Mode,
+                    Registered = true
+                }).ToArray(),
+                cancellationToken).ConfigureAwait(false);
         }
         return true;
     }
@@ -587,23 +657,32 @@ public sealed class LiveEngineHostedService(
             market.Instrument,
             market.AnalysisIntervals,
             market.CandleCapacity);
-        // RegisterAgentsAsync resolves and validates every registered assignment's profile
-        // before this runs, and faults startup if a market resolves to more than one distinct
-        // profile - so at most one entry is ever present here. A market with no registered
-        // assignments (all disabled, or none configured) falls back to default options, matching
-        // this actor's previous unconditional default-options behaviour.
-        AnalysisProfileKey profile = _profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? profiles) && profiles.Count > 0
-            ? profiles[0]
-            : _analysisProfiles.GetOrCreateProfile(null, market.AnalysisIntervals);
+        IReadOnlyList<AnalysisProfileKey> profiles =
+            _profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? configured) && configured.Count > 0
+                ? configured.OrderBy(item => item.ProfileHash, StringComparer.Ordinal).ToArray()
+                : [_analysisProfiles.GetOrCreateProfile(null, market.AnalysisIntervals)];
+        var annotators = profiles.ToDictionary(
+            profile => profile,
+            profile => (IChartAnnotator)_analysisProfiles.EngineFor(market.Instrument, profile));
+        var qualityGates = profiles.ToDictionary(
+            profile => profile,
+            _ => (IMarketDataQualityGate)new MarketDataQualityGate());
+        IReadOnlyDictionary<AnalysisProfileKey, int> dependentAgentCounts = _agentSupervisor.Instances
+            .Where(instance => instance.Key.Instrument == market.Instrument && instance.AnalysisProfile is not null)
+            .GroupBy(instance => instance.AnalysisProfile!)
+            .ToDictionary(group => group.Key, group => group.Count());
         return new MarketAnalysisActor(
             market,
             aggregator,
-            _analysisProfiles.EngineFor(profile),
+            annotators[profiles[0]],
             new MarketDataQualityGate(),
             _candleProvider,
             timeProvider,
             loggerFactory.CreateLogger<MarketAnalysisActor>(),
-            WarmupCandles);
+            WarmupCandles,
+            annotators,
+            qualityGates,
+            dependentAgentCounts);
     }
 
     private async Task RunPeriodicReconciliationAsync(CancellationToken cancellationToken)

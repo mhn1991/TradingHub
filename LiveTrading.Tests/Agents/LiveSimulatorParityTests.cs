@@ -399,4 +399,25 @@ public sealed class LiveSimulatorParityTests
             Assert.That(simulatorOverride.ProfileHash, Is.EqualTo(liveOverride.ProfileHash));
         });
     }
+
+    [Test]
+    public void LiveAnalysisProfileRegistry_OwnsMutableEnginePerInstrumentAndProfile()
+    {
+        var registry = new LiveAnalysisProfileRegistry();
+        IReadOnlySet<BarInterval> intervals = new HashSet<BarInterval> { M1 };
+        AnalysisProfileKey defaultProfile = registry.GetOrCreateProfile(new ChartAnnotationOptions(), intervals);
+        AnalysisProfileKey alternateProfile = registry.GetOrCreateProfile(
+            new ChartAnnotationOptions { RsiPeriod = 21 }, intervals);
+        var otherInstrument = new InstrumentKey("FX:GBP/USD");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(registry.EngineFor(Instrument, defaultProfile),
+                Is.SameAs(registry.EngineFor(Instrument, defaultProfile)));
+            Assert.That(registry.EngineFor(otherInstrument, defaultProfile),
+                Is.Not.SameAs(registry.EngineFor(Instrument, defaultProfile)));
+            Assert.That(registry.EngineFor(Instrument, alternateProfile),
+                Is.Not.SameAs(registry.EngineFor(Instrument, defaultProfile)));
+        });
+    }
 }

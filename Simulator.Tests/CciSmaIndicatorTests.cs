@@ -44,6 +44,16 @@ public sealed class CciSmaIndicatorTests
     }
 
     [Test]
+    public void CciState_IsZeroWhenRepeatingDecimalTypicalPriceRoundsAtWindowAverage()
+    {
+        var cci = new CciState(period: 20);
+        for (int index = 0; index < 20; index++)
+            cci.Update(Candle(index, high: 1.1005m, low: 1.0995m, close: 1.1002m));
+
+        Assert.That(cci.Current, Is.EqualTo(0m));
+    }
+
+    [Test]
     public async Task Engine_PublishesCciAndMovingAverages_WhenWindowsFill()
     {
         var options = new ChartAnnotationOptions

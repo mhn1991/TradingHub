@@ -938,6 +938,57 @@ input:focus-visible {
 .zone-resistance { color: var(--coral); fill: var(--coral); }
 .zone-mixed { color: var(--amber); fill: var(--amber); }
 
+.supply-demand-zones,
+.liquidity-pools {
+  pointer-events: none;
+}
+
+.supply-demand-zones rect {
+  fill: currentColor;
+  opacity: 0.14;
+  stroke: currentColor;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.supply-demand-zones text,
+.liquidity-pools text {
+  fill: currentColor;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 3px;
+}
+
+.supply-demand-demand { color: var(--mint); }
+.supply-demand-supply { color: var(--coral); }
+.lifecycle-tested rect,
+.lifecycle-partiallymitigated rect { opacity: 0.08; }
+.lifecycle-mitigated rect,
+.lifecycle-invalidated rect,
+.lifecycle-expired rect,
+.lifecycle-merged rect { opacity: 0.035; stroke-dasharray: 5 4; }
+
+.liquidity-pools line {
+  stroke: currentColor;
+  stroke-width: 1.25;
+  opacity: 0.72;
+  vector-effect: non-scaling-stroke;
+}
+
+.liquidity-buyside { color: #70a7ff; }
+.liquidity-sellside { color: #d68cff; }
+.liquidity-state-approached line { stroke-width: 2.5; }
+.liquidity-state-swept line,
+.liquidity-state-consumed line,
+.liquidity-state-acceptedbreak line,
+.liquidity-state-expired line,
+.liquidity-state-merged line { opacity: 0.28; stroke-dasharray: 4 4; }
+.liquidity-event path { fill: var(--amber); stroke: var(--panel); stroke-width: 1; }
+.liquidity-event-acceptedbreak path { fill: var(--coral); }
+.liquidity-event-sweep path { fill: var(--mint); }
+
 .channel-area {
   fill: url(#channel-fill);
   stroke: rgba(71, 215, 172, 0.28);
