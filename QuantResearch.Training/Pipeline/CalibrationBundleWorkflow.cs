@@ -57,29 +57,30 @@ public sealed class CalibrationBundleWorkflow(
             return new CalibrationBundlePromotionResult { Training = trainingResult, IncompatibilityReason = incompatibility };
 
         string strategyId = request.Training.Strategies[0];
-        // AGENT-01: derived from the exact Runtime/RR/price-action settings that produced the
-        // training data, not a caller-supplied value that could silently drift from it.
-        Agent.Strategies.ProgressiveStrategyOptions agentOptions = request.Training.Runtime
-            .ResolveProgressiveStrategyOptions(
-                request.Training.Quantity,
-                request.Training.MinimumRewardRisk,
-                request.Training.PriceActionConfirmation,
-                request.Training.MinimumPriceActionConfidence,
-                request.Training.RejectStrongOpposingPriceAction);
-        TradingPolicyProfile draftProfile = TradingPolicyPromotion.CreateProfile(
-            request.Training.Runtime,
-            strategyId,
-            request.StrategyVersion,
-            request.AgentKind,
-            agentOptions,
-            request.ProfileId,
-            revision: 1,
-            createdAt: DateTimeOffset.UtcNow,
-            status: TradingPolicyProfileStatus.Research,
-            setupCalibrationArtifactId: setupId,
-            managementCalibrationArtifactId: managementId,
-            metaModelArtifactId: metaModelId,
-            description: request.Training.Description);
+        // Derived from the exact strategy id and training inputs, so progressive and structural
+        // candidates promote the same definition that generated their calibration samples.
+        Agent.Configuration.TradingAgentDefinition agentDefinition = request.ResolveAgentDefinition();
+        TradingPolicyProfile draftProfile = agentDefinition.Kind == Agent.Configuration.TradingAgentKind.StructuralConfluence
+            ? TradingPolicyPromotion.CreateProfile(
+                request.Training.Runtime, strategyId, request.StrategyVersion, agentDefinition,
+                request.ProfileId, revision: 1, createdAt: DateTimeOffset.UtcNow,
+                status: TradingPolicyProfileStatus.Research,
+                setupCalibrationArtifactId: setupId,
+                managementCalibrationArtifactId: managementId,
+                metaModelArtifactId: metaModelId,
+                description: request.Training.Description)
+            : TradingPolicyPromotion.CreateProfile(
+                request.Training.Runtime, strategyId, request.StrategyVersion,
+                agentDefinition.Kind == Agent.Configuration.TradingAgentKind.LegacyProgressive
+                    ? Agent.Strategies.ProgressiveAgentKind.Legacy
+                    : Agent.Strategies.ProgressiveAgentKind.Improved,
+                agentDefinition.Progressive!, request.ProfileId, revision: 1,
+                createdAt: DateTimeOffset.UtcNow,
+                status: TradingPolicyProfileStatus.Research,
+                setupCalibrationArtifactId: setupId,
+                managementCalibrationArtifactId: managementId,
+                metaModelArtifactId: metaModelId,
+                description: request.Training.Description);
 
         CalibrationBundleCandidate candidate = await approvals
             .AddAsync(setupId, metaModelId, managementId, draftProfile, cancellationToken)

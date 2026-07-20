@@ -85,6 +85,23 @@ public sealed class CandidateStageEventEntity
     public required string DetailsJson { get; set; }
 }
 
+public sealed class SetupStateEventEntity
+{
+    public long EventId { get; set; }
+    public Guid RuntimeSessionId { get; set; }
+    public Guid AgentInstanceId { get; set; }
+    public long InstrumentId { get; set; }
+    public required string StrategyId { get; set; }
+    public required string PlaybookId { get; set; }
+    public required string SetupInstanceId { get; set; }
+    public DateTimeOffset OccurredAt { get; set; }
+    public short StateBefore { get; set; }
+    public short StateAfter { get; set; }
+    public required string ReasonCode { get; set; }
+    public long SnapshotVersion { get; set; }
+    public required string FeaturesJson { get; set; }
+}
+
 internal static class DecisionModelConfiguration
 {
     public static void Configure(ModelBuilder modelBuilder)
@@ -169,6 +186,22 @@ internal static class DecisionModelConfiguration
             entity.Property(e => e.ConfidenceAfter).HasColumnType("numeric(18,10)");
             entity.Property(e => e.DetailsJson).HasColumnName("details").HasColumnType("jsonb");
             entity.HasIndex(e => new { e.CandidateId, e.OccurredAt });
+        });
+
+        modelBuilder.Entity<SetupStateEventEntity>(entity =>
+        {
+            entity.ToTable("setup_state_events", "decision");
+            entity.HasKey(e => e.EventId);
+            entity.Property(e => e.EventId).UseIdentityAlwaysColumn();
+            entity.Property(e => e.StrategyId).HasColumnType("text");
+            entity.Property(e => e.PlaybookId).HasColumnType("text");
+            entity.Property(e => e.SetupInstanceId).HasColumnType("text");
+            entity.Property(e => e.OccurredAt).HasColumnType("timestamptz");
+            entity.Property(e => e.ReasonCode).HasColumnType("text");
+            entity.Property(e => e.FeaturesJson).HasColumnName("features").HasColumnType("jsonb");
+            entity.HasIndex(e => new { e.RuntimeSessionId, e.AgentInstanceId, e.OccurredAt });
+            entity.HasIndex(e => new { e.InstrumentId, e.StrategyId, e.OccurredAt });
+            entity.HasIndex(e => e.OccurredAt).HasMethod("brin");
         });
     }
 }

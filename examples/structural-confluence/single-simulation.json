@@ -1,0 +1,17 @@
+{
+  "brokerId": "oanda",
+  "instrument": "FX:EUR/USD",
+  "from": "2025-01-01T00:00:00Z",
+  "to": "2025-02-01T00:00:00Z",
+  "executionInterval": "1m",
+  "analysisBaseInterval": "1m",
+  "analysisIntervals": ["1m", "5m", "15m", "1h"],
+  "precisionMode": "Fast",
+  "strategies": ["structural-confluence"],
+  "autoCalibrateBeforeRun": false,
+  "startingBalance": 100000,
+  "quantity": 1000,
+  "minimumRewardRisk": 1.5,
+  "warmupDays": 21,
+  "strategyExecutionMode": "ParallelWorkers"
+}

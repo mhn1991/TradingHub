@@ -106,6 +106,9 @@ public sealed record LiveTradeCandidate
     /// does not yet route agent dispatch through <c>MarketAnalysisSnapshot</c> - see
     /// <c>AgentSupervisor</c>'s remarks).</summary>
     public required long MarketSequence { get; init; }
+    public decimal? SuggestedQuantity { get; init; }
+    public string? PlaybookId { get; init; }
+    public string? PlaybookVersion { get; init; }
     public decimal? ReferencePrice { get; init; }
     public decimal? StopLossPrice { get; init; }
     public decimal? TakeProfitPrice { get; init; }
@@ -128,6 +131,9 @@ public sealed record LiveTradeCandidate
     public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
     public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
     public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? OriginatingLiquidityPoolId { get; init; }
+    public Guid? OriginatingLiquiditySweepId { get; init; }
+    public string? OriginatingLiquidityProfileHash { get; init; }
     public Guid? TargetLiquidityPoolId { get; init; }
     public string? TargetLiquidityProfileHash { get; init; }
     public decimal? StructuralInvalidationReference { get; init; }
@@ -195,6 +201,9 @@ public static class SignalFunnel
             DecisionTime = context.Timestamp,
             DecisionEpoch = decisionEpoch,
             MarketSequence = marketSequence,
+            SuggestedQuantity = decision.SuggestedQuantity,
+            PlaybookId = decision.PlaybookId,
+            PlaybookVersion = decision.PlaybookVersion,
             ReferencePrice = decision.ReferencePrice,
             StopLossPrice = decision.StopLossPrice,
             TakeProfitPrice = decision.TakeProfitPrice,
@@ -222,6 +231,9 @@ public static class SignalFunnel
             EntrySupplyDemandZoneUpperPrice = decision.EntrySupplyDemandZoneUpperPrice,
             EntrySupplyDemandZoneState = decision.EntrySupplyDemandZoneState,
             EntrySupplyDemandProfileHash = decision.EntrySupplyDemandProfileHash,
+            OriginatingLiquidityPoolId = decision.OriginatingLiquidityPoolId,
+            OriginatingLiquiditySweepId = decision.OriginatingLiquiditySweepId,
+            OriginatingLiquidityProfileHash = decision.OriginatingLiquidityProfileHash,
             TargetLiquidityPoolId = decision.TargetLiquidityPoolId,
             TargetLiquidityProfileHash = decision.TargetLiquidityProfileHash,
             StructuralInvalidationReference = decision.StructuralInvalidationReference,

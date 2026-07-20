@@ -24,6 +24,7 @@
     <ProjectReference Include="../RiskManager/RiskManager.csproj" />
     <ProjectReference Include="../TradingCore/TradingCore.csproj" />
     <ProjectReference Include="../TradeManager/TradeManager.csproj" />
+    <ProjectReference Include="../TradingPolicies/TradingPolicies.csproj" />
     <ProjectReference Include="../TradingJournal/TradingJournal.csproj" />
   </ItemGroup>
 </Project>

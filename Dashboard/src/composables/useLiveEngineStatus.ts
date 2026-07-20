@@ -80,6 +80,25 @@ export interface LiveDecisionEpochStatus {
   durationMilliseconds: number
 }
 
+export interface LiveShadowStatus {
+  enabled: boolean
+  candidateCount: number
+  admittedCount: number
+  rejectedCount: number
+  openPositionCount: number
+  completedCount: number
+  ambiguousCount: number
+  netProfitLoss: number
+  unrealizedProfitLoss: number
+  netR: number
+  lastPlaybookId: string | null
+  lastCandidateId: string | null
+  lastRejection: string | null
+  lastStopPrice: number | null
+  lastTargetPrice: number | null
+  lastPolicyRevision: number | null
+}
+
 export interface LiveRuntimeStatus {
   brokerWritesEnabled: boolean
   automaticExecutionEnabled: boolean
@@ -96,6 +115,7 @@ export interface LiveRuntimeStatus {
   positions: number
   reconciliationDifferences: number
   lastReconciledAt: string | null
+  shadow: LiveShadowStatus
 }
 
 export interface LiveEngineStatus {

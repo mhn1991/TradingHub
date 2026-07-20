@@ -6,6 +6,7 @@ import {
   useLiveEngineStatus,
 } from '../composables/useLiveEngineStatus'
 import LiveDecisionChart from './LiveDecisionChart.vue'
+import AgentLifecyclePanel from './live/AgentLifecyclePanel.vue'
 
 const {
   status,
@@ -130,6 +131,7 @@ function moveStop(item: LivePosition) {
 
 <template>
   <section class="live-demo-panel" aria-label="Live Demo">
+    <AgentLifecyclePanel />
     <p v-if="!status" class="live-demo-loading">Connecting to the independent live engine…</p>
     <template v-else>
       <section class="live-demo-section">
@@ -172,6 +174,29 @@ function moveStop(item: LivePosition) {
         <div class="live-demo-meta">
           <span>As of {{ formatTime(status.asOf) }}</span>
           <span>Last reconciliation {{ formatTime(runtime?.lastReconciledAt ?? null) }}</span>
+        </div>
+      </section>
+
+      <section v-if="runtime?.shadow" class="live-demo-section shadow-outcomes">
+        <div class="section-heading">
+          <h2>Shadow paper outcomes</h2>
+          <span class="paper-label">Paper only · no broker writes</span>
+        </div>
+        <div class="metric-grid">
+          <div class="metric"><span>Candidates</span><strong>{{ runtime.shadow.candidateCount }}</strong></div>
+          <div class="metric"><span>Admitted / rejected</span><strong>{{ runtime.shadow.admittedCount }} / {{ runtime.shadow.rejectedCount }}</strong></div>
+          <div class="metric"><span>Open / completed</span><strong>{{ runtime.shadow.openPositionCount }} / {{ runtime.shadow.completedCount }}</strong></div>
+          <div class="metric"><span>Net P/L</span><strong>{{ formatNumber(runtime.shadow.netProfitLoss) }}</strong></div>
+          <div class="metric"><span>Unrealized P/L</span><strong>{{ formatNumber(runtime.shadow.unrealizedProfitLoss) }}</strong></div>
+          <div class="metric"><span>Net R</span><strong>{{ formatNumber(runtime.shadow.netR) }}</strong></div>
+          <div class="metric"><span>Ambiguous outcomes</span><strong>{{ runtime.shadow.ambiguousCount }}</strong></div>
+          <div class="metric"><span>Policy revision</span><strong>{{ runtime.shadow.lastPolicyRevision ?? '—' }}</strong></div>
+        </div>
+        <div class="live-demo-meta shadow-lineage">
+          <span>Last playbook: {{ runtime.shadow.lastPlaybookId ?? '—' }}</span>
+          <span :title="runtime.shadow.lastCandidateId ?? ''">Candidate: {{ runtime.shadow.lastCandidateId?.slice(0, 12) ?? '—' }}</span>
+          <span>Stop / target: {{ formatPrice(runtime.shadow.lastStopPrice) }} / {{ formatPrice(runtime.shadow.lastTargetPrice) }}</span>
+          <span>Last rejection: {{ runtime.shadow.lastRejection ?? '—' }}</span>
         </div>
       </section>
 
@@ -283,6 +308,9 @@ function moveStop(item: LivePosition) {
 .metric-grid, .capability-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; margin: 12px 0; }
 .metric, .capability-grid > div { border: 1px solid var(--border, #2a2f3a); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 4px; }
 .metric span, .capability-grid span, .live-demo-meta { color: var(--muted, #8b93a7); font-size: 12px; }
+.shadow-outcomes { border-color: color-mix(in srgb, var(--accent, #6ea8fe) 45%, var(--border, #2a2f3a)); }
+.paper-label { color: var(--muted, #8b93a7); font-size: 12px; }
+.shadow-lineage { flex-wrap: wrap; }
 .control-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 14px 0; }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted, #8b93a7); }
 input { border: 1px solid var(--border, #2a2f3a); border-radius: 5px; padding: 7px; background: transparent; color: inherit; }

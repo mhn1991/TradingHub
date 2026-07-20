@@ -112,6 +112,49 @@ public sealed class StrategyDecisionPipelineFactoryTests
     }
 
     [Test]
+    public void Create_RejectsLegacyMetaFeatureSchema_WithRetrainingInstruction()
+    {
+        SetupCalibrationArtifact legacyArtifact = SetupArtifact() with
+        {
+            FeatureSchemaHash = "tradinghub-meta-v1"
+        };
+        RuntimeFeaturePolicy policy = DefaultPolicy() with
+        {
+            SetupCalibration = new SetupCalibrationPolicyOptions { Enabled = true }
+        };
+        var factory = new StrategyDecisionPipelineFactory(new FakeExecutionCoordinator());
+
+        ArgumentException? exception = Assert.Throws<ArgumentException>(() => factory.Create(
+            Strategy(new FakeTradingAgent()),
+            policy,
+            legacyArtifact,
+            metaModel: null,
+            new TradingSafetyOptions()));
+
+        Assert.That(exception!.Message, Does.Contain("Retraining is required"));
+    }
+
+    [Test]
+    public void Create_AcceptsCurrentMetaSchema_IndependentOfPolicyContentHash()
+    {
+        RuntimeFeaturePolicy changedPolicy = DefaultPolicy() with
+        {
+            DmiConfirmationEnabled = false,
+            SetupCalibration = new SetupCalibrationPolicyOptions { Enabled = true }
+        };
+        var factory = new StrategyDecisionPipelineFactory(new FakeExecutionCoordinator());
+
+        Assert.That(
+            () => factory.Create(
+                Strategy(new FakeTradingAgent()),
+                changedPolicy,
+                SetupArtifact(),
+                metaModel: null,
+                new TradingSafetyOptions()),
+            Throws.Nothing);
+    }
+
+    [Test]
     public void FeaturePolicyHash_IsDeterministic_AndChangesWithContent()
     {
         RuntimeFeaturePolicy a = DefaultPolicy();

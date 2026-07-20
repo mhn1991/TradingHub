@@ -40,6 +40,11 @@ public sealed class CalibrationTrainingPipelineTests
 
         Assert.That(result.Success, Is.True, result.FailureReason);
         Assert.That(result.SetupArtifactId, Is.Not.Null);
+        Assert.That(backtests.Requests, Is.Not.Empty);
+        Assert.That(
+            backtests.Requests.All(item => !item.CaptureMarketReplay),
+            Is.True,
+            "Internal learning runs must not retain chart replay unless the host opts in.");
 
         CalibrationArtifactMetadata? metadata = await repository.GetMetadataAsync(result.SetupArtifactId!.Value);
         Assert.That(metadata, Is.Not.Null);

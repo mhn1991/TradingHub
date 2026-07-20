@@ -112,9 +112,54 @@ public sealed class CalibratedSetupMetaModelTests
     [Test]
     public void Constructor_MismatchedFeatureSchemaHash_Throws()
     {
-        MetaModelArtifact artifact = Artifact([]) with { FeatureSchemaHash = "some-other-schema" };
+        MetaModelArtifact artifact = Artifact([]) with { FeatureSchemaHash = "tradinghub-meta-v1" };
 
-        Assert.Throws<ArgumentException>(() => new CalibratedSetupMetaModel(artifact, new MetaModelPolicyOptions()));
+        ArgumentException? exception = Assert.Throws<ArgumentException>(
+            () => new CalibratedSetupMetaModel(artifact, new MetaModelPolicyOptions()));
+
+        Assert.That(exception!.Message, Does.Contain("Retraining is required"));
+    }
+
+    [TestCase(50, 50, 50, 1)]
+    [TestCase(5, 50, 50, 2)]
+    [TestCase(5, 5, 50, 3)]
+    public void Evaluate_SelectsMostSpecificSufficientStructuralBucket(
+        int exactSamples,
+        int alignedSamples,
+        int confidenceOnlySamples,
+        int expectedFallbackLevel)
+    {
+        MetaModelBucket exact = Bucket(exactSamples, 0.8m, 0.8m) with
+        {
+            CciState = "Aligned",
+            StructuralConfluenceState = "Present"
+        };
+        MetaModelBucket aligned = Bucket(alignedSamples, 0.7m, 0.7m);
+        MetaModelBucket confidenceOnly = Bucket(confidenceOnlySamples, 0.6m, 0.6m) with
+        {
+            AlignmentFrom = 0m,
+            AlignmentTo = 1m
+        };
+        var model = new CalibratedSetupMetaModel(
+            Artifact([exact, aligned, confidenceOnly]),
+            new MetaModelPolicyOptions { MinimumSamples = 30 });
+
+        MetaLabelDecision decision = model.Evaluate(Features(
+            confidence: 62m,
+            alignment: 0.6m,
+            cciState: "Aligned:200",
+            structuralConfluence: true));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.BucketFallbackLevel, Is.EqualTo(expectedFallbackLevel));
+            Assert.That(decision.Probability, Is.EqualTo(expectedFallbackLevel switch
+            {
+                1 => 0.8m,
+                2 => 0.7m,
+                _ => 0.6m
+            }));
+        });
     }
 
     private static MetaModelArtifact Artifact(IReadOnlyList<MetaModelBucket> buckets) => new()
@@ -144,7 +189,11 @@ public sealed class CalibratedSetupMetaModelTests
         ExpectedR = expectedR
     };
 
-    private static MetaLabelFeatures Features(decimal confidence, decimal alignment) => new()
+    private static MetaLabelFeatures Features(
+        decimal confidence,
+        decimal alignment,
+        string? cciState = null,
+        bool? structuralConfluence = null) => new()
     {
         StrategyId = "improved",
         Instrument = "FX:GBP/USD",
@@ -154,6 +203,8 @@ public sealed class CalibratedSetupMetaModelTests
         RegimeConfidence = 80m,
         SetupConfidence = confidence,
         MultiTimeframeAlignment = alignment,
+        CciConfirmationState = cciState,
+        SupplyDemandLiquidityConfluence = structuralConfluence,
         PriceActionEvents = [],
         FeatureSchemaVersion = MetaLabelFeatureFactory.SchemaVersion
     };

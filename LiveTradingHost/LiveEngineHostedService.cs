@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Agent.Factories;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Engine;
@@ -14,14 +15,20 @@ using LiveTrading.MarketData;
 using LiveTrading.Persistence;
 using LiveTrading.Reconciliation;
 using LiveTrading.Runtime;
+using LiveTrading.Shadow.Outcomes;
 using LiveTradingHost.Api;
 using LiveTradingHost.Configuration;
+using LiveTradingHost.Deployment;
+using LiveTradingHost.Observability;
 using LiveTradingHost.Status;
 using Microsoft.Extensions.Options;
 using QuantResearch.Training.Pipeline;
+using RiskManager.Calibration;
 using RiskManager.Safety;
 using TradingCore.MarketData;
 using TradingCore.Pipeline;
+using TradingObservability.Abstractions;
+using TradingPolicies;
 
 namespace LiveTradingHost;
 
@@ -40,12 +47,15 @@ public sealed class LiveEngineHostedService(
     IServiceProvider services,
     LiveEngineState state,
     LiveStatusRealtimePublisher publisher,
+    LiveRuntimeObservability observability,
+    LiveAnalysisProfileRegistry analysisProfiles,
+    HostInstanceIdentity hostIdentity,
     TimeProvider timeProvider,
     ILoggerFactory loggerFactory) : BackgroundService
 {
     private const int WarmupCandles = 250;
 
-    private readonly string _instanceId = Guid.NewGuid().ToString("N");
+    private readonly string _instanceId = hostIdentity.Value;
     private readonly ILogger<LiveEngineHostedService> _logger = loggerFactory.CreateLogger<LiveEngineHostedService>();
     private IBrokerClient _broker = null!;
     private ILiveQuoteStream _quoteStream = null!;
@@ -60,15 +70,23 @@ public sealed class LiveEngineHostedService(
     private ILivePolicyRegistry _policies = null!;
     private ITradingSafetyController _safety = null!;
     private ILiveCalibrationTrainingScheduler _calibrationScheduler = null!;
-    private readonly LiveAnalysisProfileRegistry _analysisProfiles = new();
+    private ILiveShadowOutcomeService _shadowOutcomes = null!;
+    private readonly LiveAnalysisProfileRegistry _analysisProfiles = analysisProfiles;
     private readonly Dictionary<InstrumentKey, List<AnalysisProfileKey>> _profilesByMarket = new();
+    private volatile bool _ready;
+
+    public bool IsReady => _ready;
+
+    public bool CanServeAnalysis(InstrumentKey instrument, AnalysisProfileKey profile) =>
+        _ready && _profilesByMarket.TryGetValue(instrument, out List<AnalysisProfileKey>? profiles)
+            && profiles.Contains(profile);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!oandaOptions.Value.IsConfigured)
         {
             const string message = "OANDA is not configured (Oanda:Enabled/AccountId/AccessToken). " +
-                "Set them via appsettings or Oanda__AccountId/Oanda__AccessToken environment variables.";
+                "Import an enabled OANDA credential into the broker credential database.";
             _logger.LogCritical("{Message}", message);
             state.SetFaulted(message);
             await PublishAsync(stoppingToken).ConfigureAwait(false);
@@ -108,6 +126,8 @@ public sealed class LiveEngineHostedService(
         Task persistenceTask = _persistence.RunAsync(persistenceCts.Token);
         using CancellationTokenSource renewalCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         Task renewalLoop = RunLeaseRenewalLoopAsync(renewalCts.Token);
+        RuntimeSessionStatus terminalStatus = RuntimeSessionStatus.Completed;
+        string? terminalReason = null;
 
         try
         {
@@ -116,6 +136,9 @@ public sealed class LiveEngineHostedService(
                 await PublishAsync(stoppingToken).ConfigureAwait(false);
                 return;
             }
+
+            await observability.StartAsync(
+                _agentSupervisor.Instances.ToArray(), _instanceId, stoppingToken).ConfigureAwait(false);
 
             await _runtime.RecoverAsync(stoppingToken).ConfigureAwait(false);
             state.SetRestReachable(true);
@@ -228,6 +251,7 @@ public sealed class LiveEngineHostedService(
                 engineToken));
 
             state.SetRunning();
+            _ready = true;
             await PublishAsync(stoppingToken).ConfigureAwait(false);
 
             Task first = await Task.WhenAny(workerTasks.Append(persistenceTask)).ConfigureAwait(false);
@@ -257,10 +281,13 @@ public sealed class LiveEngineHostedService(
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Expected on host shutdown.
+            terminalStatus = RuntimeSessionStatus.Cancelled;
+            terminalReason = "Host shutdown requested.";
         }
         catch (Exception ex)
         {
+            terminalStatus = RuntimeSessionStatus.Failed;
+            terminalReason = ex.Message;
             _logger.LogCritical(ex, "The live engine faulted. Existing broker-side stops are left intact.");
             _safety.Trip(
                 SafetyTripReason.External,
@@ -271,6 +298,7 @@ public sealed class LiveEngineHostedService(
         }
         finally
         {
+            _ready = false;
             renewalCts.Cancel();
             await SafeAwaitAsync(renewalLoop).ConfigureAwait(false);
             try
@@ -281,6 +309,18 @@ public sealed class LiveEngineHostedService(
             catch (Exception ex)
             {
                 _logger.LogCritical(ex, "The clean-shutdown checkpoint could not be written.");
+            }
+            if (observability.Started)
+            {
+                try
+                {
+                    await observability.CompleteAsync(terminalStatus, terminalReason, CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogCritical(ex, "The live runtime observability session could not be finalized.");
+                }
             }
             persistenceCts.Cancel();
             await SafeAwaitAsync(persistenceTask).ConfigureAwait(false);
@@ -302,6 +342,7 @@ public sealed class LiveEngineHostedService(
         _policies = services.GetRequiredService<ILivePolicyRegistry>();
         _safety = services.GetRequiredService<ITradingSafetyController>();
         _calibrationScheduler = services.GetRequiredService<ILiveCalibrationTrainingScheduler>();
+        _shadowOutcomes = services.GetRequiredService<ILiveShadowOutcomeService>();
     }
 
     private async Task MonitorQuoteFeedAsync(
@@ -336,7 +377,10 @@ public sealed class LiveEngineHostedService(
         CancellationToken cancellationToken)
     {
         await foreach (LiveQuoteSnapshot quote in quotes.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        {
+            await _shadowOutcomes.OnQuoteAsync(quote, cancellationToken).ConfigureAwait(false);
             await _positionManagement.OnQuoteAsync(quote, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task ProcessClosedEpochsAsync(CancellationToken cancellationToken)
@@ -367,7 +411,7 @@ public sealed class LiveEngineHostedService(
         }
     }
 
-    private static async Task ForwardCandlesAsync(
+    private async Task ForwardCandlesAsync(
         InstrumentKey instrument,
         BarInterval interval,
         ChannelReader<Candle> input,
@@ -376,6 +420,7 @@ public sealed class LiveEngineHostedService(
     {
         await foreach (Candle candle in input.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
+            await _shadowOutcomes.OnCompletedCandleAsync(candle, cancellationToken).ConfigureAwait(false);
             await output.WriteAsync(
                 new CandleClosedMarketEvent
                 {
@@ -420,14 +465,12 @@ public sealed class LiveEngineHostedService(
 
             await _positionManagement.OnAnalysisAsync(update, actor.LatestQuote, cancellationToken)
                 .ConfigureAwait(false);
+            await _shadowOutcomes.OnAnalysisAsync(update, actor.LatestQuote, cancellationToken)
+                .ConfigureAwait(false);
             IReadOnlyList<AgentEvaluationAudit> evaluationAudits = await _agentSupervisor
                 .ApplyAsync(update, actor.LatestQuote?.Spread, cancellationToken)
                 .ConfigureAwait(false);
-            if (evaluationAudits.Count > 0)
-            {
-                await _persistence.AppendAsync("agent-evaluations", evaluationAudits, cancellationToken)
-                    .ConfigureAwait(false);
-            }
+            await observability.ObserveAsync(evaluationAudits, cancellationToken).ConfigureAwait(false);
             foreach (AnalysisProfileActorStatus profile in actor.ProfileStatuses)
             {
                 state.UpdateAnalysisProfile(new AnalysisProfileStatusDto
@@ -453,6 +496,7 @@ public sealed class LiveEngineHostedService(
                 (double averageDuration, double p95Duration) = instance.EvaluationDurationSummary();
                 state.UpdateAgent(new AgentStatusDto
                 {
+                    AgentInstanceId = observability.AgentInstanceId(instance.Key),
                     DeploymentId = instance.Key.DeploymentId,
                     StrategyId = instance.Key.StrategyId,
                     Instrument = instance.Key.Instrument.Value,
@@ -558,20 +602,28 @@ public sealed class LiveEngineHostedService(
                 {
                     try
                     {
-                        resolved.SetupCalibration.Validate(resolved.Bundle.FeatureSchemaHash);
+                        resolved.SetupCalibration.Validate(MetaLabelFeatureFactory.SchemaVersion);
                     }
                     catch (ArgumentException)
                     {
                         return FaultConfiguration(
                             $"Agent {assignment.StrategyId}/{market.Instrument}: setup calibration artifact " +
                             $"{resolved.SetupCalibration.CalibrationId} was trained under feature schema " +
-                            $"{resolved.SetupCalibration.FeatureSchemaHash}, which does not match the resolved " +
-                            $"policy bundle's feature schema {resolved.Bundle.FeatureSchemaHash}.");
+                            $"{resolved.SetupCalibration.FeatureSchemaHash}, which does not match the runtime " +
+                            $"feature-vector schema {MetaLabelFeatureFactory.SchemaVersion}.");
                     }
                 }
 
+                IReadOnlySet<BarInterval> requiredIntervals = TradingAgentFactory
+                    .Create(portableProfile.EffectiveAgentDefinition()).RequiredIntervals.ToHashSet();
+                if (!requiredIntervals.IsSubsetOf(market.AnalysisIntervals))
+                {
+                    return FaultConfiguration(
+                        $"Agent {assignment.StrategyId}/{market.Instrument} requires intervals " +
+                        $"{string.Join(", ", requiredIntervals.Order())} outside the configured market universe.");
+                }
                 AnalysisProfileKey profile = _analysisProfiles.GetOrCreateProfile(
-                    resolved.Bundle.FeaturePolicy.AnnotationOptions, market.AnalysisIntervals);
+                    resolved.Bundle.FeaturePolicy.AnnotationOptions, requiredIntervals);
                 if (!_profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? marketProfiles))
                     _profilesByMarket[market.Instrument] = marketProfiles = [];
                 if (!marketProfiles.Contains(profile))
@@ -579,8 +631,7 @@ public sealed class LiveEngineHostedService(
 
                 StrategyDecisionRuntime runtime = LiveAgentFactory.Create(
                     assignment.StrategyId,
-                    portableProfile.AgentKind,
-                    portableProfile.AgentOptions,
+                    portableProfile.EffectiveAgentDefinition(),
                     resolved.Bundle,
                     resolved.SetupCalibration,
                     resolved.MetaModel,
@@ -621,6 +672,7 @@ public sealed class LiveEngineHostedService(
                 });
             }
         }
+        await PreloadDeployableProfilesAsync(cancellationToken).ConfigureAwait(false);
         AgentInstanceState[] instances = _agentSupervisor.Instances
             .OrderBy(instance => instance.Key.DeploymentId, StringComparer.Ordinal)
             .ThenBy(instance => instance.Key.Instrument.Value, StringComparer.Ordinal)
@@ -642,6 +694,46 @@ public sealed class LiveEngineHostedService(
                 cancellationToken).ConfigureAwait(false);
         }
         return true;
+    }
+
+    private async Task PreloadDeployableProfilesAsync(CancellationToken cancellationToken)
+    {
+        using IServiceScope scope = services.CreateScope();
+        DBManager.Abstractions.Config.IAgentLifecycleStore lifecycle =
+            scope.ServiceProvider.GetRequiredService<DBManager.Abstractions.Config.IAgentLifecycleStore>();
+        IAgentPackageResolver packageResolver =
+            scope.ServiceProvider.GetRequiredService<IAgentPackageResolver>();
+        DBManager.Abstractions.Config.Page<DBManager.Abstractions.Config.PolicyRevisionSummary> page =
+            await lifecycle.ListPolicyRevisionsAsync(null, 0, 1_000, cancellationToken).ConfigureAwait(false);
+        foreach (DBManager.Abstractions.Config.PolicyRevisionSummary revision in page.Items.Where(item =>
+                     item.Status is not (DBManager.Abstractions.Config.PolicyRevisionStatus.Research
+                         or DBManager.Abstractions.Config.PolicyRevisionStatus.Retired
+                         or DBManager.Abstractions.Config.PolicyRevisionStatus.Suspended)))
+        {
+            ResolvedAgentPackage package;
+            try
+            {
+                package = await packageResolver.ResolveAsync(revision.PolicyRevisionId, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
+            {
+                _logger.LogWarning(ex, "Skipping unresolved deployable policy revision {PolicyRevisionId}.",
+                    revision.PolicyRevisionId);
+                continue;
+            }
+
+            foreach (LiveMarketDefinition market in markets.Value.Markets.Where(item => item.Enabled
+                         && package.RequiredIntervals.IsSubsetOf(item.AnalysisIntervals)))
+            {
+                AnalysisProfileKey profile = _analysisProfiles.GetOrCreateProfile(
+                    package.FeaturePolicy.AnnotationOptions, package.RequiredIntervals);
+                if (!_profilesByMarket.TryGetValue(market.Instrument, out List<AnalysisProfileKey>? marketProfiles))
+                    _profilesByMarket[market.Instrument] = marketProfiles = [];
+                if (!marketProfiles.Contains(profile))
+                    marketProfiles.Add(profile);
+            }
+        }
     }
 
     private bool FaultConfiguration(string message)

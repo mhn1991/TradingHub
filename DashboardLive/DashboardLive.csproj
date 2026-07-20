@@ -11,6 +11,9 @@
     <ProjectReference Include="../Brokers/Brokers.csproj" />
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
     <ProjectReference Include="../DashboardContracts/DashboardContracts.csproj" />
+    <ProjectReference Include="../DBManager.Abstractions/DBManager.Abstractions.csproj" />
+    <ProjectReference Include="../DBManager.Postgres/DBManager.Postgres.csproj" />
+    <ProjectReference Include="../TradingHub.Persistence.Postgres/TradingHub.Persistence.Postgres.csproj" />
     <ProjectReference Include="../Networking/Networking.csproj" />
     <ProjectReference Include="../QuantResearch/QuantResearch.csproj" />
     <ProjectReference Include="../QuantResearchRunner/QuantResearchRunner.csproj" />

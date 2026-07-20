@@ -52,6 +52,7 @@ public sealed class StreamingComparativeEngineOptions
     public Func<string, SimulatedTradeRecord, Task>? TradeCompleted { get; init; }
     public ISetupMetaModel? MetaLabelModel { get; init; }
     public Simulator.Jobs.IAsyncPauseGate? PauseGate { get; init; }
+    public bool CaptureMarketReplay { get; init; } = true;
 }
 
 /// <summary>
@@ -222,7 +223,8 @@ public sealed class StreamingComparativeEngine
             options.OutputDirectory,
             options.Runtime.ReplayChunkSize,
             options.Runtime.ExecutionDetailPreEntryFrames,
-            options.Runtime.ExecutionDetailPostExitFrames);
+            options.Runtime.ExecutionDetailPostExitFrames,
+            options.CaptureMarketReplay);
 
         await replayWriter.WriteManifestAsync(new SimulationManifest
         {

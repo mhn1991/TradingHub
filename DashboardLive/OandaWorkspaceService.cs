@@ -75,7 +75,7 @@ internal sealed class OandaWorkspaceService : BackgroundService
                 WorkspaceDataKind.Market,
                 IsConfigured: false,
                 IsReadOnly: true,
-                "OANDA is disabled on the backend. Set Oanda__Enabled, Oanda__AccountId, and Oanda__AccessToken before starting DashboardLive.",
+                "OANDA is disabled on the backend. Import an enabled OANDA credential into the broker credential database.",
                 []);
         }
 
@@ -254,7 +254,7 @@ internal sealed class OandaWorkspaceService : BackgroundService
         {
             _logger.LogInformation(
                 "OANDA is disabled; no OANDA requests will be sent. Set Oanda__Enabled=true, " +
-                "Oanda__AccountId, and Oanda__AccessToken before starting DashboardLive.");
+                "an enabled OANDA credential in the broker credential database.");
             return;
         }
 

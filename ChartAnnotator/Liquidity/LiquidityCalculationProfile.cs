@@ -82,6 +82,25 @@ public sealed record LiquidityCalculationProfile
     public bool RequireAcceptedBreakRetest { get; init; }
     public bool RequireAcceptedBreakDisplacement { get; init; }
 
+    /// <summary>
+    /// An accepted-break pool keeps being processed for this many bars after acceptance (instead
+    /// of terminating immediately), so a subsequent touch can be recorded as a genuine
+    /// LiquidityEventType.Retest - previously the pool was marked terminal the instant its break
+    /// was accepted, which meant Retest could never be emitted at all and any playbook gate
+    /// requiring one (LiquidityBreakRetestPlaybook's RequireRetestEvent, on by default) could never
+    /// pass. A full reversal back through the original side during this window fails the pool
+    /// outright (LiquidityPoolState.Broken) rather than waiting out the rest of the window.
+    /// </summary>
+    public int MaximumBarsToTrackAcceptedBreak { get; init; } = 20;
+
+    /// <summary>
+    /// Minimum bars between two touches for the second to count toward
+    /// <see cref="LiquidityPool.DistinctTouchCount"/>. Standard cooldown-based touch counting
+    /// (industry default is 5 bars) so one consolidation sitting on the level across many
+    /// consecutive candles cannot be mistaken for repeated distinct tests.
+    /// </summary>
+    public int MinimumDistinctTouchBars { get; init; } = 5;
+
     public LiquidityScoringWeights ScoringWeights { get; init; } = LiquidityScoringWeights.Default;
 
     public int RuleSetVersion { get; init; } = 1;
@@ -115,6 +134,8 @@ public sealed record LiquidityCalculationProfile
             MinimumCloseBackAtr < 0m ||
             MinimumAcceptedBreakCloseDistanceAtr <= 0m ||
             MinimumAcceptedBreakHoldBars < 0 ||
+            MaximumBarsToTrackAcceptedBreak < 1 ||
+            MinimumDistinctTouchBars < 0 ||
             RuleSetVersion < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(LiquidityCalculationProfile));

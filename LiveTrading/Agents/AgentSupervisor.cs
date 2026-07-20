@@ -29,6 +29,8 @@ public sealed record AgentEvaluationAudit
     public required string StateBefore { get; init; }
     public required string StateAfter { get; init; }
     public decimal? Confidence { get; init; }
+    public string? PlaybookId { get; init; }
+    public required double EvaluationMilliseconds { get; init; }
     public string? ReasonCode { get; init; }
     public IReadOnlyDictionary<string, string> Diagnostics { get; init; } =
         new Dictionary<string, string>();
@@ -65,7 +67,24 @@ public sealed class AgentSupervisor(
     int maxConcurrentEvaluations = 4,
     TimeSpan? evaluationTimeout = null)
 {
+    private enum MutationKind { Add, Pause, Resume, Drain, Stop, Replace }
+    private sealed class PendingMutation(
+        MutationKind kind,
+        AgentInstanceKey key,
+        AgentInstanceState? instance,
+        TaskCompletionSource<long> completion)
+    {
+        public MutationKind Kind { get; } = kind;
+        public AgentInstanceKey Key { get; } = key;
+        public AgentInstanceState? Instance { get; } = instance;
+        public TaskCompletionSource<long> Completion { get; } = completion;
+        public CancellationTokenRegistration CancellationRegistration { get; set; }
+    }
+
+    private readonly object _instancesSync = new();
     private readonly Dictionary<AgentInstanceKey, AgentInstanceState> _instances = [];
+    private readonly HashSet<AgentInstanceKey> _entryDisabled = [];
+    private readonly List<PendingMutation> _pendingMutations = [];
     /// <summary>One serialization gate per registered instance - not for cross-agent concurrency
     /// (that's <see cref="_dispatchGate"/>'s job), but so a timed-out evaluation that keeps
     /// running in the background can never overlap with a *later* <see cref="ApplyAsync"/> call's
@@ -80,12 +99,35 @@ public sealed class AgentSupervisor(
     public void Register(AgentInstanceState instance)
     {
         ArgumentNullException.ThrowIfNull(instance);
-        if (!_instances.TryAdd(instance.Key, instance))
-            throw new InvalidOperationException($"Agent instance '{instance.Key}' is already registered.");
-        _instanceGates.Add(instance.Key, new SemaphoreSlim(1, 1));
+        lock (_instancesSync)
+            RegisterCore(instance);
     }
 
-    public IReadOnlyCollection<AgentInstanceState> Instances => _instances.Values;
+    public IReadOnlyCollection<AgentInstanceState> Instances
+    {
+        get
+        {
+            lock (_instancesSync)
+                return _instances.Values.ToArray();
+        }
+    }
+
+    public Task<long> StageRegisterAsync(AgentInstanceState instance,
+        CancellationToken cancellationToken = default) =>
+        Stage(MutationKind.Add, instance.Key, instance, cancellationToken);
+
+    public Task<long> StagePauseAsync(AgentInstanceKey key, CancellationToken cancellationToken = default) =>
+        Stage(MutationKind.Pause, key, cancellationToken: cancellationToken);
+    public Task<long> StageResumeAsync(AgentInstanceKey key, CancellationToken cancellationToken = default) =>
+        Stage(MutationKind.Resume, key, cancellationToken: cancellationToken);
+    public Task<long> StageDrainAsync(AgentInstanceKey key, CancellationToken cancellationToken = default) =>
+        Stage(MutationKind.Drain, key, cancellationToken: cancellationToken);
+    public Task<long> StageStopAsync(AgentInstanceKey key, CancellationToken cancellationToken = default) =>
+        Stage(MutationKind.Stop, key, cancellationToken: cancellationToken);
+
+    public Task<long> StageReplaceAsync(AgentInstanceKey current, AgentInstanceState replacement,
+        CancellationToken cancellationToken = default) =>
+        Stage(MutationKind.Replace, current, replacement, cancellationToken);
 
     public async Task<IReadOnlyList<AgentEvaluationAudit>> ApplyAsync(
         MarketAnalysisUpdate update,
@@ -94,6 +136,7 @@ public sealed class AgentSupervisor(
     {
         ArgumentNullException.ThrowIfNull(update);
         long epoch = LiveDecisionEpochCoordinator.EpochFor(update.AvailableAt);
+        ApplyPendingMutations(update.Instrument, epoch);
 
         // Establishes "current" before any dispatch starts, so a still-in-flight evaluation for
         // an older sequence (typically one that timed out) is detectable by
@@ -104,16 +147,21 @@ public sealed class AgentSupervisor(
         // Fixed-order eligible list, built once before any concurrent dispatch - this exact
         // order is what determines candidate submission order below, independent of which
         // evaluation happens to finish first.
-        List<AgentInstanceState> eligible = _instances.Values
-            .Where(instance => instance.Key.Instrument == update.Instrument)
-            .Where(instance => ShouldTrigger(instance, update))
-            .Where(instance => update.MarketSequence > instance.LastEvaluatedMarketSequence)
-            .OrderBy(instance => instance.Key.DeploymentId, StringComparer.Ordinal)
-            .ThenBy(instance => instance.Key.Instrument.Value, StringComparer.Ordinal)
-            .ThenBy(instance => instance.Key.StrategyId, StringComparer.Ordinal)
-            .ThenBy(instance => instance.Key.PolicyBundleId)
-            .ThenBy(instance => instance.Key.Revision)
-            .ToList();
+        List<AgentInstanceState> eligible;
+        lock (_instancesSync)
+        {
+            eligible = _instances.Values
+                .Where(instance => instance.Key.Instrument == update.Instrument)
+                .Where(instance => !_entryDisabled.Contains(instance.Key))
+                .Where(instance => ShouldTrigger(instance, update))
+                .Where(instance => update.MarketSequence > instance.LastEvaluatedMarketSequence)
+                .OrderBy(instance => instance.Key.DeploymentId, StringComparer.Ordinal)
+                .ThenBy(instance => instance.Key.Instrument.Value, StringComparer.Ordinal)
+                .ThenBy(instance => instance.Key.StrategyId, StringComparer.Ordinal)
+                .ThenBy(instance => instance.Key.PolicyBundleId)
+                .ThenBy(instance => instance.Key.Revision)
+                .ToList();
+        }
 
         var candidates = new LiveTradeCandidate?[eligible.Count];
         epochCoordinator.ExpectAgents(epoch, update.Instrument, eligible.Select(item => item.Key).ToArray());
@@ -137,6 +185,111 @@ public sealed class AgentSupervisor(
         epochCoordinator.NotifyEvaluated(epoch, update.Instrument);
 
         return audits;
+    }
+
+    private Task<long> Stage(MutationKind kind, AgentInstanceKey key,
+        AgentInstanceState? instance = null, CancellationToken cancellationToken = default)
+    {
+        var completion = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var mutation = new PendingMutation(kind, key, instance, completion);
+        lock (_instancesSync)
+        {
+            _pendingMutations.Add(mutation);
+            if (cancellationToken.CanBeCanceled)
+            {
+                mutation.CancellationRegistration = cancellationToken.Register(
+                    () => CancelPendingMutation(mutation, cancellationToken));
+            }
+        }
+        return completion.Task;
+    }
+
+    private void CancelPendingMutation(PendingMutation mutation, CancellationToken cancellationToken)
+    {
+        lock (_instancesSync)
+        {
+            if (_pendingMutations.Remove(mutation))
+                mutation.Completion.TrySetCanceled(cancellationToken);
+        }
+    }
+
+    private void ApplyPendingMutations(InstrumentKey instrument, long epoch)
+    {
+        PendingMutation[] applicable;
+        lock (_instancesSync)
+        {
+            applicable = _pendingMutations.Where(item => item.Key.Instrument == instrument).ToArray();
+            _pendingMutations.RemoveAll(item => item.Key.Instrument == instrument);
+            foreach (PendingMutation mutation in applicable)
+            {
+                try
+                {
+                    if (mutation.Kind is MutationKind.Stop or MutationKind.Replace
+                        && _instanceGates.TryGetValue(mutation.Key, out SemaphoreSlim? activeGate)
+                        && activeGate.CurrentCount == 0)
+                    {
+                        _pendingMutations.Add(mutation);
+                        continue;
+                    }
+                    switch (mutation.Kind)
+                    {
+                        case MutationKind.Add:
+                            RegisterCore(mutation.Instance ?? throw new InvalidOperationException("Missing Agent instance."));
+                            break;
+                        case MutationKind.Pause:
+                        case MutationKind.Drain:
+                            RequireRegistered(mutation.Key);
+                            _entryDisabled.Add(mutation.Key);
+                            break;
+                        case MutationKind.Resume:
+                            RequireRegistered(mutation.Key);
+                            _entryDisabled.Remove(mutation.Key);
+                            break;
+                        case MutationKind.Stop:
+                            RemoveCore(mutation.Key);
+                            break;
+                        case MutationKind.Replace:
+                            RemoveCore(mutation.Key);
+                            RegisterCore(mutation.Instance ?? throw new InvalidOperationException("Missing replacement Agent instance."));
+                            break;
+                        default:
+                            throw new ArgumentOutOfRangeException();
+                    }
+                    mutation.Completion.TrySetResult(epoch);
+                    mutation.CancellationRegistration.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    mutation.Completion.TrySetException(ex);
+                    mutation.CancellationRegistration.Dispose();
+                }
+            }
+        }
+    }
+
+    private void RegisterCore(AgentInstanceState instance)
+    {
+        if (!_instances.TryAdd(instance.Key, instance))
+            throw new InvalidOperationException($"Agent instance '{instance.Key}' is already registered.");
+        _instanceGates.Add(instance.Key, new SemaphoreSlim(1, 1));
+    }
+
+    private void RemoveCore(AgentInstanceKey key)
+    {
+        RequireRegistered(key);
+        AgentInstanceState instance = _instances[key];
+        _instances.Remove(key);
+        _entryDisabled.Remove(key);
+        if (_instanceGates.Remove(key, out SemaphoreSlim? gate))
+            gate.Dispose();
+        if (instance.IsolatedRuntime is IDisposable disposable)
+            disposable.Dispose();
+    }
+
+    private void RequireRegistered(AgentInstanceKey key)
+    {
+        if (!_instances.ContainsKey(key))
+            throw new KeyNotFoundException($"Agent instance '{key}' is not registered.");
     }
 
     private async Task<AgentEvaluationAudit> DispatchOneAsync(
@@ -203,12 +356,14 @@ public sealed class AgentSupervisor(
                 instanceGateHandedOff = true;
                 _ = ObserveLateCompletionAsync(evaluation, instance, instanceGate);
                 return BuildAudit(
-                    instance, update, stateBefore, AgentEvaluationOutcome.TimedOut, candidates[index]);
+                    instance, update, stateBefore, AgentEvaluationOutcome.TimedOut, candidates[index],
+                    Stopwatch.GetElapsedTime(started));
             }
 
             candidates[index] = await evaluation.ConfigureAwait(false);
             return BuildAudit(
-                instance, update, stateBefore, AgentEvaluationOutcome.Completed, candidates[index]);
+                instance, update, stateBefore, AgentEvaluationOutcome.Completed, candidates[index],
+                Stopwatch.GetElapsedTime(started));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -221,7 +376,8 @@ public sealed class AgentSupervisor(
                 instance.Key.StrategyId,
                 instance.Key.Instrument);
             return BuildAudit(
-                instance, update, stateBefore, AgentEvaluationOutcome.Failed, candidates[index]);
+                instance, update, stateBefore, AgentEvaluationOutcome.Failed, candidates[index],
+                Stopwatch.GetElapsedTime(started));
         }
         finally
         {
@@ -244,7 +400,8 @@ public sealed class AgentSupervisor(
         MarketAnalysisUpdate update,
         string stateBefore,
         AgentEvaluationOutcome outcome,
-        LiveTradeCandidate? candidate)
+        LiveTradeCandidate? candidate,
+        TimeSpan evaluationDuration)
     {
         var diagnostics = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -273,6 +430,8 @@ public sealed class AgentSupervisor(
             StateBefore = stateBefore,
             StateAfter = instance.LastStatus ?? outcome.ToString(),
             Confidence = candidate?.RawConfidence ?? instance.LastConfidence,
+            PlaybookId = candidate?.PlaybookId,
+            EvaluationMilliseconds = evaluationDuration.TotalMilliseconds,
             ReasonCode = instance.LastReasonCode,
             Diagnostics = diagnostics,
             Error = instance.LastEvaluationError?.Message

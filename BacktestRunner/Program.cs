@@ -1,13 +1,19 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Agent.Configuration;
 using Agent.Strategies;
+using Agent.Strategies.StructuralConfluence;
 using Brokers.Models;
+using ChartAnnotator.Engine;
 using Dashboard.Contracts;
+using DBManager.Abstractions.Credentials;
+using DBManager.Postgres.Security;
 using QuantResearch.Training.Pipeline;
 using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
 using TradeManager;
+using TradingCore.Pipeline;
 using TradingPolicies;
 
 namespace BacktestRunner;
@@ -28,7 +34,15 @@ internal static class Program
     {
         try
         {
-            BacktestCommandOptions options = BacktestCommandOptions.Parse(args);
+            string? requestJsonPath = ExtractRequestJsonPath(args);
+            BacktestCommandOptions options = requestJsonPath is null
+                ? BacktestCommandOptions.Parse(args)
+                : new BacktestCommandOptions
+                {
+                    OutputDirectory = Path.Combine("Dashboard", "public", "data", "simulations"),
+                    StrategyExecution = "sequential",
+                    CaptureMarketReplay = false
+                };
             if (options.ShowHelp)
             {
                 PrintHelp();
@@ -43,13 +57,51 @@ internal static class Program
             };
 
             options = await ResolveCalibrationArtifactsAsync(options, cancellation.Token);
-            BacktestRequest request = options.ToBacktestRequest();
+            BacktestRequest request = requestJsonPath is null
+                ? options.ToBacktestRequest()
+                : await LoadRequestJsonAsync(requestJsonPath, cancellation.Token).ConfigureAwait(false);
+            if (args.Any(item => string.Equals(item, "--pullback-only", StringComparison.OrdinalIgnoreCase)))
+            {
+                request = WithPullbackOnlyStructuralAgent(request);
+                Console.WriteLine(
+                    "Playbook filter: supply/demand pullback only (sweep + break/retest disabled); " +
+                    "RequireTrendAlignment=false (step A).");
+            }
+
+            BrokerCredentialDatabaseConfiguration? databaseConfiguration =
+                BrokerCredentialDatabaseConfiguration.TryLoad(Directory.GetCurrentDirectory(), out string repositoryRoot);
+            IBrokerCredentialStore? credentialStore = databaseConfiguration?.OpenStore(repositoryRoot);
+
             await using var service = new BacktestApplicationService(
                 new FileSimulationJobRepository(request.JobsDirectory),
                 new BacktestApplicationServiceOptions
                 {
                     MaxConcurrentJobs = 1,
-                    QueueCapacity = 4
+                    QueueCapacity = 4,
+                    CredentialResolver = credentialStore is null
+                        ? null
+                        : async (backtest, cancellationToken) =>
+                        {
+                            string environment = backtest.Environment == Brokers.Abstractions.BrokerEnvironment.Live
+                                ? "LIVE"
+                                : "DEMO";
+                            string broker = backtest.Runtime.SourceKind == Simulator.MarketData.HistoricalDataSourceKind.BinanceCandles
+                                ? "BINANCE"
+                                : "OANDA";
+                            BrokerCredential? credential = await credentialStore
+                                .GetAsync(
+                                    broker,
+                                    broker == "BINANCE" && environment == "DEMO" ? "TESTNET" : environment,
+                                    cancellationToken: cancellationToken)
+                                .ConfigureAwait(false);
+                            return credential is null
+                                ? null
+                                : new HistoricalBrokerCredentials(
+                                    credential.AccountId,
+                                    credential.AccessToken,
+                                    credential.ApiKey,
+                                    credential.SecretKey);
+                        }
                 });
 
             var progress = new Progress<BacktestProgress>(update =>
@@ -430,11 +482,94 @@ internal static class Program
         };
     }
 
+    private static BacktestRequest WithPullbackOnlyStructuralAgent(BacktestRequest request)
+    {
+        var structural = new StructuralConfluenceStrategyOptions
+        {
+            Quantity = request.Quantity,
+            MinimumRewardRisk = request.MinimumRewardRisk,
+            Trigger = new StructuralTriggerOptions
+            {
+                MinimumPriceActionConfidence = request.MinimumPriceActionConfidence
+            },
+            LiquiditySweepReversal = new LiquiditySweepReversalOptions { Enabled = false },
+            LiquidityBreakRetest = new LiquidityBreakRetestOptions { Enabled = false },
+            // Step A diagnostic: drop HTF trend veto so pullbacks are judged on zone + trigger + geometry.
+            SupplyDemandPullback = new SupplyDemandPullbackOptions
+            {
+                Enabled = true,
+                RequireTrendAlignment = false
+            }
+        };
+        structural.Validate();
+        ChartAnnotationOptions annotation = request.Runtime.AnnotationOptions with
+        {
+            SupplyDemand = request.Runtime.AnnotationOptions.SupplyDemand with { Enabled = true }
+        };
+        return request with
+        {
+            Strategies = ["structural-confluence"],
+            StrategyAssignments =
+            [
+                new StrategyInstrumentAssignment
+                {
+                    Id = "structural-pullback-step-a",
+                    StrategyType = TradingAgentTypeIds.StructuralConfluence,
+                    Instrument = request.Instrument,
+                    Mode = AgentExecutionMode.Shadow,
+                    AgentDefinitionOverride = new TradingAgentDefinition
+                    {
+                        Kind = TradingAgentKind.StructuralConfluence,
+                        StructuralConfluence = structural
+                    }
+                }
+            ],
+            Runtime = request.Runtime with { AnnotationOptions = annotation }
+        };
+    }
+
+    private static string? ExtractRequestJsonPath(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (string.Equals(args[i], "--request-json", StringComparison.OrdinalIgnoreCase) &&
+                i + 1 < args.Length)
+                return args[i + 1];
+            if (args[i].StartsWith("--request-json=", StringComparison.OrdinalIgnoreCase))
+                return args[i]["--request-json=".Length..];
+        }
+
+        return null;
+    }
+
+    private static async Task<BacktestRequest> LoadRequestJsonAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (!File.Exists(fullPath))
+            throw new FileNotFoundException($"Backtest request JSON was not found: {fullPath}");
+
+        await using FileStream stream = File.OpenRead(fullPath);
+        BacktestRequest? request = await JsonSerializer
+            .DeserializeAsync<BacktestRequest>(stream, JsonOptions, cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"Failed to deserialize BacktestRequest from {fullPath}.");
+        request.Validate();
+        string strategies = request.StrategyAssignments is { Count: > 0 } assignments
+            ? string.Join(',', assignments.Select(item => item.Id ?? item.StrategyType))
+            : string.Join(',', request.Strategies);
+        Console.WriteLine(
+            $"Loaded request JSON {fullPath} · {request.Instrument} · min R:R {request.MinimumRewardRisk} · strategies={strategies}");
+        return request;
+    }
+
     private static void PrintHelp() => Console.WriteLine("""
 TradingHub streamed dual-strategy backtest (CLI → shared application service)
 
 Usage:
   dotnet run --project BacktestRunner -- [options]
+  dotnet run --project BacktestRunner -- --request-json path/to/BacktestRequest.json
 
 Options:
   --instrument FX:EUR/USD                  (default: liquid major)

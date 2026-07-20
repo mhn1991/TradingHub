@@ -96,6 +96,60 @@ public sealed class LiquidityAnalyzerTests
     }
 
     [Test]
+    public void TouchAfterAcceptedBreak_EmitsRetestAndPoolStaysTrackable()
+    {
+        // Regression test for a real bug: LiquidityEventType.Retest was never emitted anywhere -
+        // an accepted-break pool was marked terminal the instant it accepted, so no later touch
+        // could ever be recorded against it. LiquidityBreakRetestPlaybook's Retest gate
+        // (RequireRetestEvent, on by default) could therefore never pass.
+        var analyzer = new LiquidityAnalyzer(RoundNumberProfile());
+        var history = new List<Candle>();
+        Update(analyzer, C(0, 99m, 99.2m, 98.8m, 99m), history, [], 0);
+        LiquidityAnalysisSnapshot accepted = Update(
+            analyzer, C(1, 100.2m, 100.8m, 100.2m, 100.6m), history, [], 1);
+        LiquidityEvent acceptedEvent = accepted.RecentEvents.Single(item =>
+            item.EventType == LiquidityEventType.AcceptedBreak);
+
+        // Dips back into the pool's [99.90, 100.10] range without closing beyond its lower edge.
+        LiquidityAnalysisSnapshot retested = Update(
+            analyzer, C(2, 100.3m, 100.4m, 99.95m, 100.15m), history, [], 2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(retested.RecentEvents.Any(item =>
+                item.PoolId == acceptedEvent.PoolId && item.EventType == LiquidityEventType.Retest), Is.True);
+            Assert.That(retested.Pools.Single(item => item.PoolId == acceptedEvent.PoolId).State,
+                Is.EqualTo(LiquidityPoolState.AcceptedBreak));
+            Assert.That(retested.ActivePools.Any(item => item.PoolId == acceptedEvent.PoolId), Is.True);
+        });
+    }
+
+    [Test]
+    public void FullReversalAfterAcceptedBreak_FailsThePoolAsBroken()
+    {
+        var analyzer = new LiquidityAnalyzer(RoundNumberProfile());
+        var history = new List<Candle>();
+        Update(analyzer, C(0, 99m, 99.2m, 98.8m, 99m), history, [], 0);
+        LiquidityAnalysisSnapshot accepted = Update(
+            analyzer, C(1, 100.2m, 100.8m, 100.2m, 100.6m), history, [], 1);
+        LiquidityEvent acceptedEvent = accepted.RecentEvents.Single(item =>
+            item.EventType == LiquidityEventType.AcceptedBreak);
+
+        // Closes back below the pool's lower edge (99.90) - a full reversal, not a retest.
+        LiquidityAnalysisSnapshot failed = Update(
+            analyzer, C(2, 100.2m, 100.2m, 99.5m, 99.7m), history, [], 2);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(failed.RecentEvents.Any(item =>
+                item.PoolId == acceptedEvent.PoolId && item.EventType == LiquidityEventType.Failure), Is.True);
+            Assert.That(failed.Pools.Single(item => item.PoolId == acceptedEvent.PoolId).State,
+                Is.EqualTo(LiquidityPoolState.Broken));
+            Assert.That(failed.ActivePools.Any(item => item.PoolId == acceptedEvent.PoolId), Is.False);
+        });
+    }
+
+    [Test]
     public void PreviousDayLevels_ArePublishedOnlyAfterReferenceDayEnds()
     {
         var analyzer = new LiquidityAnalyzer(Profile() with
@@ -180,6 +234,60 @@ public sealed class LiquidityAnalyzerTests
             MarketStructureSnapshot.Empty,
             PriceActionSnapshot.Empty,
             sequence);
+    }
+
+    /// <summary>
+    /// Regression guard for the terminal-pool trimming added to bound <c>_pools</c> to roughly
+    /// MaximumActivePools + MaximumRetainedSweeps (previously every pool ever formed in a run was
+    /// retained forever, making every candle's update scan/re-sort the whole history - O(total
+    /// pools) per candle, roughly quadratic total cost over a long stream). Drifts price through
+    /// hundreds of distinct round-number levels over 5,000 candles (far more than the default
+    /// 256-entry retention window) to force many trims, then proves the append-only lifecycle
+    /// guarantee still holds: once a pool ID is observed terminal (Swept/Consumed/AcceptedBreak/
+    /// Expired/Merged), it never reappears as Active - which is exactly what a resurrection bug
+    /// (a trimmed pool's deterministic ID being re-detected as brand new) would produce. Also
+    /// confirms the analyzer's own bounded output actually stays bounded.
+    /// </summary>
+    [Test]
+    public void Update_LongRun_NeverResurrectsATrimmedPoolAndKeepsOutputBounded()
+    {
+        var profile = RoundNumberProfile() with { RoundNumberMajorStep = 1m, RoundNumberMinorStep = null };
+        var analyzer = new LiquidityAnalyzer(profile);
+        var history = new List<Candle>();
+        var terminalStates = new HashSet<LiquidityPoolState>
+        {
+            LiquidityPoolState.Swept, LiquidityPoolState.Consumed, LiquidityPoolState.AcceptedBreak,
+            LiquidityPoolState.Broken, LiquidityPoolState.Expired, LiquidityPoolState.Merged
+        };
+        var everSeenTerminal = new HashSet<Guid>();
+        LiquidityAnalysisSnapshot? last = null;
+
+        for (int i = 0; i < 5_000; i++)
+        {
+            decimal price = 100m + i * 0.06m;
+            Candle candle = C(i, price, price + 0.3m, price - 0.3m, price + 0.05m);
+            last = Update(analyzer, candle, history, [], i);
+
+            foreach (LiquidityPool pool in last.Pools)
+            {
+                if (terminalStates.Contains(pool.State))
+                {
+                    everSeenTerminal.Add(pool.PoolId);
+                }
+                else if (everSeenTerminal.Contains(pool.PoolId))
+                {
+                    Assert.Fail($"Pool {pool.PoolId} was observed terminal, then resurrected as {pool.State}.");
+                }
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(last!.Pools.Count, Is.GreaterThan(profile.MaximumActivePools),
+                "the drifting round-number stream should have formed more pools than fit in one active set");
+            Assert.That(last.Pools.Count, Is.LessThanOrEqualTo(profile.MaximumActivePools + profile.MaximumRetainedSweeps));
+            Assert.That(last.ActivePools.Count, Is.LessThanOrEqualTo(profile.MaximumActivePools));
+        });
     }
 
     private static Candle C(int index, decimal open, decimal high, decimal low, decimal close) =>

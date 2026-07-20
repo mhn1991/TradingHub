@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
+using Agent.Configuration;
 using Agent.Strategies;
+using Agent.Strategies.StructuralConfluence;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.CurrencyStrength;
@@ -143,6 +145,9 @@ public sealed record BacktestRuntimeOptions
     public PositionManagementOptions ImprovedPositionManagement { get; init; } =
         PositionManagementOptions.ImprovedDefaults;
 
+    public PositionManagementOptions StructuralPositionManagement { get; init; } =
+        PositionManagementOptions.StructuralDefaults;
+
     /// <summary>
     /// Account-level safety and daily equity-profit protection. Null thresholds leave
     /// the corresponding rule disabled.
@@ -284,6 +289,7 @@ public sealed record BacktestRuntimeOptions
         StrategyTimeframes.Validate();
         LegacyPositionManagement.Validate();
         ImprovedPositionManagement.Validate();
+        StructuralPositionManagement.Validate();
         SafetyOptions.Validate();
         PositionSizing.Validate();
         AnnotationOptions.Validate();
@@ -331,6 +337,7 @@ public sealed record BacktestRuntimeOptions
         BarInterval[] derivedAnalysisIntervals = StrategyTimeframes.RequiredIntervals
             .Concat(ResolveManagementIntervals("legacy"))
             .Concat(ResolveManagementIntervals("improved"))
+            .Concat(ResolveManagementIntervals(TradingAgentTypeIds.StructuralConfluence))
             .Distinct()
             .ToArray();
         foreach (BarInterval interval in derivedAnalysisIntervals)
@@ -410,10 +417,21 @@ public sealed record BacktestRuntimeOptions
         }
     }
 
-    public PositionManagementOptions GetPositionManagement(string strategyId) =>
-        strategyId.Contains("legacy", StringComparison.OrdinalIgnoreCase)
+    public PositionManagementOptions GetPositionManagement(string strategyId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
+        if (string.Equals(
+                strategyId.Trim(),
+                TradingAgentTypeIds.StructuralConfluence,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return StructuralPositionManagement;
+        }
+
+        return strategyId.Contains("legacy", StringComparison.OrdinalIgnoreCase)
             ? LegacyPositionManagement
             : ImprovedPositionManagement;
+    }
 
     public BarInterval ResolveManagementInterval(string strategyId)
     {
@@ -469,7 +487,7 @@ public sealed record BacktestRuntimeOptions
 /// </summary>
 public sealed record StrategyInstrumentAssignment
 {
-    /// <summary>"legacy" or "improved" - the same catalog <see cref="BacktestRequest.Strategies"/> uses.</summary>
+    /// <summary>Canonical agent type - the same catalog <see cref="BacktestRequest.Strategies"/> uses.</summary>
     public required string StrategyType { get; init; }
     public required InstrumentKey Instrument { get; init; }
     /// <summary>Optional override; defaults to "{StrategyType}:{Instrument.Value}".</summary>
@@ -482,6 +500,12 @@ public sealed record StrategyInstrumentAssignment
     /// options resolution.
     /// </summary>
     public ProgressiveStrategyOptions? AgentOptionsOverride { get; init; }
+
+    /// <summary>
+    /// Complete agent definition override. This is the preferred schema; the progressive
+    /// options property remains as a migration alias and cannot be supplied at the same time.
+    /// </summary>
+    public TradingAgentDefinition? AgentDefinitionOverride { get; init; }
 
     /// <summary>
     /// Multi-agent architecture Phase 5: per-assignment computed-analysis override, resolved
@@ -548,6 +572,13 @@ public sealed record BacktestRequest
     public string CacheDirectory { get; init; } = Path.Combine(".cache", "oanda");
     public string JobsDirectory { get; init; } = Path.Combine(".cache", "simulation-jobs");
     public BacktestRuntimeOptions Runtime { get; init; } = new();
+    /// <summary>
+    /// Operational output switch for internal training runs. It is intentionally excluded
+    /// from persisted requests and configuration hashes because it does not change trading
+    /// decisions or results; normal user simulations still capture chart replay.
+    /// </summary>
+    [JsonIgnore]
+    public bool CaptureMarketReplay { get; init; } = true;
     /// <summary>Optional in-memory candle override for tests and CI without OANDA.</summary>
     [JsonIgnore]
     public IReadOnlyList<Candle>? InlineCandles { get; init; }
@@ -578,6 +609,50 @@ public sealed record BacktestRequest
             MinimumPriceActionConfidence,
             RejectStrongOpposingPriceAction);
 
+    public TradingAgentDefinition ResolveAgentDefinition(
+        string strategyType,
+        TradingAgentDefinition? definitionOverride = null,
+        ProgressiveStrategyOptions? progressiveOptionsOverride = null)
+    {
+        if (definitionOverride is not null && progressiveOptionsOverride is not null)
+            throw new ArgumentException("AgentDefinitionOverride conflicts with the legacy AgentOptionsOverride.");
+
+        TradingAgentKind kind = TradingAgentTypeIds.Parse(strategyType);
+        if (definitionOverride is not null)
+        {
+            definitionOverride.Validate();
+            if (definitionOverride.Kind != kind)
+            {
+                throw new ArgumentException(
+                    $"Strategy type '{strategyType}' conflicts with agent definition kind '{definitionOverride.Kind}'.");
+            }
+            return definitionOverride;
+        }
+
+        return kind switch
+        {
+            TradingAgentKind.LegacyProgressive or TradingAgentKind.ImprovedProgressive => new TradingAgentDefinition
+            {
+                Kind = kind,
+                Progressive = progressiveOptionsOverride ?? ResolveProgressiveStrategyOptions()
+            },
+            TradingAgentKind.StructuralConfluence => new TradingAgentDefinition
+            {
+                Kind = kind,
+                StructuralConfluence = new StructuralConfluenceStrategyOptions
+                {
+                    Quantity = Quantity,
+                    MinimumRewardRisk = MinimumRewardRisk,
+                    Trigger = new StructuralTriggerOptions
+                    {
+                        MinimumPriceActionConfidence = MinimumPriceActionConfidence
+                    }
+                }
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(strategyType))
+        };
+    }
+
     public void Validate()
     {
         if (Instrument.IsEmpty)
@@ -599,12 +674,10 @@ public sealed record BacktestRequest
             {
                 if (assignment.Instrument.IsEmpty)
                     throw new ArgumentException("Every strategy assignment requires an instrument.");
-                if (assignment.StrategyType is not ("legacy" or "improved"))
-                {
-                    throw new ArgumentException(
-                        $"Unknown strategy type '{assignment.StrategyType}' in StrategyAssignments. " +
-                        "Use legacy or improved.");
-                }
+                ResolveAgentDefinition(
+                    assignment.StrategyType,
+                    assignment.AgentDefinitionOverride,
+                    assignment.AgentOptionsOverride);
             }
             string[] ids = assignments
                 .Select(assignment => assignment.Id ?? $"{assignment.StrategyType}:{assignment.Instrument.Value}")
@@ -628,6 +701,11 @@ public sealed record BacktestRequest
                     $"{duplicateInstrument} has more than one Executable assignment. " +
                     "At most one assignment per instrument may be Executable.");
             }
+        }
+        else
+        {
+            foreach (string strategy in Strategies)
+                ResolveAgentDefinition(strategy);
         }
 
         // Inline fixtures use the inline capability set (includes 1s for tests).

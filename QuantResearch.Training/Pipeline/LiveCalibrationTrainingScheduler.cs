@@ -1,4 +1,4 @@
-using Agent.Strategies;
+using Agent.Configuration;
 using Brokers.Models;
 using Microsoft.Extensions.Logging;
 using Simulator.Models;
@@ -98,9 +98,6 @@ public sealed class LiveCalibrationTrainingScheduler(
                     Embargo = TimeSpan.FromHours(policy.EmbargoHours),
                     Description = $"automatic retrain · {policy.StrategyId} · {policy.Instrument} · {now:O}"
                 },
-                AgentKind = policy.StrategyId.Contains("legacy", StringComparison.OrdinalIgnoreCase)
-                    ? ProgressiveAgentKind.Legacy
-                    : ProgressiveAgentKind.Improved,
                 StrategyVersion = policy.StrategyVersion
             };
 

@@ -21,7 +21,7 @@ public sealed class PostgresSchemaVersionReader(IDbContextFactory<TradingHubDbCo
 
         List<HistoryRow> rows = await context.Database
             .SqlQueryRaw<HistoryRow>(
-                $"SELECT migration_id AS \"MigrationId\", product_version AS \"ProductVersion\" " +
+                $"SELECT migration_id, product_version " +
                 $"FROM {MigrationsHistorySchema}.{MigrationsHistoryTableName} ORDER BY migration_id")
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);

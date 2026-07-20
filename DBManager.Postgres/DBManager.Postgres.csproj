@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../DBManager.Abstractions/DBManager.Abstractions.csproj" />
+    <ProjectReference Include="../TradingObservability.Abstractions/TradingObservability.Abstractions.csproj" />
   </ItemGroup>
 
   <ItemGroup>

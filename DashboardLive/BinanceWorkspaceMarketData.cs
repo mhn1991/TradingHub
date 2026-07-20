@@ -63,7 +63,7 @@ internal sealed class BinanceWorkspaceMarketData
                 WorkspaceDataKind.Market,
                 IsConfigured: false,
                 IsReadOnly: true,
-                "OANDA is disabled on the backend. Set Oanda__Enabled, Oanda__AccountId, and Oanda__AccessToken before starting DashboardLive.",
+                "OANDA is disabled on the backend. Import an enabled OANDA credential into the broker credential database.",
                 []))
             : _oanda.GetBrokerAsync(cancellationToken);
         await Task.WhenAll(assetsTask, oandaTask).ConfigureAwait(false);

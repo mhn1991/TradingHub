@@ -1,3 +1,4 @@
+using Agent.Configuration;
 using Agent.Strategies;
 using Brokers.Models;
 using Simulator.Models;
@@ -18,6 +19,11 @@ public sealed record CalibrationTrainingRequest
     /// </summary>
     public required IReadOnlyList<InstrumentKey> Instruments { get; init; }
     public required IReadOnlyList<string> Strategies { get; init; }
+    /// <summary>
+    /// Exact definition used when a single experiment profile is calibrated. Null preserves
+    /// pooled catalog-strategy training for existing research callers.
+    /// </summary>
+    public TradingAgentDefinition? AgentDefinition { get; init; }
     public required DateTimeOffset From { get; init; }
     public required DateTimeOffset To { get; init; }
     public required BacktestRuntimeOptions Runtime { get; init; }
@@ -49,7 +55,16 @@ public sealed record CalibrationTrainingRequest
     public TimeSpan Embargo { get; init; } = TimeSpan.FromDays(1);
 
     public decimal SetupConfidenceBucketWidth { get; init; } = 5m;
-    public decimal MetaModelConfidenceBucketWidth { get; init; } = 5m;
+    /// <summary>
+    /// One full-range bucket by default (100 = confidence is not partitioned at all): raw
+    /// EntryConfidence was measured to have ~zero correlation with realized R (Pearson r =
+    /// -0.029, 2026-07-20 session), so partitioning cohorts by it just fragments sample size
+    /// across MetaModelCalibrator's other, actually-discriminating dimensions
+    /// (PlaybookId/MultiTimeframeAlignment/CciState/StructuralConfluenceState) for no benefit.
+    /// Narrow this back down only once EntryConfidence itself is replaced with a signal that's
+    /// been shown predictive.
+    /// </summary>
+    public decimal MetaModelConfidenceBucketWidth { get; init; } = 100m;
     public decimal MetaModelAlignmentBucketWidth { get; init; } = 0.25m;
 
     /// <summary>Minimum out-of-fold samples a bucket needs before its statistics are trusted; below this the run still succeeds but fewer buckets get non-trivial validation coverage.</summary>
@@ -82,6 +97,17 @@ public sealed record CalibrationTrainingRequest
             throw new ArgumentException("At least one instrument is required.");
         if (Strategies is null || Strategies.Count == 0 || Strategies.Any(string.IsNullOrWhiteSpace))
             throw new ArgumentException("At least one non-empty strategy id is required.");
+        if (AgentDefinition is not null)
+        {
+            AgentDefinition.Validate();
+            if (Strategies.Count != 1 ||
+                !TradingAgentTypeIds.TryParse(Strategies[0], out TradingAgentKind kind) ||
+                kind != AgentDefinition.Kind)
+            {
+                throw new ArgumentException(
+                    "AgentDefinition requires exactly one matching canonical strategy type.");
+            }
+        }
         if (From >= To)
             throw new ArgumentException("From must be earlier than To.");
         if (StartingBalance <= 0m || Quantity <= 0m)

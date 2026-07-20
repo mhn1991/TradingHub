@@ -16,6 +16,25 @@ public sealed class LiquidityAnalyzer
     private readonly Dictionary<Guid, PoolRuntimeState> _pools = [];
     private readonly List<LiquidityEvent> _recentEvents = [];
     private readonly List<LiquiditySweepEvent> _recentSweeps = [];
+    /// <summary>
+    /// Every pool ID ever formed, retained for the lifetime of the analyzer so a deterministic
+    /// ID can never be re-detected and resurrected after its <see cref="PoolRuntimeState"/> is
+    /// trimmed from <see cref="_pools"/> below. Cheap (a Guid per pool) compared to keeping the
+    /// full runtime state around forever.
+    /// </summary>
+    private readonly HashSet<Guid> _formedPoolIds = [];
+    /// <summary>
+    /// Pool IDs in creation order (== AvailableAt order - <see cref="AddPool"/> only ever stamps
+    /// a new pool with the current candle's timestamp). Lets <see cref="TrimStaleTerminalPools"/>
+    /// find "oldest first" without re-sorting the whole pool dictionary every candle. A
+    /// <see cref="LinkedList{T}"/> rather than a <see cref="Queue{T}"/> deliberately - trimming
+    /// must be able to remove a terminal entry from the *middle* of this order without one
+    /// long-lived active pool sitting near the front permanently blocking every terminal entry
+    /// behind it (a real bug this analyzer's first cut of this fix had: a plain FIFO queue gives
+    /// up the instant it sees one still-active pool, so a single long-lived active pool lets
+    /// everything behind it accumulate forever).
+    /// </summary>
+    private readonly LinkedList<Guid> _creationOrder = [];
     private long _snapshotVersion;
 
     public LiquidityAnalyzer(LiquidityCalculationProfile? profile = null)
@@ -68,9 +87,20 @@ public sealed class LiquidityAnalyzer
         PruneExcessPools(availableAt, events);
 
         _recentEvents.AddRange(events);
-        TrimTo(_recentEvents, _profile.MaximumRetainedEvents);
+        TrimEventsPreferringActivePools(_profile.MaximumRetainedEvents);
         _recentSweeps.AddRange(sweeps);
         TrimTo(_recentSweeps, _profile.MaximumRetainedSweeps);
+
+        // Must run after the two trims above: a pool that just went Terminal via a sweep/event
+        // produced THIS candle must not be removed from _pools before that same sweep/event has
+        // even been added to the retained lists - otherwise the sweep permanently references a
+        // pool ID that no longer exists in Pools, and every consumer that cross-references sweeps
+        // against pools (e.g. the sweep-reversal playbook's `pools.ContainsKey(item.PoolId)` check)
+        // silently and permanently loses it, and every later sweep suffers the same fate once the
+        // pool backlog exceeds the retention window - a real bug, found by comparing a live
+        // backtest's reason-code funnel (100% "no sweep available" for the back half of a 7-week
+        // run) against an isolated replay of the same candles.
+        TrimStaleTerminalPools();
 
         LiquidityPool[] active = _pools.Values
             .Where(state => !state.Terminal)
@@ -128,6 +158,15 @@ public sealed class LiquidityAnalyzer
                 Transition(state, LiquidityEventType.Failure, LiquidityPoolState.Expired,
                     candle.Prices.Close, availableAt, events);
                 state.Terminal = true;
+                continue;
+            }
+
+            // Handled entirely separately from the approach/sweep/break logic below, which only
+            // applies to a pool still working toward its first break decision - once accepted,
+            // "penetrated further" or "swept" no longer mean the same thing.
+            if (state.Pool.State == LiquidityPoolState.AcceptedBreak)
+            {
+                UpdateAcceptedBreakPool(state, candle, availableAt, events);
                 continue;
             }
 
@@ -219,7 +258,7 @@ public sealed class LiquidityAnalyzer
                 {
                     Transition(state, LiquidityEventType.AcceptedBreak, LiquidityPoolState.AcceptedBreak,
                         candle.Prices.Close, availableAt, events);
-                    state.Terminal = true;
+                    state.AcceptedBreakHoldBars = 0;
                     continue;
                 }
 
@@ -244,7 +283,22 @@ public sealed class LiquidityAnalyzer
                     Transition(state, LiquidityEventType.Touch, next, candle.Prices.Close, availableAt, events);
                 else
                     AddEvent(state.Pool, LiquidityEventType.Touch, next, next, candle.Prices.Close, availableAt, events);
-                state.Pool = state.Pool with { TouchCount = state.Pool.TouchCount + 1 };
+                // Cooldown-based distinct touch count (industry-standard technique): only counts
+                // toward DistinctTouchCount if at least MinimumDistinctTouchBars have passed since
+                // the last counted touch, so one consolidation sitting on the level across many
+                // consecutive intersecting candles cannot be mistaken for repeated separate tests.
+                // Deliberately independent of TouchCount, which keeps its existing (unthrottled)
+                // meaning for FreshnessScore/QualityScore below.
+                TimeSpan cooldown = TimeSpan.FromSeconds(
+                    BarIntervalParser.ApproximateSeconds(state.Pool.Interval) * _profile.MinimumDistinctTouchBars);
+                bool distinctTouch = state.Pool.LastDistinctTouchAt is not DateTimeOffset lastDistinct ||
+                    availableAt - lastDistinct >= cooldown;
+                state.Pool = state.Pool with
+                {
+                    TouchCount = state.Pool.TouchCount + 1,
+                    DistinctTouchCount = distinctTouch ? state.Pool.DistinctTouchCount + 1 : state.Pool.DistinctTouchCount,
+                    LastDistinctTouchAt = distinctTouch ? availableAt : state.Pool.LastDistinctTouchAt
+                };
             }
 
             decimal freshness = Math.Clamp(1m - age / 100m - state.Pool.TouchCount * 0.15m, 0m, 1m);
@@ -561,7 +615,7 @@ public sealed class LiquidityAnalyzer
             "liquidity-pool", candle.Instrument.ToString(), candle.Interval.ToString(), _profileHash,
             type, side, originatedAt, confirmedAt, lower, upper, reference, sourceKey,
             _profile.RuleSetVersion);
-        if (_pools.ContainsKey(id))
+        if (_formedPoolIds.Contains(id))
             return;
 
         decimal freshness = 1m;
@@ -595,6 +649,8 @@ public sealed class LiquidityAnalyzer
             ProfileHash = _profileHash
         };
         _pools[id] = new PoolRuntimeState { Pool = pool, ConfirmedSequence = sequence };
+        _formedPoolIds.Add(id);
+        _creationOrder.AddLast(id);
     }
 
     private void MergeOverlappingPools(DateTimeOffset availableAt, List<LiquidityEvent> events)
@@ -654,6 +710,126 @@ public sealed class LiquidityAnalyzer
         {
             Transition(state, LiquidityEventType.Failure, LiquidityPoolState.Expired,
                 state.Pool.ReferencePrice, availableAt, events);
+            state.Terminal = true;
+        }
+    }
+
+    /// <summary>
+    /// Bounds <see cref="_pools"/> to roughly <see cref="LiquidityCalculationProfile.MaximumActivePools"/>
+    /// + <see cref="LiquidityCalculationProfile.MaximumRetainedSweeps"/> entries so per-candle
+    /// full-dictionary scans (<see cref="UpdateExistingPools"/>, the duplicate-detection checks in
+    /// <see cref="DetectEqualLevels"/>/<see cref="DetectIsolatedSwings"/>/<see cref="HasReferencePeriodPool"/>/
+    /// <see cref="HasReferencePool"/>, <see cref="MergeOverlappingPools"/>, <see cref="PruneExcessPools"/>,
+    /// and the snapshot builder in <see cref="Update"/>) stay O(bounded constant) instead of
+    /// O(every pool ever formed in the run) - without that, a long backtest degrades to roughly
+    /// quadratic total work as pools accumulate. Only terminal pools older (by creation order,
+    /// which matches AvailableAt order exactly) than the window the snapshot's <c>Pools</c>
+    /// output ever needs are removed; <see cref="_formedPoolIds"/> keeps every ID forever so a
+    /// trimmed pool's deterministic ID can never be re-detected and resurrected.
+    ///
+    /// Must be called after <see cref="_recentSweeps"/>/<see cref="_recentEvents"/> have already
+    /// received this candle's additions and been trimmed to their own retention windows - and must
+    /// never remove a pool that either of those two lists still references. A pool that just went
+    /// Terminal via a sweep produced THIS candle is often also the OLDEST entry in
+    /// <see cref="_creationOrder"/> (a level that sat unswept for a long time before it was finally
+    /// hit), making it the first candidate this walk considers for removal - if removed here, the
+    /// sweep that was just recorded for it would permanently reference a pool ID no longer present
+    /// in the snapshot's <c>Pools</c> list, and every consumer that cross-references sweeps against
+    /// pools (e.g. the sweep-reversal playbook's `pools.ContainsKey(item.PoolId)` check) would lose
+    /// it forever. This was a real bug: once the total ever-formed pool count first exceeded the
+    /// retention window, every subsequent sweep suffered the same fate, permanently - confirmed via
+    /// a live backtest whose reason-code funnel was a healthy mix for the first ~2.5 weeks, then
+    /// exactly "no sweep available" for every remaining evaluation, reproduced identically in an
+    /// isolated replay of the same candles.
+    /// </summary>
+    private void TrimStaleTerminalPools()
+    {
+        int excess = _creationOrder.Count - (_profile.MaximumActivePools + _profile.MaximumRetainedSweeps);
+        if (excess <= 0)
+        {
+            return;
+        }
+
+        HashSet<Guid> protectedIds = [];
+        foreach (LiquiditySweepEvent sweep in _recentSweeps) protectedIds.Add(sweep.PoolId);
+        foreach (LiquidityEvent liquidityEvent in _recentEvents) protectedIds.Add(liquidityEvent.PoolId);
+
+        // Walk oldest-to-newest, removing terminal entries wherever they are - not just at the
+        // front - so one long-lived active pool can never block cleanup of everything behind it.
+        // Active entries and pools still referenced by a retained sweep/event are skipped in place
+        // (never removed here); the number skipped is bounded by MaximumActivePools +
+        // MaximumRetainedSweeps + MaximumRetainedEvents regardless of total run length, so this
+        // stays a bounded walk.
+        LinkedListNode<Guid>? node = _creationOrder.First;
+        int removed = 0;
+        while (node is not null && removed < excess)
+        {
+            LinkedListNode<Guid>? next = node.Next;
+            if (protectedIds.Contains(node.Value))
+            {
+                node = next;
+                continue;
+            }
+            if (_pools.TryGetValue(node.Value, out PoolRuntimeState? state) && state.Terminal)
+            {
+                _pools.Remove(node.Value);
+                _creationOrder.Remove(node);
+                removed++;
+            }
+
+            node = next;
+        }
+    }
+
+    /// <summary>
+    /// A pool that has already had its break accepted stays trackable for
+    /// MaximumBarsToTrackAcceptedBreak bars instead of terminating immediately, specifically so a
+    /// later touch can be recorded as LiquidityEventType.Retest (see the call site's comment for
+    /// why this exists - without it Retest could never be emitted at all). A full reversal back
+    /// through the pool's original side during this window fails the pool outright rather than
+    /// waiting out the remainder of the tracking window.
+    /// </summary>
+    private void UpdateAcceptedBreakPool(
+        PoolRuntimeState state,
+        Candle candle,
+        DateTimeOffset availableAt,
+        List<LiquidityEvent> events)
+    {
+        LiquidityPool pool = state.Pool;
+        bool buySide = pool.Side == LiquiditySide.BuySide;
+        bool failedBack = buySide
+            ? candle.Prices.Close < pool.LowerPrice
+            : candle.Prices.Close > pool.UpperPrice;
+        if (failedBack)
+        {
+            Transition(state, LiquidityEventType.Failure, LiquidityPoolState.Broken,
+                candle.Prices.Close, availableAt, events);
+            state.Terminal = true;
+            return;
+        }
+
+        bool intersects = candle.Prices.High >= pool.LowerPrice && candle.Prices.Low <= pool.UpperPrice;
+        if (intersects)
+        {
+            AddEvent(state.Pool, LiquidityEventType.Retest, state.Pool.State, state.Pool.State,
+                candle.Prices.Close, availableAt, events);
+            // Same cooldown-based distinct-touch bookkeeping as the pre-break Touch path (see
+            // that call site's comment) - a retest is still a touch for this purpose.
+            TimeSpan cooldown = TimeSpan.FromSeconds(
+                BarIntervalParser.ApproximateSeconds(state.Pool.Interval) * _profile.MinimumDistinctTouchBars);
+            bool distinctTouch = state.Pool.LastDistinctTouchAt is not DateTimeOffset lastDistinct ||
+                availableAt - lastDistinct >= cooldown;
+            state.Pool = state.Pool with
+            {
+                TouchCount = state.Pool.TouchCount + 1,
+                DistinctTouchCount = distinctTouch ? state.Pool.DistinctTouchCount + 1 : state.Pool.DistinctTouchCount,
+                LastDistinctTouchAt = distinctTouch ? availableAt : state.Pool.LastDistinctTouchAt
+            };
+        }
+
+        state.AcceptedBreakHoldBars++;
+        if (state.AcceptedBreakHoldBars >= _profile.MaximumBarsToTrackAcceptedBreak)
+        {
             state.Terminal = true;
         }
     }
@@ -759,6 +935,43 @@ public sealed class LiquidityAnalyzer
             items.RemoveRange(0, items.Count - maximum);
     }
 
+    /// <summary>
+    /// Same fixed-capacity trim as <see cref="TrimTo{T}"/>, but for <see cref="_recentEvents"/>
+    /// specifically: prefers evicting events whose pool is no longer tracked (terminal, or
+    /// already removed by <see cref="TrimStaleTerminalPools"/>) over events belonging to a pool
+    /// still being tracked. An accepted-break pool now stays trackable and keeps emitting
+    /// LiquidityEventType.Retest for MaximumBarsToTrackAcceptedBreak bars (see
+    /// UpdateAcceptedBreakPool) instead of going silent immediately - that added volume competes
+    /// for this list's fixed capacity, and plain oldest-first eviction was found to evict the
+    /// still-relevant AcceptedBreak event itself before a consumer ever got to read it (confirmed
+    /// via a live reason-code funnel: StructuralAcceptedBreakUnavailable jumped 1.3% -> 7.3% the
+    /// moment pools started staying active longer). Falls back to oldest-first across everything,
+    /// including active-pool events, only once every terminal/gone-pool event is already spent.
+    /// </summary>
+    private void TrimEventsPreferringActivePools(int maximum)
+    {
+        if (_recentEvents.Count <= maximum)
+            return;
+        int excess = _recentEvents.Count - maximum;
+
+        var toRemove = new HashSet<int>();
+        for (int i = 0; i < _recentEvents.Count && toRemove.Count < excess; i++)
+        {
+            if (!_pools.TryGetValue(_recentEvents[i].PoolId, out PoolRuntimeState? state) || state.Terminal)
+                toRemove.Add(i);
+        }
+        for (int i = 0; i < _recentEvents.Count && toRemove.Count < excess; i++)
+        {
+            toRemove.Add(i);
+        }
+
+        for (int i = _recentEvents.Count - 1; i >= 0; i--)
+        {
+            if (toRemove.Contains(i))
+                _recentEvents.RemoveAt(i);
+        }
+    }
+
     private sealed class PoolRuntimeState
     {
         public required LiquidityPool Pool { get; set; }
@@ -766,5 +979,6 @@ public sealed class LiquidityAnalyzer
         public bool Terminal { get; set; }
         public int BreakHoldBars { get; set; }
         public DateTimeOffset? BreakStartedAt { get; set; }
+        public int AcceptedBreakHoldBars { get; set; }
     }
 }

@@ -30,6 +30,7 @@ public enum StopAmendmentReason
     BreakEven,
     StructureSwing,
     StructureZone,
+    StructureSupplyDemandZone,
     StructureChannel,
     AtrFallback,
     ProfitFloor,

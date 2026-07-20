@@ -16,6 +16,7 @@ dist/
 !.env.example
 !.env.integration.example
 .cache/
+.state/
 
 # Dashboard generated / local market data (regenerate sample via DashboardExporter)
 Dashboard/public/data/backtests/*.json

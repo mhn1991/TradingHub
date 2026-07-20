@@ -108,7 +108,26 @@ public sealed class LiveEngineState(TimeProvider timeProvider)
                 Orders = runtime.Registry.Orders.Count,
                 Positions = runtime.Registry.Positions.Count,
                 ReconciliationDifferences = runtime.LastReconciliation?.Differences.Count ?? 0,
-                LastReconciledAt = runtime.LastReconciliation?.CompletedAt
+                LastReconciledAt = runtime.LastReconciliation?.CompletedAt,
+                Shadow = new LiveShadowStatusDto
+                {
+                    Enabled = runtime.Shadow.Enabled,
+                    CandidateCount = runtime.Shadow.CandidateCount,
+                    AdmittedCount = runtime.Shadow.AdmittedCount,
+                    RejectedCount = runtime.Shadow.RejectedCount,
+                    OpenPositionCount = runtime.Shadow.OpenPositionCount,
+                    CompletedCount = runtime.Shadow.CompletedCount,
+                    AmbiguousCount = runtime.Shadow.AmbiguousCount,
+                    NetProfitLoss = runtime.Shadow.NetProfitLoss,
+                    UnrealizedProfitLoss = runtime.Shadow.UnrealizedProfitLoss,
+                    NetR = runtime.Shadow.NetR,
+                    LastPlaybookId = runtime.Shadow.LastPlaybookId,
+                    LastCandidateId = runtime.Shadow.LastCandidateId,
+                    LastRejection = runtime.Shadow.LastRejection,
+                    LastStopPrice = runtime.Shadow.LastStopPrice,
+                    LastTargetPrice = runtime.Shadow.LastTargetPrice,
+                    LastPolicyRevision = runtime.Shadow.LastPolicyRevision
+                }
             };
             _revision++;
         }

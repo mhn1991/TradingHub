@@ -9,6 +9,9 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../LiveTrading/LiveTrading.csproj" />
+    <ProjectReference Include="../DBManager.Abstractions/DBManager.Abstractions.csproj" />
+    <ProjectReference Include="../DBManager.Postgres/DBManager.Postgres.csproj" />
+    <ProjectReference Include="../TradingHub.Persistence.Postgres/TradingHub.Persistence.Postgres.csproj" />
     <ProjectReference Include="../LiveTrading.Oanda/LiveTrading.Oanda.csproj" />
     <ProjectReference Include="../QuantResearch.Training/QuantResearch.Training.csproj" />
     <ProjectReference Include="../Simulator/Simulator.csproj" />

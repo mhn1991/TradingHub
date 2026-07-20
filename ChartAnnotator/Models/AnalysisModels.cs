@@ -283,6 +283,68 @@ public sealed record RsiAnalysisSnapshot
     public int SampleCount { get; init; }
 }
 
+public enum CciZone
+{
+    Unknown,
+    ExtremeNegative,
+    Negative,
+    Neutral,
+    Positive,
+    ExtremePositive
+}
+
+public enum CciRelationshipType
+{
+    None,
+    RegularBullishDivergence,
+    RegularBearishDivergence,
+    HiddenBullishDivergence,
+    HiddenBearishDivergence,
+    BullishConvergence,
+    BearishConvergence
+}
+
+public sealed record CciRelationshipSnapshot
+{
+    public required CciRelationshipType Type { get; init; }
+    public required DateTimeOffset FirstPivotTime { get; init; }
+    public required DateTimeOffset SecondPivotTime { get; init; }
+    public required DateTimeOffset ConfirmedAt { get; init; }
+    public required decimal FirstPrice { get; init; }
+    public required decimal SecondPrice { get; init; }
+    public required decimal FirstCci { get; init; }
+    public required decimal SecondCci { get; init; }
+    public required decimal PriceChange { get; init; }
+    public required decimal CciChange { get; init; }
+    public required decimal Strength { get; init; }
+    public required int AgeCandles { get; init; }
+
+    public bool IsDivergence => Type is
+        CciRelationshipType.RegularBullishDivergence or
+        CciRelationshipType.RegularBearishDivergence or
+        CciRelationshipType.HiddenBullishDivergence or
+        CciRelationshipType.HiddenBearishDivergence;
+}
+
+public sealed record CciAnalysisSnapshot
+{
+    public static CciAnalysisSnapshot Empty { get; } = new();
+
+    public CciZone Zone { get; init; }
+    public MomentumDirection MomentumDirection { get; init; }
+    public decimal? MomentumChange { get; init; }
+    public decimal? PreviousValue { get; init; }
+    public bool CrossedUpFromExtremeNegative { get; init; }
+    public bool CrossedDownFromExtremePositive { get; init; }
+    public bool CrossedUpZero { get; init; }
+    public bool CrossedDownZero { get; init; }
+    public int BarsSinceExtremeNegative { get; init; } = -1;
+    public int BarsSinceExtremePositive { get; init; } = -1;
+    public CciRelationshipSnapshot? LatestRelationship { get; init; }
+    public bool IsNewRelationship { get; init; }
+    public int SampleCount { get; init; }
+}
+
 public enum MarketEfficiencyState
 {
     Unknown,
@@ -375,6 +437,7 @@ public sealed record IndicatorSnapshot
     public AtrAnalysisSnapshot AtrAnalysis { get; init; } = AtrAnalysisSnapshot.Empty;
     public VolumeAnalysisSnapshot VolumeAnalysis { get; init; } = VolumeAnalysisSnapshot.Empty;
     public RsiAnalysisSnapshot RsiAnalysis { get; init; } = RsiAnalysisSnapshot.Empty;
+    public CciAnalysisSnapshot CciAnalysis { get; init; } = CciAnalysisSnapshot.Empty;
     public BollingerAnalysisSnapshot BollingerAnalysis { get; init; } = BollingerAnalysisSnapshot.Empty;
     public AdxAnalysisSnapshot AdxAnalysis { get; init; } = AdxAnalysisSnapshot.Empty;
 }
@@ -393,7 +456,8 @@ public sealed record IndicatorPoint(
     VolumeAnalysisSnapshot? VolumeAnalysis = null,
     decimal? Cci = null,
     decimal? Sma50 = null,
-    decimal? Sma200 = null);
+    decimal? Sma200 = null,
+    CciAnalysisSnapshot? CciAnalysis = null);
 
 public sealed record ConfidenceContribution(
     string Rule,

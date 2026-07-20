@@ -2,6 +2,7 @@ using Agent.Models;
 using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
 using ChartAnnotator.SupplyDemand;
+using ChartAnnotator.TargetManagement;
 
 namespace Agent.Strategies.StructuralConfluence.Playbooks;
 
@@ -21,6 +22,15 @@ public sealed record StructuralGeometry
     public string? TargetSource { get; init; }
     public LiquidityPool? TargetPool { get; init; }
     public required string ReasonCode { get; init; }
+
+    /// <summary>
+    /// Adaptive target-map outputs (plan §3-§4). Null unless
+    /// <see cref="StructuralConfluenceStrategyOptions.AdaptiveTargetManagement"/> is enabled, in
+    /// which case v1's nearest-obstacle <see cref="Target"/>/<see cref="TargetSource"/> above are
+    /// populated from <see cref="TargetPlan"/>'s selected terminal/projection for compatibility.
+    /// </summary>
+    public TradeExitPolicy? ExitPolicy { get; init; }
+    public TradeTargetPlan? TargetPlan { get; init; }
 }
 
 public sealed record PlaybookEvaluation
@@ -70,4 +80,14 @@ public sealed record PlaybookRuntimeState
     public DateTimeOffset? ArmedAt { get; init; }
     public DateTimeOffset? ExpiresAt { get; init; }
     public PlaybookEvaluation? LastEvaluation { get; init; }
+    /// <summary>
+    /// Sticky across non-ready frames (only overwritten when a NEW ready candidate appears) -
+    /// unlike <see cref="SetupId"/>, which gets clobbered back to null the moment the playbook
+    /// goes dormant. Lets a playbook check "have I already signaled off this exact identity"
+    /// even after the position it produced has closed and evaluation resumes: while a position
+    /// is open, <c>StructuralConfluenceAgent</c> short-circuits before ever calling
+    /// <c>Evaluate</c>, so this field is frozen at the identity that was actually traded for the
+    /// whole holding period, then compared against on the first post-close evaluation.
+    /// </summary>
+    public string? LastReadySetupId { get; init; }
 }

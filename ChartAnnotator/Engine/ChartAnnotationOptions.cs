@@ -32,6 +32,13 @@ public sealed record ChartAnnotationOptions
     public int BollingerPeriod { get; init; } = 20;
     public decimal BollingerStandardDeviations { get; init; } = 2m;
     public int CciPeriod { get; init; } = 20;
+    public int CciMomentumLookback { get; init; } = 3;
+    public decimal CciMomentumThreshold { get; init; } = 5m;
+    public decimal CciExtremeNegativeThreshold { get; init; } = -100m;
+    public decimal CciExtremePositiveThreshold { get; init; } = 100m;
+    public decimal CciMinimumDivergenceDifference { get; init; } = 10m;
+    public decimal CciMinimumPriceDifferenceAtr { get; init; } = 0.05m;
+    public int CciSignalLifetimeCandles { get; init; } = 50;
     public int SmaFastPeriod { get; init; } = 50;
     public int SmaSlowPeriod { get; init; } = 200;
     public int BollingerWidthHistoryPeriod { get; init; } = 50;
@@ -43,6 +50,12 @@ public sealed record ChartAnnotationOptions
     public int SwingLeftBars { get; init; } = 2;
     public int SwingRightBars { get; init; } = 2;
     public int HeavyAnalysisEveryCandles { get; init; } = 12;
+    /// <summary>
+    /// Trendline/channel detection is judged unreliable and left disabled; the detectors and every
+    /// downstream consumer stay in place as dead code for a possible future revisit rather than
+    /// being deleted.
+    /// </summary>
+    public bool TrendlineChannelDetectionEnabled { get; init; }
     public decimal StructureDirectionToleranceAtr { get; init; } = 0.05m;
     public PriceActionOptions PriceAction { get; init; } = new();
     public PriceActionSetupOptions PriceActionSetups { get; init; } = new();
@@ -102,6 +115,14 @@ public sealed record ChartAnnotationOptions
             BollingerPeriod <= 1 ||
             BollingerStandardDeviations <= 0m ||
             CciPeriod < 2 ||
+            CciMomentumLookback < 1 ||
+            CciMomentumThreshold < 0m ||
+            CciExtremeNegativeThreshold >= 0m ||
+            CciExtremePositiveThreshold <= 0m ||
+            CciExtremeNegativeThreshold >= CciExtremePositiveThreshold ||
+            CciMinimumDivergenceDifference < 0m ||
+            CciMinimumPriceDifferenceAtr < 0m ||
+            CciSignalLifetimeCandles < 1 ||
             SmaFastPeriod < 1 ||
             SmaSlowPeriod < 1 ||
             SmaSlowPeriod < SmaFastPeriod ||

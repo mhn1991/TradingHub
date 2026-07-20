@@ -65,6 +65,7 @@ public sealed record MarketStatusDto
 /// visible proof point for the acceptance criterion "meta multiplier never exceeds one."</summary>
 public sealed record AgentStatusDto
 {
+    public Guid AgentInstanceId { get; init; }
     public string DeploymentId { get; init; } = string.Empty;
     public required string StrategyId { get; init; }
     public required string Instrument { get; init; }
@@ -118,6 +119,27 @@ public sealed record LiveRuntimeStatusDto
     public required int Positions { get; init; }
     public required int ReconciliationDifferences { get; init; }
     public DateTimeOffset? LastReconciledAt { get; init; }
+    public required LiveShadowStatusDto Shadow { get; init; }
+}
+
+public sealed record LiveShadowStatusDto
+{
+    public required bool Enabled { get; init; }
+    public required long CandidateCount { get; init; }
+    public required long AdmittedCount { get; init; }
+    public required long RejectedCount { get; init; }
+    public required int OpenPositionCount { get; init; }
+    public required long CompletedCount { get; init; }
+    public required long AmbiguousCount { get; init; }
+    public required decimal NetProfitLoss { get; init; }
+    public required decimal UnrealizedProfitLoss { get; init; }
+    public required decimal NetR { get; init; }
+    public string? LastPlaybookId { get; init; }
+    public string? LastCandidateId { get; init; }
+    public string? LastRejection { get; init; }
+    public decimal? LastStopPrice { get; init; }
+    public decimal? LastTargetPrice { get; init; }
+    public int? LastPolicyRevision { get; init; }
 }
 
 

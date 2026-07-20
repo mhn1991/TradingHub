@@ -4,6 +4,7 @@ using ChartAnnotator.Regime;
 using ChartAnnotator.NeoWave;
 using ChartAnnotator.Liquidity;
 using ChartAnnotator.SupplyDemand;
+using ChartAnnotator.TargetManagement;
 
 namespace Agent.Models;
 
@@ -14,6 +15,17 @@ public enum AgentAction
     Sell,
     Close,
     Cancel
+}
+
+public enum StructuralSetupLifecycle
+{
+    Dormant,
+    Armed,
+    CatalystObserved,
+    AwaitingTrigger,
+    CandidateProduced,
+    Invalidated,
+    Expired
 }
 
 public sealed record AgentDecision
@@ -40,6 +52,17 @@ public sealed record AgentDecision
     public string? StopSource { get; init; }
     public string? TargetSource { get; init; }
     public decimal? ExpectedRewardRisk { get; init; }
+
+    /// <summary>
+    /// Adaptive target management (Structural Indicator and Adaptive Target Management Plan
+    /// §5.2). Null for every legacy/v1 decision and for non-structural agents, so old records
+    /// deserialize with unchanged legacy behavior. When set, <see cref="TakeProfitPrice"/> is
+    /// only populated for <see cref="TradeExitPolicy.FixedStructuralTarget"/>; managed policies
+    /// leave it null because a hard broker target is never submitted for them (plan §4.3).
+    /// </summary>
+    public TradeExitPolicy? ExitPolicy { get; init; }
+    public TradeTargetPlan? TargetPlan { get; init; }
+
     public required decimal Confidence { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required string Reason { get; init; }
@@ -50,6 +73,30 @@ public sealed record AgentDecision
     public PriceActionSetupType? PriceActionSetupType { get; init; }
     public string? PriceActionSetupId { get; init; }
     public decimal? PriceActionSetupReferenceLevel { get; init; }
+
+    public string? PlaybookId { get; init; }
+    public string? PlaybookVersion { get; init; }
+    public string? StructuralSetupId { get; init; }
+    public StructuralSetupLifecycle? StructuralLifecycle { get; init; }
+    public decimal? ContextQuality { get; init; }
+    public decimal? LocationQuality { get; init; }
+    public decimal? CatalystQuality { get; init; }
+    public decimal? TriggerQuality { get; init; }
+    public decimal? ConfirmationQuality { get; init; }
+    public decimal? GeometryQuality { get; init; }
+    public string? CciConfirmationState { get; init; }
+    public decimal? EntryCci { get; init; }
+    public decimal? EntryCciMomentumChange { get; init; }
+    public string? EntryCciRelationship { get; init; }
+    public decimal? SweepPenetrationAtr { get; init; }
+    public decimal? ReclaimStrength { get; init; }
+    public int? LiquidityPoolTouchCount { get; init; }
+    public int? SupplyDemandZoneTouchCount { get; init; }
+    public decimal? SupplyDemandPenetrationRatio { get; init; }
+    public bool? SupplyDemandLiquidityConfluence { get; init; }
+    public decimal? DistanceToNearestTargetAtr { get; init; }
+    public decimal? DistanceToInvalidationAtr { get; init; }
+    public IReadOnlyList<string> StructuralSetupReasonCodes { get; init; } = [];
 
     /// <summary>
     /// Regime-routing diagnostics (spec §9.3). All null when regime routing is
@@ -146,6 +193,9 @@ public sealed record AgentDecision
     public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
     public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
     public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? OriginatingLiquidityPoolId { get; init; }
+    public Guid? OriginatingLiquiditySweepId { get; init; }
+    public string? OriginatingLiquidityProfileHash { get; init; }
     public Guid? TargetLiquidityPoolId { get; init; }
     public string? TargetLiquidityProfileHash { get; init; }
     public decimal? StructuralInvalidationReference { get; init; }

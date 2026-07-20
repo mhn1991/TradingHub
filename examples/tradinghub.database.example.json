@@ -1,0 +1,4 @@
+{
+  "ConnectionString": "Host=127.0.0.1;Port=5432;Database=tradinghub;Username=tradinghub_user;Password=replace-me;Include Error Detail=false",
+  "BrokerCredentialKeyFile": ".state/keys/broker-credentials.key"
+}

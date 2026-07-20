@@ -93,6 +93,48 @@ public sealed class LivePolicyRegistryTests
     }
 
     [Test]
+    public void RegisterHistorical_PreparesExecutableRevisionWithoutChangingCurrent_UntilActivated()
+    {
+        var registry = new LivePolicyRegistry();
+        LiveTradingPolicyBundle revisionOne = Phase3TestData.Policy() with
+        {
+            Revision = 1,
+            ConfigurationHash = "hash-r1"
+        };
+        LiveTradingPolicyBundle revisionTwo = Phase3TestData.Policy() with
+        {
+            Revision = 2,
+            ConfigurationHash = "hash-r2"
+        };
+        AgentInstanceKey nextKey = KeyFor(revisionTwo);
+        var next = new LivePolicyRegistration
+        {
+            Key = nextKey,
+            Policy = revisionTwo,
+            Mode = StrategyActivationMode.Automatic
+        };
+        registry.Register(KeyFor(revisionOne), revisionOne, StrategyActivationMode.Automatic);
+
+        registry.RegisterHistorical(nextKey, next);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(registry.Resolve(StrategyId, Phase3TestData.Instrument).Revision, Is.EqualTo(1));
+            Assert.That(registry.TryResolveManagementByRevision(
+                StrategyId, Phase3TestData.Instrument, revisionTwo.PolicyBundleId, 2), Is.Not.Null);
+        });
+
+        registry.Activate(nextKey, next);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(registry.Resolve(StrategyId, Phase3TestData.Instrument).Revision, Is.EqualTo(2));
+            Assert.That(registry.TryResolveManagementByRevision(
+                StrategyId, Phase3TestData.Instrument, revisionOne.PolicyBundleId, 1), Is.Not.Null);
+        });
+    }
+
+    [Test]
     public void TryResolveManagementByRevision_UnknownRevision_ReturnsNullRatherThanThrowing()
     {
         var registry = new LivePolicyRegistry();

@@ -101,6 +101,7 @@ public sealed class FileSimulationJobRepositoryCompatibilityTests
                 Assert.That(interrupted!.Status, Is.EqualTo(SimulationJobStatus.Failed));
                 Assert.That(interrupted.IsComplete, Is.True);
                 Assert.That(interrupted.Revision, Is.EqualTo(5));
+                Assert.That(interrupted.Error, Does.StartWith("HostRestartedWhileRunning:"));
             });
         }
         finally

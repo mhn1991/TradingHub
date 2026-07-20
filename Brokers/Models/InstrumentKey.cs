@@ -1,5 +1,8 @@
+using System.Text.Json.Serialization;
+
 namespace Brokers.Models;
 
+[JsonConverter(typeof(InstrumentKeyJsonConverter))]
 public readonly record struct InstrumentKey
 {
     public InstrumentKey(string value)

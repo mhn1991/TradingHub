@@ -6,7 +6,8 @@ using System.Threading.Channels;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Agent.Abstractions;
-using Agent.Strategies;
+using Agent.Configuration;
+using Agent.Factories;
 using Brokers;
 using Brokers.Abstractions;
 using Brokers.Binance;
@@ -27,8 +28,15 @@ public sealed class BacktestApplicationServiceOptions
     public int MaxConcurrentJobs { get; init; } = 1;
     public int QueueCapacity { get; init; } = 8;
     public Func<BacktestRequest, IHistoricalCandleStream>? StreamFactory { get; init; }
+    public Func<BacktestRequest, CancellationToken, Task<HistoricalBrokerCredentials?>>? CredentialResolver { get; init; }
     public Func<BacktestRequest, IReadOnlyList<StrategyFactoryEntry>>? StrategyFactory { get; init; }
 }
+
+public sealed record HistoricalBrokerCredentials(
+    string? AccountId = null,
+    string? AccessToken = null,
+    string? ApiKey = null,
+    string? SecretKey = null);
 
 /// <summary>
 /// Shared application service used by Dashboard API and CLI. Owns a bounded job queue
@@ -68,9 +76,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
         // Do not leave stale "Running" jobs after process restart. Public operations
         // await this owned initialization task; construction never blocks on async I/O.
-        _initialization = repository is FileSimulationJobRepository fileRepo
-            ? fileRepo.MarkInterruptedJobsAsync()
-            : Task.CompletedTask;
+        _initialization = repository.MarkInterruptedJobsAsync();
 
         _workers = Enumerable.Range(0, _options.MaxConcurrentJobs)
             .Select(_ => Task.Run(() => WorkerLoopAsync(_serviceLifetime.Token)))
@@ -416,7 +422,12 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
         IReadOnlyList<StrategyFactoryEntry> strategies =
             (_options.StrategyFactory ?? CreateDefaultStrategies)(request);
-        IHistoricalCandleStream stream = (_options.StreamFactory ?? CreateDefaultStream)(request);
+        HistoricalBrokerCredentials? credentials = _options.StreamFactory is null && _options.CredentialResolver is not null
+            ? await _options.CredentialResolver(request, cancellationToken).ConfigureAwait(false)
+            : null;
+        IHistoricalCandleStream stream = _options.StreamFactory is not null
+            ? _options.StreamFactory(request)
+            : CreateDefaultStream(request, credentials);
         await using IAsyncDisposable? ownedStream = stream as IAsyncDisposable;
 
         string inputRequestId = job.Snapshot.InputRequestId ?? BuildInputRequestId(request);
@@ -476,7 +487,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                     SimulationJobStatus mapped = download.Status switch
                     {
                         "DownloadingData" => SimulationJobStatus.DownloadingData,
-                        "LoadingCache" or "CacheLoaded" => SimulationJobStatus.LoadingCache,
+                        "ReadingCache" or "CacheLoaded" => SimulationJobStatus.LoadingCache,
                         _ => current.Status
                     };
                     return NextRevision(current) with
@@ -538,6 +549,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             MetaLabelModel = runtime.MetaModel.Enabled
                 ? new Simulator.Calibration.CalibratedSetupMetaModel(runtime.MetaModelArtifact!, runtime.MetaModel)
                 : null,
+            CaptureMarketReplay = request.CaptureMarketReplay,
             SimulationOptions = simulationOptions,
             OutputDirectory = job.OutputDirectory,
             InputStreamId = inputStreamId,
@@ -728,7 +740,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             $"{options.DailyEquityGivebackActivation},{options.MaximumDailyEquityGiveback}," +
             $"{options.TripOnCriticalDataQualityIssue}");
 
-    private static IHistoricalCandleStream CreateDefaultStream(BacktestRequest request)
+    private static IHistoricalCandleStream CreateDefaultStream(
+        BacktestRequest request,
+        HistoricalBrokerCredentials? credentials = null)
     {
         if (request.InlineCandles is not null)
             return new EnumerablePagedCandleSource(request.InlineCandles);
@@ -752,8 +766,8 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             var binance = BrokerClientFactory.CreateBinance(new BinanceOptions
             {
                 Environment = BrokerEnvironment.Live,
-                ApiKey = Environment.GetEnvironmentVariable("BINANCE_API_KEY"),
-                SecretKey = Environment.GetEnvironmentVariable("BINANCE_SECRET_KEY"),
+                ApiKey = credentials?.ApiKey,
+                SecretKey = credentials?.SecretKey,
                 BaseAddress = ResolveBinanceMarketDataBaseAddress()
             });
             return new BinanceStreamingCandleSource(
@@ -770,7 +784,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                 $"Historical source {runtime.SourceKind} is not wired in this build.");
         }
 
-        (string accountId, string accessToken) = ResolveOandaCredentials(request);
+        (string accountId, string accessToken) = ResolveOandaCredentials(request, credentials);
         var oanda = BrokerClientFactory.CreateOanda(new OandaOptions
         {
             Environment = request.Environment,
@@ -787,27 +801,19 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
     private static IReadOnlyList<StrategyFactoryEntry> CreateDefaultStrategies(
         BacktestRequest request)
     {
-        ProgressiveStrategyOptions defaultStrategyOptions = request.ResolveProgressiveStrategyOptions();
-
         if (request.StrategyAssignments is { Count: > 0 } assignments)
         {
             return assignments
                 .Select(assignment =>
                 {
-                    // Phase 5: each assignment resolves its own Agent-interpretation options
-                    // instead of every assignment reusing one request-wide instance - only
-                    // assignments that declare AgentOptionsOverride actually diverge.
-                    ProgressiveStrategyOptions strategyOptions =
-                        assignment.AgentOptionsOverride ?? defaultStrategyOptions;
+                    TradingAgentDefinition definition = request.ResolveAgentDefinition(
+                        assignment.StrategyType,
+                        assignment.AgentDefinitionOverride,
+                        assignment.AgentOptionsOverride);
+                    string typeId = TradingAgentTypeIds.Format(definition.Kind);
                     return new StrategyFactoryEntry(
-                        assignment.Id ?? $"{assignment.StrategyType}:{assignment.Instrument.Value}",
-                        assignment.StrategyType switch
-                        {
-                            "legacy" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, strategyOptions),
-                            "improved" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, strategyOptions),
-                            _ => throw new ArgumentException(
-                                $"Unknown strategy type '{assignment.StrategyType}'. Use legacy or improved.")
-                        },
+                        assignment.Id ?? $"{typeId}:{assignment.Instrument.Value}",
+                        TradingAgentFactory.Create(definition),
                         assignment.Instrument,
                         assignment.AnalysisOptionsOverride,
                         assignment.Mode,
@@ -820,16 +826,11 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         var list = new List<StrategyFactoryEntry>();
         foreach (string raw in request.Strategies)
         {
-            string id = NormalizeStrategyId(raw);
-            ITradingAgent agent = id switch
-            {
-                "legacy" or "legacy-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Legacy, defaultStrategyOptions),
-                "improved" or "improved-progressive" => ProgressiveAgentFactory.Create(ProgressiveAgentKind.Improved, defaultStrategyOptions),
-                _ => throw new ArgumentException($"Unknown strategy '{raw}'. Use legacy or improved.")
-            };
+            TradingAgentDefinition definition = request.ResolveAgentDefinition(raw);
+            string id = TradingAgentTypeIds.Format(definition.Kind);
+            ITradingAgent agent = TradingAgentFactory.Create(definition);
             list.Add(new StrategyFactoryEntry(
-                id.StartsWith("legacy", StringComparison.Ordinal) ? "legacy" :
-                id.StartsWith("improved", StringComparison.Ordinal) ? "improved" : id,
+                id,
                 agent,
                 request.Instrument));
         }
@@ -837,15 +838,8 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         return list;
     }
 
-    private static string NormalizeStrategyId(string name)
-    {
-        string trimmed = name.Trim().ToLowerInvariant();
-        if (trimmed.Contains("legacy", StringComparison.Ordinal))
-            return "legacy";
-        if (trimmed.Contains("improved", StringComparison.Ordinal))
-            return "improved";
-        return trimmed;
-    }
+    private static string NormalizeStrategyId(string name) =>
+        TradingAgentTypeIds.Format(TradingAgentTypeIds.Parse(name));
 
     private static string ResolveBaseCurrency(InstrumentKey instrument)
     {
@@ -865,19 +859,18 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             : new Uri("https://data-api.binance.vision/");
     }
 
-    private static (string AccountId, string AccessToken) ResolveOandaCredentials(BacktestRequest request)
+    private static (string AccountId, string AccessToken) ResolveOandaCredentials(
+        BacktestRequest request,
+        HistoricalBrokerCredentials? credentials)
     {
-        string? accountId = request.AccountId
-            ?? Environment.GetEnvironmentVariable("OANDA_ACCOUNT_ID")
-            ?? Environment.GetEnvironmentVariable("Oanda__AccountId");
-        string? token = request.AccessToken
-            ?? Environment.GetEnvironmentVariable("OANDA_ACCESS_TOKEN")
-            ?? Environment.GetEnvironmentVariable("OANDA_TOKEN")
-            ?? Environment.GetEnvironmentVariable("Oanda__AccessToken");
+        string? accountId = credentials?.AccountId
+            ?? request.AccountId;
+        string? token = credentials?.AccessToken
+            ?? request.AccessToken;
         if (string.IsNullOrWhiteSpace(accountId) || string.IsNullOrWhiteSpace(token))
         {
             throw new InvalidOperationException(
-                "OANDA credentials are required. Set OANDA_ACCOUNT_ID and OANDA_ACCESS_TOKEN, " +
+                "OANDA credentials are required in the broker credential database, " +
                 "or provide InlineCandles for offline runs.");
         }
 

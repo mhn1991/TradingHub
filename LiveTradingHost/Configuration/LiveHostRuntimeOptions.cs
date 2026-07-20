@@ -5,6 +5,7 @@ public sealed record LiveHostRuntimeOptions
     public const string SectionName = "LiveHost";
 
     public string Urls { get; init; } = "http://127.0.0.1:5088";
+    public string HostInstanceId { get; init; } = Environment.MachineName;
     public bool RequireLoopback { get; init; } = true;
     public string ControlToken { get; init; } = string.Empty;
     public TimeSpan ReconciliationInterval { get; init; } = TimeSpan.FromMinutes(1);
@@ -30,7 +31,8 @@ public sealed record LiveHostRuntimeOptions
 
     public void Validate()
     {
-        if (string.IsNullOrWhiteSpace(Urls) || ReconciliationInterval <= TimeSpan.Zero ||
+        if (string.IsNullOrWhiteSpace(Urls) || string.IsNullOrWhiteSpace(HostInstanceId) ||
+            ReconciliationInterval <= TimeSpan.Zero ||
             CheckpointInterval <= TimeSpan.Zero || ManagementQuoteQueueCapacity < 128 ||
             MaxConcurrentAgentEvaluations < 1 || AgentEvaluationTimeout <= TimeSpan.Zero)
         {

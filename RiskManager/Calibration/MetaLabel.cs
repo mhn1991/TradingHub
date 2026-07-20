@@ -11,6 +11,7 @@ namespace RiskManager.Calibration;
 public sealed record MetaLabelFeatures
 {
     public required string StrategyId { get; init; }
+    public string? PlaybookId { get; init; }
     public required string Instrument { get; init; }
     public required DateTimeOffset AvailableAt { get; init; }
     public required AgentAction Direction { get; init; }
@@ -32,6 +33,20 @@ public sealed record MetaLabelFeatures
     public decimal? PlannedCostBasisPoints { get; init; }
     public decimal? PortfolioConcentration { get; init; }
     public decimal? CurrencyStrengthDifferential { get; init; }
+    public string? CciConfirmationState { get; init; }
+    public decimal? Cci { get; init; }
+    public decimal? CciMomentumChange { get; init; }
+    public string? CciRelationship { get; init; }
+    public decimal? LiquidityPoolQuality { get; init; }
+    public decimal? SweepPenetrationAtr { get; init; }
+    public decimal? ReclaimStrength { get; init; }
+    public int? LiquidityPoolTouchCount { get; init; }
+    public decimal? SupplyDemandZoneQuality { get; init; }
+    public int? SupplyDemandZoneTouchCount { get; init; }
+    public decimal? SupplyDemandPenetrationRatio { get; init; }
+    public bool? SupplyDemandLiquidityConfluence { get; init; }
+    public decimal? DistanceToNearestTargetAtr { get; init; }
+    public decimal? DistanceToInvalidationAtr { get; init; }
     public required string FeatureSchemaVersion { get; init; }
 }
 
@@ -41,6 +56,8 @@ public sealed record MetaLabelDecision
     public required decimal Probability { get; init; }
     public required string ModelVersion { get; init; }
     public required string ReasonCode { get; init; }
+    /// <summary>1 is the most specific cohort; null means no reliable bucket was selected.</summary>
+    public int? BucketFallbackLevel { get; init; }
     /// <summary>Conservative scalar only. Values above one are rejected.</summary>
     public decimal RiskMultiplier { get; init; } = 1m;
 
@@ -62,7 +79,7 @@ public interface ISetupMetaModel
 
 public static class MetaLabelFeatureFactory
 {
-    public const string SchemaVersion = "tradinghub-meta-v1";
+    public const string SchemaVersion = "tradinghub-meta-v2";
 
     public static MetaLabelFeatures Create(
         AgentDecision decision,
@@ -101,6 +118,7 @@ public static class MetaLabelFeatureFactory
         return new MetaLabelFeatures
         {
             StrategyId = decision.StrategyId ?? decision.StrategyName ?? "unknown",
+            PlaybookId = decision.PlaybookId,
             Instrument = decision.Instrument.Value,
             AvailableAt = analysis.Timestamp,
             Direction = decision.Action,
@@ -125,6 +143,20 @@ public static class MetaLabelFeatureFactory
             PlannedCostBasisPoints = plannedCostBasisPoints,
             PortfolioConcentration = portfolioConcentration,
             CurrencyStrengthDifferential = currencyStrengthDifferential,
+            CciConfirmationState = decision.CciConfirmationState,
+            Cci = decision.EntryCci,
+            CciMomentumChange = decision.EntryCciMomentumChange,
+            CciRelationship = decision.EntryCciRelationship,
+            LiquidityPoolQuality = decision.LiquidityPoolQuality,
+            SweepPenetrationAtr = decision.SweepPenetrationAtr,
+            ReclaimStrength = decision.ReclaimStrength,
+            LiquidityPoolTouchCount = decision.LiquidityPoolTouchCount,
+            SupplyDemandZoneQuality = decision.SupplyDemandZoneQuality,
+            SupplyDemandZoneTouchCount = decision.SupplyDemandZoneTouchCount,
+            SupplyDemandPenetrationRatio = decision.SupplyDemandPenetrationRatio,
+            SupplyDemandLiquidityConfluence = decision.SupplyDemandLiquidityConfluence,
+            DistanceToNearestTargetAtr = decision.DistanceToNearestTargetAtr,
+            DistanceToInvalidationAtr = decision.DistanceToInvalidationAtr,
             FeatureSchemaVersion = SchemaVersion
         };
     }

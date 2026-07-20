@@ -16,7 +16,22 @@ public sealed class StructuralCandidateArbitrator(StructuralArbitrationOptions o
             .Where(item => item.IsReady && item.Geometry?.IsValid == true)
             .ToArray();
         if (ready.Length == 0)
-            return new(null, evaluations.Select(item => item.ReasonCode).FirstOrDefault() ?? "StructuralNoCandidate");
+        {
+            // Most-relevant, not first-in-list: playbooks are iterated in alphabetical PlaybookId
+            // order (see StructuralConfluenceAgent's constructor), so a plain FirstOrDefault always
+            // reports the same one playbook's reason code regardless of which playbooks actually
+            // had something interesting to say - e.g. "structural.indicator-confluence" sorts
+            // before all three of the others, so it would silently mask every real rejection reason
+            // from the structural playbooks the moment it's enabled. Mirrors
+            // StructuralConfluenceAgent.MostRelevant's ordering exactly so the reported reason code
+            // and the evidence attached to the resulting Observe decision always agree.
+            string reasonCode = evaluations
+                .OrderByDescending(item => item.Lifecycle)
+                .ThenByDescending(item => item.CatalystAt)
+                .ThenBy(item => item.PlaybookId, StringComparer.Ordinal)
+                .FirstOrDefault()?.ReasonCode ?? "StructuralNoCandidate";
+            return new(null, reasonCode);
+        }
         if (ready.Select(item => item.Direction).Distinct().Count() > 1)
             return new(null, "StructuralPlaybookConflict");
 

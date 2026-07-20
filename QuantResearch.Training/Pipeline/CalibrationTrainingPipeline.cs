@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Agent.Configuration;
 using Brokers.Models;
 using Microsoft.Extensions.Logging;
 using QuantResearch.Calibration;
@@ -13,6 +14,14 @@ using Simulator.Services;
 using TradeManager;
 
 namespace QuantResearch.Training.Pipeline;
+
+public sealed record CalibrationTrainingPipelineOptions
+{
+    /// <summary>
+    /// Operational diagnostic output. It is excluded from training and simulation hashes.
+    /// </summary>
+    public bool CaptureMarketReplay { get; init; }
+}
 
 /// <summary>
 /// Single, leakage-safe, three-stage calibration orchestrator. Replaces the calibration logic
@@ -36,15 +45,18 @@ public sealed class CalibrationTrainingPipeline
     private readonly IBacktestApplicationService _backtests;
     private readonly ICalibrationArtifactRepository _artifacts;
     private readonly ILogger<CalibrationTrainingPipeline>? _logger;
+    private readonly CalibrationTrainingPipelineOptions _options;
 
     public CalibrationTrainingPipeline(
         IBacktestApplicationService backtests,
         ICalibrationArtifactRepository artifacts,
-        ILogger<CalibrationTrainingPipeline>? logger = null)
+        ILogger<CalibrationTrainingPipeline>? logger = null,
+        CalibrationTrainingPipelineOptions? options = null)
     {
         _backtests = backtests ?? throw new ArgumentNullException(nameof(backtests));
         _artifacts = artifacts ?? throw new ArgumentNullException(nameof(artifacts));
         _logger = logger;
+        _options = options ?? new CalibrationTrainingPipelineOptions();
     }
 
     public async Task<CalibrationTrainingResult> RunAsync(
@@ -197,7 +209,7 @@ public sealed class CalibrationTrainingPipeline
         PurgedTimeSeriesFold<SimulatedTradeRecord> reserved = folds[^1];
         IReadOnlyList<PurgedTimeSeriesFold<SimulatedTradeRecord>> cvFolds = folds[..^1];
 
-        var outOfFold = new Dictionary<(string, string, string, decimal, decimal), List<SetupOutcome>>();
+        var outOfFold = new Dictionary<(string, string, string, string, decimal, decimal), List<SetupOutcome>>();
         var foldSummaries = new List<CalibrationFoldSummary>();
         var outOfFoldTradeIds = new HashSet<string>(StringComparer.Ordinal);
         var outOfFoldTrades = new List<SimulatedTradeRecord>();
@@ -227,7 +239,8 @@ public sealed class CalibrationTrainingPipeline
                 SetupCalibrationBucket? bucket = MatchSetupBucket(foldArtifact, outcome);
                 if (bucket is null)
                     continue;
-                var key = (bucket.StrategyId, bucket.InstrumentGroup, bucket.Regime, bucket.ConfidenceFrom, bucket.ConfidenceTo);
+                var key = (bucket.StrategyId, bucket.PlaybookId, bucket.InstrumentGroup, bucket.Regime,
+                    bucket.ConfidenceFrom, bucket.ConfidenceTo);
                 if (!outOfFold.TryGetValue(key, out List<SetupOutcome>? list))
                     outOfFold[key] = list = [];
                 list.Add(outcome);
@@ -285,7 +298,8 @@ public sealed class CalibrationTrainingPipeline
         // fix for ConfidenceCalibrator's AverageR==ExpectedR duplication: they now genuinely differ.
         SetupCalibrationBucket[] correctedBuckets = finalArtifact.Buckets.Select(bucket =>
         {
-            var key = (bucket.StrategyId, bucket.InstrumentGroup, bucket.Regime, bucket.ConfidenceFrom, bucket.ConfidenceTo);
+            var key = (bucket.StrategyId, bucket.PlaybookId, bucket.InstrumentGroup, bucket.Regime,
+                bucket.ConfidenceFrom, bucket.ConfidenceTo);
             if (!outOfFold.TryGetValue(key, out List<SetupOutcome>? oof) || oof.Count == 0)
                 return bucket;
             decimal winRate = oof.Count(o => o.Won) / (decimal)oof.Count;
@@ -324,6 +338,7 @@ public sealed class CalibrationTrainingPipeline
     private static SetupCalibrationBucket? MatchSetupBucket(SetupCalibrationArtifact artifact, SetupOutcome outcome) =>
         artifact.Buckets
             .Where(b => string.Equals(b.StrategyId, outcome.StrategyId, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(b.PlaybookId, MetaModelCohorts.NormalizePlaybook(outcome.PlaybookId), StringComparison.OrdinalIgnoreCase) &&
                         string.Equals(b.InstrumentGroup, outcome.InstrumentGroup, StringComparison.OrdinalIgnoreCase) &&
                         string.Equals(b.Regime, outcome.Regime, StringComparison.OrdinalIgnoreCase) &&
                         outcome.Confidence >= b.ConfidenceFrom &&
@@ -379,7 +394,10 @@ public sealed class CalibrationTrainingPipeline
         PurgedTimeSeriesFold<SimulatedTradeRecord> reserved = folds[^1];
         IReadOnlyList<PurgedTimeSeriesFold<SimulatedTradeRecord>> cvFolds = folds[..^1];
 
-        var outOfFold = new Dictionary<(string, string, decimal, decimal, decimal, decimal), List<SimulatedTradeRecord>>();
+        var outOfFold = new Dictionary<
+            (string StrategyId, string PlaybookId, string Regime, decimal ConfidenceFrom, decimal ConfidenceTo,
+                decimal AlignmentFrom, decimal AlignmentTo, string? CciState, string? StructuralConfluenceState),
+            List<SimulatedTradeRecord>>();
         var foldSummaries = new List<CalibrationFoldSummary>();
 
         foreach (PurgedTimeSeriesFold<SimulatedTradeRecord> fold in cvFolds)
@@ -405,7 +423,7 @@ public sealed class CalibrationTrainingPipeline
                 MetaModelBucket? bucket = MatchMetaModelBucket(foldArtifact, testTrade);
                 if (bucket is null)
                     continue;
-                var key = (bucket.StrategyId, bucket.Regime, bucket.ConfidenceFrom, bucket.ConfidenceTo, bucket.AlignmentFrom, bucket.AlignmentTo);
+                var key = MetaBucketKey(bucket);
                 if (!outOfFold.TryGetValue(key, out List<SimulatedTradeRecord>? list))
                     outOfFold[key] = list = [];
                 list.Add(testTrade);
@@ -443,7 +461,7 @@ public sealed class CalibrationTrainingPipeline
 
         MetaModelBucket[] correctedBuckets = finalArtifact.Buckets.Select(bucket =>
         {
-            var key = (bucket.StrategyId, bucket.Regime, bucket.ConfidenceFrom, bucket.ConfidenceTo, bucket.AlignmentFrom, bucket.AlignmentTo);
+            var key = MetaBucketKey(bucket);
             if (!outOfFold.TryGetValue(key, out List<SimulatedTradeRecord>? oof) || oof.Count == 0)
                 return bucket;
             decimal winRate = oof.Count(t => (t.RMultiple ?? 0m) > 0m) / (decimal)oof.Count;
@@ -481,16 +499,62 @@ public sealed class CalibrationTrainingPipeline
         return metadata.Id;
     }
 
-    private static MetaModelBucket? MatchMetaModelBucket(MetaModelArtifact artifact, SimulatedTradeRecord trade) =>
-        artifact.Buckets
-            .Where(b => string.Equals(b.StrategyId, trade.StrategyId, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(b.Regime, trade.EntryRegime.ToString(), StringComparison.OrdinalIgnoreCase) &&
-                        trade.EntryConfidence >= b.ConfidenceFrom &&
-                        (trade.EntryConfidence < b.ConfidenceTo || b.ConfidenceTo == 100m && trade.EntryConfidence <= b.ConfidenceTo) &&
-                        trade.EntryMultiTimeframeAlignment!.Value >= b.AlignmentFrom &&
-                        (trade.EntryMultiTimeframeAlignment.Value < b.AlignmentTo || b.AlignmentTo == 1m && trade.EntryMultiTimeframeAlignment.Value <= b.AlignmentTo))
-            .OrderByDescending(b => b.Samples)
-            .FirstOrDefault();
+    private static MetaModelBucket? MatchMetaModelBucket(MetaModelArtifact artifact, SimulatedTradeRecord trade)
+    {
+        if (trade.EntryMultiTimeframeAlignment is not decimal alignment)
+            return null;
+
+        string playbookId = MetaModelCohorts.NormalizePlaybook(trade.PlaybookId);
+        string? cciState = MetaModelCohorts.CoarseCciState(trade.EntryCciConfirmationState);
+        string? confluenceState = MetaModelCohorts.CoarseConfluenceState(trade.EntryStructuralConfluenceState);
+        MetaModelBucket[] cohort = artifact.Buckets
+            .Where(bucket =>
+                string.Equals(bucket.StrategyId, trade.StrategyId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(bucket.PlaybookId, playbookId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(bucket.Regime, trade.EntryRegime.ToString(), StringComparison.OrdinalIgnoreCase) &&
+                trade.EntryConfidence >= bucket.ConfidenceFrom &&
+                (trade.EntryConfidence < bucket.ConfidenceTo ||
+                 bucket.ConfidenceTo == 100m && trade.EntryConfidence <= 100m))
+            .ToArray();
+
+        MetaModelBucket? exact = BestMetaBucket(cohort.Where(bucket =>
+            (bucket.CciState is not null || bucket.StructuralConfluenceState is not null) &&
+            string.Equals(bucket.CciState, cciState, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(bucket.StructuralConfluenceState, confluenceState, StringComparison.OrdinalIgnoreCase) &&
+            ContainsAlignment(bucket, alignment)));
+        if (exact is not null)
+            return exact;
+
+        MetaModelBucket? playbookAlignment = BestMetaBucket(cohort.Where(bucket =>
+            bucket.CciState is null && bucket.StructuralConfluenceState is null &&
+            (bucket.AlignmentFrom > 0m || bucket.AlignmentTo < 1m) &&
+            ContainsAlignment(bucket, alignment)));
+        return playbookAlignment ?? BestMetaBucket(cohort.Where(bucket =>
+            bucket.CciState is null && bucket.StructuralConfluenceState is null &&
+            bucket.AlignmentFrom == 0m && bucket.AlignmentTo == 1m));
+    }
+
+    private static MetaModelBucket? BestMetaBucket(IEnumerable<MetaModelBucket> buckets) => buckets
+        .OrderByDescending(bucket => bucket.Samples)
+        .ThenBy(bucket => bucket.AlignmentFrom)
+        .FirstOrDefault();
+
+    private static bool ContainsAlignment(MetaModelBucket bucket, decimal alignment) =>
+        alignment >= bucket.AlignmentFrom &&
+        (alignment < bucket.AlignmentTo || bucket.AlignmentTo == 1m && alignment <= 1m);
+
+    private static (
+        string StrategyId,
+        string PlaybookId,
+        string Regime,
+        decimal ConfidenceFrom,
+        decimal ConfidenceTo,
+        decimal AlignmentFrom,
+        decimal AlignmentTo,
+        string? CciState,
+        string? StructuralConfluenceState) MetaBucketKey(MetaModelBucket bucket) =>
+        (bucket.StrategyId, bucket.PlaybookId, bucket.Regime, bucket.ConfidenceFrom, bucket.ConfidenceTo,
+            bucket.AlignmentFrom, bucket.AlignmentTo, bucket.CciState, bucket.StructuralConfluenceState);
 
     private static CalibrationValidationReport SummarizeTrades(IReadOnlyList<SimulatedTradeRecord> trades)
     {
@@ -634,7 +698,24 @@ public sealed class CalibrationTrainingPipeline
                         Quantity = request.Quantity,
                         OutputDirectory = Path.Combine(runDirectory, "runs"),
                         JobsDirectory = Path.Combine(runDirectory, "jobs"),
-                        Runtime = runtime
+                        // Training consumes completed trades, not chart playback. Retaining a
+                        // full analysis snapshot per candle can otherwise occupy tens of GB
+                        // before a large replay chunk is flushed.
+                        CaptureMarketReplay = _options.CaptureMarketReplay,
+                        Runtime = runtime,
+                        StrategyAssignments = request.AgentDefinition is null
+                            ? null
+                            :
+                            [
+                                new StrategyInstrumentAssignment
+                                {
+                                    Id = $"calibration:{strategy}:{instrument.Value}",
+                                    StrategyType = strategy,
+                                    Instrument = instrument,
+                                    AgentDefinitionOverride = request.AgentDefinition,
+                                    AnalysisOptionsOverride = runtime.AnnotationOptions
+                                }
+                            ]
                     };
                     backtestRequest = FeatureSwitchMapper.Apply(backtestRequest, new FeatureSwitches());
 

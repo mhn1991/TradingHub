@@ -34,6 +34,7 @@ public static class ResearchTradeMapper
         {
             TradeId = trade.PositionId ?? $"{trade.SetupId}:{opened:O}",
             StrategyId = trade.StrategyId,
+            PlaybookId = trade.PlaybookId,
             Instrument = trade.Instrument.Value,
             InstrumentGroup = InstrumentGroupResolver.Resolve(trade.Instrument),
             Regime = trade.EntryRegime.ToString(),
@@ -79,6 +80,7 @@ public static class ResearchTradeMapper
         return new SetupOutcome
         {
             StrategyId = trade.StrategyId,
+            PlaybookId = trade.PlaybookId,
             InstrumentGroup = InstrumentGroupResolver.Resolve(trade.Instrument),
             Regime = trade.EntryRegime.ToString(),
             Confidence = trade.EntryConfidence,

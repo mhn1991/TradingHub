@@ -14,23 +14,28 @@ public sealed class BinanceIntegrationTests
     private const int CandleLimit = 20;
     private IBrokerClient _broker = null!;
     private InstrumentKey _instrument;
+    private bool _hasCredentials;
 
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
         _instrument = new InstrumentKey(
             IntegrationTestEnvironment.Optional("BINANCE_TEST_INSTRUMENT") ?? "CRYPTO:BTC/USDT");
-        string? apiKey = IntegrationTestEnvironment.Optional("BINANCE_API_KEY");
-        string? secretKey = IntegrationTestEnvironment.Optional("BINANCE_SECRET_KEY");
-        bool hasCredentials = apiKey is not null && secretKey is not null;
+        var credential = IntegrationTestEnvironment.OptionalCredential("BINANCE", "TESTNET") ??
+                         IntegrationTestEnvironment.OptionalCredential("BINANCE", "LIVE");
+        string? apiKey = credential?.ApiKey;
+        string? secretKey = credential?.SecretKey;
+        _hasCredentials = !string.IsNullOrWhiteSpace(apiKey) && !string.IsNullOrWhiteSpace(secretKey);
 
         _broker = BrokerClientFactory.CreateBinance(new BinanceOptions
         {
-            Environment = IntegrationTestEnvironment.ParseBrokerEnvironment("BINANCE_ENVIRONMENT"),
+            Environment = credential is null
+                ? BrokerEnvironment.Live
+                : IntegrationTestEnvironment.ParseStoredBrokerEnvironment(credential.Environment),
             ApiKey = apiKey ?? "not-used-by-public-market-data-tests",
             SecretKey = secretKey ?? "not-used-by-public-market-data-tests",
-            BaseAddress = IntegrationTestEnvironment.OptionalUri("BINANCE_BASE_URL") ??
-                (hasCredentials ? null : new Uri("https://data-api.binance.vision/"))
+            BaseAddress = IntegrationTestEnvironment.CredentialUri(credential?.BaseAddress, "base address") ??
+                (_hasCredentials ? null : new Uri("https://data-api.binance.vision/"))
         });
     }
 
@@ -130,9 +135,9 @@ public sealed class BinanceIntegrationTests
         }
     }
 
-    private static void RequireCredentials()
+    private void RequireCredentials()
     {
-        _ = IntegrationTestEnvironment.Required("BINANCE_API_KEY");
-        _ = IntegrationTestEnvironment.Required("BINANCE_SECRET_KEY");
+        if (!_hasCredentials)
+            Assert.Ignore("Import and enable Binance credentials in the broker credential database.");
     }
 }

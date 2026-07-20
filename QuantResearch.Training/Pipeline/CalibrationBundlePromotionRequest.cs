@@ -1,4 +1,6 @@
+using Agent.Configuration;
 using Agent.Strategies;
+using Agent.Strategies.StructuralConfluence;
 
 namespace QuantResearch.Training.Pipeline;
 
@@ -20,7 +22,9 @@ namespace QuantResearch.Training.Pipeline;
 public sealed record CalibrationBundlePromotionRequest
 {
     public required CalibrationTrainingRequest Training { get; init; }
-    public required ProgressiveAgentKind AgentKind { get; init; }
+    /// <summary>Legacy progressive compatibility field. Structural requests use <see cref="AgentDefinition"/>.</summary>
+    public ProgressiveAgentKind? AgentKind { get; init; }
+    public TradingAgentDefinition? AgentDefinition { get; init; }
     public required string StrategyVersion { get; init; }
     public Guid ProfileId { get; init; } = Guid.NewGuid();
 
@@ -35,5 +39,58 @@ public sealed record CalibrationBundlePromotionRequest
         }
         if (string.IsNullOrWhiteSpace(StrategyVersion))
             throw new ArgumentException("StrategyVersion is required.");
+        _ = ResolveAgentDefinition();
+    }
+
+    public TradingAgentDefinition ResolveAgentDefinition()
+    {
+        if (Training.Strategies.Count != 1)
+            throw new ArgumentException("Training.Strategies must contain exactly one entry.");
+
+        TradingAgentKind kind = TradingAgentTypeIds.Parse(Training.Strategies[0]);
+        if (AgentDefinition is not null)
+        {
+            AgentDefinition.Validate();
+            if (AgentDefinition.Kind != kind)
+                throw new ArgumentException("AgentDefinition conflicts with the requested strategy id.");
+            if (AgentKind.HasValue)
+                throw new ArgumentException("AgentDefinition conflicts with the legacy AgentKind field.");
+            return AgentDefinition;
+        }
+
+        if (kind == TradingAgentKind.StructuralConfluence)
+        {
+            if (AgentKind.HasValue)
+                throw new ArgumentException("AgentKind is progressive-only and cannot describe structural-confluence.");
+            return new TradingAgentDefinition
+            {
+                Kind = kind,
+                StructuralConfluence = new StructuralConfluenceStrategyOptions
+                {
+                    Quantity = Training.Quantity,
+                    MinimumRewardRisk = Training.MinimumRewardRisk,
+                    Trigger = new StructuralTriggerOptions
+                    {
+                        MinimumPriceActionConfidence = Training.MinimumPriceActionConfidence
+                    }
+                }
+            };
+        }
+
+        ProgressiveAgentKind expected = kind == TradingAgentKind.LegacyProgressive
+            ? ProgressiveAgentKind.Legacy
+            : ProgressiveAgentKind.Improved;
+        if (AgentKind.HasValue && AgentKind.Value != expected)
+            throw new ArgumentException("AgentKind conflicts with the requested strategy id.");
+        return new TradingAgentDefinition
+        {
+            Kind = kind,
+            Progressive = Training.Runtime.ResolveProgressiveStrategyOptions(
+                Training.Quantity,
+                Training.MinimumRewardRisk,
+                Training.PriceActionConfirmation,
+                Training.MinimumPriceActionConfidence,
+                Training.RejectStrongOpposingPriceAction)
+        };
     }
 }

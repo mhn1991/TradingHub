@@ -5,6 +5,7 @@ namespace QuantResearch.Calibration;
 public sealed record SetupOutcome
 {
     public required string StrategyId { get; init; }
+    public string PlaybookId { get; init; } = "unknown";
     public required string InstrumentGroup { get; init; }
     public required string Regime { get; init; }
     public required decimal Confidence { get; init; }
@@ -99,14 +100,16 @@ public static class ConfidenceCalibrator
             trainingTo = trainingFrom.AddSeconds(1);
 
         var buckets = new List<SetupCalibrationBucket>();
-        foreach (IGrouping<(string StrategyId, string InstrumentGroup, string Regime), SetupOutcome> cohort in outcomes
+        foreach (IGrouping<(string StrategyId, string PlaybookId, string InstrumentGroup, string Regime), SetupOutcome> cohort in outcomes
                      .GroupBy(item => (
-                         string.IsNullOrWhiteSpace(item.StrategyId) ? "unknown" : item.StrategyId,
-                         string.IsNullOrWhiteSpace(item.InstrumentGroup) ? "Unknown" : item.InstrumentGroup,
-                         string.IsNullOrWhiteSpace(item.Regime) ? "Unknown" : item.Regime))
-                     .OrderBy(item => item.Key.Item1, StringComparer.Ordinal)
-                     .ThenBy(item => item.Key.Item2, StringComparer.Ordinal)
-                     .ThenBy(item => item.Key.Item3, StringComparer.Ordinal))
+                         StrategyId: string.IsNullOrWhiteSpace(item.StrategyId) ? "unknown" : item.StrategyId,
+                         PlaybookId: string.IsNullOrWhiteSpace(item.PlaybookId) ? "unknown" : item.PlaybookId,
+                         InstrumentGroup: string.IsNullOrWhiteSpace(item.InstrumentGroup) ? "Unknown" : item.InstrumentGroup,
+                         Regime: string.IsNullOrWhiteSpace(item.Regime) ? "Unknown" : item.Regime))
+                     .OrderBy(item => item.Key.StrategyId, StringComparer.Ordinal)
+                     .ThenBy(item => item.Key.PlaybookId, StringComparer.Ordinal)
+                     .ThenBy(item => item.Key.InstrumentGroup, StringComparer.Ordinal)
+                     .ThenBy(item => item.Key.Regime, StringComparer.Ordinal))
         {
             for (decimal from = 0m; from < 100m; from += bucketWidth)
             {
@@ -123,9 +126,10 @@ public static class ConfidenceCalibrator
                 });
                 buckets.Add(new SetupCalibrationBucket
                 {
-                    StrategyId = cohort.Key.Item1,
-                    InstrumentGroup = cohort.Key.Item2,
-                    Regime = cohort.Key.Item3,
+                    StrategyId = cohort.Key.StrategyId,
+                    PlaybookId = cohort.Key.PlaybookId,
+                    InstrumentGroup = cohort.Key.InstrumentGroup,
+                    Regime = cohort.Key.Regime,
                     ConfidenceFrom = from,
                     ConfidenceTo = to,
                     Samples = sample.Length,

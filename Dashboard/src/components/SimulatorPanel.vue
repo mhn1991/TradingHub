@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type {
   ChartLayers,
   ImportedDatasetMetadata,
+  PromoteTradingPolicyRequest,
   ReplayFrame,
   ReplayTrade,
   ResearchArtifactSelection,
@@ -11,11 +12,22 @@ import type {
   SimulationInstrumentOption,
   SimulationJobSnapshot,
   StrategyProgressSnapshot,
+  TradingPolicyProfile,
 } from '../types'
 import { RESEARCH_ARTIFACT_SELECTION_KEY } from '../types'
 import AnalysisChart from './AnalysisChart.vue'
+import SimulationExperimentPanel from './SimulationExperimentPanel.vue'
+import ProfileBuilderWizard from './simulator/ProfileBuilderWizard.vue'
 import { useSimulationRealtime } from '../composables/useSimulationRealtime'
 import { useSimulationPlayback, type PlaybackRow } from '../composables/useSimulationPlayback'
+import { useSimulationProfiles } from '../composables/useSimulationProfiles'
+import type { SimulationStrategyProfile } from '../types/simulation-experiments'
+
+const emit = defineEmits<{
+  (event: 'open-experiment-report', experimentId: string): void
+}>()
+
+const simulatorMode = ref<'single' | 'experiment'>('single')
 
 /** Full UTC calendar months ending at the start of the current month. */
 function evaluationWindowMonths(months: number): { from: string; to: string } {
@@ -170,6 +182,10 @@ function createBaseSimulationForm() {
     financingShortAnnualPercent: 0,
     refreshCache: false,
     noCache: false,
+    // Chart replay costs real throughput (~1.5x candles/second when off vs on in local
+    // benchmarks) - on by default so the replay chart still works out of the box, but a run
+    // that only needs metrics/trades can turn it off for a meaningfully faster single run.
+    captureMarketReplay: true,
     legacyPositionManagement: {
       mode: 'StructureAtr',
       managementInterval: '15m',
@@ -534,10 +550,54 @@ const simulationPresets: SimulationPresetDefinition[] = [
 
 const form = reactive(createBaseSimulationForm())
 const selectedPresetId = ref(simulationPresets[0]!.id)
+const selectedSimulationProfileKey = ref('')
+const {
+  profiles: simulationProfiles,
+  loading: simulationProfilesLoading,
+  error: simulationProfilesError,
+  refresh: refreshSimulationProfiles,
+} = useSimulationProfiles()
 const showAdvancedConfig = ref(false)
 const selectedPreset = computed(() =>
   simulationPresets.find((preset) => preset.id === selectedPresetId.value) ?? simulationPresets[0]!,
 )
+const selectedSimulationProfile = computed(() => simulationProfiles.value.find(
+  (profile) => simulationProfileKey(profile) === selectedSimulationProfileKey.value,
+) ?? null)
+
+function simulationProfileKey(profile: SimulationStrategyProfile): string {
+  return `${profile.profileId}:${profile.revision}`
+}
+
+function simulationProfileStrategy(profile: SimulationStrategyProfile): string {
+  switch (profile.agent.kind) {
+    case 'LegacyProgressive': return 'legacy-progressive'
+    case 'ImprovedProgressive': return 'improved-progressive'
+    case 'StructuralConfluence': return 'structural-confluence'
+  }
+}
+
+function simulationProfileKind(profile: SimulationStrategyProfile): string {
+  return profile.agent.kind.replace(/([a-z])([A-Z])/g, '$1 $2')
+}
+
+function applySimulationProfileSelection(): void {
+  const profile = selectedSimulationProfile.value
+  if (!profile) return
+  form.instrument = profile.instrument.value
+  form.strategies = simulationProfileStrategy(profile)
+  form.strategyAssignmentsEnabled = false
+  error.value = null
+}
+
+const showProfileBuilder = ref(false)
+
+async function onProfileBuilt(profile: SimulationStrategyProfile): Promise<void> {
+  showProfileBuilder.value = false
+  await refreshSimulationProfiles()
+  selectedSimulationProfileKey.value = simulationProfileKey(profile)
+  applySimulationProfileSelection()
+}
 
 const brokerCatalog = ref<SimulationBrokerCatalog | null>(null)
 const brokerCatalogLoading = ref(false)
@@ -612,7 +672,8 @@ const busy = ref(false)
 const replayRows = ref<PlaybackRow[]>([])
 const loadedChunks = ref<Set<string>>(new Set())
 const chunkCursor = ref(0)
-const maxChartRows = 2_000
+const maxChartRows = 750
+const replayLoadsInFlight = new Set<string>()
 // §7 multi-instrument portfolio clock: rows from different instruments interleave in
 // one sequence-ordered stream, so the chart needs to display only one instrument's
 // candles at a time rather than a mixed, meaningless price series.
@@ -900,15 +961,18 @@ let tradePoll: number | undefined
 let chunkPoll: number | undefined
 
 onBeforeUnmount(() => {
-  if (tradePoll !== undefined) window.clearInterval(tradePoll)
-  if (chunkPoll !== undefined) window.clearInterval(chunkPoll)
+  stopBackgroundPollers()
 })
 
 watch(job, (value) => {
   if (!value) return
-  void loadProgressiveReplay(value.id)
-  void loadTrades(value.id)
-
+  const existingIndex = jobs.value.findIndex(item => item.id === value.id)
+  if (existingIndex >= 0) {
+    jobs.value.splice(existingIndex, 1, value)
+  } else {
+    jobs.value.unshift(value)
+    jobs.value = jobs.value.slice(0, 20)
+  }
   // Surface the real failure reason instead of a later pause/resume conflict.
   const status = formatSimulationStatus(value.status)
   if (status === 'Failed') {
@@ -917,12 +981,31 @@ watch(job, (value) => {
   }
 })
 
+watch(() => job.value?.id, () => {
+  promotedProfile.value = null
+  promoteDraft.strategyId = activeStrategies.value[0]?.strategyId ?? ''
+})
+
 watch(completedTradeRevision, () => {
   const payload = completedTrade.value
   if (payload && payload.simulationId.replaceAll('-', '').toLowerCase() === selectedId.value?.replaceAll('-', '').toLowerCase()) {
     appendTrade(payload.simulationId, payload.strategyId, payload.trade)
   }
-  if (selectedId.value) void loadTrades(selectedId.value)
+  if (simulatorMode.value === 'single' && selectedId.value) void loadTrades(selectedId.value)
+})
+
+watch(simulatorMode, (mode) => {
+  if (mode === 'experiment') {
+    stopBackgroundPollers()
+    // The experiment view does not render playback. Release the large analysis
+    // snapshots instead of retaining them in the hidden single-run panel.
+    replayRows.value = []
+    executionDetailRows.value = []
+    loadedChunks.value = new Set()
+    return
+  }
+
+  if (selectedId.value) startBackgroundPollers(selectedId.value)
 })
 
 async function refreshJobList() {
@@ -983,6 +1066,8 @@ async function startSimulation() {
 
     const body = {
       brokerId: form.brokerId,
+      simulationProfileId: selectedSimulationProfile.value?.profileId ?? null,
+      simulationProfileRevision: selectedSimulationProfile.value?.revision ?? null,
       instrument: form.instrument,
       from: new Date(`${form.from}T00:00:00Z`).toISOString(),
       to: new Date(`${form.to}T00:00:00Z`).toISOString(),
@@ -1115,6 +1200,7 @@ async function startSimulation() {
         : {},
       refreshCache: form.refreshCache,
       noCache: form.noCache,
+      captureMarketReplay: form.captureMarketReplay,
       legacyPositionManagement: form.legacyPositionManagement,
       improvedPositionManagement: form.improvedPositionManagement,
       autoCalibrateBeforeRun: form.autoCalibrateBeforeRun,
@@ -1300,6 +1386,7 @@ function applyFormState(next: SimulationFormState, options?: { preserveBroker?: 
 
 function applyPreset(presetId: string) {
   const preset = simulationPresets.find((item) => item.id === presetId) ?? simulationPresets[0]!
+  selectedSimulationProfileKey.value = ''
   selectedPresetId.value = preset.id
   applyFormState(preset.build(), { preserveBroker: true, preferRecommendedInstrument: false })
   showAdvancedConfig.value = false
@@ -1537,10 +1624,19 @@ function validatePositionManagement() {
 }
 
 function startBackgroundPollers(id: string) {
-  if (tradePoll !== undefined) window.clearInterval(tradePoll)
-  if (chunkPoll !== undefined) window.clearInterval(chunkPoll)
+  stopBackgroundPollers()
+  if (simulatorMode.value !== 'single') return
+  void loadTrades(id)
+  void loadProgressiveReplay(id)
   tradePoll = window.setInterval(() => { void loadTrades(id) }, 5000)
   chunkPoll = window.setInterval(() => { void loadProgressiveReplay(id) }, 1500)
+}
+
+function stopBackgroundPollers() {
+  if (tradePoll !== undefined) window.clearInterval(tradePoll)
+  if (chunkPoll !== undefined) window.clearInterval(chunkPoll)
+  tradePoll = undefined
+  chunkPoll = undefined
 }
 
 async function control(action: 'pause' | 'resume' | 'cancel') {
@@ -1585,6 +1681,48 @@ async function control(action: 'pause' | 'resume' | 'cancel') {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
     busy.value = false
+  }
+}
+
+const promoteDraft = reactive({
+  strategyId: '',
+  revision: 1,
+  approveForDemo: false,
+  description: '',
+})
+const promoteBusy = ref(false)
+const promotedProfile = ref<TradingPolicyProfile | null>(null)
+
+async function promoteToLivePolicy() {
+  if (!job.value || !promoteDraft.strategyId) return
+  promoteBusy.value = true
+  error.value = null
+  promotedProfile.value = null
+  try {
+    const body: PromoteTradingPolicyRequest = {
+      revision: promoteDraft.revision,
+      approveForDemo: promoteDraft.approveForDemo,
+      description: promoteDraft.description.trim() || null,
+      setupCalibrationArtifactId: form.setupCalibrationArtifactId.trim() || null,
+      managementCalibrationArtifactId: form.managementCalibrationArtifactId.trim() || null,
+      metaModelArtifactId: form.metaModelArtifactId.trim() || null,
+    }
+    const response = await fetch(
+      `${import.meta.env.BASE_URL}api/simulations/${job.value.id}/policy-profiles/${promoteDraft.strategyId}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
+    if (!response.ok) {
+      throw new Error(await readApiError(response, 'Could not promote this simulation to a live policy'))
+    }
+    promotedProfile.value = await response.json() as TradingPolicyProfile
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    promoteBusy.value = false
   }
 }
 
@@ -1633,37 +1771,48 @@ async function loadExecutionDetail(item: { strategyId: string; trade: ReplayTrad
 }
 
 async function loadProgressiveReplay(id: string) {
-  if (selectedId.value !== id) return
-  // Prefer chunk list + incremental fetch; fall back to bounded range API.
-  // Composite identity: simulationId + chunkId prevents cross-job pollution.
-  const chunksResponse = await fetch(`${import.meta.env.BASE_URL}api/simulations/${id}/replay/chunks`)
-  if (chunksResponse.ok) {
-    const chunks = await chunksResponse.json() as Array<{ chunkId: string }>
-    // A newly selected long-running job only needs the current bounded tail.
-    // Already loaded live chunks remain in the rolling replay window.
-    for (const chunk of chunks.slice(-3)) {
-      if (selectedId.value !== id) return
+  if (simulatorMode.value !== 'single' || selectedId.value !== id || replayLoadsInFlight.has(id)) return
+  replayLoadsInFlight.add(id)
+  try {
+    // Prefer chunk list + incremental fetch; fall back to bounded range API.
+    // Composite identity: simulationId + chunkId prevents cross-job pollution.
+    const chunksResponse = await fetch(`${import.meta.env.BASE_URL}api/simulations/${id}/replay/chunks`)
+    if (chunksResponse.ok) {
+      const chunks = await chunksResponse.json() as Array<{ chunkId: string }>
+      // One analysis-rich chunk is enough to seed the 180-candle chart. Loading
+      // three at once used to inflate tens of MB of JSON on every selection.
+      const chunk = chunks.at(-1)
+      if (!chunk) return
       const key = `${id}:${chunk.chunkId}`
-      if (loadedChunks.value.has(key)) continue
-      const response = await fetch(`${import.meta.env.BASE_URL}api/simulations/${id}/replay/chunks/${chunk.chunkId}`)
-      if (!response.ok) continue
+      if (loadedChunks.value.has(key)) return
+      const response = await fetch(`${import.meta.env.BASE_URL}api/simulations/${id}/replay/chunks/${chunk.chunkId}?take=250`)
+      if (!response.ok) {
+        if (response.status === 413) {
+          loadedChunks.value.add(key)
+          error.value = await readApiError(response, 'Replay chunk is too large for interactive playback')
+        }
+        return
+      }
       const payload = await response.json() as PlaybackRow[] | { rows?: PlaybackRow[] }
       const rows = Array.isArray(payload) ? payload : (payload.rows ?? [])
-      if (selectedId.value !== id) return
+      if (simulatorMode.value !== 'single' || selectedId.value !== id) return
       appendRows(rows)
       loadedChunks.value.add(key)
+      return
     }
-    return
-  }
 
-  const response = await fetch(
-    `${import.meta.env.BASE_URL}api/simulations/${id}/replay?startSequence=${chunkCursor.value}&limit=2000`,
-  )
-  if (!response.ok) return
-  const payload = await response.json() as { rows?: PlaybackRow[]; nextCursor?: string | null }
-  appendRows(payload.rows ?? [])
-  if (payload.nextCursor?.startsWith('seq:')) {
-    chunkCursor.value = Number(payload.nextCursor.slice(4)) || chunkCursor.value
+    const response = await fetch(
+      `${import.meta.env.BASE_URL}api/simulations/${id}/replay?startSequence=${chunkCursor.value}&limit=750`,
+    )
+    if (!response.ok) return
+    const payload = await response.json() as { rows?: PlaybackRow[]; nextCursor?: string | null }
+    if (simulatorMode.value !== 'single' || selectedId.value !== id) return
+    appendRows(payload.rows ?? [])
+    if (payload.nextCursor?.startsWith('seq:')) {
+      chunkCursor.value = Number(payload.nextCursor.slice(4)) || chunkCursor.value
+    }
+  } finally {
+    replayLoadsInFlight.delete(id)
   }
 }
 
@@ -1750,6 +1899,7 @@ function clearResearchSelection() {
 
 onMounted(() => {
   loadResearchSelection()
+  void refreshSimulationProfiles()
   void loadSimulationCatalog()
   void refreshJobList()
   void refreshImportedDatasets()
@@ -1760,20 +1910,25 @@ onMounted(() => {
   <section class="simulator-panel">
     <header class="simulator-header">
       <div>
-        <h2>Dashboard Simulator</h2>
+        <h2>{{ simulatorMode === 'single' ? 'Dashboard Simulator' : 'Experiment Lab' }}</h2>
         <p>
-          Choose a trading-style preset, adjust instrument/dates if needed, then run.
-          Warm-up history is loaded automatically; trading starts at the evaluation From date.
+          {{ simulatorMode === 'single'
+            ? 'Choose a trading-style preset, adjust instrument/dates if needed, then run. Warm-up history is loaded automatically; trading starts at the evaluation From date.'
+            : 'Build immutable profile comparisons with explicit learning, embargo, warm-up, and held-out boundaries.' }}
         </p>
       </div>
-      <div class="simulator-status">
+      <div class="simulator-mode" aria-label="Simulator mode">
+        <button type="button" :class="{ active: simulatorMode === 'single' }" @click="simulatorMode = 'single'">Single Run</button>
+        <button type="button" :class="{ active: simulatorMode === 'experiment' }" @click="simulatorMode = 'experiment'">Experiment</button>
+      </div>
+      <div v-if="simulatorMode === 'single'" class="simulator-status">
         {{ progressLabel }}
         <small v-if="connected"> · SignalR</small>
         <small v-else-if="usingPolling"> · polling fallback</small>
       </div>
     </header>
 
-    <div class="simulator-grid">
+    <div v-if="simulatorMode === 'single'" class="simulator-grid">
       <form class="card config-card" @submit.prevent="startSimulation">
         <div class="config-heading">
           <h3>Configuration</h3>
@@ -1808,6 +1963,49 @@ onMounted(() => {
               Fractional fields use 0.01 steps and accept 0 where 0 means off/unlimited/immediate.
             </p>
           </div>
+        </fieldset>
+        <fieldset class="broker-picker">
+          <legend>Saved agent profile</legend>
+          <label>
+            Immutable profile revision (optional)
+            <select
+              v-model="selectedSimulationProfileKey"
+              :disabled="simulationProfilesLoading"
+              @change="applySimulationProfileSelection"
+            >
+              <option value="">Use the preset/manual strategy configuration</option>
+              <option
+                v-for="profile in simulationProfiles"
+                :key="simulationProfileKey(profile)"
+                :value="simulationProfileKey(profile)"
+              >
+                {{ profile.name }} · r{{ profile.revision }} · {{ simulationProfileKind(profile) }}
+              </option>
+            </select>
+          </label>
+          <p v-if="simulationProfilesError" class="error">{{ simulationProfilesError }}</p>
+          <small v-if="selectedSimulationProfile" class="muted">
+            Uses the saved agent, analysis, runtime, management, and calibration policy exactly.
+            Profile instrument: {{ selectedSimulationProfile.instrument.value }} · hash:
+            <span class="mono">{{ selectedSimulationProfile.contentHash.slice(0, 12) }}</span>
+          </small>
+          <small v-else class="muted">
+            Profiles created in Experiment Lab appear here. Broker, dates, balance, and trading costs remain run inputs.
+          </small>
+          <button
+            v-if="!showProfileBuilder"
+            type="button"
+            class="button button-secondary"
+            @click="showProfileBuilder = true"
+          >
+            Build new profile step by step
+          </button>
+          <ProfileBuilderWizard
+            v-if="showProfileBuilder"
+            :instrument="form.instrument"
+            @saved="onProfileBuilt"
+            @close="showProfileBuilder = false"
+          />
         </fieldset>
         <fieldset class="broker-picker">
           <legend>Broker and asset</legend>
@@ -1918,6 +2116,13 @@ onMounted(() => {
             <label>Train months <input type="number" min="1" max="24" v-model.number="form.autoCalibrateTrainMonths" /></label>
             <label>Embargo days before From <input type="number" min="0" max="90" v-model.number="form.autoCalibrateEmbargoDays" /></label>
           </div>
+          <p class="muted" v-if="form.autoCalibrateBeforeRun">
+            Adds real time before the simulation starts: the setup stage runs one full backtest
+            over the training window, and the management stage reruns a second full backtest
+            under the frozen entry policy - roughly 2x the cost of the training window alone, on
+            top of the requested simulation. Uncheck this (or set manual artifact IDs above) for
+            the fastest possible run.
+          </p>
           <div class="row">
             <label>Setup artifact ID <input v-model.trim="form.setupCalibrationArtifactId" spellcheck="false" placeholder="guid or empty" /></label>
             <label>Management artifact ID <input v-model.trim="form.managementCalibrationArtifactId" spellcheck="false" placeholder="guid or empty" /></label>
@@ -1996,6 +2201,7 @@ onMounted(() => {
                 <select v-model="row.strategyType">
                   <option value="legacy">Legacy</option>
                   <option value="improved">Improved</option>
+                  <option value="structural-confluence">Structural confluence</option>
                 </select>
               </label>
               <label>Instrument
@@ -2472,7 +2678,12 @@ onMounted(() => {
         <div class="row checks">
           <label><input v-model="form.refreshCache" type="checkbox" /> Refresh cache</label>
           <label><input v-model="form.noCache" type="checkbox" /> No cache</label>
+          <label><input v-model="form.captureMarketReplay" type="checkbox" /> Capture chart replay</label>
         </div>
+        <p class="muted">
+          Chart replay costs roughly a third of throughput to build (measured locally); turn it
+          off for a faster run when you only need metrics/trades and won't view the replay chart.
+        </p>
         <p class="muted">Historical bid/ask fills are not enabled until OANDA bid/ask history is wired.</p>
         <button type="submit" :disabled="busy || brokerCatalogLoading || !selectedBroker.isAvailable">
           {{ busy ? 'Starting…' : 'Run Simulation' }}
@@ -2517,6 +2728,46 @@ onMounted(() => {
             <button type="button" :disabled="busy || !canPauseCompute" title="Only while prepare/download/warm-up/run is active" @click="control('pause')">Pause compute</button>
             <button type="button" :disabled="busy || !canResumeCompute" title="Only when status is Paused" @click="control('resume')">Resume compute</button>
             <button type="button" :disabled="busy || !canCancelCompute" title="Stop an in-flight job" @click="control('cancel')">Cancel</button>
+          </div>
+
+          <div v-if="displayJobStatus === 'Completed'" class="promote-block">
+            <h4>Promote to live policy</h4>
+            <p class="muted">
+              Persists a <code>TradingPolicyProfile</code> built from this run's strategy/agent
+              configuration into the shared policy store, using whatever calibration artifact IDs
+              are currently attached above. Reviewed profiles need a separate approval step before
+              live/shadow runtimes will use them unless "Approve for demo" is checked here.
+            </p>
+            <div class="promote-form">
+              <label>
+                Strategy
+                <select v-model="promoteDraft.strategyId">
+                  <option v-for="strategy in activeStrategies" :key="strategy.strategyId" :value="strategy.strategyId">
+                    {{ strategy.strategyName }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                Revision
+                <input v-model.number="promoteDraft.revision" type="number" min="1" step="1" />
+              </label>
+              <label class="checkbox-row">
+                <input v-model="promoteDraft.approveForDemo" type="checkbox" />
+                Approve for demo immediately
+              </label>
+              <label class="full">
+                Description (optional)
+                <input v-model.trim="promoteDraft.description" type="text" placeholder="e.g. EURUSD structural-confluence, Mar window" />
+              </label>
+            </div>
+            <button type="button" class="button" :disabled="promoteBusy || !promoteDraft.strategyId" @click="promoteToLivePolicy">
+              {{ promoteBusy ? 'Promoting…' : 'Promote to live policy' }}
+            </button>
+            <p v-if="promotedProfile" class="research-banner ok">
+              Promoted <strong>{{ promotedProfile.strategyId }}</strong> rev {{ promotedProfile.revision }}
+              as <strong>{{ promotedProfile.status }}</strong> (profile <code>{{ promotedProfile.profileId }}</code>).
+              See it under Research &amp; calibration → Live trading policy profiles.
+            </p>
           </div>
         </template>
         <p v-else class="muted">Start a simulation to stream progress. Refresh reconnects via SignalR or polling.</p>
@@ -2655,6 +2906,9 @@ onMounted(() => {
             @click="loadExecutionDetail(item)"
           >
             {{ item.strategyId }} · {{ item.trade.exitReason }} · R {{ item.trade.rMultiple?.toFixed(2) ?? '—' }} · reductions {{ item.trade.positionReductionCount ?? 0 }} · amendments {{ item.trade.stopAmendmentCount ?? 0 }}
+            <template v-if="item.trade.exitPolicy">
+              · {{ item.trade.exitPolicy }} · planned {{ item.trade.plannedR?.toFixed(2) ?? '—' }}R · realized {{ item.trade.realizedR?.toFixed(2) ?? '—' }}R
+            </template>
           </button>
         </div>
         <p v-if="executionDetailStatus" class="muted">{{ executionDetailStatus }}</p>
@@ -2729,6 +2983,7 @@ onMounted(() => {
         <button type="button" class="secondary" @click="refreshJobList">Refresh jobs</button>
       </section>
     </div>
+    <SimulationExperimentPanel v-else @open-report="experimentId => emit('open-experiment-report', experimentId)" />
   </section>
 </template>
 
@@ -2856,6 +3111,23 @@ onMounted(() => {
   border-radius: 0.5rem;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.simulator-mode {
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  border-radius: 0.6rem;
+  background: rgba(0, 0, 0, 0.24);
+}
+.simulator-mode button {
+  background: transparent;
+  color: var(--muted, #8b93a7);
+  white-space: nowrap;
+}
+.simulator-mode button.active {
+  background: var(--mint, #47d7ac);
+  color: #07110e;
+  font-weight: 800;
 }
 .simulator-grid {
   display: grid;
@@ -2985,6 +3257,22 @@ button.secondary {
   color: #fecaca;
   font-size: 0.82rem;
 }
+.promote-block {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(94, 234, 212, 0.25);
+  border-radius: 0.55rem;
+  background: rgba(94, 234, 212, 0.06);
+}
+.promote-block h4 { margin: 0; }
+.promote-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem;
+}
+.promote-form label.full { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   .simulator-grid { grid-template-columns: 1fr; }
 }

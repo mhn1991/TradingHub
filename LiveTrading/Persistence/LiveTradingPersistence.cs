@@ -7,6 +7,7 @@ using LiveTrading.ManualApproval;
 using LiveTrading.Registry;
 using PortfolioManager.Risk;
 using RiskManager.Safety;
+using LiveTrading.Shadow.Outcomes;
 
 namespace LiveTrading.Persistence;
 
@@ -34,6 +35,7 @@ public sealed record LiveEngineCheckpoint
     public string? LastReconciliationId { get; init; }
     public string? LastBrokerTransactionId { get; init; }
     public bool CleanShutdown { get; init; }
+    public LiveShadowOutcomeCheckpoint? ShadowOutcomes { get; init; }
 }
 
 public interface ILiveTradingPersistence

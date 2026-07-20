@@ -18,6 +18,7 @@ public sealed class IgIntegrationTests
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
+        var credential = IntegrationTestEnvironment.RequiredCredential("IG", "DEMO");
         _instrument = new InstrumentKey(
             IntegrationTestEnvironment.Optional("IG_TEST_INSTRUMENT") ?? "FX:GBP/USD");
         _epic = IntegrationTestEnvironment.Optional("IG_TEST_EPIC");
@@ -30,12 +31,12 @@ public sealed class IgIntegrationTests
 
         _broker = BrokerClientFactory.CreateIg(new IgOptions
         {
-            Environment = IntegrationTestEnvironment.ParseBrokerEnvironment("IG_ENVIRONMENT"),
-            ApiKey = IntegrationTestEnvironment.Required("IG_API_KEY"),
-            Identifier = IntegrationTestEnvironment.Required("IG_IDENTIFIER"),
-            Password = IntegrationTestEnvironment.Required("IG_PASSWORD"),
-            AccountId = IntegrationTestEnvironment.Optional("IG_ACCOUNT_ID"),
-            BaseAddress = IntegrationTestEnvironment.OptionalUri("IG_BASE_URL"),
+            Environment = IntegrationTestEnvironment.ParseStoredBrokerEnvironment(credential.Environment),
+            ApiKey = IntegrationTestEnvironment.RequiredCredentialValue(credential.ApiKey, "API key"),
+            Identifier = IntegrationTestEnvironment.RequiredCredentialValue(credential.Identifier, "identifier"),
+            Password = IntegrationTestEnvironment.RequiredCredentialValue(credential.Password, "password"),
+            AccountId = credential.AccountId,
+            BaseAddress = IntegrationTestEnvironment.CredentialUri(credential.BaseAddress, "base address"),
             InstrumentMappings = mappings
         });
     }

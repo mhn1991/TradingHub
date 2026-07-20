@@ -34,9 +34,10 @@ public sealed class MetaModelCalibratorTests
             dataHash: "hash",
             createdAt: DateTimeOffset.UtcNow);
 
-        Assert.That(artifact.Buckets, Has.Count.EqualTo(2));
+        Assert.That(artifact.Buckets, Has.Count.EqualTo(3));
 
-        MetaModelBucket mainBucket = artifact.Buckets.Single(bucket => bucket.AlignmentFrom == 0.5m);
+        MetaModelBucket mainBucket = artifact.Buckets.Single(bucket =>
+            bucket.AlignmentFrom == 0.5m && bucket.AlignmentTo == 0.75m);
         Assert.Multiple(() =>
         {
             Assert.That(mainBucket.Samples, Is.EqualTo(3));
@@ -46,8 +47,13 @@ public sealed class MetaModelCalibratorTests
             Assert.That(mainBucket.ExpectedR, Is.EqualTo((1.0m + 1.5m - 0.5m) / 3m));
         });
 
-        MetaModelBucket lowAlignmentBucket = artifact.Buckets.Single(bucket => bucket.AlignmentFrom == 0.0m);
+        MetaModelBucket lowAlignmentBucket = artifact.Buckets.Single(bucket =>
+            bucket.AlignmentFrom == 0.0m && bucket.AlignmentTo == 0.25m);
         Assert.That(lowAlignmentBucket.Samples, Is.EqualTo(1));
+
+        MetaModelBucket confidenceOnlyBucket = artifact.Buckets.Single(bucket =>
+            bucket.AlignmentFrom == 0m && bucket.AlignmentTo == 1m);
+        Assert.That(confidenceOnlyBucket.Samples, Is.EqualTo(4));
     }
 
     [Test]

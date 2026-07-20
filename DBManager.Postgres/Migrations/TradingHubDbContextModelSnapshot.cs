@@ -253,6 +253,10 @@ namespace DBManager.Postgres.Migrations
                         .HasColumnType("text")
                         .HasColumnName("content_hash");
 
+                    b.Property<long>("ContentSizeBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("content_size_bytes");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamptz")
                         .HasColumnName("created_at");
@@ -262,14 +266,27 @@ namespace DBManager.Postgres.Migrations
                         .HasColumnType("text")
                         .HasColumnName("feature_schema_hash");
 
+                    b.Property<string>("MediaType")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("media_type");
+
                     b.Property<string>("MetricsJson")
                         .IsRequired()
                         .HasColumnType("jsonb")
                         .HasColumnName("metrics");
 
+                    b.Property<string>("PayloadJson")
+                        .HasColumnType("text")
+                        .HasColumnName("payload");
+
                     b.Property<long>("SampleCount")
                         .HasColumnType("bigint")
                         .HasColumnName("sample_count");
+
+                    b.Property<int>("SerializerVersion")
+                        .HasColumnType("integer")
+                        .HasColumnName("serializer_version");
 
                     b.Property<short>("Status")
                         .HasColumnType("smallint")
@@ -324,6 +341,115 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("calibration_artifacts", "config");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Config.CalibrationArtifactStatusEventEntity", b =>
+                {
+                    b.Property<long>("EventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("event_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("EventId"));
+
+                    b.Property<string>("ActorIdentity")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("actor_identity");
+
+                    b.Property<Guid>("ArtifactId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("artifact_id");
+
+                    b.Property<short>("FromStatus")
+                        .HasColumnType("smallint")
+                        .HasColumnName("from_status");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<short>("ToStatus")
+                        .HasColumnType("smallint")
+                        .HasColumnName("to_status");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_calibration_artifact_status_events");
+
+                    b.HasIndex("ArtifactId", "OccurredAt")
+                        .HasDatabaseName("ix_calibration_artifact_status_events_artifact_id_occurred_at");
+
+                    b.ToTable("calibration_artifact_status_events", "config");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.CalibrationBundleCandidateEntity", b =>
+                {
+                    b.Property<Guid>("CandidateId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("candidate_id");
+
+                    b.Property<Guid?>("ApprovedProfileId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("approved_profile_id");
+
+                    b.Property<int?>("ApprovedProfileRevision")
+                        .HasColumnType("integer")
+                        .HasColumnName("approved_profile_revision");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("ManagementArtifactId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("management_artifact_id");
+
+                    b.Property<Guid>("MetaModelArtifactId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("meta_model_artifact_id");
+
+                    b.Property<string>("ProposedProfileJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("proposed_profile");
+
+                    b.Property<string>("RejectionReason")
+                        .HasColumnType("text")
+                        .HasColumnName("rejection_reason");
+
+                    b.Property<DateTimeOffset?>("ReviewedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("reviewed_at");
+
+                    b.Property<string>("ReviewedBy")
+                        .HasColumnType("text")
+                        .HasColumnName("reviewed_by");
+
+                    b.Property<Guid>("SetupArtifactId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("setup_artifact_id");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.HasKey("CandidateId")
+                        .HasName("pk_calibration_bundle_candidates");
+
+                    b.HasIndex("ManagementArtifactId")
+                        .HasDatabaseName("ix_calibration_bundle_candidates_management_artifact_id");
+
+                    b.HasIndex("MetaModelArtifactId")
+                        .HasDatabaseName("ix_calibration_bundle_candidates_meta_model_artifact_id");
+
+                    b.HasIndex("SetupArtifactId")
+                        .HasDatabaseName("ix_calibration_bundle_candidates_setup_artifact_id");
+
+                    b.HasIndex("Status", "CreatedAt")
+                        .HasDatabaseName("ix_calibration_bundle_candidates_status_created_at");
+
+                    b.ToTable("calibration_bundle_candidates", "config");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Config.DeploymentActivationEventEntity", b =>
                 {
                     b.Property<long>("EventId")
@@ -368,6 +494,92 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("deployment_activation_events", "config");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Config.DeploymentAgentEntity", b =>
+                {
+                    b.Property<Guid>("DeploymentAgentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_agent_id");
+
+                    b.Property<short>("AgentMode")
+                        .HasColumnType("smallint")
+                        .HasColumnName("agent_mode");
+
+                    b.Property<Guid>("BrokerAccountId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_account_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_id");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("boolean")
+                        .HasColumnName("enabled");
+
+                    b.Property<string>("FaultCode")
+                        .HasColumnType("text")
+                        .HasColumnName("fault_code");
+
+                    b.Property<string>("FaultMessage")
+                        .HasColumnType("text")
+                        .HasColumnName("fault_message");
+
+                    b.Property<long>("InstrumentId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("instrument_id");
+
+                    b.Property<string>("PackageHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("package_hash");
+
+                    b.Property<Guid>("PolicyRevisionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("policy_revision_id");
+
+                    b.Property<DateTimeOffset?>("StartedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("started_at");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.Property<DateTimeOffset?>("StoppedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("stopped_at");
+
+                    b.Property<string>("StrategyId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("strategy_id");
+
+                    b.HasKey("DeploymentAgentId")
+                        .HasName("pk_deployment_agents");
+
+                    b.HasIndex("InstrumentId")
+                        .HasDatabaseName("ix_deployment_agents_instrument_id");
+
+                    b.HasIndex("PolicyRevisionId")
+                        .HasDatabaseName("ix_deployment_agents_policy_revision_id");
+
+                    b.HasIndex("BrokerAccountId", "InstrumentId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_deployment_agents_one_executable_owner")
+                        .HasFilter("enabled AND agent_mode IN (2, 3) AND status IN (0, 1, 2, 3, 4, 5, 6)");
+
+                    b.HasIndex("DeploymentId", "InstrumentId", "PolicyRevisionId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_deployment_agents_deployment_id_instrument_id_policy_revisi");
+
+                    b.ToTable("deployment_agents", "config");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Config.DeploymentAssignmentEntity", b =>
                 {
                     b.Property<Guid>("DeploymentId")
@@ -399,6 +611,91 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("deployment_assignments", "config");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Config.DeploymentCommandEntity", b =>
+                {
+                    b.Property<Guid>("CommandId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("command_id");
+
+                    b.Property<DateTimeOffset?>("ClaimedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("claimed_at");
+
+                    b.Property<string>("ClaimedByHost")
+                        .HasColumnType("text")
+                        .HasColumnName("claimed_by_host");
+
+                    b.Property<short>("CommandType")
+                        .HasColumnType("smallint")
+                        .HasColumnName("command_type");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("completed_at");
+
+                    b.Property<Guid?>("DeploymentAgentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_agent_id");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_id");
+
+                    b.Property<string>("ErrorCode")
+                        .HasColumnType("text")
+                        .HasColumnName("error_code");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasColumnType("text")
+                        .HasColumnName("error_message");
+
+                    b.Property<long>("ExpectedVersion")
+                        .HasColumnType("bigint")
+                        .HasColumnName("expected_version");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("idempotency_key");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("payload_json");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("requested_at");
+
+                    b.Property<string>("RequestedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("requested_by");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.HasKey("CommandId")
+                        .HasName("pk_deployment_commands");
+
+                    b.HasIndex("DeploymentAgentId")
+                        .HasDatabaseName("ix_deployment_commands_deployment_agent_id");
+
+                    b.HasIndex("DeploymentId")
+                        .HasDatabaseName("ix_deployment_commands_deployment_id");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("ix_deployment_commands_idempotency_key");
+
+                    b.HasIndex("Status", "RequestedAt")
+                        .HasDatabaseName("ix_deployment_commands_status_requested_at");
+
+                    b.ToTable("deployment_commands", "operations");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Config.DeploymentEntity", b =>
                 {
                     b.Property<Guid>("DeploymentId")
@@ -410,30 +707,72 @@ namespace DBManager.Postgres.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("broker_account_id");
 
+                    b.Property<long>("ConcurrencyToken")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("concurrency_token");
+
                     b.Property<string>("DeploymentHash")
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("deployment_hash");
 
+                    b.Property<DateTimeOffset?>("DrainingAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("draining_at");
+
+                    b.Property<string>("Environment")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("environment");
+
                     b.Property<short>("ExecutionMode")
                         .HasColumnType("smallint")
                         .HasColumnName("execution_mode");
+
+                    b.Property<DateTimeOffset?>("FaultedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("faulted_at");
 
                     b.Property<string>("HostInstanceId")
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("host_instance_id");
 
-                    b.Property<Guid>("PolicyRevisionId")
+                    b.Property<string>("IdempotencyKey")
+                        .HasColumnType("text")
+                        .HasColumnName("idempotency_key");
+
+                    b.Property<DateTimeOffset?>("PausedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("paused_at");
+
+                    b.Property<Guid?>("PolicyRevisionId")
                         .HasColumnType("uuid")
                         .HasColumnName("policy_revision_id");
 
-                    b.Property<DateTimeOffset>("StartedAt")
+                    b.Property<DateTimeOffset?>("PreparingAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("preparing_at");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("requested_at");
+
+                    b.Property<string>("RequestedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("requested_by");
+
+                    b.Property<DateTimeOffset?>("RunningAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("running_at");
+
+                    b.Property<DateTimeOffset?>("StartedAt")
                         .HasColumnType("timestamptz")
                         .HasColumnName("started_at");
 
                     b.Property<string>("StartedBy")
-                        .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("started_by");
 
@@ -449,6 +788,10 @@ namespace DBManager.Postgres.Migrations
                         .HasColumnType("timestamptz")
                         .HasColumnName("stopped_at");
 
+                    b.Property<DateTimeOffset?>("WarmingUpAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("warming_up_at");
+
                     b.HasKey("DeploymentId")
                         .HasName("pk_deployments");
 
@@ -457,10 +800,142 @@ namespace DBManager.Postgres.Migrations
                         .HasDatabaseName("ix_deployments_one_active_per_account")
                         .HasFilter("status = 0");
 
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("ix_deployments_idempotency_key")
+                        .HasFilter("idempotency_key IS NOT NULL");
+
                     b.HasIndex("PolicyRevisionId")
                         .HasDatabaseName("ix_deployments_policy_revision_id");
 
                     b.ToTable("deployments", "config");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.DeploymentEventEntity", b =>
+                {
+                    b.Property<long>("EventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("event_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("EventId"));
+
+                    b.Property<string>("ActorIdentity")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("actor_identity");
+
+                    b.Property<string>("CorrelationId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("correlation_id");
+
+                    b.Property<Guid?>("DeploymentAgentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_agent_id");
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_id");
+
+                    b.Property<string>("DetailJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("detail_json");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("event_type");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<string>("ReasonCode")
+                        .HasColumnType("text")
+                        .HasColumnName("reason_code");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_deployment_events");
+
+                    b.HasIndex("DeploymentAgentId")
+                        .HasDatabaseName("ix_deployment_events_deployment_agent_id");
+
+                    b.HasIndex("DeploymentId", "OccurredAt")
+                        .HasDatabaseName("ix_deployment_events_deployment_id_occurred_at");
+
+                    b.ToTable("deployment_events", "operations");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.ParityCertificationEntity", b =>
+                {
+                    b.Property<Guid>("CertificationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("certification_id");
+
+                    b.Property<DateTimeOffset>("CertifiedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("certified_at");
+
+                    b.Property<string>("CertifiedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("certified_by");
+
+                    b.Property<int>("ComparedEpochCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("compared_epoch_count");
+
+                    b.Property<string>("ConfigurationHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("configuration_hash");
+
+                    b.Property<string>("LiveBuildHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("live_build_hash");
+
+                    b.Property<int>("MismatchCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("mismatch_count");
+
+                    b.Property<string>("MismatchDetailsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("mismatch_details_json");
+
+                    b.Property<Guid>("PolicyRevisionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("policy_revision_id");
+
+                    b.Property<string>("RecordingHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("recording_hash");
+
+                    b.Property<string>("SimulatorBuildHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("simulator_build_hash");
+
+                    b.Property<string>("SourceCommit")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("source_commit");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.HasKey("CertificationId")
+                        .HasName("pk_parity_certifications");
+
+                    b.HasIndex("PolicyRevisionId", "CertifiedAt")
+                        .HasDatabaseName("ix_parity_certifications_policy_revision_id_certified_at");
+
+                    b.ToTable("parity_certifications", "config");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Config.PolicyArtifactEntity", b =>
@@ -484,6 +959,62 @@ namespace DBManager.Postgres.Migrations
                         .HasDatabaseName("ix_policy_artifacts_artifact_id");
 
                     b.ToTable("policy_artifacts", "config");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.PolicyPermissionEventEntity", b =>
+                {
+                    b.Property<Guid>("PermissionEventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("permission_event_id");
+
+                    b.Property<string>("ActorIdentity")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("actor_identity");
+
+                    b.Property<Guid?>("BrokerAccountId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_account_id");
+
+                    b.Property<string>("BrokerEnvironment")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("broker_environment");
+
+                    b.Property<string>("ConfigurationHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("configuration_hash");
+
+                    b.Property<bool>("Granted")
+                        .HasColumnType("boolean")
+                        .HasColumnName("granted");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<int>("Permissions")
+                        .HasColumnType("integer")
+                        .HasColumnName("permissions");
+
+                    b.Property<Guid>("PolicyRevisionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("policy_revision_id");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("reason");
+
+                    b.HasKey("PermissionEventId")
+                        .HasName("pk_policy_permission_events");
+
+                    b.HasIndex("PolicyRevisionId", "BrokerEnvironment", "BrokerAccountId", "OccurredAt")
+                        .HasDatabaseName("ix_policy_permission_events_policy_revision_id_broker_environm");
+
+                    b.ToTable("policy_permission_events", "config");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Config.PolicyProfileEntity", b =>
@@ -601,7 +1132,7 @@ namespace DBManager.Postgres.Migrations
 
                     b.Property<string>("PolicyDocumentJson")
                         .IsRequired()
-                        .HasColumnType("jsonb")
+                        .HasColumnType("text")
                         .HasColumnName("policy_document");
 
                     b.Property<Guid>("PolicyId")
@@ -624,7 +1155,6 @@ namespace DBManager.Postgres.Migrations
                         .HasName("pk_policy_revisions");
 
                     b.HasIndex("ConfigurationHash")
-                        .IsUnique()
                         .HasDatabaseName("ix_policy_revisions_configuration_hash");
 
                     b.HasIndex("PolicyId", "Revision")
@@ -632,6 +1162,101 @@ namespace DBManager.Postgres.Migrations
                         .HasDatabaseName("ix_policy_revisions_policy_id_revision");
 
                     b.ToTable("policy_revisions", "config");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.RuntimeProfileEntity", b =>
+                {
+                    b.Property<Guid>("RuntimeProfileId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("runtime_profile_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("name");
+
+                    b.Property<short>("ProfileKind")
+                        .HasColumnType("smallint")
+                        .HasColumnName("profile_kind");
+
+                    b.HasKey("RuntimeProfileId")
+                        .HasName("pk_runtime_profiles");
+
+                    b.HasIndex("ProfileKind", "Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_runtime_profiles_profile_kind_name");
+
+                    b.ToTable("runtime_profiles", "config");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.RuntimeProfileRevisionEntity", b =>
+                {
+                    b.Property<Guid>("RuntimeProfileRevisionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("runtime_profile_revision_id");
+
+                    b.Property<DateTimeOffset?>("ApprovedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("approved_at");
+
+                    b.Property<string>("ApprovedBy")
+                        .HasColumnType("text")
+                        .HasColumnName("approved_by");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("created_by");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer")
+                        .HasColumnName("revision");
+
+                    b.Property<Guid>("RuntimeProfileId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("runtime_profile_id");
+
+                    b.Property<string>("SettingsHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("settings_hash");
+
+                    b.Property<string>("SettingsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("settings");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.HasKey("RuntimeProfileRevisionId")
+                        .HasName("pk_runtime_profile_revisions");
+
+                    b.HasIndex("SettingsHash")
+                        .IsUnique()
+                        .HasDatabaseName("ix_runtime_profile_revisions_settings_hash");
+
+                    b.HasIndex("RuntimeProfileId", "Revision")
+                        .IsUnique()
+                        .HasDatabaseName("ix_runtime_profile_revisions_runtime_profile_id_revision");
+
+                    b.ToTable("runtime_profile_revisions", "config");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Decision.AgentEvaluationEntity", b =>
@@ -843,6 +1468,85 @@ namespace DBManager.Postgres.Migrations
                         .HasName("pk_decision_keys");
 
                     b.ToTable("decision_keys", "decision");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Decision.SetupStateEventEntity", b =>
+                {
+                    b.Property<long>("EventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("event_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("EventId"));
+
+                    b.Property<Guid>("AgentInstanceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("agent_instance_id");
+
+                    b.Property<string>("FeaturesJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("features");
+
+                    b.Property<long>("InstrumentId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("instrument_id");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<string>("PlaybookId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("playbook_id");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("reason_code");
+
+                    b.Property<Guid>("RuntimeSessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("runtime_session_id");
+
+                    b.Property<string>("SetupInstanceId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("setup_instance_id");
+
+                    b.Property<long>("SnapshotVersion")
+                        .HasColumnType("bigint")
+                        .HasColumnName("snapshot_version");
+
+                    b.Property<short>("StateAfter")
+                        .HasColumnType("smallint")
+                        .HasColumnName("state_after");
+
+                    b.Property<short>("StateBefore")
+                        .HasColumnType("smallint")
+                        .HasColumnName("state_before");
+
+                    b.Property<string>("StrategyId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("strategy_id");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_setup_state_events");
+
+                    b.HasIndex("OccurredAt")
+                        .HasDatabaseName("ix_setup_state_events_occurred_at");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("OccurredAt"), "brin");
+
+                    b.HasIndex("InstrumentId", "StrategyId", "OccurredAt")
+                        .HasDatabaseName("ix_setup_state_events_instrument_id_strategy_id_occurred_at");
+
+                    b.HasIndex("RuntimeSessionId", "AgentInstanceId", "OccurredAt")
+                        .HasDatabaseName("ix_setup_state_events_runtime_session_id_agent_instance_id_occ");
+
+                    b.ToTable("setup_state_events", "decision");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Decision.TradeCandidateEntity", b =>
@@ -1830,6 +2534,118 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("account_snapshots", "operations");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Operations.AgentActivityWindowEntity", b =>
+                {
+                    b.Property<Guid>("RuntimeSessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("runtime_session_id");
+
+                    b.Property<Guid>("AgentInstanceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("agent_instance_id");
+
+                    b.Property<long>("InstrumentId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("instrument_id");
+
+                    b.Property<string>("StrategyId")
+                        .HasColumnType("text")
+                        .HasColumnName("strategy_id");
+
+                    b.Property<string>("PlaybookKey")
+                        .HasColumnType("text")
+                        .HasColumnName("playbook_key");
+
+                    b.Property<DateTimeOffset>("WindowStart")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("window_start");
+
+                    b.Property<long>("BuyCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("buy_count");
+
+                    b.Property<long>("CandidatesCreated")
+                        .HasColumnType("bigint")
+                        .HasColumnName("candidates_created");
+
+                    b.Property<long>("CandidatesRejected")
+                        .HasColumnType("bigint")
+                        .HasColumnName("candidates_rejected");
+
+                    b.Property<long>("ErrorCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("error_count");
+
+                    b.Property<long>("EvaluationsObserved")
+                        .HasColumnType("bigint")
+                        .HasColumnName("evaluations_observed");
+
+                    b.Property<long>("HoldCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("hold_count");
+
+                    b.Property<DateTimeOffset?>("LatestMarketTime")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("latest_market_time");
+
+                    b.Property<long?>("LatestSnapshotVersion")
+                        .HasColumnType("bigint")
+                        .HasColumnName("latest_snapshot_version");
+
+                    b.Property<double>("MaxEvaluationMilliseconds")
+                        .HasColumnType("double precision")
+                        .HasColumnName("max_evaluation_milliseconds");
+
+                    b.Property<double?>("MeanCandidateConfidence")
+                        .HasColumnType("double precision")
+                        .HasColumnName("mean_candidate_confidence");
+
+                    b.Property<double>("MeanEvaluationMilliseconds")
+                        .HasColumnType("double precision")
+                        .HasColumnName("mean_evaluation_milliseconds");
+
+                    b.Property<double>("MinEvaluationMilliseconds")
+                        .HasColumnType("double precision")
+                        .HasColumnName("min_evaluation_milliseconds");
+
+                    b.Property<long>("NoSetupCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("no_setup_count");
+
+                    b.Property<string>("ReasonCountsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("reason_counts_json");
+
+                    b.Property<long>("SellCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("sell_count");
+
+                    b.Property<long>("StateTransitions")
+                        .HasColumnType("bigint")
+                        .HasColumnName("state_transitions");
+
+                    b.Property<long>("TimeoutCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("timeout_count");
+
+                    b.Property<long>("WarmupCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("warmup_count");
+
+                    b.Property<DateTimeOffset>("WindowEnd")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("window_end");
+
+                    b.HasKey("RuntimeSessionId", "AgentInstanceId", "InstrumentId", "StrategyId", "PlaybookKey", "WindowStart")
+                        .HasName("pk_agent_activity_windows");
+
+                    b.HasIndex("RuntimeSessionId", "WindowStart")
+                        .HasDatabaseName("ix_agent_activity_windows_runtime_session_id_window_start");
+
+                    b.ToTable("agent_activity_windows", "operations");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Operations.Backup.BackupRecordEntity", b =>
                 {
                     b.Property<Guid>("BackupId")
@@ -1973,6 +2789,183 @@ namespace DBManager.Postgres.Migrations
                         .HasDatabaseName("ix_checkpoints_deployment_id_checkpoint_type_sequence");
 
                     b.ToTable("checkpoints", "operations");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Operations.LiveEventJournalEntity", b =>
+                {
+                    b.Property<long>("EventSequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("event_sequence");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("EventSequence"));
+
+                    b.Property<Guid>("DeploymentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_id");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("event_id");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<string>("PayloadHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("payload_hash");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("payload_json");
+
+                    b.Property<string>("PayloadType")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("payload_type");
+
+                    b.Property<string>("StreamName")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("stream_name");
+
+                    b.HasKey("EventSequence")
+                        .HasName("pk_live_event_journal");
+
+                    b.HasIndex("EventId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_live_event_journal_event_id");
+
+                    b.HasIndex("DeploymentId", "StreamName", "OccurredAt")
+                        .HasDatabaseName("ix_live_event_journal_deployment_id_stream_name_occurred_at");
+
+                    b.ToTable("live_event_journal", "operations");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Operations.ManualApprovalCandidateEntity", b =>
+                {
+                    b.Property<string>("CandidateId")
+                        .HasColumnType("text")
+                        .HasColumnName("candidate_id");
+
+                    b.Property<string>("CandidateFingerprint")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("candidate_fingerprint");
+
+                    b.Property<string>("CandidateJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("candidate_json");
+
+                    b.Property<string>("ConfigurationHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("configuration_hash");
+
+                    b.Property<DateTimeOffset?>("ConsumedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("consumed_at");
+
+                    b.Property<Guid?>("DeploymentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_id");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<string>("PolicyRevision")
+                        .HasColumnType("text")
+                        .HasColumnName("policy_revision");
+
+                    b.Property<string>("ReservationId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("reservation_id");
+
+                    b.Property<string>("ReviewReason")
+                        .HasColumnType("text")
+                        .HasColumnName("review_reason");
+
+                    b.Property<DateTimeOffset?>("ReviewedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reviewed_at");
+
+                    b.Property<string>("ReviewedBy")
+                        .HasColumnType("text")
+                        .HasColumnName("reviewed_by");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("revision");
+
+                    b.Property<short>("State")
+                        .HasColumnType("smallint")
+                        .HasColumnName("state");
+
+                    b.HasKey("CandidateId")
+                        .HasName("pk_manual_approval_candidates");
+
+                    b.HasIndex("CandidateFingerprint")
+                        .HasDatabaseName("ix_manual_approval_candidates_candidate_fingerprint");
+
+                    b.HasIndex("State", "ExpiresAt")
+                        .HasDatabaseName("ix_manual_approval_candidates_state_expires_at");
+
+                    b.ToTable("manual_approval_candidates", "operations");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Operations.ManualApprovalEventEntity", b =>
+                {
+                    b.Property<long>("EventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("event_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("EventId"));
+
+                    b.Property<string>("Actor")
+                        .HasColumnType("text")
+                        .HasColumnName("actor");
+
+                    b.Property<string>("CandidateId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("candidate_id");
+
+                    b.Property<long>("CandidateRevision")
+                        .HasColumnType("bigint")
+                        .HasColumnName("candidate_revision");
+
+                    b.Property<short>("FromState")
+                        .HasColumnType("smallint")
+                        .HasColumnName("from_state");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<string>("Reason")
+                        .HasColumnType("text")
+                        .HasColumnName("reason");
+
+                    b.Property<short>("ToState")
+                        .HasColumnType("smallint")
+                        .HasColumnName("to_state");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_manual_approval_events");
+
+                    b.HasIndex("CandidateId", "CandidateRevision")
+                        .IsUnique()
+                        .HasDatabaseName("ix_manual_approval_events_candidate_id_candidate_revision");
+
+                    b.ToTable("manual_approval_events", "operations");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Operations.OperatorCommandEntity", b =>
@@ -2142,6 +3135,79 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("reconciliation_runs", "operations");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Operations.RuntimeSessionEntity", b =>
+                {
+                    b.Property<Guid>("RuntimeSessionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("runtime_session_id");
+
+                    b.Property<string>("ConfigurationHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("configuration_hash");
+
+                    b.Property<Guid?>("DeploymentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_id");
+
+                    b.Property<DateTimeOffset?>("EndedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("ended_at");
+
+                    b.Property<string>("HostInstanceId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("host_instance_id");
+
+                    b.Property<string>("MachineName")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("machine_name");
+
+                    b.Property<int>("ProcessId")
+                        .HasColumnType("integer")
+                        .HasColumnName("process_id");
+
+                    b.Property<Guid?>("ResearchRunId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("research_run_id");
+
+                    b.Property<short>("SessionKind")
+                        .HasColumnType("smallint")
+                        .HasColumnName("session_kind");
+
+                    b.Property<Guid?>("SimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("started_at");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.Property<string>("TerminationReason")
+                        .HasColumnType("text")
+                        .HasColumnName("termination_reason");
+
+                    b.HasKey("RuntimeSessionId")
+                        .HasName("pk_runtime_sessions");
+
+                    b.HasIndex("DeploymentId")
+                        .HasDatabaseName("ix_runtime_sessions_deployment_id");
+
+                    b.HasIndex("SimulationId")
+                        .HasDatabaseName("ix_runtime_sessions_simulation_id");
+
+                    b.HasIndex("SessionKind", "StartedAt")
+                        .HasDatabaseName("ix_runtime_sessions_session_kind_started_at");
+
+                    b.ToTable("runtime_sessions", "operations");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Operations.SafetyEventEntity", b =>
                 {
                     b.Property<long>("EventId")
@@ -2214,6 +3280,117 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("safety_events", "operations");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Operations.TradingTelemetryEventEntity", b =>
+                {
+                    b.Property<Guid>("EventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("event_id");
+
+                    b.Property<Guid?>("AgentInstanceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("agent_instance_id");
+
+                    b.Property<string>("CandidateId")
+                        .HasColumnType("text")
+                        .HasColumnName("candidate_id");
+
+                    b.Property<Guid?>("DecisionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("decision_id");
+
+                    b.Property<Guid?>("DeploymentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deployment_id");
+
+                    b.Property<Guid?>("ExperimentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("experiment_id");
+
+                    b.Property<Guid?>("FillId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("fill_id");
+
+                    b.Property<long?>("InstrumentId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("instrument_id");
+
+                    b.Property<DateTimeOffset>("ObservedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("observed_at");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<Guid?>("OrderCommandId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("order_command_id");
+
+                    b.Property<Guid?>("OrderId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("order_id");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("payload_json");
+
+                    b.Property<Guid?>("PolicyRevisionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("policy_revision_id");
+
+                    b.Property<Guid?>("PositionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("position_id");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("reason_code");
+
+                    b.Property<Guid?>("ResearchRunId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("research_run_id");
+
+                    b.Property<Guid?>("ReservationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("reservation_id");
+
+                    b.Property<Guid>("RuntimeSessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("runtime_session_id");
+
+                    b.Property<short>("Severity")
+                        .HasColumnType("smallint")
+                        .HasColumnName("severity");
+
+                    b.Property<Guid?>("SimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.Property<short>("Type")
+                        .HasColumnType("smallint")
+                        .HasColumnName("type");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_trading_telemetry_events");
+
+                    b.HasIndex("CandidateId")
+                        .HasDatabaseName("ix_trading_telemetry_events_candidate_id");
+
+                    b.HasIndex("PositionId")
+                        .HasDatabaseName("ix_trading_telemetry_events_position_id");
+
+                    b.HasIndex("ReasonCode", "OccurredAt")
+                        .HasDatabaseName("ix_trading_telemetry_events_reason_code_occurred_at");
+
+                    b.HasIndex("RuntimeSessionId", "OccurredAt")
+                        .HasDatabaseName("ix_trading_telemetry_events_runtime_session_id_occurred_at");
+
+                    b.ToTable("trading_telemetry_events", "operations");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Reference.BrokerAccountEntity", b =>
                 {
                     b.Property<Guid>("BrokerAccountId")
@@ -2261,6 +3438,137 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("broker_accounts", "reference");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Reference.BrokerAccountSettingsRevisionEntity", b =>
+                {
+                    b.Property<Guid>("BrokerAccountSettingsRevisionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_account_settings_revision_id");
+
+                    b.Property<string>("AccountAlias")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("account_alias");
+
+                    b.Property<string>("AccountCurrency")
+                        .IsRequired()
+                        .HasColumnType("char(3)")
+                        .HasColumnName("account_currency");
+
+                    b.Property<bool>("Active")
+                        .HasColumnType("boolean")
+                        .HasColumnName("active");
+
+                    b.Property<Guid?>("BrokerAccountId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_account_id");
+
+                    b.Property<Guid>("BrokerEnvironmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_environment_id");
+
+                    b.Property<string>("ContentHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("content_hash");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("ExternalAccountId")
+                        .HasColumnType("text")
+                        .HasColumnName("external_account_id");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer")
+                        .HasColumnName("revision");
+
+                    b.Property<string>("SettingsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("settings");
+
+                    b.HasKey("BrokerAccountSettingsRevisionId")
+                        .HasName("pk_broker_account_settings_revisions");
+
+                    b.HasIndex("BrokerAccountId")
+                        .HasDatabaseName("ix_broker_account_settings_revisions_broker_account_id");
+
+                    b.HasIndex("BrokerEnvironmentId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_broker_account_settings_one_active")
+                        .HasFilter("active");
+
+                    b.HasIndex("BrokerEnvironmentId", "Revision")
+                        .IsUnique()
+                        .HasDatabaseName("ix_broker_account_settings_revisions_broker_environment_id_rev");
+
+                    b.ToTable("broker_account_settings_revisions", "reference");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Reference.BrokerEndpointRevisionEntity", b =>
+                {
+                    b.Property<Guid>("BrokerEndpointRevisionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_endpoint_revision_id");
+
+                    b.Property<bool>("Active")
+                        .HasColumnType("boolean")
+                        .HasColumnName("active");
+
+                    b.Property<string>("BaseAddress")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("base_address");
+
+                    b.Property<Guid>("BrokerEnvironmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_environment_id");
+
+                    b.Property<string>("ContentHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("content_hash");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("created_by");
+
+                    b.Property<short>("Kind")
+                        .HasColumnType("smallint")
+                        .HasColumnName("kind");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer")
+                        .HasColumnName("revision");
+
+                    b.HasKey("BrokerEndpointRevisionId")
+                        .HasName("pk_broker_endpoint_revisions");
+
+                    b.HasIndex("BrokerEnvironmentId", "Kind")
+                        .IsUnique()
+                        .HasDatabaseName("ix_broker_endpoint_revisions_one_active")
+                        .HasFilter("active");
+
+                    b.HasIndex("BrokerEnvironmentId", "Kind", "Revision")
+                        .IsUnique()
+                        .HasDatabaseName("ix_broker_endpoint_revisions_broker_environment_id_kind_revisi");
+
+                    b.ToTable("broker_endpoint_revisions", "reference");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Reference.BrokerEntity", b =>
                 {
                     b.Property<long>("BrokerId")
@@ -2292,6 +3600,49 @@ namespace DBManager.Postgres.Migrations
                         .HasDatabaseName("ix_brokers_code");
 
                     b.ToTable("brokers", "reference");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Reference.BrokerEnvironmentEntity", b =>
+                {
+                    b.Property<Guid>("BrokerEnvironmentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_environment_id");
+
+                    b.Property<long>("BrokerId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("broker_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("display_name");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("boolean")
+                        .HasColumnName("enabled");
+
+                    b.Property<string>("EnvironmentCode")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("environment_code");
+
+                    b.Property<bool>("IsLive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_live");
+
+                    b.HasKey("BrokerEnvironmentId")
+                        .HasName("pk_broker_environments");
+
+                    b.HasIndex("BrokerId", "EnvironmentCode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_broker_environments_broker_id_environment_code");
+
+                    b.ToTable("broker_environments", "reference");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Reference.BrokerInstrumentEntity", b =>
@@ -2360,6 +3711,55 @@ namespace DBManager.Postgres.Migrations
                         .HasDatabaseName("ix_broker_instruments_instrument_id");
 
                     b.ToTable("broker_instruments", "reference");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Reference.CredentialReferenceEntity", b =>
+                {
+                    b.Property<Guid>("CredentialReferenceId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("credential_reference_id");
+
+                    b.Property<bool>("Active")
+                        .HasColumnType("boolean")
+                        .HasColumnName("active");
+
+                    b.Property<Guid>("BrokerEnvironmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("broker_environment_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("provider");
+
+                    b.Property<string>("Purpose")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("purpose");
+
+                    b.Property<string>("SecretKey")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("secret_key");
+
+                    b.Property<string>("SecretVersion")
+                        .HasColumnType("text")
+                        .HasColumnName("secret_version");
+
+                    b.HasKey("CredentialReferenceId")
+                        .HasName("pk_credential_references");
+
+                    b.HasIndex("BrokerEnvironmentId", "Purpose")
+                        .IsUnique()
+                        .HasDatabaseName("ix_credential_references_one_active")
+                        .HasFilter("active");
+
+                    b.ToTable("credential_references", "reference");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Reference.InstrumentEntity", b =>
@@ -2884,6 +4284,610 @@ namespace DBManager.Postgres.Migrations
                     b.ToTable("reservation_events", "risk");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Security.BrokerCredentialEntity", b =>
+                {
+                    b.Property<string>("BrokerCode")
+                        .HasColumnType("text")
+                        .HasColumnName("broker_code");
+
+                    b.Property<string>("Environment")
+                        .HasColumnType("text")
+                        .HasColumnName("environment");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("created_at");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("boolean")
+                        .HasColumnName("enabled");
+
+                    b.Property<byte[]>("ProtectedPayload")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("protected_payload");
+
+                    b.Property<string>("ProtectionScheme")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("protection_scheme");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamptz")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("BrokerCode", "Environment")
+                        .HasName("pk_broker_credentials");
+
+                    b.ToTable("broker_credentials", "security");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationExperimentComparisonEntity", b =>
+                {
+                    b.Property<Guid>("ComparisonId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("comparison_id");
+
+                    b.Property<Guid>("BaselineSimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("baseline_simulation_id");
+
+                    b.Property<Guid>("CandidateSimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("candidate_simulation_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("ExperimentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("experiment_id");
+
+                    b.Property<string>("MetricsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("metrics_json");
+
+                    b.HasKey("ComparisonId")
+                        .HasName("pk_experiment_comparisons");
+
+                    b.HasIndex("ExperimentId")
+                        .HasDatabaseName("ix_experiment_comparisons_experiment_id");
+
+                    b.ToTable("experiment_comparisons", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationExperimentEntity", b =>
+                {
+                    b.Property<Guid>("ExperimentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("experiment_id");
+
+                    b.Property<string>("ConfigurationHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("configuration_hash");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("name");
+
+                    b.Property<string>("ResolvedConfigurationJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("resolved_configuration_json");
+
+                    b.Property<int>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer")
+                        .HasColumnName("revision");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("status");
+
+                    b.HasKey("ExperimentId")
+                        .HasName("pk_experiments");
+
+                    b.HasIndex("Status", "CreatedAt")
+                        .HasDatabaseName("ix_experiments_status_created_at");
+
+                    b.ToTable("experiments", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationExperimentRunEntity", b =>
+                {
+                    b.Property<Guid>("ExperimentRunId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("experiment_run_id");
+
+                    b.Property<DateTimeOffset?>("AnalysisWarmupFrom")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("analysis_warmup_from");
+
+                    b.Property<DateTimeOffset?>("EmbargoFrom")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("embargo_from");
+
+                    b.Property<DateTimeOffset?>("EmbargoTo")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("embargo_to");
+
+                    b.Property<DateTimeOffset?>("EvaluationFrom")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("evaluation_from");
+
+                    b.Property<DateTimeOffset?>("EvaluationTo")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("evaluation_to");
+
+                    b.Property<DateTimeOffset?>("EvaluationWarmupFrom")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("evaluation_warmup_from");
+
+                    b.Property<Guid>("ExperimentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("experiment_id");
+
+                    b.Property<DateTimeOffset?>("LearningFrom")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("learning_from");
+
+                    b.Property<DateTimeOffset?>("LearningTo")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("learning_to");
+
+                    b.Property<Guid>("ProfileRevisionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("profile_revision_id");
+
+                    b.Property<Guid?>("SharedAnalysisGroupId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("shared_analysis_group_id");
+
+                    b.Property<Guid>("SimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.Property<string>("VariantId")
+                        .HasColumnType("text")
+                        .HasColumnName("variant_id");
+
+                    b.HasKey("ExperimentRunId")
+                        .HasName("pk_experiment_runs");
+
+                    b.HasIndex("ExperimentId", "SimulationId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_experiment_runs_experiment_id_simulation_id");
+
+                    b.ToTable("experiment_runs", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationJobEntity", b =>
+                {
+                    b.Property<Guid>("SimulationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.Property<bool>("CancelRequested")
+                        .HasColumnType("boolean")
+                        .HasColumnName("cancel_requested");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("completed_at");
+
+                    b.Property<string>("ConfigurationHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("configuration_hash");
+
+                    b.Property<string>("FailureCode")
+                        .HasColumnType("text")
+                        .HasColumnName("failure_code");
+
+                    b.Property<string>("FailureDetail")
+                        .HasColumnType("text")
+                        .HasColumnName("failure_detail");
+
+                    b.Property<DateTimeOffset?>("HeartbeatAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("heartbeat_at");
+
+                    b.Property<string>("InputHash")
+                        .HasColumnType("text")
+                        .HasColumnName("input_hash");
+
+                    b.Property<string>("InputRequestId")
+                        .HasColumnType("text")
+                        .HasColumnName("input_request_id");
+
+                    b.Property<short>("JobKind")
+                        .HasColumnType("smallint")
+                        .HasColumnName("job_kind");
+
+                    b.Property<Guid?>("OutputManifestId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("output_manifest_id");
+
+                    b.Property<Guid?>("ParentExperimentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("parent_experiment_id");
+
+                    b.Property<bool>("PauseRequested")
+                        .HasColumnType("boolean")
+                        .HasColumnName("pause_requested");
+
+                    b.Property<short>("Phase")
+                        .HasColumnType("smallint")
+                        .HasColumnName("phase");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("requested_at");
+
+                    b.Property<string>("ResolvedConfigurationJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("resolved_configuration_json");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("revision");
+
+                    b.Property<string>("SnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("snapshot_json");
+
+                    b.Property<DateTimeOffset?>("StartedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("started_at");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.HasKey("SimulationId")
+                        .HasName("pk_jobs");
+
+                    b.HasIndex("ParentExperimentId")
+                        .HasDatabaseName("ix_jobs_parent_experiment_id");
+
+                    b.HasIndex("Status", "RequestedAt")
+                        .HasDatabaseName("ix_jobs_status_requested_at");
+
+                    b.ToTable("jobs", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationJobEventEntity", b =>
+                {
+                    b.Property<long>("EventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("event_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("EventId"));
+
+                    b.Property<string>("DetailsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("details_json");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("event_type");
+
+                    b.Property<long>("JobRevision")
+                        .HasColumnType("bigint")
+                        .HasColumnName("job_revision");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<Guid>("SimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.Property<short>("Status")
+                        .HasColumnType("smallint")
+                        .HasColumnName("status");
+
+                    b.HasKey("EventId")
+                        .HasName("pk_job_events");
+
+                    b.HasIndex("SimulationId", "OccurredAt")
+                        .HasDatabaseName("ix_job_events_simulation_id_occurred_at");
+
+                    b.HasIndex("SimulationId", "JobRevision", "EventType")
+                        .IsUnique()
+                        .HasDatabaseName("ix_job_events_simulation_id_job_revision_event_type");
+
+                    b.ToTable("job_events", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationJobProgressEntity", b =>
+                {
+                    b.Property<Guid>("SimulationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.Property<decimal>("CandlesPerSecond")
+                        .HasPrecision(20, 4)
+                        .HasColumnType("numeric(20,4)")
+                        .HasColumnName("candles_per_second");
+
+                    b.Property<string>("CurrentPhase")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("current_phase");
+
+                    b.Property<DateTimeOffset?>("MarketTime")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("market_time");
+
+                    b.Property<long>("ProcessedCandles")
+                        .HasColumnType("bigint")
+                        .HasColumnName("processed_candles");
+
+                    b.Property<decimal>("ProgressPercent")
+                        .HasPrecision(7, 4)
+                        .HasColumnType("numeric(7,4)")
+                        .HasColumnName("progress_percent");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("SimulationId")
+                        .HasName("pk_job_progress");
+
+                    b.ToTable("job_progress", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationOutputBlobEntity", b =>
+                {
+                    b.Property<Guid>("BlobId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("blob_id");
+
+                    b.Property<short>("BlobKind")
+                        .HasColumnType("smallint")
+                        .HasColumnName("blob_kind");
+
+                    b.Property<string>("ContentHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("content_hash");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("MediaType")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("media_type");
+
+                    b.Property<Guid>("OutputManifestId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("output_manifest_id");
+
+                    b.Property<DateTimeOffset?>("RetentionUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("retention_until");
+
+                    b.Property<Guid>("SimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("size_bytes");
+
+                    b.Property<string>("StorageUri")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("storage_uri");
+
+                    b.HasKey("BlobId")
+                        .HasName("pk_output_blobs");
+
+                    b.HasIndex("ContentHash")
+                        .HasDatabaseName("ix_output_blobs_content_hash");
+
+                    b.HasIndex("SimulationId", "BlobKind")
+                        .HasDatabaseName("ix_output_blobs_simulation_id_blob_kind");
+
+                    b.ToTable("output_blobs", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationOutputManifestEntity", b =>
+                {
+                    b.Property<Guid>("OutputManifestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("output_manifest_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("ManifestHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("manifest_hash");
+
+                    b.Property<Guid>("SimulationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("simulation_id");
+
+                    b.HasKey("OutputManifestId")
+                        .HasName("pk_output_manifests");
+
+                    b.HasIndex("SimulationId", "ManifestHash")
+                        .IsUnique()
+                        .HasDatabaseName("ix_output_manifests_simulation_id_manifest_hash");
+
+                    b.ToTable("output_manifests", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationProfileEntity", b =>
+                {
+                    b.Property<Guid>("ProfileId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("profile_id");
+
+                    b.Property<DateTimeOffset?>("ArchivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("archived_at");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("name");
+
+                    b.HasKey("ProfileId")
+                        .HasName("pk_experiment_profiles");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_experiment_profiles_name")
+                        .HasFilter("archived_at IS NULL");
+
+                    b.ToTable("experiment_profiles", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Simulation.SimulationProfileRevisionEntity", b =>
+                {
+                    b.Property<Guid>("ProfileRevisionId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("profile_revision_id");
+
+                    b.Property<string>("ConfigurationHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("configuration_hash");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("ProfileId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("profile_id");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer")
+                        .HasColumnName("revision");
+
+                    b.Property<string>("SettingsJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("settings_json");
+
+                    b.HasKey("ProfileRevisionId")
+                        .HasName("pk_profile_revisions");
+
+                    b.HasIndex("ProfileId", "Revision")
+                        .IsUnique()
+                        .HasDatabaseName("ix_profile_revisions_profile_id_revision");
+
+                    b.ToTable("profile_revisions", "simulation");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.CalibrationArtifactStatusEventEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Config.CalibrationArtifactEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ArtifactId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_calibration_artifact_status_events_calibration_artifacts_ar");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.CalibrationBundleCandidateEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Config.CalibrationArtifactEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ManagementArtifactId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_calibration_bundle_candidates_calibration_artifacts_managem");
+
+                    b.HasOne("DBManager.Postgres.Config.CalibrationArtifactEntity", null)
+                        .WithMany()
+                        .HasForeignKey("MetaModelArtifactId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_calibration_bundle_candidates_calibration_artifacts_meta_mo");
+
+                    b.HasOne("DBManager.Postgres.Config.CalibrationArtifactEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SetupArtifactId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_calibration_bundle_candidates_calibration_artifacts_setup_a");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.DeploymentAgentEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Reference.BrokerAccountEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BrokerAccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_deployment_agents_broker_accounts_broker_account_id");
+
+                    b.HasOne("DBManager.Postgres.Config.DeploymentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_deployment_agents_deployments_deployment_id");
+
+                    b.HasOne("DBManager.Postgres.Reference.InstrumentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("InstrumentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_deployment_agents_instruments_instrument_id");
+
+                    b.HasOne("DBManager.Postgres.Config.PolicyRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PolicyRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_deployment_agents_policy_revisions_policy_revision_id");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Config.DeploymentAssignmentEntity", b =>
                 {
                     b.HasOne("DBManager.Postgres.Config.DeploymentEntity", null)
@@ -2901,6 +4905,22 @@ namespace DBManager.Postgres.Migrations
                         .HasConstraintName("fk_deployment_assignments_instruments_instrument_id");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Config.DeploymentCommandEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Config.DeploymentAgentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DeploymentAgentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_deployment_commands_deployment_agents_deployment_agent_id");
+
+                    b.HasOne("DBManager.Postgres.Config.DeploymentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_deployment_commands_deployments_deployment_id");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Config.DeploymentEntity", b =>
                 {
                     b.HasOne("DBManager.Postgres.Reference.BrokerAccountEntity", null)
@@ -2914,8 +4934,33 @@ namespace DBManager.Postgres.Migrations
                         .WithMany()
                         .HasForeignKey("PolicyRevisionId")
                         .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired()
                         .HasConstraintName("fk_deployments_policy_revisions_policy_revision_id");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.DeploymentEventEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Config.DeploymentAgentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DeploymentAgentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_deployment_events_deployment_agents_deployment_agent_id");
+
+                    b.HasOne("DBManager.Postgres.Config.DeploymentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("DeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_deployment_events_deployments_deployment_id");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.ParityCertificationEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Config.PolicyRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PolicyRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_parity_certifications_policy_revisions_policy_revision_id");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Config.PolicyArtifactEntity", b =>
@@ -2935,6 +4980,16 @@ namespace DBManager.Postgres.Migrations
                         .HasConstraintName("fk_policy_artifacts_policy_revisions_policy_revision_id");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Config.PolicyPermissionEventEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Config.PolicyRevisionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PolicyRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_policy_permission_events_policy_revisions_policy_revision_id");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Config.PolicyRevisionEntity", b =>
                 {
                     b.HasOne("DBManager.Postgres.Config.PolicyProfileEntity", null)
@@ -2943,6 +4998,16 @@ namespace DBManager.Postgres.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_policy_revisions_policy_profiles_policy_id");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Config.RuntimeProfileRevisionEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Config.RuntimeProfileEntity", null)
+                        .WithMany()
+                        .HasForeignKey("RuntimeProfileId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_runtime_profile_revisions_runtime_profiles_runtime_profile_");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Execution.FillEntity", b =>
@@ -3022,6 +5087,42 @@ namespace DBManager.Postgres.Migrations
                         .HasConstraintName("fk_broker_accounts_brokers_broker_id");
                 });
 
+            modelBuilder.Entity("DBManager.Postgres.Reference.BrokerAccountSettingsRevisionEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Reference.BrokerAccountEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BrokerAccountId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_broker_account_settings_revisions_broker_accounts_broker_ac");
+
+                    b.HasOne("DBManager.Postgres.Reference.BrokerEnvironmentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BrokerEnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_broker_account_settings_revisions_broker_environments_broke");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Reference.BrokerEndpointRevisionEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Reference.BrokerEnvironmentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BrokerEnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_broker_endpoint_revisions_broker_environments_broker_enviro");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Reference.BrokerEnvironmentEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Reference.BrokerEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BrokerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_broker_environments_brokers_broker_id");
+                });
+
             modelBuilder.Entity("DBManager.Postgres.Reference.BrokerInstrumentEntity", b =>
                 {
                     b.HasOne("DBManager.Postgres.Reference.BrokerAccountEntity", null)
@@ -3037,6 +5138,16 @@ namespace DBManager.Postgres.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_broker_instruments_instruments_instrument_id");
+                });
+
+            modelBuilder.Entity("DBManager.Postgres.Reference.CredentialReferenceEntity", b =>
+                {
+                    b.HasOne("DBManager.Postgres.Reference.BrokerEnvironmentEntity", null)
+                        .WithMany()
+                        .HasForeignKey("BrokerEnvironmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_credential_references_broker_environments_broker_environmen");
                 });
 
             modelBuilder.Entity("DBManager.Postgres.Research.CalibrationRunEntity", b =>

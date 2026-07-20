@@ -48,7 +48,7 @@ public sealed class StreamingComparativeEngineTests
     }
 
     [Test]
-    public async Task Application_Service_Starts_Job_And_Completes_With_Inline_Candles()
+    public async Task Application_Service_Can_Complete_Without_Capturing_Market_Replay()
     {
         InstrumentKey instrument = new("FX:EUR/USD");
         BarInterval baseInterval = BarInterval.Minutes(1);
@@ -73,6 +73,7 @@ public sealed class StreamingComparativeEngineTests
             OutputDirectory = Path.Combine(tempRoot, "out"),
             JobsDirectory = Path.Combine(tempRoot, "jobs"),
             InlineCandles = candles,
+            CaptureMarketReplay = false,
             Runtime = new BacktestRuntimeOptions
             {
                 BaseInterval = baseInterval,
@@ -97,6 +98,9 @@ public sealed class StreamingComparativeEngineTests
         Assert.That(result.Strategies, Has.Count.EqualTo(2));
         Assert.That(File.Exists(Path.Combine(result.OutputDirectory, "manifest.json")), Is.True);
         Assert.That(File.Exists(Path.Combine(result.OutputDirectory, "COMPLETE")), Is.True);
+        Assert.That(
+            Directory.EnumerateFiles(Path.Combine(result.OutputDirectory, "market"), "chunk-*.json.gz"),
+            Is.Empty);
 
         SimulationJobSnapshot? snapshot = await service.GetAsync(result.SimulationId);
         Assert.That(snapshot, Is.Not.Null);

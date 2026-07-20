@@ -18,24 +18,27 @@ public sealed class OandaIntegrationTests
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
+        var credential = IntegrationTestEnvironment.RequiredCredential("OANDA", "DEMO");
         _instrument = new InstrumentKey(
             IntegrationTestEnvironment.Optional("OANDA_TEST_INSTRUMENT") ?? "FX:EUR/USD");
 
         _broker = BrokerClientFactory.CreateOanda(new OandaOptions
         {
-            Environment = IntegrationTestEnvironment.ParseBrokerEnvironment("OANDA_ENVIRONMENT"),
-            AccessToken = IntegrationTestEnvironment.Required("OANDA_TOKEN"),
-            AccountId = IntegrationTestEnvironment.Optional("OANDA_ACCOUNT_ID") ??
-                "not-used-by-market-data-tests",
-            BaseAddress = IntegrationTestEnvironment.OptionalUri("OANDA_BASE_URL")
+            Environment = IntegrationTestEnvironment.ParseStoredBrokerEnvironment(credential.Environment),
+            AccessToken = IntegrationTestEnvironment.RequiredCredentialValue(
+                credential.AccessToken,
+                "access token"),
+            AccountId = IntegrationTestEnvironment.RequiredCredentialValue(
+                credential.AccountId,
+                "account id"),
+            BaseAddress = IntegrationTestEnvironment.CredentialUri(credential.BaseAddress, "base address")
         });
     }
 
     [Test]
-    [Explicit("Calls the real OANDA API using environment-variable credentials.")]
+    [Explicit("Calls the real OANDA API using credentials from the database vault.")]
     public async Task AccountSummary_TravelsThroughBrokerAndNetworking()
     {
-        _ = IntegrationTestEnvironment.Required("OANDA_ACCOUNT_ID");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         IReadOnlyList<AccountSnapshot> accounts =
@@ -140,7 +143,6 @@ public sealed class OandaIntegrationTests
     [Explicit("Calls OANDA read-only order and position endpoints.")]
     public async Task OpenOrdersAndPositions_CanBeReadEvenWhenEmpty()
     {
-        _ = IntegrationTestEnvironment.Required("OANDA_ACCOUNT_ID");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         IReadOnlyList<BrokerOrder> orders =

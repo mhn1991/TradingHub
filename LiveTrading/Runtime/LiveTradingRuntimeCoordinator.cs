@@ -8,6 +8,7 @@ using LiveTrading.Persistence;
 using LiveTrading.Portfolio;
 using LiveTrading.Reconciliation;
 using LiveTrading.Registry;
+using LiveTrading.Shadow.Outcomes;
 using PortfolioManager.Risk;
 using RiskManager.Safety;
 using TradingCore.Pipeline;
@@ -57,6 +58,7 @@ public sealed record LiveRuntimeSnapshot
     public required PortfolioReservationSnapshot Reservations { get; init; }
     public required IReadOnlyList<ManualApprovalCandidate> ManualCandidates { get; init; }
     public required IReadOnlyList<PortfolioDecision> RecentPortfolioDecisions { get; init; }
+    public required LiveShadowOutcomeSnapshot Shadow { get; init; }
     public required DateTimeOffset AsOf { get; init; }
 }
 
@@ -131,6 +133,7 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
     private readonly ITradingSafetyController _safety;
     private readonly ILiveTradingPersistence _persistence;
     private readonly ILivePolicyRegistry _policies;
+    private readonly ILiveShadowOutcomeService _shadowOutcomes;
     private readonly TimeProvider _timeProvider;
     private readonly Queue<PortfolioDecision> _recentDecisions = new();
     private BrokerReconciliationReport? _lastReconciliation;
@@ -148,6 +151,7 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
         ITradingSafetyController safety,
         ILiveTradingPersistence persistence,
         ILivePolicyRegistry policies,
+        ILiveShadowOutcomeService shadowOutcomes,
         TimeProvider timeProvider)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -163,6 +167,7 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
         _safety = safety;
         _persistence = persistence;
         _policies = policies;
+        _shadowOutcomes = shadowOutcomes;
         _timeProvider = timeProvider;
     }
 
@@ -188,6 +193,7 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
                     Reservations = _reservations.Snapshot,
                     ManualCandidates = _manualApprovals.Snapshot,
                     RecentPortfolioDecisions = _recentDecisions.ToArray(),
+                    Shadow = _shadowOutcomes.Snapshot,
                     AsOf = _timeProvider.GetUtcNow()
                 };
             }
@@ -207,6 +213,8 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
                 _reservations.Restore(checkpoint.Reservations);
                 _manualApprovals.Restore(checkpoint.ManualApprovals);
                 _safety.Restore(checkpoint.Safety, _timeProvider.GetUtcNow());
+                await _shadowOutcomes.RestoreAsync(checkpoint.ShadowOutcomes, cancellationToken)
+                    .ConfigureAwait(false);
             }
             LiveAccountStateSnapshot account = await _account.RefreshAsync(cancellationToken).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(checkpoint?.LastBrokerTransactionId))
@@ -271,18 +279,28 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
                              StrategyActivationMode.ObserveOnly or StrategyActivationMode.Shadow))
             {
                 StrategyActivationMode mode = activationModes[candidate.CandidateId];
+                _account.TryGetQuote(candidate.Instrument, out var quote);
+                ShadowAdmissionResult shadow = await _shadowOutcomes.AdmitAsync(
+                    candidate,
+                    mode,
+                    quote,
+                    cancellationToken).ConfigureAwait(false);
                 PortfolioDecision nonExecuting = new()
                 {
                     Candidate = candidate,
                     Approved = false,
                     ReasonCode = "NonExecutingDeploymentMode",
-                    Explanation = $"Deployment mode {mode} records the neutral strategy candidate but cannot reserve capital or submit an order."
+                    Explanation = mode == StrategyActivationMode.Shadow
+                        ? $"Shadow outcome: {shadow.Admission.Disposition}. No capital was reserved and no broker order was submitted."
+                        : "ObserveOnly recorded decision diagnostics without opening a paper or real position."
                 };
                 RecordDecision(nonExecuting);
-                await PersistAsync("shadow-candidates", nonExecuting, cancellationToken).ConfigureAwait(false);
             }
             if (executableCandidates.Length == 0)
+            {
+                await SaveCheckpointCoreAsync(cleanShutdown: false, cancellationToken).ConfigureAwait(false);
                 return;
+            }
 
             if (!_options.BrokerWritesEnabled)
             {
@@ -852,6 +870,7 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
             ManualApprovals = _manualApprovals.Snapshot,
             Safety = _safety.Snapshot,
             LastReconciliationId = _lastReconciliation?.ReconciliationId,
+            ShadowOutcomes = _shadowOutcomes.Checkpoint,
             CleanShutdown = cleanShutdown
         }, cancellationToken).AsTask();
 }

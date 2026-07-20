@@ -58,7 +58,7 @@ public sealed class BinanceStreamingCandleSource :
             await StreamingCandleCacheWriter.TryValidateManifestAsync(cachePath, request, cancellationToken)
                 .ConfigureAwait(false))
         {
-            RaiseProgress(0, null, "LoadingCache", fromCache: true, pages: 0);
+            RaiseProgress(0, null, "ReadingCache", fromCache: true, pages: 0);
             long count = 0;
             await foreach (MarketCandle candle in StreamingCandleCache.ReadStreamAsync(
                                cachePath,
@@ -68,7 +68,7 @@ public sealed class BinanceStreamingCandleSource :
             {
                 count++;
                 if (count % 2_000 == 0)
-                    RaiseProgress(count, candle.OpenTime, "LoadingCache", fromCache: true, pages: 0);
+                    RaiseProgress(count, candle.OpenTime, "ReadingCache", fromCache: true, pages: 0);
                 yield return candle;
             }
 

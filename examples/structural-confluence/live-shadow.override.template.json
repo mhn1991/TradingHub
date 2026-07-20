@@ -1,0 +1,52 @@
+{
+  "_templateWarning": "Replace the placeholder profile with the exact ApprovedForDemo TradingPolicyProfile before starting the host.",
+  "LiveExecution": {
+    "BrokerWritesEnabled": false,
+    "AutomaticExecutionEnabled": false,
+    "PartialCloseEnabled": false,
+    "DynamicStopReplacementEnabled": false
+  },
+  "LiveShadowOutcomes": {
+    "Enabled": true,
+    "MaximumOpenPaperPositions": 10,
+    "DefaultQuantity": 1000,
+    "EntrySlippageBasisPoints": 0.5,
+    "ExitSlippageBasisPoints": 0.5,
+    "CommissionBasisPointsPerSide": 0,
+    "FinancingBasisPointsPerDay": 0,
+    "RejectSecondPositionPerInstrument": true
+  },
+  "LiveMarkets": {
+    "Markets": [
+      {
+        "Instrument": { "Value": "FX:EUR/USD" },
+        "Strategies": [
+          {
+            "StrategyId": "structural-confluence",
+            "PolicyBundleId": "structural-eurusd-approved",
+            "Mode": "Shadow",
+            "Enabled": true
+          }
+        ],
+        "ExecutionInterval": { "Value": 1, "Unit": "Minute" },
+        "AnalysisBaseInterval": { "Value": 1, "Unit": "Minute" },
+        "AnalysisIntervals": [
+          { "Value": 1, "Unit": "Minute" },
+          { "Value": 5, "Unit": "Minute" },
+          { "Value": 15, "Unit": "Minute" },
+          { "Value": 1, "Unit": "Hour" }
+        ],
+        "Enabled": true,
+        "CandleCapacity": 2000
+      }
+    ]
+  },
+  "LivePolicyBundles": {
+    "structural-eurusd-approved": {
+      "DeploymentDescription": "Exact immutable profile approved for EUR/USD demo shadow evaluation.",
+      "Profile": {
+        "_replaceWithExactApprovedTradingPolicyProfile": true
+      }
+    }
+  }
+}

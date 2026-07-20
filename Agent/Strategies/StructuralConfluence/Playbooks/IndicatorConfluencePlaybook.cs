@@ -1,0 +1,211 @@
+using Agent.Models;
+using Agent.Strategies.StructuralConfluence.Evidence;
+using ChartAnnotator.Models;
+
+namespace Agent.Strategies.StructuralConfluence.Playbooks;
+
+/// <summary>
+/// Entry driven purely by indicator confluence rather than structure: ADX/DMI establishes trend
+/// presence and direction, RSI confirms momentum is turning in that direction (and isn't already
+/// exhausted), and Bollinger Bands confirm there's enough volatility for the move to travel. Each
+/// indicator answers a different question - deliberately not stacking two indicators that measure
+/// the same thing (e.g. RSI and CCI would both just be momentum oscillators agreeing with
+/// themselves). Has no zone/pool/level to anchor risk to, so unlike the other three playbooks its
+/// stop/target is a plain ATR multiple.
+/// </summary>
+public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
+{
+    public const string StableId = "structural.indicator-confluence";
+    private readonly StructuralConfluenceStrategyOptions _root;
+    private readonly IndicatorConfluenceOptions _options;
+
+    public IndicatorConfluencePlaybook(StructuralConfluenceStrategyOptions options)
+    {
+        _root = options;
+        _options = options.IndicatorConfluence;
+    }
+
+    public string PlaybookId => StableId;
+    public string Version => "1.0";
+
+    public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
+    {
+        IndicatorConfirmationPacket indicators = evidence.Indicators;
+        AdxAnalysisSnapshot adx = indicators.AdxAnalysis;
+
+        // ADX/DMI supplies both "is there a trend" and "which way" - there is no structural zone
+        // to derive direction from here, so the trend indicator itself is the direction source.
+        if (adx.DirectionalBias == PriceActionDirection.Neutral)
+            return Dormant("StructuralIndicatorTrendUnavailable");
+
+        PriceActionDirection direction = adx.DirectionalBias;
+        bool buy = direction == PriceActionDirection.Bullish;
+        decimal price = evidence.Trigger.LatestCandle.Prices.Close;
+        decimal? atr = evidence.Indicators.Atr ?? evidence.Trigger.Indicators.Atr;
+
+        RsiAnalysisSnapshot rsi = indicators.RsiAnalysis;
+        decimal? rsiValue = indicators.Rsi;
+        BollingerAnalysisSnapshot bollinger = indicators.BollingerAnalysis;
+
+        bool trendPasses = adx.Adx is decimal adxValue && adxValue >= _options.MinimumAdx &&
+            (!_options.RequireTrendStrengthening || adx.IsTrendStrengthening);
+
+        bool momentumDirectionMatches = buy
+            ? rsi.MomentumDirection == MomentumDirection.Rising
+            : rsi.MomentumDirection == MomentumDirection.Falling;
+        bool momentumNotExhausted = rsiValue is decimal rsiVal &&
+            (buy ? rsiVal <= _options.MaximumRsiForBuy : rsiVal >= _options.MinimumRsiForSell);
+        bool momentumPasses = momentumDirectionMatches && momentumNotExhausted;
+
+        bool volatilityPasses = _options.RequireSqueezeBreakout
+            ? !bollinger.IsSqueeze && bollinger.WidthDirection == VolatilityDirection.Expanding
+            : !bollinger.IsSqueeze;
+
+        decimal adxQuality = adx.Adx is decimal adxForQuality
+            ? Math.Clamp(50m + (adxForQuality - _options.MinimumAdx) * 2m, 0m, 100m)
+            : 0m;
+        // Distance from neutral (50), not the raw RSI value - using RSI itself as quality made
+        // Confidence = min(gate qualities) silently require RSI >= MinimumConfidence (55 by
+        // default) for every buy, since that gate's quality would otherwise sit below the
+        // confidence floor even when the actual momentum gate (momentumPasses above) had already
+        // passed. Centering on neutral means a fresh momentum shift right off 50 doesn't get
+        // penalized just for not yet being deep into overbought/oversold territory.
+        decimal rsiQuality = rsiValue is decimal rsiForQuality
+            ? Math.Clamp(50m + (buy ? rsiForQuality - 50m : 50m - rsiForQuality) * 1.5m, 0m, 100m)
+            : 0m;
+        decimal bollingerQuality = bollinger.WidthPercentile is decimal widthPercentile
+            ? Math.Clamp(widthPercentile, 0m, 100m)
+            : 50m;
+
+        var gates = new List<MandatoryGate>
+        {
+            Gate("Trend", trendPasses, adxQuality, "StructuralIndicatorTrendBelowMinimum"),
+            Gate("Momentum", momentumPasses, rsiQuality, "StructuralIndicatorMomentumNotAligned"),
+            Gate("Volatility", volatilityPasses, bollingerQuality, "StructuralIndicatorVolatilityInsufficient")
+        };
+
+        StructuralGeometry geometry = BuildAtrGeometry(direction, price, atr, evidence.ExecutableSpread);
+        gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
+
+        decimal confidence = StructuralPlaybookRules.Confidence(gates, 0m, 0m, 0m);
+        bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
+
+        // Unlike the other three playbooks, there is no persistent zone/pool/break event to anchor
+        // identity to - confluence is recomputed fresh from indicator state every bar. Without this,
+        // a fresh SetupId (and CatalystAt) was minted every single bar confluence held, breaking any
+        // consumer that dedupes or tracks a setup by SetupId across bars and re-arming a "new" setup
+        // every evaluation even while the same trade opportunity was still live. Carry the prior
+        // bar's identity forward for as long as the same direction stays ready; only mint a new one
+        // when this is a fresh (or re-armed, or direction-flipped) candidate.
+        DateTimeOffset catalystAt;
+        string setupId;
+        if (ready && state.LastEvaluation is { IsReady: true, SetupId: not null } lastReady &&
+            lastReady.Direction == direction)
+        {
+            setupId = lastReady.SetupId;
+            catalystAt = lastReady.CatalystAt ?? evidence.AvailableAt;
+        }
+        else
+        {
+            catalystAt = evidence.AvailableAt;
+            string catalystIdentity = $"{catalystAt:O}-{price}";
+            setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
+                null, null, catalystIdentity, catalystAt, direction);
+        }
+
+        return new PlaybookEvaluation
+        {
+            PlaybookId = PlaybookId,
+            Version = Version,
+            Direction = direction,
+            Lifecycle = ready ? StructuralSetupLifecycle.CandidateProduced : StructuralSetupLifecycle.Dormant,
+            SetupId = setupId,
+            CatalystAt = catalystAt,
+            MandatoryGates = gates.AsReadOnly(),
+            SupportingEvidence = BuildSupport(trendPasses, momentumPasses, volatilityPasses),
+            ConflictingEvidence = [],
+            ConfidenceContributions =
+            [
+                new("Trend", 0m, trendPasses ? "StructuralIndicatorTrendAligned" : "StructuralIndicatorTrendMissing"),
+                new("Momentum", 0m, momentumPasses ? "StructuralIndicatorMomentumAligned" : "StructuralIndicatorMomentumMissing")
+            ],
+            ContextQuality = adxQuality,
+            LocationQuality = 0m,
+            CatalystQuality = rsiQuality,
+            TriggerQuality = rsiQuality,
+            ConfirmationQuality = bollingerQuality,
+            GeometryQuality = geometry.Quality,
+            Confidence = confidence,
+            ExpiresAt = catalystAt + StructuralPlaybookRules.Bars(evidence.Trigger.Interval, _root.MaximumArmedSetupBars),
+            ReasonCode = ready ? "StructuralIndicatorConfluenceCandidate" : FirstFailure(gates, confidence, _options.MinimumConfidence),
+            IsReady = ready,
+            Geometry = geometry
+        };
+    }
+
+    private StructuralGeometry BuildAtrGeometry(
+        PriceActionDirection direction,
+        decimal price,
+        decimal? atr,
+        decimal executableSpread)
+    {
+        if (atr is not > 0m)
+            return Invalid(price, "StructuralIndicatorAtrUnavailable");
+
+        bool buy = direction == PriceActionDirection.Bullish;
+        decimal entry = price + (buy ? executableSpread : -executableSpread) / 2m;
+        decimal stop = entry + (buy ? -1m : 1m) * _options.StopAtr * atr.Value;
+        decimal target = entry + (buy ? 1m : -1m) * _options.TargetAtr * atr.Value;
+        decimal risk = buy ? entry - stop : stop - entry;
+        decimal reward = buy ? target - entry : entry - target;
+        if (risk <= 0m || reward <= 0m)
+            return Invalid(entry, "StructuralIndicatorGeometryInvalid");
+
+        decimal rewardRisk = reward / risk;
+        decimal quality = Math.Clamp(50m + Math.Min(40m, (rewardRisk - 1m) * 15m), 0m, 100m);
+        return new StructuralGeometry
+        {
+            IsValid = true,
+            Entry = entry,
+            Stop = stop,
+            Target = target,
+            RewardRisk = rewardRisk,
+            Quality = quality,
+            StopSource = $"AtrMultiple:{_options.StopAtr:F2}",
+            TargetSource = $"AtrMultiple:{_options.TargetAtr:F2}",
+            ReasonCode = "StructuralIndicatorGeometryValid"
+        };
+    }
+
+    private static StructuralGeometry Invalid(decimal entry, string reasonCode) => new()
+    {
+        IsValid = false,
+        Entry = entry,
+        ReasonCode = reasonCode
+    };
+
+    private PlaybookEvaluation Dormant(string reasonCode) => new()
+    {
+        PlaybookId = PlaybookId,
+        Version = Version,
+        Direction = PriceActionDirection.Neutral,
+        Lifecycle = StructuralSetupLifecycle.Dormant,
+        ReasonCode = reasonCode
+    };
+
+    private static IReadOnlyList<string> BuildSupport(bool trend, bool momentum, bool volatility)
+    {
+        var result = new List<string>();
+        if (trend) result.Add("StructuralIndicatorTrendAligned");
+        if (momentum) result.Add("StructuralIndicatorMomentumAligned");
+        if (volatility) result.Add("StructuralIndicatorVolatilitySupportive");
+        return result.AsReadOnly();
+    }
+
+    private static MandatoryGate Gate(string name, bool passed, decimal quality, string failure) =>
+        new(name, passed, Math.Clamp(quality, 0m, 100m), passed ? $"{name}Passed" : failure);
+
+    private static string FirstFailure(IReadOnlyList<MandatoryGate> gates, decimal confidence, decimal minimum) =>
+        gates.FirstOrDefault(item => !item.Passed)?.ReasonCode ??
+        (confidence < minimum ? "StructuralConfidenceBelowMinimum" : "StructuralCandidateNotReady");
+}

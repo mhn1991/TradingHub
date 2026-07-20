@@ -2,6 +2,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Agent.Configuration;
+using DBManager.Postgres.Security;
+using Microsoft.EntityFrameworkCore;
 using QuantResearch.Analysis;
 using QuantResearch.Calibration;
 using QuantResearch.Models;
@@ -14,15 +17,22 @@ using QuantResearchRunner.Mapping;
 using QuantResearchRunner.Models;
 using RiskManager.Calibration;
 using Simulator.Calibration;
+using Simulator.Experiments;
+using Simulator.Experiments.Models;
+using Simulator.Experiments.Persistence;
 using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
 using TradeManager;
+using TradingHub.Persistence.Postgres.Bootstrap;
+using TradingHub.Persistence.Postgres.Calibration;
+using TradingHub.Persistence.Postgres.Simulation;
 
 namespace QuantResearchRunner;
 
 public static class Program
 {
+    private static StandaloneTradingHubContextFactory? _contextFactory;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -39,6 +49,7 @@ public static class Program
 
         try
         {
+            await InitializePersistenceAsync().ConfigureAwait(false);
             return args[0] switch
             {
                 "walk-forward" => await RunWalkForwardAsync(args).ConfigureAwait(false),
@@ -49,6 +60,7 @@ public static class Program
                 "calibrate-setups" => await RunCalibrateSetupsAsync(args).ConfigureAwait(false),
                 "calibrate-management" => await RunCalibrateManagementAsync(args).ConfigureAwait(false),
                 "calibrate-metamodel" => await RunCalibrateMetaModelAsync(args).ConfigureAwait(false),
+                "experiment" => await RunSimulationExperimentAsync(args).ConfigureAwait(false),
                 string verb => Unknown(verb)
             };
         }
@@ -78,7 +90,7 @@ public static class Program
         await WriteJsonAsync(Path.Combine(experimentDirectory, "plan.json"), scopedPlan).ConfigureAwait(false);
 
         await using var service = new BacktestApplicationService(
-            new FileSimulationJobRepository(Path.Combine(experimentDirectory, "jobs")),
+            CreateSimulationJobRepository(),
             new BacktestApplicationServiceOptions { MaxConcurrentJobs = 1, QueueCapacity = 4 });
         var ledger = new ExperimentLedger(experimentDirectory);
 
@@ -126,15 +138,14 @@ public static class Program
             return 1;
         }
 
-        string jobsDirectory = ReadOption(args, "--jobs-directory") ?? Path.Combine(".cache", "simulation-jobs");
         string outputDirectory = ReadOption(args, "--output")
             ?? Path.Combine("research", "monte-carlo", simulationId.ToString("N"));
 
-        var repository = new FileSimulationJobRepository(jobsDirectory);
+        ISimulationJobRepository repository = CreateSimulationJobRepository();
         SimulationJobSnapshot? snapshot = await repository.GetAsync(simulationId).ConfigureAwait(false);
         if (snapshot?.OutputDirectory is not string simulationOutputDirectory)
         {
-            Console.Error.WriteLine($"No completed simulation found for id '{simulationId}' under '{jobsDirectory}'.");
+            Console.Error.WriteLine($"No completed simulation found for id '{simulationId}' in PostgreSQL.");
             return 1;
         }
 
@@ -164,8 +175,6 @@ public static class Program
             return 1;
         }
 
-        string jobsDirectory = ReadOption(args, "--jobs-directory") ??
-            Path.Combine(".cache", "simulation-jobs");
         string outputDirectory = ReadOption(args, "--output") ??
             Path.Combine("research", "neo-wave-attribution", simulationId.ToString("N"));
         int minimumSamples = int.TryParse(ReadOption(args, "--minimum-samples"), out int parsedMinimum)
@@ -175,12 +184,12 @@ public static class Program
         var options = new NeoWaveAttributionOptions { MinimumCohortSamples = minimumSamples };
         options.Validate();
 
-        var repository = new FileSimulationJobRepository(jobsDirectory);
+        ISimulationJobRepository repository = CreateSimulationJobRepository();
         SimulationJobSnapshot? snapshot = await repository.GetAsync(simulationId).ConfigureAwait(false);
         if (snapshot?.OutputDirectory is not string simulationOutputDirectory)
         {
             Console.Error.WriteLine(
-                $"No completed simulation found for id '{simulationId}' under '{jobsDirectory}'.");
+                $"No completed simulation found for id '{simulationId}' in PostgreSQL.");
             return 1;
         }
 
@@ -352,8 +361,9 @@ public static class Program
         Guid? existingMetaModelArtifactId = null)
     {
         string experimentId = Path.GetFileName(experimentDirectory);
-        var repository = new FileCalibrationArtifactRepository(ReadOption(args, "--artifacts-directory")
-            ?? Path.Combine(".cache", "calibration-artifacts"));
+        var repository = new PostgresCalibrationArtifactRepository(
+            _contextFactory ?? throw new InvalidOperationException("PostgreSQL persistence has not been initialized."),
+            TimeProvider.System);
         await using BacktestApplicationService service = BuildService(experimentDirectory);
         var pipeline = new CalibrationTrainingPipeline(service, repository);
 
@@ -383,6 +393,108 @@ public static class Program
         return await pipeline.RunAsync(request, progress).ConfigureAwait(false);
     }
 
+    private static async Task<int> RunSimulationExperimentAsync(string[] args)
+    {
+        string experimentsDirectory = ReadOption(args, "--experiments-directory") ??
+            Path.Combine(".cache", "simulation-experiments");
+        string? outputPath = ReadOption(args, "--output");
+        string? resumeValue = ReadOption(args, "--resume");
+
+        SimulationExperimentRequest? request = null;
+        Guid? resumeId = null;
+        if (resumeValue is not null)
+        {
+            if (!Guid.TryParse(resumeValue, out Guid parsed))
+                throw new ArgumentException("--resume requires an experiment GUID.");
+            resumeId = parsed;
+        }
+        else
+        {
+            string? planPath = ReadOption(args, "--plan") ??
+                (args.Length > 1 && !args[1].StartsWith("-", StringComparison.Ordinal) ? args[1] : null);
+            if (planPath is null || !File.Exists(planPath))
+                throw new ArgumentException("Usage: experiment --plan experiment.json [options], or experiment --resume id [options].");
+            await using FileStream stream = File.OpenRead(planPath);
+            request = await JsonSerializer.DeserializeAsync<SimulationExperimentRequest>(stream, JsonOptions)
+                .ConfigureAwait(false)
+                ?? throw new ArgumentException($"Could not parse experiment plan '{planPath}'.");
+            request.Validate();
+        }
+
+        StandaloneTradingHubContextFactory contextFactory = _contextFactory
+            ?? throw new InvalidOperationException("PostgreSQL persistence has not been initialized.");
+        var experimentRepository = new PostgresSimulationExperimentRepository(contextFactory);
+        SimulationExperimentParallelism parallelism = request?.Parallelism ??
+            (await experimentRepository.GetAsync(resumeId!.Value).ConfigureAwait(false))?.Manifest.Parallelism ??
+            throw new KeyNotFoundException($"Experiment '{resumeId:N}' was not found.");
+        var profileStore = new PostgresSimulationStrategyProfileStore(contextFactory);
+        var artifactRepository = new PostgresCalibrationArtifactRepository(contextFactory, TimeProvider.System);
+        await using var backtests = new BacktestApplicationService(
+            CreateSimulationJobRepository(),
+            new BacktestApplicationServiceOptions
+            {
+                MaxConcurrentJobs = Math.Max(1, parallelism.MaxProfileGroups),
+                QueueCapacity = Math.Max(4, parallelism.MaxProfileGroups * 2)
+            });
+        using var governor = new SimulationResourceGovernor(new SimulationResourceGovernorOptions
+        {
+            MaxConcurrentExperiments = 1,
+            MaxConcurrentProfileGroups = parallelism.MaxProfileGroups,
+            MaxHistoricalDownloadsPerBroker = parallelism.MaxHistoricalDownloadsPerBroker,
+            MaxTotalStrategyWorkers = parallelism.MaxTotalStrategyWorkers
+        });
+        var baseExecutor = new BacktestSimulationExperimentExecutor(backtests, artifactRepository);
+        var training = new CalibrationTrainingPipeline(backtests, artifactRepository);
+        var executor = new CalibrationAwareSimulationExperimentExecutor(baseExecutor, training, artifactRepository);
+        await using var experiments = new SimulationExperimentApplicationService(
+            experimentRepository,
+            profileStore,
+            executor,
+            governor,
+            new SimulationExperimentApplicationServiceOptions { DispatcherCount = 1, QueueCapacity = 2 });
+
+        Guid experimentId;
+        if (resumeId is { } existingId)
+        {
+            await experiments.ResumeAsync(existingId).ConfigureAwait(false);
+            experimentId = existingId;
+            Console.WriteLine($"Resumed experiment {experimentId:N}.");
+        }
+        else
+        {
+            SimulationExperimentHandle handle = await experiments.StartAsync(request!).ConfigureAwait(false);
+            experimentId = handle.Id;
+            Console.WriteLine($"Accepted experiment {experimentId:N}.");
+        }
+
+        int lastRevision = -1;
+        SimulationExperimentSnapshot final;
+        while (true)
+        {
+            final = await experiments.GetAsync(experimentId).ConfigureAwait(false)
+                ?? throw new InvalidOperationException($"Experiment '{experimentId:N}' disappeared.");
+            if (final.Revision != lastRevision)
+            {
+                Console.WriteLine($"[{final.Revision}] {final.State}/{final.Stage}");
+                lastRevision = final.Revision;
+            }
+            if (final.IsTerminal)
+                break;
+            await Task.Delay(250).ConfigureAwait(false);
+        }
+
+        outputPath ??= Path.Combine(experimentsDirectory, experimentId.ToString("N"), "cli-result.json");
+        string? outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+        if (!string.IsNullOrEmpty(outputDirectory))
+            Directory.CreateDirectory(outputDirectory);
+        await WriteJsonAsync(outputPath, final).ConfigureAwait(false);
+        Console.WriteLine($"Wrote resolved experiment snapshot to {outputPath}");
+        if (final.State == SimulationExperimentState.Completed)
+            return 0;
+        Console.Error.WriteLine(final.FailureReason ?? $"Experiment ended in state {final.State}.");
+        return 1;
+    }
+
 
     private static async Task<(QuantResearchPlan Plan, string ExperimentDirectory)> LoadScopedPlanAsync(string planPath)
     {
@@ -396,8 +508,32 @@ public static class Program
     }
 
     private static BacktestApplicationService BuildService(string experimentDirectory) => new(
-        new FileSimulationJobRepository(Path.Combine(experimentDirectory, "jobs")),
+        CreateSimulationJobRepository(),
         new BacktestApplicationServiceOptions { MaxConcurrentJobs = 1, QueueCapacity = 4 });
+
+    private static ISimulationJobRepository CreateSimulationJobRepository() =>
+        new PostgresSimulationJobRepository(
+            _contextFactory ?? throw new InvalidOperationException("PostgreSQL persistence has not been initialized."),
+            TimeProvider.System);
+
+    private static async Task InitializePersistenceAsync()
+    {
+        BrokerCredentialDatabaseConfiguration? configuration =
+            BrokerCredentialDatabaseConfiguration.TryLoad(Directory.GetCurrentDirectory(), out _);
+        if (configuration is null)
+            throw new InvalidOperationException(
+                "PostgreSQL configuration is required at .state/tradinghub.database.json.");
+
+        var contextFactory = new StandaloneTradingHubContextFactory(configuration.ConnectionString);
+        await using var context = await contextFactory.CreateDbContextAsync().ConfigureAwait(false);
+        if (!await context.Database.CanConnectAsync().ConfigureAwait(false))
+            throw new InvalidOperationException("TradingHub PostgreSQL is unavailable.");
+        string[] pending = (await context.Database.GetPendingMigrationsAsync().ConfigureAwait(false)).ToArray();
+        if (pending.Length != 0)
+            throw new InvalidOperationException(
+                $"TradingHub PostgreSQL has {pending.Length} pending migration(s); apply them before running research.");
+        _contextFactory = contextFactory;
+    }
 
     private static Task MarkCompleteAsync(string experimentDirectory) =>
         File.WriteAllTextAsync(Path.Combine(experimentDirectory, "COMPLETE"), DateTimeOffset.UtcNow.ToString("O"));
@@ -416,7 +552,17 @@ public static class Program
         QuantResearchPlan? plan = await JsonSerializer
             .DeserializeAsync<QuantResearchPlan>(stream, JsonOptions)
             .ConfigureAwait(false);
-        return plan ?? throw new ArgumentException($"Could not parse plan file '{path}'.");
+        if (plan is null)
+            throw new ArgumentException($"Could not parse plan file '{path}'.");
+        if (plan.Strategies is null)
+            throw new ArgumentException("Plan strategies are required.");
+        return plan with
+        {
+            Strategies = plan.Strategies
+                .Select(strategy => TradingAgentTypeIds.Format(TradingAgentTypeIds.Parse(strategy)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray()
+        };
     }
 
     private static async Task WriteJsonAsync<T>(string path, T value)
@@ -446,6 +592,8 @@ public static class Program
               dotnet run --project QuantResearchRunner -- calibrate-setups plan.json [--artifacts-directory dir]
               dotnet run --project QuantResearchRunner -- calibrate-management plan.json [--artifacts-directory dir]
               dotnet run --project QuantResearchRunner -- calibrate-metamodel plan.json [--artifacts-directory dir]
+              dotnet run --project QuantResearchRunner -- experiment --plan experiment.json [--profiles-directory dir] [--output file]
+              dotnet run --project QuantResearchRunner -- experiment --resume experiment-id [--experiments-directory dir] [--output file]
             """);
     }
 }

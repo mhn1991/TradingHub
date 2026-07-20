@@ -129,6 +129,7 @@ public sealed class PolicyConfigurationStore(IDbContextFactory<TradingHubDbConte
             TestTo = command.TestTo,
             SampleCount = command.SampleCount,
             MetricsJson = command.MetricsJson,
+            MediaType = "application/octet-stream",
             CreatedAt = DateTimeOffset.UtcNow
         });
 
@@ -247,15 +248,18 @@ public sealed class PolicyConfigurationStore(IDbContextFactory<TradingHubDbConte
             previousActive.Status = DeploymentStatus.Stopped;
             previousActive.StoppedAt = now;
             previousActive.StopReason = "superseded_by_activation";
-            context.DeploymentActivationEvents.Add(new DeploymentActivationEventEntity
+            if (previousActive.PolicyRevisionId is { } previousRevisionId)
             {
-                DeploymentId = previousActive.DeploymentId,
-                OccurredAt = now,
-                EventType = "Closed",
-                PolicyRevisionId = previousActive.PolicyRevisionId,
-                ActorIdentity = command.StartedBy,
-                Reason = "superseded_by_activation"
-            });
+                context.DeploymentActivationEvents.Add(new DeploymentActivationEventEntity
+                {
+                    DeploymentId = previousActive.DeploymentId,
+                    OccurredAt = now,
+                    EventType = "Closed",
+                    PolicyRevisionId = previousRevisionId,
+                    ActorIdentity = command.StartedBy,
+                    Reason = "superseded_by_activation"
+                });
+            }
         }
 
         context.Deployments.Add(new DeploymentEntity
@@ -266,8 +270,12 @@ public sealed class PolicyConfigurationStore(IDbContextFactory<TradingHubDbConte
             HostInstanceId = command.HostInstanceId,
             ExecutionMode = command.ExecutionMode,
             Status = DeploymentStatus.Active,
+            RequestedAt = now,
+            RunningAt = now,
             StartedAt = now,
             StartedBy = command.StartedBy,
+            RequestedBy = command.StartedBy,
+            ConcurrencyToken = 1,
             DeploymentHash = command.DeploymentHash
         });
         context.DeploymentActivationEvents.Add(new DeploymentActivationEventEntity
@@ -387,7 +395,10 @@ public sealed class PolicyConfigurationStore(IDbContextFactory<TradingHubDbConte
         DeploymentEntity? deployment = await context.Deployments
             .AsNoTracking()
             .FirstOrDefaultAsync(
-                d => d.BrokerAccountId == brokerAccountId && d.Status == DeploymentStatus.Active,
+                d => d.BrokerAccountId == brokerAccountId
+                    && d.Status == DeploymentStatus.Active
+                    && d.PolicyRevisionId.HasValue
+                    && d.StartedAt.HasValue,
                 cancellationToken)
             .ConfigureAwait(false);
         if (deployment is null)
@@ -397,11 +408,11 @@ public sealed class PolicyConfigurationStore(IDbContextFactory<TradingHubDbConte
         {
             DeploymentId = deployment.DeploymentId,
             BrokerAccountId = deployment.BrokerAccountId,
-            PolicyRevisionId = deployment.PolicyRevisionId,
+            PolicyRevisionId = deployment.PolicyRevisionId!.Value,
             HostInstanceId = deployment.HostInstanceId,
             ExecutionMode = deployment.ExecutionMode,
             Status = deployment.Status,
-            StartedAt = deployment.StartedAt
+            StartedAt = deployment.StartedAt!.Value
         };
     }
 

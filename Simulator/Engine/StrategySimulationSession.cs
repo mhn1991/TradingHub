@@ -124,6 +124,17 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         IndependentAnnotator = independentAnnotator;
         _positionManagementOptions = positionManagementOptions ?? new PositionManagementOptions();
         _positionManagementOptions.Validate();
+        // Fast/thesis default to the agent's own entry-side timeframe cascade (finest and
+        // coarsest of its RequiredIntervals) rather than an independently chosen constant, so
+        // trade management stays aligned with whatever timeframes actually justified the entry -
+        // a mismatch here (e.g. thesis checks run on a coarser/finer read than the trend timeframe
+        // that formed the trade's thesis) is silent and easy to introduce by hand. An explicit
+        // PositionManagementOptions value always wins over this derivation. Main has no safe
+        // agent-agnostic "second tier" to derive (not every ITradingAgent's TriggerInterval is the
+        // ladder's finest member - basket/cross-market agents in particular can violate that), so
+        // it keeps its original fallback to the fast interval; SimulationStrategyProfile.Validate's
+        // ValidateManagementTimeframeAlignment is what actually catches a stale/mismatched explicit
+        // override for the real (non-synthetic-test) profiles this is meant to protect.
         _fastStructureInterval = _positionManagementOptions.FastStructureInterval ??
             strategy.TriggerInterval;
         _mainStructureInterval = _positionManagementOptions.MainStructureInterval ??
@@ -1020,6 +1031,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 NetProfitLoss = -entryCommission,
                 StopSource = decision.StopSource,
                 TargetSource = decision.TargetSource,
+                ExitPolicy = decision.ExitPolicy,
+                TargetPlan = decision.TargetPlan,
                 SetupReason = decision.Reason,
                 ExitReason = SimulatedTradeExitReason.Unknown,
                 EntryRegime = decision.RegimeLabel ?? ChartAnnotator.Regime.MarketRegime.Unknown,
@@ -1180,7 +1193,17 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 ExitReason = exitReason,
                 ExitReasonText = _pendingExitReason ?? exitReason.ToString(),
                 FinalStopLossPrice = _activeTrade.CurrentStopLossPrice ?? _activeTrade.InitialStopLossPrice,
-                ExcursionPath = _excursionPath?.ToArray()
+                ExcursionPath = _excursionPath?.ToArray(),
+                // Adaptive target management reporting (plan §3.7/§5.5): only populated for a v2
+                // managed trade (ExitPolicy/TargetPlan set at entry - see the copy into
+                // SimulatedTradeRecord above). PlannedR is the plan's own weighted forecast;
+                // RealizedR is the same net-P&L-over-initial-risk math as the legacy RMultiple
+                // above, exposed under the plan's field name for v2-aware consumers.
+                PlannedR = _activeTrade.TargetPlan?.PlannedR,
+                RealizedR = _activeTrade.ExitPolicy is not null && initialRisk is > 0m
+                    ? netTotal / initialRisk.Value
+                    : null,
+                InitialRiskCash = _activeTrade.ExitPolicy is not null ? initialRisk : null
             };
             _trades.Add(closedTrade);
             RecordCompletedTradeForSafety(closedTrade, timestamp);
@@ -1419,6 +1442,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         PositionReductionReason.ExecutionCostStress => PartialExitReason.ExecutionCostStress,
         PositionReductionReason.RiskReduction => PartialExitReason.RiskReduction,
         PositionReductionReason.RegimeDegradation => PartialExitReason.RegimeDegradation,
+        PositionReductionReason.AdaptiveTargetCheckpoint => PartialExitReason.AdaptiveTargetCheckpoint,
         _ => PartialExitReason.Unknown
     };
 
@@ -1807,6 +1831,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 CurrentStopPrice = currentStop,
                 CurrentPrice = executablePrice,
                 TakeProfitPrice = _activeTrade.TakeProfitPrice ?? 0m,
+                ExitPolicy = _activeTrade.ExitPolicy,
+                TargetPlan = _activeTrade.TargetPlan,
                 InitialQuantity = initialQuantity,
                 CurrentQuantity = openPosition.Quantity,
                 MinimumQuantityIncrement = ResolveMinimumQuantityIncrement(_activeTrade.Instrument),

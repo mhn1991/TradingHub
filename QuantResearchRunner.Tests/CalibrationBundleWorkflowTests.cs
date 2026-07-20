@@ -118,14 +118,14 @@ public sealed class CalibrationBundleWorkflowTests
         Assert.Multiple(() =>
         {
             Assert.That(
-                result.Candidate!.ProposedProfile.AgentOptions.TrendInterval,
+                result.Candidate!.ProposedProfile.AgentOptions!.TrendInterval,
                 Is.EqualTo(expected.TrendInterval));
             Assert.That(
-                result.Candidate.ProposedProfile.AgentOptions.TrendInterval,
+                result.Candidate.ProposedProfile.AgentOptions!.TrendInterval,
                 Is.EqualTo(BarInterval.Hours(2)),
                 "RecommendedSimulationDefaults.StrategyTimeframes.TrendInterval, not ProgressiveStrategyOptions' own bare 1h default.");
             Assert.That(
-                result.Candidate.ProposedProfile.AgentOptions.EntryInterval,
+                result.Candidate.ProposedProfile.AgentOptions!.EntryInterval,
                 Is.EqualTo(expected.EntryInterval));
         });
     }

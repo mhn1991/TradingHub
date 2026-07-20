@@ -84,6 +84,17 @@ public sealed record LiquidityPool
     public required int SourcePointCount { get; init; }
     public required int TouchCount { get; init; }
 
+    /// <summary>
+    /// Count of touches at least <c>MinimumDistinctTouchBars</c> apart, so a single consolidation
+    /// sitting on the level across many consecutive candles cannot inflate this the way raw
+    /// <see cref="TouchCount"/> can. Unlike TouchCount, this is what "tested a second time" should
+    /// mean for a break-retest/pullback signal - deliberately not fed into FreshnessScore/
+    /// QualityScore, which still treat touches as reducing freshness for other purposes (e.g.
+    /// sweep-reversal wants untapped pools).
+    /// </summary>
+    public int DistinctTouchCount { get; init; }
+    public DateTimeOffset? LastDistinctTouchAt { get; init; }
+
     public required decimal EqualnessScore { get; init; }
     public required decimal VisibilityScore { get; init; }
     public required decimal CompressionScore { get; init; }

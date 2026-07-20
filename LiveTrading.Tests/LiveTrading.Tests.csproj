@@ -32,5 +32,7 @@
     <ProjectReference Include="../LiveTrading/LiveTrading.csproj" />
     <ProjectReference Include="../LiveTrading.Oanda/LiveTrading.Oanda.csproj" />
     <ProjectReference Include="../LiveTradingHost/LiveTradingHost.csproj" />
+    <ProjectReference Include="../DBManager.Abstractions/DBManager.Abstractions.csproj" />
+    <ProjectReference Include="../DBManager.Postgres/DBManager.Postgres.csproj" />
   </ItemGroup>
 </Project>

@@ -91,6 +91,7 @@ public sealed class LivePolicyBundleFactory(
             AccountSafety = profile.AccountSafety,
             LegacyManagement = profile.LegacyManagement,
             ImprovedManagement = profile.ImprovedManagement,
+            StructuralManagement = profile.StructuralManagement,
             RegimeManagement = profile.RegimeManagement,
             ConfigurationHash = profile.ConfigurationHash,
             CreatedAt = profile.CreatedAt,

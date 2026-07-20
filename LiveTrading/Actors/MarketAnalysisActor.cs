@@ -76,7 +76,7 @@ public sealed class MarketAnalysisActor(
         await WarmUpAsync(cancellationToken).ConfigureAwait(false);
         if (State != LiveMarketState.Degraded)
         {
-            State = LiveMarketState.Ready;
+            State = Readiness?.Ready == true ? LiveMarketState.Ready : LiveMarketState.WarmingUp;
         }
 
         try
@@ -101,7 +101,7 @@ public sealed class MarketAnalysisActor(
                         await WarmUpAsync(cancellationToken).ConfigureAwait(false);
                         if (State != LiveMarketState.Degraded)
                         {
-                            State = LiveMarketState.Ready;
+                            State = Readiness?.Ready == true ? LiveMarketState.Ready : LiveMarketState.WarmingUp;
                         }
 
                         break;
@@ -141,6 +141,7 @@ public sealed class MarketAnalysisActor(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            State = LiveMarketState.Degraded;
             logger.LogWarning(ex, "Warm-up/catch-up candle fetch failed for {Instrument}.", market.Instrument);
             return;
         }

@@ -1,24 +1,85 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Dashboard.Live;
+using DBManager.Abstractions.Bootstrap;
+using DBManager.Abstractions.Config;
+using DBManager.Abstractions.Credentials;
+using DBManager.Postgres.Config;
+using DBManager.Postgres.Reference;
+using DBManager.Postgres.Security;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 using QuantResearch.Training.Pipeline;
 using Simulator.Calibration;
+using Simulator.Experiments;
+using Simulator.Experiments.Persistence;
 using Simulator.Jobs;
 using Simulator.Services;
+using TradingHub.Persistence.Postgres.Bootstrap;
 using TradingPolicies;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+BrokerCredentialDatabaseConfiguration? databaseConfiguration =
+    BrokerCredentialDatabaseConfiguration.TryLoad(builder.Environment.ContentRootPath, out string repositoryRoot);
+if (databaseConfiguration is null)
+    throw new InvalidOperationException("PostgreSQL runtime configuration is required. Run DBManager.Cli migrate and seed-reference first.");
+
+IBrokerCredentialStore brokerCredentialStore = databaseConfiguration.OpenStore(repositoryRoot);
+var contextFactory = new StandaloneTradingHubContextFactory(databaseConfiguration.ConnectionString);
+var runtimeProfileStore = new RuntimeProfileStore(contextFactory, TimeProvider.System);
+RuntimeProfileRevisionDetail dashboardProfile = await runtimeProfileStore.GetApprovedRevisionAsync(
+    RuntimeProfileKind.Dashboard,
+    "default",
+    CancellationToken.None) ?? throw new InvalidOperationException(
+    "No approved Dashboard/default runtime profile exists in PostgreSQL. Run DBManager.Cli seed-reference first.");
+await using var dashboardProfileStream = new MemoryStream(Encoding.UTF8.GetBytes(dashboardProfile.SettingsJson));
+IConfiguration dashboardConfiguration = new ConfigurationBuilder()
+    .AddJsonStream(dashboardProfileStream)
+    .Build();
+var brokerConfigurationStore = new BrokerRuntimeConfigurationStore(contextFactory);
+ResolvedBrokerRuntimeConfiguration oandaRuntime =
+    await brokerConfigurationStore.GetActiveAsync("OANDA", "DEMO", CancellationToken.None) ??
+    await brokerConfigurationStore.GetActiveAsync("OANDA", "LIVE", CancellationToken.None) ??
+    throw new InvalidOperationException("No enabled OANDA runtime configuration exists in PostgreSQL.");
+ResolvedBrokerRuntimeConfiguration binanceRuntime =
+    await brokerConfigurationStore.GetActiveAsync("BINANCE", "TESTNET", CancellationToken.None) ??
+    await brokerConfigurationStore.GetActiveAsync("BINANCE", "LIVE", CancellationToken.None) ??
+    throw new InvalidOperationException("No enabled Binance runtime configuration exists in PostgreSQL.");
+SecretReference accessTokenReference = oandaRuntime.CredentialReferences.Single(reference =>
+    reference.Purpose == "access_token");
+using SecretValue accessToken = await new EncryptedDatabaseSecretResolver(brokerCredentialStore)
+    .ResolveAsync(accessTokenReference, CancellationToken.None);
+OandaWorkspaceOptions configuredOanda =
+    dashboardConfiguration.GetSection(OandaWorkspaceOptions.SectionName).Get<OandaWorkspaceOptions>() ?? new();
+OandaWorkspaceOptions oandaOptions = configuredOanda with
+{
+    Enabled = true,
+    Environment = oandaRuntime.Environment.IsLive
+        ? Brokers.Abstractions.BrokerEnvironment.Live
+        : Brokers.Abstractions.BrokerEnvironment.Demo,
+    AccountId = oandaRuntime.Account?.ExternalAccountId
+        ?? throw new InvalidOperationException("The active OANDA account setting has no external account id."),
+    AccessToken = accessToken.Reveal(),
+    RestBaseAddress = oandaRuntime.Endpoints.Single(endpoint => endpoint.Kind == BrokerEndpointKind.Rest).BaseAddress,
+    StreamBaseAddress = oandaRuntime.Endpoints.Single(endpoint => endpoint.Kind == BrokerEndpointKind.Streaming).BaseAddress
+};
+LiveFeedOptions configuredLiveFeed =
+    dashboardConfiguration.GetSection(LiveFeedOptions.SectionName).Get<LiveFeedOptions>() ?? new();
+LiveFeedOptions liveFeedOptions = configuredLiveFeed with
+{
+    RestBaseAddress = binanceRuntime.Endpoints.Single(endpoint => endpoint.Kind == BrokerEndpointKind.Rest).BaseAddress,
+    WebSocketBaseAddress = new Uri(
+        binanceRuntime.Endpoints.Single(endpoint => endpoint.Kind == BrokerEndpointKind.MarketData)
+            .BaseAddress.AbsoluteUri.TrimEnd('/') + "/")
+};
 builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = 2L * 1024 * 1024 * 1024);
 builder.Services.Configure<FormOptions>(options =>
     options.MultipartBodyLengthLimit = 2L * 1024 * 1024 * 1024);
-builder.Services.Configure<LiveFeedOptions>(
-    builder.Configuration.GetSection(LiveFeedOptions.SectionName));
-builder.Services.Configure<OandaWorkspaceOptions>(
-    builder.Configuration.GetSection(OandaWorkspaceOptions.SectionName));
+builder.Services.AddSingleton<IOptions<LiveFeedOptions>>(Options.Create(liveFeedOptions));
+builder.Services.AddSingleton<IOptions<OandaWorkspaceOptions>>(Options.Create(oandaOptions));
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<ILiveWebSocketFactory, LiveWebSocketFactory>();
 builder.Services.AddHttpClient("BinancePublicMarketData", (services, client) =>
@@ -54,44 +115,80 @@ string jobsDirectory = Path.GetFullPath(Path.Combine(
     "..",
     ".cache",
     "simulation-jobs"));
-builder.Services.AddSingleton<ISimulationJobRepository>(_ => new FileSimulationJobRepository(jobsDirectory));
-string calibrationArtifactsDirectory = Path.GetFullPath(Path.Combine(
-    builder.Environment.ContentRootPath,
-    "..",
-    ".cache",
-    "calibration-artifacts"));
-builder.Services.AddSingleton<ICalibrationArtifactRepository>(
-    _ => new FileCalibrationArtifactRepository(calibrationArtifactsDirectory));
-string tradingPolicyProfilesDirectory = Path.GetFullPath(Path.Combine(
-    builder.Environment.ContentRootPath, "..", ".cache", "trading-policy-profiles"));
-builder.Services.AddSingleton<ITradingPolicyProfileStore>(
-    _ => new FileTradingPolicyProfileStore(tradingPolicyProfilesDirectory));
-string calibrationBundleCandidatesDirectory = Path.GetFullPath(Path.Combine(
-    builder.Environment.ContentRootPath, "..", ".cache", "calibration-bundle-candidates"));
-builder.Services.AddSingleton<ICalibrationBundleApprovalStore>(services => new FileCalibrationBundleApprovalStore(
-    calibrationBundleCandidatesDirectory,
-    services.GetRequiredService<ICalibrationArtifactRepository>(),
-    services.GetRequiredService<ITradingPolicyProfileStore>(),
-    services.GetRequiredService<TimeProvider>()));
+builder.Services.AddTradingHubPersistence(new TradingHubPersistenceRegistrationOptions
+{
+    Database = databaseConfiguration,
+    RepositoryRoot = repositoryRoot,
+    Mode = PersistenceMode.PostgresOnly,
+    LegacySimulationJobsDirectory = jobsDirectory,
+    LegacyLiveDirectory = Path.Combine(repositoryRoot, ".state", "live-trading"),
+    DeploymentId = Guid.Empty
+});
 builder.Services.AddSingleton<BacktestApplicationService>(services =>
 {
-    // Pre-run auto-calibration trains legacy and improved strategy chains in parallel, so the
-    // shared job queue needs at least two concurrent slots (plus headroom for a user sim).
+    // A single job is CPU-light (~1-2 cores; per-candle processing is inherently sequential,
+    // measured 2026-07-20 via `top -H` while 2 jobs ran: ~12% of a 20-core box). 3 was sized for
+    // "auto-cal trains legacy+improved in parallel, plus one user sim", not for the hardware -
+    // left most of the machine idle. 12 keeps ~8 cores of headroom for Postgres/the OS/DB
+    // connection pool rather than maxing out to core count.
     var appService = new BacktestApplicationService(
         services.GetRequiredService<ISimulationJobRepository>(),
         new BacktestApplicationServiceOptions
         {
-            MaxConcurrentJobs = 3,
-            QueueCapacity = 8
+            MaxConcurrentJobs = 12,
+            QueueCapacity = 32,
+            CredentialResolver = async (request, cancellationToken) =>
+                {
+                    string environment = request.Environment == Brokers.Abstractions.BrokerEnvironment.Live
+                        ? "LIVE"
+                        : "DEMO";
+                    string broker = request.Runtime.SourceKind == Simulator.MarketData.HistoricalDataSourceKind.BinanceCandles
+                        ? "BINANCE"
+                        : "OANDA";
+                    BrokerCredential? credential = await brokerCredentialStore.GetAsync(
+                        broker,
+                        broker == "BINANCE" && environment == "DEMO" ? "TESTNET" : environment,
+                        cancellationToken: cancellationToken);
+                    return credential is null
+                        ? null
+                        : new HistoricalBrokerCredentials(
+                            credential.AccountId,
+                            credential.AccessToken,
+                            credential.ApiKey,
+                            credential.SecretKey);
+                }
         });
     return appService;
 });
 builder.Services.AddSingleton<IBacktestApplicationService>(services =>
     services.GetRequiredService<BacktestApplicationService>());
+builder.Services.AddSingleton<ISimulationResourceGovernor>(_ => new SimulationResourceGovernor(
+    new SimulationResourceGovernorOptions
+    {
+        // Host ceilings: two experiments/profile groups, one download per broker, and a
+        // CPU-sized worker pool. Experiment manifests default profile groups to one; callers
+        // must explicitly opt into running structural profiles concurrently.
+        MaxConcurrentExperiments = 2,
+        MaxConcurrentProfileGroups = 2,
+        MaxHistoricalDownloadsPerBroker = 1,
+        MaxTotalStrategyWorkers = Math.Max(2, Environment.ProcessorCount)
+    }));
 builder.Services.AddSingleton<ResearchCalibrationService>();
+builder.Services.AddSingleton<PendingAutoCalibrationTracker>();
 builder.Services.AddSingleton(services => new CalibrationTrainingPipeline(
     services.GetRequiredService<IBacktestApplicationService>(),
     services.GetRequiredService<ICalibrationArtifactRepository>()));
+builder.Services.AddSingleton(services => new BacktestSimulationExperimentExecutor(
+    services.GetRequiredService<IBacktestApplicationService>(),
+    services.GetRequiredService<ICalibrationArtifactRepository>()));
+builder.Services.AddSingleton<ISimulationExperimentExecutor>(services =>
+    new CalibrationAwareSimulationExperimentExecutor(
+        services.GetRequiredService<BacktestSimulationExperimentExecutor>(),
+        services.GetRequiredService<CalibrationTrainingPipeline>(),
+        services.GetRequiredService<ICalibrationArtifactRepository>()));
+builder.Services.AddSingleton<SimulationExperimentApplicationService>();
+builder.Services.AddSingleton<ISimulationExperimentApplicationService>(services =>
+    services.GetRequiredService<SimulationExperimentApplicationService>());
 builder.Services.AddSingleton(services => new PreRunCalibrationService(
     services.GetRequiredService<CalibrationTrainingPipeline>(),
     services.GetRequiredService<ICalibrationArtifactRepository>(),
@@ -126,6 +223,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 WebApplication app = builder.Build();
+await TradingHubPersistenceRegistration.ValidatePostgresStartupAsync(
+    app.Services,
+    requireCurrentSchema: true);
 app.UseExceptionHandler();
 app.UseCors();
 
@@ -618,9 +718,12 @@ app.MapGet("/api/live/events", async (
 });
 
 app.MapSimulationEndpoints();
+app.MapSimulationProfileEndpoints();
+app.MapSimulationExperimentEndpoints();
 app.MapCalibrationEndpoints();
 app.MapCalibrationBundleEndpoints();
 app.MapResearchEndpoints();
+app.MapTradingReportEndpoints();
 app.MapHub<SimulationHub>("/hubs/simulations");
 
 app.Run();

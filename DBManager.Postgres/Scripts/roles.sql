@@ -24,6 +24,7 @@ CREATE SCHEMA IF NOT EXISTS operations  AUTHORIZATION trading_migrator;
 CREATE SCHEMA IF NOT EXISTS research    AUTHORIZATION trading_migrator;
 CREATE SCHEMA IF NOT EXISTS analytics   AUTHORIZATION trading_migrator;
 CREATE SCHEMA IF NOT EXISTS integration AUTHORIZATION trading_migrator;
+CREATE SCHEMA IF NOT EXISTS security    AUTHORIZATION trading_migrator;
 
 -- If `operations` and its migrations-history table were bootstrapped earlier under a different
 -- owner (e.g. a single dev superuser before roles existed), reassign them to trading_migrator.
@@ -31,10 +32,13 @@ ALTER SCHEMA operations OWNER TO trading_migrator;
 ALTER TABLE IF EXISTS operations.schema_history OWNER TO trading_migrator;
 
 -- trading_runtime (section 25.1): read/write runtime, decision, risk, execution, management,
--- operations tables; read approved configuration. No DDL, no secrets, no grants.
+-- operations tables; read approved configuration and encrypted credential payloads. The
+-- application-layer key is never stored in PostgreSQL. No DDL and no grants.
 GRANT USAGE ON SCHEMA
     reference, config, runtime, decision, risk, execution, management, operations, integration
     TO trading_runtime;
+GRANT USAGE ON SCHEMA security TO trading_runtime;
+GRANT SELECT ON ALL TABLES IN SCHEMA security TO trading_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA reference TO trading_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA config TO trading_runtime;
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA
@@ -78,3 +82,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE trading_migrator IN SCHEMA research, analytics
     GRANT SELECT, INSERT, UPDATE ON TABLES TO trading_research;
 ALTER DEFAULT PRIVILEGES FOR ROLE trading_migrator IN SCHEMA research, analytics
     GRANT USAGE ON SEQUENCES TO trading_research;
+ALTER DEFAULT PRIVILEGES FOR ROLE trading_migrator IN SCHEMA security
+    GRANT SELECT ON TABLES TO trading_runtime;

@@ -5,6 +5,7 @@ using RiskManager.Conditions;
 using RiskManager.Safety;
 using TradeManager;
 using TradingCore.Pipeline;
+using TradingPolicies;
 
 namespace LiveTrading;
 
@@ -32,10 +33,44 @@ public sealed record LiveTradingPolicyBundle
     public required TradingSafetyOptions AccountSafety { get; init; }
     public required PositionManagementOptions LegacyManagement { get; init; }
     public required PositionManagementOptions ImprovedManagement { get; init; }
+    public PositionManagementOptions StructuralManagement { get; init; } = PositionManagementOptions.StructuralDefaults;
     public required RegimeManagementOptions RegimeManagement { get; init; }
     public required string ConfigurationHash { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public string? Description { get; init; }
+
+    /// <summary>Adapts the canonical environment-neutral package to the live pipeline's legacy
+    /// bundle shape. Only the selected management policy is meaningful for the selected Agent;
+    /// populating all legacy slots with that same immutable policy prevents a second resolution
+    /// path from silently choosing different management settings.</summary>
+    public static LiveTradingPolicyBundle FromResolvedPackage(ResolvedAgentPackage package)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        return new LiveTradingPolicyBundle
+        {
+            PolicyBundleId = package.PolicyId,
+            Revision = package.Revision,
+            StrategyVersion = package.StrategyVersion,
+            FeatureSchemaHash = package.FeatureSchemaHash,
+            FeaturePolicy = package.FeaturePolicy,
+            SetupCalibrationArtifactId = package.SetupCalibrationArtifactId,
+            ManagementCalibrationArtifactId = package.ManagementCalibrationArtifactId,
+            MetaModelArtifactId = package.MetaModelArtifactId,
+            PositionSizing = package.PositionSizing,
+            AdaptiveRisk = package.AdaptiveRisk,
+            PortfolioRisk = package.PortfolioRisk,
+            CorrelationRisk = package.CorrelationRisk,
+            TradingConditions = package.TradingConditions,
+            AccountSafety = package.AccountSafety,
+            LegacyManagement = package.PositionManagement,
+            ImprovedManagement = package.PositionManagement,
+            StructuralManagement = package.PositionManagement,
+            RegimeManagement = package.RegimeManagement,
+            ConfigurationHash = package.ConfigurationHash,
+            CreatedAt = package.CreatedAt,
+            Description = $"Resolved package {package.PackageHash}"
+        };
+    }
 
     /// <summary>
     /// Structural validation only. <see cref="FeatureSchemaHash"/> is cryptographically
@@ -75,6 +110,7 @@ public sealed record LiveTradingPolicyBundle
         ArgumentNullException.ThrowIfNull(AccountSafety);
         ArgumentNullException.ThrowIfNull(LegacyManagement);
         ArgumentNullException.ThrowIfNull(ImprovedManagement);
+        ArgumentNullException.ThrowIfNull(StructuralManagement);
         ArgumentNullException.ThrowIfNull(RegimeManagement);
         ArgumentNullException.ThrowIfNull(FeaturePolicy.SetupCalibration);
 
@@ -86,6 +122,7 @@ public sealed record LiveTradingPolicyBundle
         AccountSafety.Validate();
         LegacyManagement.Validate();
         ImprovedManagement.Validate();
+        StructuralManagement.Validate();
         RegimeManagement.Validate();
         FeaturePolicy.SetupCalibration.Validate();
     }

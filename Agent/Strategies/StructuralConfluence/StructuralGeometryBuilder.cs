@@ -1,13 +1,17 @@
 using Agent.Strategies.StructuralConfluence.Evidence;
 using Agent.Strategies.StructuralConfluence.Playbooks;
+using Agent.Strategies.StructuralConfluence.TargetManagement;
 using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
 using ChartAnnotator.SupplyDemand;
+using ChartAnnotator.TargetManagement;
 
 namespace Agent.Strategies.StructuralConfluence;
 
 public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOptions options)
 {
+    private readonly TargetMapBuilder _targetMap = new(options);
+
     public StructuralGeometry Build(
         StructuralEvidencePacket evidence,
         PriceActionDirection direction,
@@ -84,6 +88,65 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
             TargetSource = nearest.Source,
             TargetPool = nearest.Pool,
             ReasonCode = "StructuralGeometryValid"
+        };
+    }
+
+    /// <summary>
+    /// v2 tiered target-map path (Structural Indicator and Adaptive Target Management Plan §3-§4).
+    /// Reuses <see cref="Build"/>'s exact stop-geometry/risk computation and validity gates
+    /// unchanged, then replaces nearest-obstacle target selection with <see cref="TargetMapBuilder"/>.
+    /// Only called once a playbook has already decided <paramref name="exitPolicy"/> (Phase 3);
+    /// <see cref="Build"/> itself is never modified or called from here, so v1 behavior is exactly
+    /// preserved regardless of how this method evolves.
+    /// </summary>
+    public StructuralGeometry BuildAdaptive(
+        StructuralEvidencePacket evidence,
+        PriceActionDirection direction,
+        decimal rawStop,
+        string stopSource,
+        TradeExitPolicy exitPolicy,
+        IReadOnlyCollection<string>? excludedSourceIds = null)
+    {
+        decimal? atrValue = evidence.Indicators.Atr ?? evidence.Setup.Indicators.Atr;
+        decimal close = evidence.Trigger.LatestCandle.Prices.Close;
+        bool buy = direction == PriceActionDirection.Bullish;
+        decimal entry = close + (buy ? evidence.ExecutableSpread : -evidence.ExecutableSpread) / 2m;
+        if (atrValue is not > 0m)
+            return Invalid(entry, "StructuralAtrUnavailable");
+        decimal atr = atrValue.Value;
+        decimal stop = rawStop + (buy ? -1m : 1m) * options.StopBufferAtr * atr;
+        decimal risk = buy ? entry - stop : stop - entry;
+        if (risk <= 0m || risk > options.Geometry.MaximumStopDistanceAtr * atr)
+            return Invalid(entry, "StructuralStopInvalid");
+
+        TargetMapResult map = _targetMap.Build(evidence, direction, entry, stop, exitPolicy, excludedSourceIds);
+        if (!map.IsAdmissible || map.Plan is null)
+            return Invalid(entry, map.ReasonCode);
+
+        TradeTargetCandidate terminal = map.SelectedTerminal!;
+        decimal geometryQuality = Math.Clamp(50m + Math.Min(40m, (map.Plan.ConservativeOpportunityR - options.MinimumRewardRisk) * 15m) -
+            evidence.ExecutableSpread / atr * 10m, 0m, 100m);
+        return new StructuralGeometry
+        {
+            IsValid = true,
+            Entry = entry,
+            Stop = stop,
+            // Compatibility fields (plan §5.2): populated from the selected terminal/projection
+            // so legacy report/replay consumers that only know about a single hard target still
+            // see a sensible value, even though a managed policy never submits it as a broker order.
+            Target = terminal.ExecutionPrice,
+            RewardRisk = map.Plan.PlannedR,
+            Quality = geometryQuality,
+            StopSource = stopSource,
+            TargetSource = $"{terminal.SourceKind}:{terminal.SourceId}",
+            // TargetPool intentionally left null here: TargetMapBuilder returns a source-agnostic
+            // TradeTargetCandidate, not the originating LiquidityPool object. A caller that needs
+            // TargetLiquidityPoolId can resolve it from evidence by terminal.SourceId when wiring
+            // playbooks in Phase 3.
+            TargetPool = null,
+            ReasonCode = "StructuralGeometryValid",
+            ExitPolicy = exitPolicy,
+            TargetPlan = map.Plan
         };
     }
 

@@ -45,10 +45,10 @@ cd Dashboard && npm ci && npm run build
 
 ## Security
 
-- Credentials are read only from environment / secure config (`OANDA_ACCOUNT_ID`, `OANDA_ACCESS_TOKEN`, `Oanda__*`).
+- Broker credentials are read from encrypted PostgreSQL rows through `IBrokerCredentialStore`; secret environment variables are not used by runtime hosts.
 - `BacktestRequest.AccessToken` / `AccountId` / `InlineCandles` are `[JsonIgnore]` and not persisted in job snapshots.
 - `.gitignore` covers `.env`, `.env.*`, `.cache/`, simulation outputs, and compressed caches.
-- `.env.example` remains the only committed credential template.
+- `.env.example` remains a placeholder template; real broker secrets are imported from a temporary ignored file and then removed.
 
 ## Remaining limitations
 

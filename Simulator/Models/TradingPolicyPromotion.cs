@@ -1,3 +1,4 @@
+using Agent.Configuration;
 using Agent.Strategies;
 using TradingCore.Pipeline;
 using TradingPolicies;
@@ -33,18 +34,7 @@ public static class TradingPolicyPromotion
         runtime.Validate();
         resolvedAgentOptions.Validate();
 
-        var featurePolicy = new RuntimeFeaturePolicy
-        {
-            AnnotationOptions = runtime.AnnotationOptions,
-            MarketRegimeRouting = runtime.MarketRegimeRouting,
-            ValueLocationEvidence = runtime.ValueLocationEvidence,
-            CurrencyStrengthEvidence = runtime.CurrencyStrengthEvidence,
-            RsiBollingerSignals = runtime.RsiBollingerSignals,
-            DmiConfirmationEnabled = runtime.DmiConfirmationEnabled,
-            CurrencyStrength = runtime.CurrencyStrength,
-            SetupCalibration = runtime.SetupCalibration,
-            NeoWaveEvidence = runtime.NeoWaveEvidence
-        };
+        RuntimeFeaturePolicy featurePolicy = CreateFeaturePolicy(runtime);
 
         return TradingPolicyProfile.Create(
             profileId,
@@ -63,6 +53,7 @@ public static class TradingPolicyPromotion
             runtime.SafetyOptions,
             runtime.LegacyPositionManagement,
             runtime.ImprovedPositionManagement,
+            runtime.StructuralPositionManagement,
             runtime.RegimeManagement,
             runtime.ManagementCalibration,
             // AGENT-02: Enabled must always agree with whether this specific profile actually
@@ -78,4 +69,65 @@ public static class TradingPolicyPromotion
             metaModelArtifactId,
             description);
     }
+
+    public static TradingPolicyProfile CreateProfile(
+        BacktestRuntimeOptions runtime,
+        string strategyId,
+        string strategyVersion,
+        TradingAgentDefinition agentDefinition,
+        Guid profileId,
+        int revision,
+        DateTimeOffset createdAt,
+        TradingPolicyProfileStatus status = TradingPolicyProfileStatus.Reviewed,
+        Guid? setupCalibrationArtifactId = null,
+        Guid? managementCalibrationArtifactId = null,
+        Guid? metaModelArtifactId = null,
+        string? description = null)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
+        ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(strategyVersion);
+        ArgumentNullException.ThrowIfNull(agentDefinition);
+        runtime.Validate();
+        agentDefinition.Validate();
+
+        return TradingPolicyProfile.Create(
+            profileId,
+            revision,
+            strategyId,
+            strategyVersion,
+            agentDefinition,
+            status,
+            CreateFeaturePolicy(runtime),
+            runtime.PositionSizing,
+            runtime.AdaptiveRisk,
+            runtime.PortfolioRisk,
+            runtime.CorrelationRisk,
+            runtime.TradingConditions,
+            runtime.SafetyOptions,
+            runtime.LegacyPositionManagement,
+            runtime.ImprovedPositionManagement,
+            runtime.StructuralPositionManagement,
+            runtime.RegimeManagement,
+            runtime.ManagementCalibration,
+            runtime.MetaModel with { Enabled = metaModelArtifactId.HasValue },
+            createdAt,
+            setupCalibrationArtifactId,
+            managementCalibrationArtifactId,
+            metaModelArtifactId,
+            description);
+    }
+
+    private static RuntimeFeaturePolicy CreateFeaturePolicy(BacktestRuntimeOptions runtime) => new()
+    {
+        AnnotationOptions = runtime.AnnotationOptions,
+        MarketRegimeRouting = runtime.MarketRegimeRouting,
+        ValueLocationEvidence = runtime.ValueLocationEvidence,
+        CurrencyStrengthEvidence = runtime.CurrencyStrengthEvidence,
+        RsiBollingerSignals = runtime.RsiBollingerSignals,
+        DmiConfirmationEnabled = runtime.DmiConfirmationEnabled,
+        CurrencyStrength = runtime.CurrencyStrength,
+        SetupCalibration = runtime.SetupCalibration,
+        NeoWaveEvidence = runtime.NeoWaveEvidence
+    };
 }

@@ -1,3 +1,4 @@
+using Agent.Configuration;
 using Brokers.Models;
 using QuantResearch.Validation;
 using Simulator.Models;
@@ -44,6 +45,8 @@ public sealed record QuantResearchPlan
             throw new ArgumentException("At least one instrument is required.");
         if (Strategies is null || Strategies.Count == 0)
             throw new ArgumentException("At least one strategy is required.");
+        foreach (string strategy in Strategies)
+            _ = TradingAgentTypeIds.Parse(strategy);
         if (From >= To)
             throw new ArgumentException("From must be earlier than To.");
         ArgumentNullException.ThrowIfNull(WalkForward);

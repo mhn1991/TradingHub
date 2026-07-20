@@ -312,6 +312,43 @@ public sealed class SupplyDemandAnalyzerTests
         Assert.That(zone.HasFairValueGap, Is.True);
     }
 
+    [Test]
+    public void Update_RequireOriginationMove_BlocksBaseWithNoQualifyingPriorMove()
+    {
+        // Nothing precedes the base with a genuine directional move (a flat doji, not a real
+        // approach leg), so the standard "strong move in, base, strong move out" pattern is
+        // incomplete even though the base+departure alone would otherwise qualify.
+        var candles = new List<Candle>
+        {
+            Doji(0, 99m),
+            Doji(1, 100m),
+            Marubozu(2, 100m, 101m),
+            Marubozu(3, 101m, 102m)
+        };
+
+        var analyzer = new SupplyDemandAnalyzer(EnabledProfile(b => b.With(p => p with { RequireOriginationMove = true })));
+        Assert.That(Replay(analyzer, candles)[^1].ActiveZones, Is.Empty);
+    }
+
+    [Test]
+    public void Update_RequireOriginationMove_AllowsBaseWithQualifyingPriorMove()
+    {
+        // Bearish approach into the base, then bullish departure out - the full
+        // Drop-Base-Rally pattern the standard demand-zone definition describes.
+        var candles = new List<Candle>
+        {
+            Marubozu(0, 101m, 100m),
+            Doji(1, 100m),
+            Marubozu(2, 100m, 101m),
+            Marubozu(3, 101m, 102m)
+        };
+
+        var analyzer = new SupplyDemandAnalyzer(EnabledProfile(b => b.With(p => p with { RequireOriginationMove = true })));
+        SupplyDemandZone zone = Replay(analyzer, candles)[^1].ActiveZones.Single();
+
+        Assert.That(zone.Type, Is.EqualTo(SupplyDemandZoneType.Demand));
+    }
+
     // ----- Lifecycle: fresh -> approached -> tested -> partially mitigated -> mitigated/invalidated/expired
 
     [Test]
@@ -688,5 +725,86 @@ public sealed class SupplyDemandAnalyzerTests
             Assert.That(last.IsEnabled, Is.False);
             Assert.That(last.ActiveZones, Is.Empty);
         });
+    }
+
+    /// <summary>
+    /// Regression guard for the terminal-zone trimming added to bound <c>_zones</c> to roughly
+    /// MaximumActiveZones + MaximumRetainedEvents (previously every zone ever formed in a run was
+    /// retained forever, making every candle's update scan/re-sort the whole history - O(total
+    /// zones) per candle, roughly quadratic total cost over a long stream). Runs long enough
+    /// (10,000 candles, far more than the default 250-entry retention window) to force many
+    /// trims, then proves the append-only lifecycle guarantee still holds: no zone ID is ever
+    /// "Formed" twice, which is exactly what a resurrection bug (a trimmed zone's deterministic
+    /// ID being re-detected as brand new) would produce. Also confirms the analyzer's own bounded
+    /// output actually stays bounded.
+    /// </summary>
+    [Test]
+    public void Update_LongRun_NeverResurrectsATrimmedZoneAndKeepsOutputBounded()
+    {
+        var candles = BuildLongOscillatingStream(count: 10_000);
+        var profile = EnabledProfile();
+        var analyzer = new SupplyDemandAnalyzer(profile);
+        List<SupplyDemandAnalysisSnapshot> snapshots = Replay(analyzer, candles, atr: 1m);
+
+        var formedCounts = new Dictionary<Guid, int>();
+        var seenEventIds = new HashSet<Guid>();
+        foreach (SupplyDemandAnalysisSnapshot snapshot in snapshots)
+        {
+            foreach (SupplyDemandZoneEvent zoneEvent in snapshot.RecentEvents)
+            {
+                if (!seenEventIds.Add(zoneEvent.EventId))
+                {
+                    continue;
+                }
+
+                if (zoneEvent.EventType == SupplyDemandZoneEventType.Formed)
+                {
+                    formedCounts[zoneEvent.ZoneId] = formedCounts.GetValueOrDefault(zoneEvent.ZoneId) + 1;
+                }
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(formedCounts, Is.Not.Empty, "the synthetic stream should have formed multiple zones");
+            Assert.That(formedCounts.Values, Is.All.EqualTo(1),
+                "a zone ID was 'Formed' more than once - a trimmed terminal zone was resurrected");
+            SupplyDemandAnalysisSnapshot last = snapshots[^1];
+            Assert.That(last.Zones.Count, Is.LessThanOrEqualTo(profile.MaximumActiveZones + profile.MaximumRetainedEvents));
+            Assert.That(last.ActiveZones.Count, Is.LessThanOrEqualTo(profile.MaximumActiveZones));
+        });
+    }
+
+    /// <summary>Long oscillating series with a slow drift so base/departure geometry keeps
+    /// producing new, non-overlapping zone candidates rather than repeatedly re-forming the
+    /// same one (mirrors the shape used in the manual candles/second benchmark that originally
+    /// surfaced the unbounded-growth cost).</summary>
+    private static Candle[] BuildLongOscillatingStream(int count)
+    {
+        var candles = new Candle[count];
+        decimal price = 100m;
+        for (int i = 0; i < count; i++)
+        {
+            decimal wave = (decimal)Math.Sin(i / 17.0) * 1.5m;
+            decimal drift = i * 0.01m;
+            decimal open = price;
+            decimal close = price + wave + drift + (i % 23 == 0 ? 2m : 0m) - (i % 29 == 0 ? 2m : 0m);
+            decimal high = Math.Max(open, close) + 0.4m;
+            decimal low = Math.Min(open, close) - 0.4m;
+            DateTimeOffset openTime = Start + TimeSpan.FromMinutes(15 * i);
+            candles[i] = new Candle
+            {
+                Instrument = Instrument,
+                Interval = Interval,
+                OpenTime = openTime,
+                CloseTime = openTime.AddMinutes(15),
+                Prices = new Ohlc(open, high, low, close),
+                Volume = new MarketVolume(100m, VolumeKind.Unknown),
+                IsComplete = true
+            };
+            price = close;
+        }
+
+        return candles;
     }
 }

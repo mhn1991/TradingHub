@@ -10,10 +10,17 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <ProjectReference Include="../DBManager.Postgres/DBManager.Postgres.csproj" />
     <ProjectReference Include="../QuantResearch/QuantResearch.csproj" />
     <ProjectReference Include="../QuantResearch.Training/QuantResearch.Training.csproj" />
     <ProjectReference Include="../RiskManager/RiskManager.csproj" />
     <ProjectReference Include="../Simulator/Simulator.csproj" />
     <ProjectReference Include="../TradeManager/TradeManager.csproj" />
+    <ProjectReference Include="../TradingHub.Persistence.Postgres/TradingHub.Persistence.Postgres.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
   </ItemGroup>
 </Project>

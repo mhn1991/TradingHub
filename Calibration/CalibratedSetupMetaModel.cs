@@ -30,16 +30,26 @@ public sealed class CalibratedSetupMetaModel : ISetupMetaModel
     public MetaLabelDecision Evaluate(MetaLabelFeatures features)
     {
         ArgumentNullException.ThrowIfNull(features);
+        if (!string.Equals(features.FeatureSchemaVersion, MetaLabelFeatureFactory.SchemaVersion, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Meta-label features use schema '{features.FeatureSchemaVersion}', but model '{_artifact.ModelVersion}' requires " +
+                $"'{MetaLabelFeatureFactory.SchemaVersion}'. Retraining is required.");
+        }
 
-        MetaModelBucket? bucket = _artifact.Buckets.FirstOrDefault(candidate =>
+        string playbookId = MetaModelCohorts.NormalizePlaybook(features.PlaybookId);
+        string? cciState = MetaModelCohorts.CoarseCciState(features.CciConfirmationState);
+        string? confluenceState = MetaModelCohorts.CoarseConfluenceState(features.SupplyDemandLiquidityConfluence);
+        IEnumerable<MetaModelBucket> cohort = _artifact.Buckets.Where(candidate =>
             string.Equals(candidate.StrategyId, features.StrategyId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(candidate.PlaybookId, playbookId, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(candidate.Regime, features.Regime.ToString(), StringComparison.OrdinalIgnoreCase) &&
             features.SetupConfidence >= candidate.ConfidenceFrom &&
-            features.SetupConfidence < candidate.ConfidenceTo &&
-            features.MultiTimeframeAlignment >= candidate.AlignmentFrom &&
-            features.MultiTimeframeAlignment < candidate.AlignmentTo);
+            (features.SetupConfidence < candidate.ConfidenceTo || candidate.ConfidenceTo == 100m && features.SetupConfidence <= 100m));
 
-        if (bucket is null || bucket.Samples < _options.MinimumSamples)
+        (MetaModelBucket? bucket, int? fallbackLevel) = Select(cohort, features.MultiTimeframeAlignment, cciState, confluenceState);
+
+        if (bucket is null)
         {
             return new MetaLabelDecision
             {
@@ -47,6 +57,7 @@ public sealed class CalibratedSetupMetaModel : ISetupMetaModel
                 Probability = 0.5m,
                 ModelVersion = _artifact.ModelVersion,
                 ReasonCode = "MetaModelBucketUnavailable",
+                BucketFallbackLevel = null,
                 RiskMultiplier = 1m
             };
         }
@@ -60,6 +71,7 @@ public sealed class CalibratedSetupMetaModel : ISetupMetaModel
                 Probability = probability,
                 ModelVersion = _artifact.ModelVersion,
                 ReasonCode = "MetaModelNegativeExpectancy",
+                BucketFallbackLevel = fallbackLevel,
                 RiskMultiplier = 0m
             };
         }
@@ -72,6 +84,7 @@ public sealed class CalibratedSetupMetaModel : ISetupMetaModel
                 Probability = probability,
                 ModelVersion = _artifact.ModelVersion,
                 ReasonCode = "MetaModelWeakExpectancy",
+                BucketFallbackLevel = fallbackLevel,
                 RiskMultiplier = Math.Clamp(_options.WeakPositiveRiskMultiplier, 0m, 1m)
             };
         }
@@ -82,7 +95,45 @@ public sealed class CalibratedSetupMetaModel : ISetupMetaModel
             Probability = probability,
             ModelVersion = _artifact.ModelVersion,
             ReasonCode = "MetaModelStrongExpectancy",
+            BucketFallbackLevel = fallbackLevel,
             RiskMultiplier = 1m
         };
     }
+
+    private (MetaModelBucket? Bucket, int? Level) Select(
+        IEnumerable<MetaModelBucket> cohort,
+        decimal alignment,
+        string? cciState,
+        string? confluenceState)
+    {
+        MetaModelBucket? exact = Best(cohort.Where(candidate =>
+            (candidate.CciState is not null || candidate.StructuralConfluenceState is not null) &&
+            string.Equals(candidate.CciState, cciState, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(candidate.StructuralConfluenceState, confluenceState, StringComparison.OrdinalIgnoreCase) &&
+            ContainsAlignment(candidate, alignment)));
+        if (exact is not null)
+            return (exact, 1);
+
+        MetaModelBucket? aligned = Best(cohort.Where(candidate =>
+            candidate.CciState is null && candidate.StructuralConfluenceState is null &&
+            (candidate.AlignmentFrom > 0m || candidate.AlignmentTo < 1m) &&
+            ContainsAlignment(candidate, alignment)));
+        if (aligned is not null)
+            return (aligned, 2);
+
+        MetaModelBucket? confidenceOnly = Best(cohort.Where(candidate =>
+            candidate.CciState is null && candidate.StructuralConfluenceState is null &&
+            candidate.AlignmentFrom == 0m && candidate.AlignmentTo == 1m));
+        return confidenceOnly is null ? (null, null) : (confidenceOnly, 3);
+    }
+
+    private MetaModelBucket? Best(IEnumerable<MetaModelBucket> candidates) => candidates
+        .Where(candidate => candidate.Samples >= _options.MinimumSamples)
+        .OrderByDescending(candidate => candidate.Samples)
+        .ThenBy(candidate => candidate.AlignmentFrom)
+        .FirstOrDefault();
+
+    private static bool ContainsAlignment(MetaModelBucket bucket, decimal alignment) =>
+        alignment >= bucket.AlignmentFrom &&
+        (alignment < bucket.AlignmentTo || bucket.AlignmentTo == 1m && alignment <= 1m);
 }

@@ -1,6 +1,8 @@
 using Brokers;
 using Brokers.Models;
 using Brokers.Oanda;
+using DBManager.Abstractions.Credentials;
+using DBManager.Postgres.Security;
 using LiveTrading.MarketData;
 using LiveTrading.Oanda;
 using NUnit.Framework;
@@ -10,9 +12,7 @@ namespace LiveTrading.Tests;
 /// <summary>
 /// Real-network tests only - mirrors <c>Brokers.IntegrationTests/OandaIntegrationTests.cs</c>'s
 /// [Category("Integration")]/[Explicit]/[NonParallelizable] convention exactly, so these never
-/// run automatically (no OANDA credentials or network egress exist in this sandboxed
-/// environment - confirmed empty via <c>env | grep -i oanda</c> during Phase 1 planning). Run
-/// manually with real OANDA practice credentials via OANDA_TOKEN / OANDA_ACCOUNT_ID env vars.
+/// run automatically. Run manually with an enabled OANDA/DEMO row in the broker credential vault.
 /// </summary>
 [TestFixture]
 [Category("Integration")]
@@ -26,24 +26,34 @@ public sealed class OandaAdapterIntegrationTests
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
-        string? token = Environment.GetEnvironmentVariable("OANDA_TOKEN");
         _instrument = new InstrumentKey(Environment.GetEnvironmentVariable("OANDA_TEST_INSTRUMENT") ?? "FX:EUR/USD");
-        if (string.IsNullOrWhiteSpace(token))
+        BrokerCredentialDatabaseConfiguration? configuration =
+            BrokerCredentialDatabaseConfiguration.TryLoad(
+                TestContext.CurrentContext.TestDirectory,
+                out string repositoryRoot);
+        IBrokerCredentialStore? store = configuration?.OpenStore(repositoryRoot);
+        BrokerCredential? credential = store?.GetAsync("OANDA", "DEMO").GetAwaiter().GetResult();
+        if (credential is null ||
+            string.IsNullOrWhiteSpace(credential.AccessToken) ||
+            string.IsNullOrWhiteSpace(credential.AccountId))
         {
-            return; // Explicit tests below will fail with a clear message when actually run without credentials.
+            return;
         }
 
         _broker = BrokerClientFactory.CreateOanda(new OandaOptions
         {
             Environment = Brokers.Abstractions.BrokerEnvironment.Demo,
-            AccessToken = token,
-            AccountId = Environment.GetEnvironmentVariable("OANDA_ACCOUNT_ID") ?? "not-used-by-market-data-tests"
+            AccessToken = credential.AccessToken,
+            AccountId = credential.AccountId,
+            BaseAddress = string.IsNullOrWhiteSpace(credential.BaseAddress)
+                ? null
+                : new Uri(credential.BaseAddress, UriKind.Absolute)
         });
         _map = new OandaInstrumentMap(new Dictionary<string, string>());
     }
 
     [Test]
-    [Explicit("Calls the real OANDA pricing stream using environment-variable credentials.")]
+    [Explicit("Calls the real OANDA pricing stream using credentials from the database vault.")]
     public async Task OandaLiveQuoteStream_ReceivesAtLeastOneTradeableTick()
     {
         RequireBroker();
@@ -61,7 +71,7 @@ public sealed class OandaAdapterIntegrationTests
     }
 
     [Test]
-    [Explicit("Calls the real OANDA REST candle endpoint using environment-variable credentials.")]
+    [Explicit("Calls the real OANDA REST candle endpoint using credentials from the database vault.")]
     public async Task OandaCompletedCandleProvider_FiltersOutIncompleteTrailingCandles()
     {
         RequireBroker();
@@ -192,7 +202,7 @@ public sealed class OandaAdapterIntegrationTests
     private void RequireBroker()
     {
         if (_broker is null)
-            Assert.Fail("Set OANDA_TOKEN and OANDA_ACCOUNT_ID before running explicit OANDA integration tests.");
+            Assert.Fail("Import and enable OANDA/DEMO in the broker credential database before running explicit integration tests.");
     }
 
     private async Task<LiveQuoteSnapshot> ReadQuoteAsync()

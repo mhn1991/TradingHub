@@ -88,7 +88,9 @@ public sealed record SetDeploymentAssignment
 /// <summary>How an Agent instance is allowed to act for a given assignment.</summary>
 public enum AgentMode
 {
-    RecordOnly,
-    Shadow,
-    Live
+    RecordOnly = 0,
+    Shadow = 1,
+    Live = 2,
+    ManualApproval = Live,
+    Automatic = 3
 }

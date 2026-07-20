@@ -35,6 +35,7 @@ public sealed class DashboardRequestRoundTripTests
             NeoWaveEvidenceMode = "SoftRiskReduction",
             NeoWaveEvidenceInterval = "15m",
             NeoWaveMinimumStructuralScore = 65m,
+            CaptureMarketReplay = false,
             LegacyPositionManagement = new PositionManagementRequest
             {
                 EnableNeoWaveInvalidationExit = true,
@@ -84,6 +85,7 @@ public sealed class DashboardRequestRoundTripTests
             Assert.That(mapped.Runtime.LegacyPositionManagement.EnableNeoWaveInvalidationExit, Is.True);
             Assert.That(mapped.Runtime.LegacyPositionManagement.NeoWaveInvalidationBufferAtr, Is.EqualTo(0.20m));
             Assert.That(mapped.Runtime.Financing.InstrumentRates["FX:GBP/USD"].LongAnnualPercent, Is.EqualTo(-3.5m));
+            Assert.That(mapped.CaptureMarketReplay, Is.False);
             Assert.That(() => mapped.Validate(), Throws.Nothing);
         });
     }
@@ -107,6 +109,7 @@ public sealed class DashboardRequestRoundTripTests
             Assert.That(request.AutoCalibrateBeforeRun, Is.True);
             Assert.That(request.AutoCalibrateTrainMonths, Is.EqualTo(2));
             Assert.That(request.AutoCalibrateEmbargoDays, Is.EqualTo(10));
+            Assert.That(request.CaptureMarketReplay, Is.True);
             Assert.That(request.ShouldAutoCalibrate(null, null, null), Is.True);
         });
     }

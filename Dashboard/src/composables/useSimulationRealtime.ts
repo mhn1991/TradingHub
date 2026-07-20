@@ -18,6 +18,7 @@ export function useSimulationRealtime(simulationId: Ref<string | null>) {
 
   let connection: signalR.HubConnection | null = null
   let pollTimer: number | undefined
+  let subscribedId: string | null = null
   let lastRevision = -1
   let disposed = false
 
@@ -28,10 +29,11 @@ export function useSimulationRealtime(simulationId: Ref<string | null>) {
     usingPolling.value = false
 
     const hubUrl = `${window.location.origin}${import.meta.env.BASE_URL}hubs/simulations`.replace(/([^:]\/)\/+/g, '$1')
-    connection = new signalR.HubConnectionBuilder()
+    const nextConnection = new signalR.HubConnectionBuilder()
       .withUrl(hubUrl)
       .withAutomaticReconnect()
       .build()
+    connection = nextConnection
 
     const apply = (payload: SimulationJobSnapshot) => {
       if (disposed) return
@@ -40,48 +42,76 @@ export function useSimulationRealtime(simulationId: Ref<string | null>) {
       snapshot.value = payload
     }
 
-    connection.on('SimulationStatusChanged', apply)
-    connection.on('SimulationProgressChanged', apply)
-    connection.on('SimulationCompleted', apply)
-    connection.on('SimulationFailed', apply)
-    connection.on('TradeCompleted', (payload: CompletedTradeEnvelope) => {
+    nextConnection.on('SimulationStatusChanged', apply)
+    nextConnection.on('SimulationProgressChanged', apply)
+    nextConnection.on('SimulationCompleted', apply)
+    nextConnection.on('SimulationFailed', apply)
+    nextConnection.on('TradeCompleted', (payload: CompletedTradeEnvelope) => {
       completedTrade.value = payload
       completedTradeRevision.value++
     })
 
-    connection.onreconnected(async () => {
+    nextConnection.onreconnecting(() => {
+      if (connection !== nextConnection) return
+      connected.value = false
+      usingPolling.value = true
+    })
+
+    nextConnection.onreconnected(async () => {
+      if (connection !== nextConnection) return
       connected.value = true
-      if (simulationId.value) {
-        await connection?.invoke('Subscribe', simulationId.value)
-        await refreshOnce(simulationId.value)
-      }
+      usingPolling.value = false
+      subscribedId = id
+      await nextConnection.invoke('Subscribe', id)
+      await refreshOnce(id)
+    })
+
+    nextConnection.onclose(() => {
+      if (connection !== nextConnection || disposed) return
+      connected.value = false
+      usingPolling.value = true
+      startPolling(id, true)
     })
 
     try {
-      await connection.start()
+      await nextConnection.start()
+      if (connection !== nextConnection || disposed || simulationId.value !== id) {
+        await nextConnection.stop()
+        return
+      }
       connected.value = true
-      await connection.invoke('Subscribe', id)
+      subscribedId = id
+      await nextConnection.invoke('Subscribe', id)
       await refreshOnce(id)
+      // SignalR progress events are fast, while this low-frequency reconciliation
+      // prevents a dropped event or proxy timeout from freezing the panel.
+      startPolling(id, false)
     } catch (err) {
+      if (connection !== nextConnection) return
       connected.value = false
       usingPolling.value = true
       error.value = err instanceof Error ? err.message : String(err)
-      startPolling(id)
+      startPolling(id, true)
     }
   }
 
   async function refreshOnce(id: string) {
-    const response = await fetch(`${import.meta.env.BASE_URL}api/simulations/${id}`)
+    if (disposed || simulationId.value !== id) return
+    const response = await fetch(`${import.meta.env.BASE_URL}api/simulations/${id}`, {
+      cache: 'no-store',
+    })
     if (!response.ok) return
     const payload = await response.json() as SimulationJobSnapshot
+    if (disposed || simulationId.value !== id) return
     if (typeof payload.revision === 'number' && payload.revision < lastRevision) return
     lastRevision = payload.revision ?? lastRevision
     snapshot.value = payload
+    error.value = null
   }
 
-  function startPolling(id: string) {
+  function startPolling(id: string, fallback: boolean) {
     stopPolling()
-    usingPolling.value = true
+    usingPolling.value = fallback
     pollTimer = window.setInterval(() => {
       void refreshOnce(id)
     }, 1500)
@@ -96,20 +126,23 @@ export function useSimulationRealtime(simulationId: Ref<string | null>) {
 
   async function disposeConnection() {
     stopPolling()
-    if (connection) {
+    const currentConnection = connection
+    const currentSubscription = subscribedId
+    connection = null
+    subscribedId = null
+    if (currentConnection) {
       try {
-        if (simulationId.value) {
-          await connection.invoke('Unsubscribe', simulationId.value)
+        if (currentSubscription) {
+          await currentConnection.invoke('Unsubscribe', currentSubscription)
         }
       } catch {
         // ignore
       }
       try {
-        await connection.stop()
+        await currentConnection.stop()
       } catch {
         // ignore
       }
-      connection = null
     }
     connected.value = false
   }

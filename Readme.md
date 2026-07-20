@@ -89,12 +89,17 @@ Legacy and Improved have separate break-even/structure activation, management-in
 
 Architecture details: [`ARCHITECTURE_SIMULATOR.md`](ARCHITECTURE_SIMULATOR.md).
 
+Structural-confluence research, immutable experiment profiles, the experiment CLI, and live-shadow
+paper outcomes are documented in
+[`STRUCTURAL_CONFLUENCE_EXPERIMENT_AND_SHADOW.md`](Implementation&PhasingDocs/STRUCTURAL_CONFLUENCE_EXPERIMENT_AND_SHADOW.md).
+Runnable request templates live under [`examples/structural-confluence`](examples/structural-confluence).
+
 ### CLI (same application service)
 
-```bash
-export Oanda__AccountId='YOUR_PRACTICE_ACCOUNT_ID'
-export Oanda__AccessToken='YOUR_PRACTICE_ACCESS_TOKEN'
+Bootstrap the encrypted broker credential vault first; see
+[`BROKER_CREDENTIAL_VAULT.md`](Implementation&PhasingDocs/BROKER_CREDENTIAL_VAULT.md).
 
+```bash
 dotnet run -c Release --project BacktestRunner/BacktestRunner.csproj -- \
   --instrument FX:GBP/JPY \
   --from 2025-07-13 \
@@ -173,7 +178,9 @@ See [`PROFIT_PROTECTION_AND_LONG_RUN_FIX.md`](PROFIT_PROTECTION_AND_LONG_RUN_FIX
 - Portfolio-level currency/correlation exposure controls exist and gate admission in `SharedPortfolioAccount` mode, and the simulator can now stream more than one instrument in a run (§7 multi-instrument portfolio clock — see `ARCHITECTURE_SIMULATOR.md` § Quantitative risk / portfolio layer), so correlation/cross-instrument competition can actually be exercised in production. Remaining gap: no dedicated test proves an exact-correlated real streamed pair trips a correlation penalty end-to-end, and Dashboard replay trade markers aren't yet instrument-filtered (only the candle series is).
 - `SharedPortfolioAccount` mode's account ledger now nets for real: one shared balance pool and margin computed from real net exposure per instrument across strategies, not summed independently (see `ARCHITECTURE_SIMULATOR.md` § Known limitations). Remaining gap is position-level: same-instrument positions across strategies still can't be reconciled to one broker-side netted position, deliberately deferred because it needs every exit-management code path in `StrategySimulationSession` retrofitted to a virtual-lot model first.
 - Generate Phase 3 ML training rows from historical annotations using time-split, lookahead-safe labels.
-- Wire an operational QuantResearch runner (walk-forward/ablation/sensitivity/calibration CLI) and a calibration-artifact repository — the library primitives exist but have no end-to-end workflow yet.
+- Continue validating the operational QuantResearch experiment/calibration runner with larger
+  multi-instrument walk-forward datasets; the server-owned workflow, immutable profile/artifact
+  stores, resumable ledger, and CLI are implemented.
 
 ## Price action and warm-up calibration
 

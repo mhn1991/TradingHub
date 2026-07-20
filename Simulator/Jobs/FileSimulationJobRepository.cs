@@ -128,7 +128,7 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
             _gate.Release();
         }
 
-        IReadOnlyList<SimulationJobSnapshot> jobs = await ListAsync(500, cancellationToken)
+        IReadOnlyList<SimulationJobSnapshot> jobs = await ListAsync(int.MaxValue, cancellationToken)
             .ConfigureAwait(false);
         int interrupted = 0;
         foreach (SimulationJobSnapshot job in jobs)
@@ -147,7 +147,8 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
                 Status = SimulationJobStatus.Failed,
                 IsComplete = true,
                 CompletedAt = DateTimeOffset.UtcNow,
-                Error = "Interrupted by service restart. Partial replay output may remain on disk."
+                Error = "HostRestartedWhileRunning: The host restarted before this simulation " +
+                        "could complete. Partial replay output remains available."
             }, cancellationToken).ConfigureAwait(false);
             interrupted++;
         }

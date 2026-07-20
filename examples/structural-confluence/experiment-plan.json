@@ -1,0 +1,33 @@
+{
+  "name": "structural-confluence-cci-ablation",
+  "description": "Replace the example profile references with immutable baseline and CCI-required profile revisions created in Dashboard.",
+  "timeline": {
+    "learningFrom": "2024-01-01T00:00:00Z",
+    "learningTo": "2024-10-01T00:00:00Z",
+    "evaluationFrom": "2024-10-15T00:00:00Z",
+    "evaluationTo": "2025-01-01T00:00:00Z",
+    "trainingWarmupDays": 21,
+    "evaluationWarmupDays": 21,
+    "embargoDays": 10
+  },
+  "profiles": [
+    {
+      "profileId": "11111111-1111-1111-1111-111111111111",
+      "revision": 1,
+      "isBaseline": true
+    },
+    {
+      "profileId": "22222222-2222-2222-2222-222222222222",
+      "revision": 1,
+      "isBaseline": false
+    }
+  ],
+  "parallelism": {
+    "maxProfileGroups": 2,
+    "maxTotalStrategyWorkers": 4,
+    "maxHistoricalDownloadsPerBroker": 1,
+    "estimatedMemoryBudgetBytes": 2147483648
+  },
+  "allowInsufficientWarmup": false,
+  "availableDataFrom": "2023-12-01T00:00:00Z"
+}

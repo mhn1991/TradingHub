@@ -23,6 +23,7 @@ public sealed record ResearchTrade
 {
     public required string TradeId { get; init; }
     public required string StrategyId { get; init; }
+    public string PlaybookId { get; init; } = "unknown";
     public required string Instrument { get; init; }
     public required string InstrumentGroup { get; init; }
     public required string Regime { get; init; }

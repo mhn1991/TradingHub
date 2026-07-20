@@ -772,10 +772,25 @@ const focusIndicators = computed(() => {
   const frame = focusFrame.value
   if (!frame) return null
   const donchian = frame.indicators.donchian
+  const cciAnalysis = frame.indicators.cciAnalysis
+  const cciRelationship = cciAnalysis?.latestRelationship
+  const cciCrossings = [
+    cciAnalysis?.crossedUpFromExtremeNegative ? '↑ from -extreme' : null,
+    cciAnalysis?.crossedDownFromExtremePositive ? '↓ from +extreme' : null,
+    cciAnalysis?.crossedUpZero ? '↑ zero' : null,
+    cciAnalysis?.crossedDownZero ? '↓ zero' : null,
+  ].filter((value): value is string => value != null)
   return {
     time: timestamp(frame.availableAt),
     rsi: frame.indicators.rsi?.toFixed(1) ?? '—',
     cci: frame.indicators.cci?.toFixed(1) ?? '—',
+    cciState: cciAnalysis
+      ? `${cciAnalysis.zone} · ${cciAnalysis.momentumDirection}${cciAnalysis.momentumChange != null ? ` ${cciAnalysis.momentumChange >= 0 ? '+' : ''}${cciAnalysis.momentumChange.toFixed(1)}` : ''}`
+      : '—',
+    cciCrossing: cciCrossings.length ? cciCrossings.join(', ') : '—',
+    cciRelationship: cciRelationship
+      ? `${cciRelationship.type} · age ${cciRelationship.ageCandles} · strength ${cciRelationship.strength.toFixed(2)}`
+      : '—',
     sma50: frame.indicators.sma50 != null ? price(frame.indicators.sma50) : '—',
     sma200: frame.indicators.sma200 != null ? price(frame.indicators.sma200) : '—',
     atr: frame.indicators.atrAnalysis?.normalizedPercent?.toFixed(3) ?? '—',
@@ -1283,6 +1298,9 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       <div class="chart-readout-metrics">
         <span><em>RSI</em>{{ focusIndicators.rsi }}</span>
         <span><em>CCI</em>{{ focusIndicators.cci }}</span>
+        <span><em>CCI state</em>{{ focusIndicators.cciState }}</span>
+        <span><em>CCI cross</em>{{ focusIndicators.cciCrossing }}</span>
+        <span><em>CCI relation</em>{{ focusIndicators.cciRelationship }}</span>
         <span><em>SMA50</em>{{ focusIndicators.sma50 }}</span>
         <span><em>SMA200</em>{{ focusIndicators.sma200 }}</span>
         <span><em>ATR%</em>{{ focusIndicators.atr }}</span>

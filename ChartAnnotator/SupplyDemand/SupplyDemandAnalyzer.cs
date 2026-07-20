@@ -18,6 +18,25 @@ public sealed class SupplyDemandAnalyzer
     private readonly string _profileHash;
     private readonly Dictionary<Guid, ZoneRuntimeState> _zones = [];
     private readonly List<SupplyDemandZoneEvent> _recentEvents = [];
+    /// <summary>
+    /// Every zone ID ever formed, retained for the lifetime of the analyzer so a deterministic
+    /// ID can never be re-detected and resurrected after its <see cref="ZoneRuntimeState"/> is
+    /// trimmed from <see cref="_zones"/> below. Cheap (a Guid per zone, no zone payload) compared
+    /// to keeping the full runtime state around forever.
+    /// </summary>
+    private readonly HashSet<Guid> _formedZoneIds = [];
+    /// <summary>
+    /// Zone IDs in creation order (== AvailableAt order - <see cref="DetectNewZone"/> only ever
+    /// stamps a new zone with the current candle's timestamp and adds at most one per call).
+    /// Lets <see cref="TrimStaleTerminalZones"/> find "oldest first" without re-sorting the whole
+    /// zone dictionary every candle. A <see cref="LinkedList{T}"/> rather than a <see cref="Queue{T}"/>
+    /// deliberately - trimming must be able to remove a terminal entry from the *middle* of this
+    /// order without one long-lived active zone sitting near the front permanently blocking every
+    /// terminal entry behind it (a real bug this analyzer's first cut of this fix had: a plain
+    /// FIFO queue gives up the instant it sees one still-active zone, so a single long-lived
+    /// active zone lets everything behind it accumulate forever).
+    /// </summary>
+    private readonly LinkedList<Guid> _creationOrder = [];
     private long _snapshotVersion;
 
     public SupplyDemandAnalyzer(SupplyDemandCalculationProfile? profile = null)
@@ -65,6 +84,11 @@ public sealed class SupplyDemandAnalyzer
         {
             _recentEvents.RemoveRange(0, _recentEvents.Count - _profile.MaximumRetainedEvents);
         }
+
+        // Must run after _recentEvents has already received this candle's additions and been
+        // trimmed - see TrimStaleTerminalZones's own doc comment for why (same defect as, and
+        // fixed alongside, LiquidityAnalyzer.TrimStaleTerminalPools).
+        TrimStaleTerminalZones();
 
         SupplyDemandZone[] active = _zones.Values
             .Where(state => !state.Terminal)
@@ -123,7 +147,22 @@ public sealed class SupplyDemandAnalyzer
             if (touchedNow)
             {
                 SupplyDemandZoneState before = zone.State;
-                zone = zone with { TouchCount = zone.TouchCount + 1 };
+                // Cooldown-based distinct touch count (industry-standard technique): only counts
+                // toward DistinctTouchCount if at least MinimumDistinctTouchBars have passed since
+                // the last counted touch, so one consolidation sitting on the zone across many
+                // consecutive candles cannot be mistaken for repeated separate pullback tests.
+                // Deliberately independent of TouchCount, which keeps its existing (unthrottled)
+                // meaning for FreshnessScore/QualityScore elsewhere.
+                TimeSpan cooldown = TimeSpan.FromSeconds(
+                    BarIntervalParser.ApproximateSeconds(zone.Interval) * _profile.MinimumDistinctTouchBars);
+                bool distinctTouch = zone.LastDistinctTouchAt is not DateTimeOffset lastDistinct ||
+                    availableAt - lastDistinct >= cooldown;
+                zone = zone with
+                {
+                    TouchCount = zone.TouchCount + 1,
+                    DistinctTouchCount = distinctTouch ? zone.DistinctTouchCount + 1 : zone.DistinctTouchCount,
+                    LastDistinctTouchAt = distinctTouch ? availableAt : zone.LastDistinctTouchAt
+                };
                 if (before is SupplyDemandZoneState.ConfirmedFresh or SupplyDemandZoneState.Approached)
                 {
                     zone = zone with { State = SupplyDemandZoneState.Tested };
@@ -318,6 +357,12 @@ public sealed class SupplyDemandAnalyzer
                     continue;
                 }
 
+                if (_profile.RequireOriginationMove && !TryEvaluateOrigination(history, baseStartIndex, bullish, atr))
+                {
+                    suppressedCandidates++;
+                    continue;
+                }
+
                 DateTimeOffset baseStartedAt = baseCandles[0].OpenTime;
                 DateTimeOffset baseEndedAt = baseCandles[^1].CloseTime ?? baseCandles[^1].OpenTime;
                 DateTimeOffset departureStartedAt = departureCandles[0].OpenTime;
@@ -345,7 +390,7 @@ public sealed class SupplyDemandAnalyzer
                     distal,
                     _profileHash);
 
-                if (_zones.ContainsKey(zoneId))
+                if (_formedZoneIds.Contains(zoneId))
                 {
                     suppressedCandidates++;
                     continue;
@@ -397,6 +442,8 @@ public sealed class SupplyDemandAnalyzer
                     MaxPenetrationRatio = 0m,
                     Terminal = false
                 };
+                _formedZoneIds.Add(zoneId);
+                _creationOrder.AddLast(zoneId);
                 events.Add(CreateEvent(zoneId, SupplyDemandZoneEventType.Formed, SupplyDemandZoneState.Forming, SupplyDemandZoneState.ConfirmedFresh, availableAt: availableAt, price: currentCandle.Prices.Close));
                 events.Add(CreateEvent(zoneId, SupplyDemandZoneEventType.Confirmed, SupplyDemandZoneState.ConfirmedFresh, SupplyDemandZoneState.ConfirmedFresh, availableAt: availableAt, price: currentCandle.Prices.Close));
                 return;
@@ -470,6 +517,56 @@ public sealed class SupplyDemandAnalyzer
 
         compactness = Math.Clamp(1m - baseRangeAtr / _profile.MaximumBaseRangeAtr, 0m, 1m);
         return true;
+    }
+
+    /// <summary>
+    /// Opt-in check (RequireOriginationMove) for the "strong move in" leg of the standard
+    /// Drop-Base-Rally/Rally-Base-Drop pattern: a qualifying move ending exactly where the base
+    /// begins, in the OPPOSITE direction from the eventual departure (a demand zone's base should
+    /// be approached by a prior bearish move, mirroring the departure move's own ATR/efficiency
+    /// checks). Without this, a base reached by slow drift scores identically to one reached by a
+    /// genuine prior move, even though only the latter is what the standard definition means by
+    /// "imbalance origin".
+    /// </summary>
+    private bool TryEvaluateOrigination(Candle[] history, int baseStartIndex, bool bullishDeparture, decimal atr)
+    {
+        for (int originLen = _profile.MinimumOriginationCandles; originLen <= _profile.MaximumOriginationCandles; originLen++)
+        {
+            int originStartIndex = baseStartIndex - originLen;
+            if (originStartIndex < 0)
+            {
+                break;
+            }
+
+            var originCandles = new ArraySegment<Candle>(history, originStartIndex, originLen);
+            decimal netMove = originCandles[^1].Prices.Close - originCandles[0].Prices.Open;
+            bool matchesExpectedDirection = bullishDeparture ? netMove < 0m : netMove > 0m;
+            if (!matchesExpectedDirection)
+            {
+                continue;
+            }
+
+            decimal sumRange = 0m;
+            foreach (Candle candle in originCandles)
+            {
+                sumRange += candle.Prices.High - candle.Prices.Low;
+            }
+
+            if (sumRange <= 0m)
+            {
+                continue;
+            }
+
+            decimal originationEfficiency = Math.Abs(netMove) / sumRange;
+            decimal originationAtr = Math.Abs(netMove) / atr;
+            if (originationAtr >= _profile.MinimumOriginationAtr &&
+                originationEfficiency >= _profile.MinimumOriginationEfficiency)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool DetectStructureBreak(
@@ -692,6 +789,66 @@ public sealed class SupplyDemandAnalyzer
         }
     }
 
+    /// <summary>
+    /// Bounds <see cref="_zones"/> to roughly <see cref="SupplyDemandCalculationProfile.MaximumActiveZones"/>
+    /// + <see cref="SupplyDemandCalculationProfile.MaximumRetainedEvents"/> entries so per-candle
+    /// full-dictionary scans (<see cref="UpdateExistingZones"/>, <see cref="OverlapsExistingActiveZone"/>,
+    /// <see cref="MergeOverlappingZones"/>, and the snapshot builder in <see cref="Update"/>) stay
+    /// O(bounded constant) instead of O(every zone ever formed in the run) - without that, a long
+    /// backtest degrades to roughly quadratic total work as zones accumulate. Only terminal zones
+    /// older (by creation order, which matches AvailableAt order exactly) than the window the
+    /// snapshot's <c>Zones</c> output ever needs are removed; <see cref="_formedZoneIds"/> keeps
+    /// every ID forever so a trimmed zone's deterministic ID can never be re-detected and
+    /// resurrected (the append-only lifecycle guarantee is unaffected).
+    ///
+    /// Must be called after <see cref="_recentEvents"/> has already received this candle's
+    /// additions and been trimmed to its own retention window - and must never remove a zone that
+    /// list still references. A zone that just went Terminal via an event produced THIS candle is
+    /// often also the OLDEST entry in <see cref="_creationOrder"/> (it sat around for a long time
+    /// before finally invalidating/mitigating), making it the first candidate this walk considers
+    /// for removal - if removed here, the event just recorded for it would permanently reference a
+    /// zone ID no longer present in the snapshot's <c>Zones</c> list. This is the same defect found
+    /// and fixed in <c>LiquidityAnalyzer.TrimStaleTerminalPools</c> (there it silently broke the
+    /// sweep-reversal playbook's sweep-to-pool cross-reference forever, once the pool backlog first
+    /// exceeded the retention window); fixed here for the same data-integrity reason even though no
+    /// zone consumer currently cross-references events back to zones the same way.
+    /// </summary>
+    private void TrimStaleTerminalZones()
+    {
+        int excess = _creationOrder.Count - (_profile.MaximumActiveZones + _profile.MaximumRetainedEvents);
+        if (excess <= 0)
+        {
+            return;
+        }
+
+        var protectedIds = new HashSet<Guid>(_recentEvents.Select(item => item.ZoneId));
+
+        // Walk oldest-to-newest, removing terminal entries wherever they are - not just at the
+        // front - so one long-lived active zone can never block cleanup of everything behind it.
+        // Active entries and zones still referenced by a retained event are skipped in place (never
+        // removed here); the number skipped is bounded by MaximumActiveZones + MaximumRetainedEvents
+        // regardless of total run length, so this stays a bounded walk.
+        LinkedListNode<Guid>? node = _creationOrder.First;
+        int removed = 0;
+        while (node is not null && removed < excess)
+        {
+            LinkedListNode<Guid>? next = node.Next;
+            if (protectedIds.Contains(node.Value))
+            {
+                node = next;
+                continue;
+            }
+            if (_zones.TryGetValue(node.Value, out ZoneRuntimeState? state) && state.Terminal)
+            {
+                _zones.Remove(node.Value);
+                _creationOrder.Remove(node);
+                removed++;
+            }
+
+            node = next;
+        }
+    }
+
     private decimal ComputeQualityScore(
         decimal departureAtr,
         decimal departureEfficiency,
@@ -744,7 +901,10 @@ public sealed class SupplyDemandAnalyzer
             weights.HigherTimeframeAlignment + weights.SupportResistanceConfluence +
             weights.LiquidityConfluence + weights.RoomToOpposingZone;
 
-        return totalWeight > 0m ? Math.Clamp(weightedSum / totalWeight * 100m, 0m, 100m) : 0m;
+        // Unit interval [0, 1] — matches FreshnessScore, liquidity pool quality, and agent
+        // thresholds such as MinimumZoneQuality (0.55). Never publish 0–100 here; consumers
+        // multiply by 100 only when they need a 0–100 display/confidence component.
+        return totalWeight > 0m ? Math.Clamp(weightedSum / totalWeight, 0m, 1m) : 0m;
     }
 
     private SupplyDemandZoneEvent CreateEvent(

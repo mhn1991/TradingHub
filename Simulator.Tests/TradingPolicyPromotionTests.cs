@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Agent.Strategies;
 using NUnit.Framework;
 using Simulator.Models;
+using TradeManager;
 using TradingPolicies;
 
 namespace Simulator.Tests;
@@ -47,13 +48,36 @@ public sealed class TradingPolicyPromotionTests
         Assert.Multiple(() =>
         {
             Assert.That(restored.ConfigurationHash, Is.EqualTo(profile.ConfigurationHash));
-            Assert.That(restored.AgentKind, Is.EqualTo(ProgressiveAgentKind.Improved));
+            Assert.That(restored.EffectiveGenericAgentDefinition().AgentTypeId,
+                Is.EqualTo(Agent.Configuration.TradingAgentTypeIds.ImprovedProgressive));
             Assert.That(restored.Status, Is.EqualTo(TradingPolicyProfileStatus.ApprovedForDemo));
-            Assert.That(Canonical(restored.AgentOptions), Is.EqualTo(Canonical(agentOptions)));
+            Assert.That(Canonical(restored.EffectiveGenericAgentDefinition().ReadProgressiveOptions()),
+                Is.EqualTo(Canonical(agentOptions)));
             Assert.That(Canonical(restored.PositionSizing), Is.EqualTo(Canonical(runtime.PositionSizing)));
             Assert.That(Canonical(restored.PortfolioRisk), Is.EqualTo(Canonical(runtime.PortfolioRisk)));
             Assert.That(Canonical(restored.TradingConditions), Is.EqualTo(Canonical(runtime.TradingConditions)));
             Assert.That(Canonical(restored.ImprovedManagement), Is.EqualTo(Canonical(runtime.ImprovedPositionManagement)));
+            Assert.That(Canonical(restored.StructuralManagement), Is.EqualTo(Canonical(runtime.StructuralPositionManagement)));
+        });
+    }
+
+    [Test]
+    public void StructuralAgent_UsesDedicatedManagementPolicyByExactId()
+    {
+        var structural = PositionManagementOptions.StructuralDefaults with
+        {
+            StructuralManagementPolicyRevision = "structural-test-v7"
+        };
+        var runtime = new BacktestRuntimeOptions { StructuralPositionManagement = structural };
+
+        PositionManagementOptions resolved = runtime.GetPositionManagement("structural-confluence");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(resolved, Is.SameAs(structural));
+            Assert.That(resolved.PreserveBracketTarget, Is.True);
+            Assert.That(resolved.StructureTrailActivationR, Is.InRange(0.2m, 0.5m));
+            Assert.That(resolved.StructuralManagementPolicyRevision, Is.EqualTo("structural-test-v7"));
         });
     }
 

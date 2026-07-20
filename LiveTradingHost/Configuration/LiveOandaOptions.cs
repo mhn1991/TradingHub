@@ -4,9 +4,8 @@ using Brokers.Oanda;
 namespace LiveTradingHost.Configuration;
 
 /// <summary>Config-bound wrapper around <see cref="OandaOptions"/> (which is a plain data
-/// carrier with no <c>Enabled</c>/validation of its own) - mirrors <c>DashboardLive.
-/// OandaWorkspaceOptions</c>'s shape exactly, including its env-var override convention
-/// (<c>Oanda__AccountId</c> / <c>Oanda__AccessToken</c>).</summary>
+/// carrier with no <c>Enabled</c>/validation of its own). Broker secrets are overlaid from the
+/// encrypted PostgreSQL credential vault before this type is bound.</summary>
 public sealed record LiveOandaOptions
 {
     public const string SectionName = "Oanda";

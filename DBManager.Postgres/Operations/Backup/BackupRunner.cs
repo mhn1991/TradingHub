@@ -95,6 +95,8 @@ public sealed class BackupRunner(IBackupStore backupStore, ISchemaVersionReader 
     {
         NpgsqlConnectionStringBuilder builder = new(adminConnectionString);
         string scratchDatabase = $"restore_verify_{backupId:N}";
+        bool scratchCreated = false;
+        RestoreVerificationResult verification;
 
         try
         {
@@ -104,6 +106,7 @@ public sealed class BackupRunner(IBackupStore backupStore, ISchemaVersionReader 
                 await maintenance.OpenAsync(cancellationToken).ConfigureAwait(false);
                 await using NpgsqlCommand createDb = new($"CREATE DATABASE \"{scratchDatabase}\"", maintenance);
                 await createDb.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                scratchCreated = true;
             }
 
             ProcessStartInfo restoreInfo = new("pg_restore")
@@ -128,32 +131,68 @@ public sealed class BackupRunner(IBackupStore backupStore, ISchemaVersionReader 
                 sane = await SanityCheckRestoredDatabaseAsync(adminConnectionString, scratchDatabase, cancellationToken)
                     .ConfigureAwait(false);
 
-            RecordRestoreTest resultCommand = restoreOk && sane
-                ? new RecordRestoreTest { BackupId = backupId, Status = RestoreTestStatus.Passed }
-                : new RecordRestoreTest
-                {
-                    BackupId = backupId,
-                    Status = RestoreTestStatus.Failed,
-                    FailureDetail = !restoreOk ? restoreStderr : "sanity check found no schema_history rows"
-                };
-            await backupStore.RecordRestoreTestAsync(resultCommand, cancellationToken).ConfigureAwait(false);
-
-            return new RestoreVerificationResult
+            verification = new RestoreVerificationResult
             {
                 Succeeded = restoreOk && sane,
-                FailureDetail = resultCommand.FailureDetail
+                FailureDetail = restoreOk && sane
+                    ? null
+                    : !restoreOk ? restoreStderr : "sanity check found no schema_history rows"
             };
         }
-        finally
+        catch (OperationCanceledException)
         {
-            await using NpgsqlConnection maintenance = new(
-                new NpgsqlConnectionStringBuilder(adminConnectionString) { Database = "postgres" }.ConnectionString);
-            await maintenance.OpenAsync(cancellationToken).ConfigureAwait(false);
-            await using NpgsqlCommand dropDb = new(
-                $"DROP DATABASE IF EXISTS \"{scratchDatabase}\" WITH (FORCE)", maintenance);
-            await dropDb.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            throw;
         }
+        catch (Exception exception)
+        {
+            verification = new RestoreVerificationResult
+            {
+                Succeeded = false,
+                FailureDetail = BoundFailure(exception.Message)
+            };
+        }
+
+        if (scratchCreated)
+        {
+            try
+            {
+                await using NpgsqlConnection maintenance = new(
+                    new NpgsqlConnectionStringBuilder(adminConnectionString) { Database = "postgres" }.ConnectionString);
+                await maintenance.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await using NpgsqlCommand dropDb = new(
+                    $"DROP DATABASE IF EXISTS \"{scratchDatabase}\" WITH (FORCE)", maintenance);
+                await dropDb.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                string cleanupFailure = $"scratch database cleanup failed: {BoundFailure(exception.Message)}";
+                logger.LogError(exception, "Restore verification cleanup failed for {ScratchDatabase}", scratchDatabase);
+                verification = new RestoreVerificationResult
+                {
+                    Succeeded = false,
+                    FailureDetail = verification.FailureDetail is null
+                        ? cleanupFailure
+                        : $"{verification.FailureDetail}; {cleanupFailure}"
+                };
+            }
+        }
+
+        await backupStore.RecordRestoreTestAsync(new RecordRestoreTest
+        {
+            BackupId = backupId,
+            Status = verification.Succeeded ? RestoreTestStatus.Passed : RestoreTestStatus.Failed,
+            FailureDetail = verification.FailureDetail
+        }, cancellationToken).ConfigureAwait(false);
+
+        return verification;
     }
+
+    private static string BoundFailure(string failure) =>
+        failure.Length <= 2_000 ? failure : failure[..2_000];
 
     private static async Task<bool> SanityCheckRestoredDatabaseAsync(
         string adminConnectionString, string scratchDatabase, CancellationToken cancellationToken)

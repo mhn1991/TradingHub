@@ -95,12 +95,24 @@ public sealed record SupplyDemandZone
     public required int BaseCandleCount { get; init; }
     public required int TouchCount { get; init; }
 
+    /// <summary>
+    /// Count of touches at least <c>MinimumDistinctTouchBars</c> apart, so a single consolidation
+    /// sitting on the zone across many consecutive candles cannot inflate this the way raw
+    /// <see cref="TouchCount"/> can. This is what "pulled back and tested this zone again" should
+    /// mean for a pullback signal - deliberately not fed into FreshnessScore/QualityScore, which
+    /// still treat touches as reducing freshness for other purposes.
+    /// </summary>
+    public int DistinctTouchCount { get; init; }
+    public DateTimeOffset? LastDistinctTouchAt { get; init; }
+
     public required decimal DepartureAtr { get; init; }
     public required decimal DepartureEfficiency { get; init; }
     public required decimal BaseCompactness { get; init; }
     public required decimal ImbalanceRatio { get; init; }
     public required decimal PenetrationRatio { get; init; }
+    /// <summary>Unit interval [0, 1].</summary>
     public required decimal FreshnessScore { get; init; }
+    /// <summary>Unit interval [0, 1] composite zone quality (same scale as liquidity pools).</summary>
     public required decimal QualityScore { get; init; }
 
     public required bool BrokeStructure { get; init; }

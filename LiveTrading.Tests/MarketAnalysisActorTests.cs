@@ -82,6 +82,21 @@ public sealed class MarketAnalysisActorTests
     }
 
     [Test]
+    public async Task RunAsync_InsufficientWarmUpData_RemainsWarmingUp()
+    {
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 3, 2, 8, 0, 0, TimeSpan.Zero));
+        var provider = new FakeCompletedCandleProvider();
+        MarketAnalysisActor actor = BuildActor(provider, clock, out _);
+        Channel<LiveMarketEvent> input = InputChannel();
+        Channel<MarketAnalysisUpdate> output = OutputChannel();
+        input.Writer.Complete();
+
+        await actor.RunAsync(input.Reader, output.Writer, CancellationToken.None);
+
+        Assert.That(actor.State, Is.EqualTo(LiveMarketState.WarmingUp));
+    }
+
+    [Test]
     public async Task RunAsync_LiveCandleAfterWarmUp_PublishesExactlyOneUpdate()
     {
         var clock = new FakeTimeProvider(new DateTimeOffset(2026, 3, 2, 8, 0, 0, TimeSpan.Zero));

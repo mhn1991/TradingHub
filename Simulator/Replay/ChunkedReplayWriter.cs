@@ -18,14 +18,29 @@ namespace Simulator.Replay;
 /// </summary>
 public sealed class ChunkedReplayWriter : IAsyncDisposable
 {
+    private const int MaximumMarketReplayRowsPerChunk = 250;
+    private const int ReplaySwingLimit = 100;
+    private const int ReplaySupplyDemandZoneLimit = 100;
+    private const int ReplaySupplyDemandActiveZoneLimit = 50;
+    private const int ReplaySupplyDemandEventLimit = 50;
+    private const int ReplayLiquidityPoolLimit = 100;
+    private const int ReplayLiquidityActivePoolLimit = 64;
+    private const int ReplayLiquidityEventLimit = 64;
+    private const int ReplayLiquiditySweepLimit = 64;
+    private const int ReplayPriceActionDiagnosticLimit = 64;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = false,
         Converters = { new JsonStringEnumConverter() }
     };
+    // Encoding.UTF8's preamble is the 3-byte BOM - StreamWriter emits it by default, which
+    // breaks strict ndjson parsers (e.g. Python's json.loads chokes on the first line).
+    private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 
     private readonly string _root;
     private readonly int _chunkSize;
+    private readonly int _marketChunkSize;
     private readonly Dictionary<string, StrategyChunkState> _strategyStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ExecutionDetailState> _executionDetailStates = new(StringComparer.Ordinal);
     private readonly List<MarketReplayRow> _marketBuffer = [];
@@ -34,6 +49,7 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
     private int _marketChunkIndex;
     private readonly int _executionDetailPreEntryFrames;
     private readonly int _executionDetailPostExitFrames;
+    private readonly bool _captureMarketReplay;
     private bool _completed;
     private bool _disposed;
 
@@ -41,7 +57,8 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
         string rootDirectory,
         int chunkSize,
         int executionDetailPreEntryFrames = 120,
-        int executionDetailPostExitFrames = 120)
+        int executionDetailPostExitFrames = 120,
+        bool captureMarketReplay = true)
     {
         if (string.IsNullOrWhiteSpace(rootDirectory))
             throw new ArgumentException("Output directory is required.", nameof(rootDirectory));
@@ -51,8 +68,13 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
             throw new ArgumentOutOfRangeException(nameof(executionDetailPreEntryFrames));
         _root = Path.GetFullPath(rootDirectory);
         _chunkSize = chunkSize;
+        // Profile runtimes created before replay snapshots became analysis-rich can still
+        // contain the historical 5,000-row value. Bound only the output partition size so
+        // those profiles do not retain thousands of large snapshots in memory at once.
+        _marketChunkSize = Math.Min(chunkSize, MaximumMarketReplayRowsPerChunk);
         _executionDetailPreEntryFrames = executionDetailPreEntryFrames;
         _executionDetailPostExitFrames = executionDetailPostExitFrames;
+        _captureMarketReplay = captureMarketReplay;
         Directory.CreateDirectory(_root);
         Directory.CreateDirectory(Path.Combine(_root, "market"));
         Directory.CreateDirectory(Path.Combine(_root, "execution-detail"));
@@ -104,7 +126,7 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
 
         // Normal chart replay is analysis-base (1m by default), not one row per
         // 1s/5s execution frame. Full-resolution context is retained around trades.
-        if (frame.AnalysisBaseCandle is Candle analysisCandle)
+        if (_captureMarketReplay && frame.AnalysisBaseCandle is Candle analysisCandle)
         {
             frame.Snapshots.TryGetValue(analysisCandle.Interval, out AnalysisSnapshot? analysis);
             _marketBuffer.Add(new MarketReplayRow(
@@ -118,17 +140,27 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 analysisCandle.Volume?.Value ?? 0m,
                 frame.ClosedIntervals.Select(FormatInterval).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
                 frame.IsWarmup,
-                analysis,
+                CompactAnalysisForReplay(analysis),
                 frame.ExecutionCandle.Mid.Instrument.Value));
         }
 
-        if (_marketBuffer.Count >= _chunkSize)
+        if (_marketBuffer.Count >= _marketChunkSize)
             await FlushMarketChunkAsync(cancellationToken).ConfigureAwait(false);
 
         foreach (StrategyFrameResult result in results)
         {
             StrategyChunkState state = GetOrCreateStrategy(result.StrategyId, result.StrategyName);
             string[] lifecycleEvents = result.Events.Select(item => item.Type.ToString()).ToArray();
+            if (result.Events.Count > 0)
+            {
+                EnsureEventsStreamOpen(state);
+                foreach (StrategyReplayEvent evt in result.Events)
+                {
+                    state.Funnel.Record(evt);
+                    state.EventsStreamWriter!.WriteLine(JsonSerializer.Serialize(evt, JsonOptions));
+                }
+            }
+
             if (frame.AnalysisBaseCandle is not null || result.Events.Count > 0)
             {
                 state.Events.Add(new StrategyEventRow(
@@ -155,6 +187,53 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 await FlushStrategyChunkAsync(state, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    internal static AnalysisSnapshot? CompactAnalysisForReplay(AnalysisSnapshot? analysis)
+    {
+        if (analysis is null)
+            return null;
+
+        // Replay is a bounded chart projection. The analysis engine keeps its complete
+        // immutable snapshot; only the serialized copy is trimmed to recent chart context.
+        return analysis with
+        {
+            Swings = TakeTail(analysis.Swings, ReplaySwingLimit),
+            SupplyDemand = analysis.SupplyDemand with
+            {
+                Zones = TakeTail(analysis.SupplyDemand.Zones, ReplaySupplyDemandZoneLimit),
+                ActiveZones = TakeTail(
+                    analysis.SupplyDemand.ActiveZones,
+                    ReplaySupplyDemandActiveZoneLimit),
+                RecentEvents = TakeTail(
+                    analysis.SupplyDemand.RecentEvents,
+                    ReplaySupplyDemandEventLimit)
+            },
+            Liquidity = analysis.Liquidity with
+            {
+                Pools = TakeTail(analysis.Liquidity.Pools, ReplayLiquidityPoolLimit),
+                ActivePools = TakeTail(
+                    analysis.Liquidity.ActivePools,
+                    ReplayLiquidityActivePoolLimit),
+                RecentEvents = TakeTail(
+                    analysis.Liquidity.RecentEvents,
+                    ReplayLiquidityEventLimit),
+                RecentSweeps = TakeTail(
+                    analysis.Liquidity.RecentSweeps,
+                    ReplayLiquiditySweepLimit)
+            },
+            PriceAction = analysis.PriceAction with
+            {
+                Diagnostics = TakeTail(
+                    analysis.PriceAction.Diagnostics,
+                    ReplayPriceActionDiagnosticLimit)
+            }
+        };
+    }
+
+    private static IReadOnlyList<T> TakeTail<T>(IReadOnlyList<T> values, int limit) =>
+        values.Count <= limit
+            ? values
+            : values.Skip(values.Count - limit).ToArray();
 
     public async Task CompleteAsync(
         IReadOnlyList<StrategySimulationResult> strategies,
@@ -193,7 +272,10 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                     await FlushExecutionDetailAsync(detail, complete: false, CancellationToken.None)
                         .ConfigureAwait(false);
                 foreach (StrategyChunkState state in _strategyStates.Values)
+                {
                     await FlushStrategyChunkAsync(state, CancellationToken.None).ConfigureAwait(false);
+                    await CloseEventsStreamAsync(state).ConfigureAwait(false);
+                }
                 await File.WriteAllTextAsync(
                     Path.Combine(_root, "INCOMPLETE"),
                     DateTimeOffset.UtcNow.ToString("O")).ConfigureAwait(false);
@@ -419,6 +501,8 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
         IReadOnlyList<StrategySimulationResult> strategies,
         CancellationToken cancellationToken)
     {
+        await CloseEventsStreamAsync(state).ConfigureAwait(false);
+
         StrategySimulationResult? match = strategies.FirstOrDefault(item =>
             string.Equals(item.StrategyId, state.Id, StringComparison.OrdinalIgnoreCase));
         await WriteGzipJsonAsync(
@@ -437,6 +521,64 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 match.Metrics,
                 cancellationToken).ConfigureAwait(false);
         }
+
+        // Decision funnel + per-signal disposition, aggregated incrementally from the same
+        // event stream as it was committed - avoids re-scanning the (potentially many) chunked
+        // events-NNNNNN.json.gz files after the fact just to answer "why didn't this convert to
+        // a trade", which previously required bespoke ad hoc parsing for every investigation.
+        SignalFunnelSummary funnel = state.Funnel.BuildSummary(state.Id, state.Name);
+        await WriteJsonAsync(
+            Path.Combine(state.Directory, "funnel-summary.json"),
+            funnel,
+            cancellationToken).ConfigureAwait(false);
+
+        string signalsPath = Path.Combine(state.Directory, "signals.ndjson");
+        string signalsTemporary = signalsPath + ".tmp";
+        await using (FileStream signalsFile = File.Create(signalsTemporary))
+        await using (var writer = new StreamWriter(signalsFile, Utf8NoBom))
+        {
+            foreach (SignalLifecycleRow row in state.Funnel.BuildLifecycleRows())
+                await writer.WriteLineAsync(JsonSerializer.Serialize(row, JsonOptions)).ConfigureAwait(false);
+        }
+        File.Move(signalsTemporary, signalsPath, overwrite: true);
+    }
+
+    private static void EnsureEventsStreamOpen(StrategyChunkState state)
+    {
+        if (state.EventsStreamWriter is not null)
+            return;
+        // Flat, single-file ndjson (one JSON object per line) rather than the chunked
+        // JSON-array-per-file format used for events-NNNNNN.json.gz: each chunk file must be
+        // parsed as a whole separate document, which makes ad hoc cross-run querying (DuckDB,
+        // grep, streaming line-by-line) awkward. This file is additive - the chunked files still
+        // exist for the dashboard's incremental replay/scrubbing UI.
+        string path = Path.Combine(state.Directory, "events.ndjson.gz");
+        FileStream file = File.Create(path);
+        var gzip = new GZipStream(file, CompressionLevel.Fastest);
+        state.EventsStreamGzip = gzip;
+        state.EventsStreamWriter = new StreamWriter(gzip, Utf8NoBom) { AutoFlush = false };
+    }
+
+    private static async Task CloseEventsStreamAsync(StrategyChunkState state)
+    {
+        if (state.EventsStreamWriter is null)
+            return;
+        await state.EventsStreamWriter.FlushAsync().ConfigureAwait(false);
+        await state.EventsStreamWriter.DisposeAsync().ConfigureAwait(false);
+        state.EventsStreamWriter = null;
+        state.EventsStreamGzip = null;
+    }
+
+    private static async Task WriteJsonAsync<T>(string path, T value, CancellationToken cancellationToken)
+    {
+        string temporary = path + ".tmp";
+        await using (FileStream stream = File.Create(temporary))
+        {
+            await JsonSerializer.SerializeAsync(stream, value, JsonOptions, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        File.Move(temporary, path, overwrite: true);
     }
 
     private static async Task WriteGzipJsonAsync<T>(
@@ -478,7 +620,222 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
         public List<StrategyEventRow> Events { get; } = [];
         public List<SimulatedTradeRecord> Trades { get; } = [];
         public List<TradeIndexEntry> TradeIndex { get; } = [];
+        public SignalFunnelAggregator Funnel { get; } = new();
+        public GZipStream? EventsStreamGzip { get; set; }
+        public StreamWriter? EventsStreamWriter { get; set; }
     }
+
+    /// <summary>
+    /// Accumulates two views over the same per-frame event stream as it is committed, so
+    /// answering "why didn't this signal convert to a trade" never requires re-scanning the raw
+    /// chunked event files after a run completes: an event-type x reason-code funnel (mirrors the
+    /// ad hoc Counter/groupby scripts previously written by hand for every investigation), and a
+    /// per-SetupId lifecycle/disposition row (mirrors manually diffing SignalCreated against
+    /// OrderSubmitted/OrderFilled by SetupId). Memory cost is bounded by distinct SetupId count,
+    /// not total event count - dormant/non-candidate evaluations never carry a SetupId.
+    /// </summary>
+    private sealed class SignalFunnelAggregator
+    {
+        private readonly Dictionary<string, int> _eventTypeCounts = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Dictionary<string, int>> _reasonCodesByType = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, SignalLifecycleTracker> _signals = new(StringComparer.Ordinal);
+        private readonly List<string> _signalOrder = [];
+
+        public void Record(StrategyReplayEvent evt)
+        {
+            string typeKey = evt.Type.ToString();
+            _eventTypeCounts[typeKey] = _eventTypeCounts.GetValueOrDefault(typeKey) + 1;
+
+            string? reasonCode = evt.ReasonCode;
+            if (!string.IsNullOrWhiteSpace(reasonCode))
+            {
+                if (!_reasonCodesByType.TryGetValue(typeKey, out Dictionary<string, int>? byReason))
+                {
+                    byReason = new Dictionary<string, int>(StringComparer.Ordinal);
+                    _reasonCodesByType[typeKey] = byReason;
+                }
+                byReason[reasonCode] = byReason.GetValueOrDefault(reasonCode) + 1;
+            }
+
+            if (string.IsNullOrWhiteSpace(evt.SetupId))
+                return;
+
+            if (!_signals.TryGetValue(evt.SetupId, out SignalLifecycleTracker? tracker))
+            {
+                tracker = new SignalLifecycleTracker(evt.SetupId, evt.StrategyId, evt.EventTime);
+                _signals[evt.SetupId] = tracker;
+                _signalOrder.Add(evt.SetupId);
+            }
+            tracker.Apply(evt);
+        }
+
+        public SignalFunnelSummary BuildSummary(string strategyId, string strategyName)
+        {
+            int distinctSignals = _signals.Count;
+            int executed = 0, expiredOrInvalidated = 0, rejected = 0;
+            var rejectionReasons = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (SignalLifecycleTracker tracker in _signals.Values)
+            {
+                if (tracker.Executed)
+                {
+                    executed++;
+                }
+                else if (tracker.Expired || tracker.Invalidated)
+                {
+                    expiredOrInvalidated++;
+                }
+                else if (tracker.RejectionCount > 0)
+                {
+                    rejected++;
+                    if (tracker.LastReasonCode is string reason)
+                        rejectionReasons[reason] = rejectionReasons.GetValueOrDefault(reason) + 1;
+                }
+            }
+            int unresolved = distinctSignals - executed - expiredOrInvalidated - rejected;
+            decimal conversionRate = distinctSignals == 0
+                ? 0m
+                : Math.Round(100m * executed / distinctSignals, 2);
+
+            return new SignalFunnelSummary(
+                1,
+                strategyId,
+                strategyName,
+                DateTimeOffset.UtcNow,
+                _eventTypeCounts,
+                _reasonCodesByType.ToDictionary(
+                    kv => kv.Key,
+                    kv => (IReadOnlyDictionary<string, int>)kv.Value),
+                new SignalConversionSummary(
+                    distinctSignals, executed, rejected, expiredOrInvalidated, unresolved,
+                    conversionRate, rejectionReasons));
+        }
+
+        public IEnumerable<SignalLifecycleRow> BuildLifecycleRows() =>
+            _signalOrder.Select(setupId => _signals[setupId].ToRow());
+    }
+
+    private sealed class SignalLifecycleTracker
+    {
+        private readonly string _setupId;
+        private readonly string _strategyId;
+        private readonly DateTimeOffset _firstSeenAt;
+
+        public SignalLifecycleTracker(string setupId, string strategyId, DateTimeOffset firstSeenAt)
+        {
+            _setupId = setupId;
+            _strategyId = strategyId;
+            _firstSeenAt = firstSeenAt;
+            _lastEventAt = firstSeenAt;
+        }
+
+        public bool Executed { get; private set; }
+        public bool Completed { get; private set; }
+        public bool Expired { get; private set; }
+        public bool Invalidated { get; private set; }
+        public int RejectionCount { get; private set; }
+        public string? LastReasonCode { get; private set; }
+
+        public void Apply(StrategyReplayEvent evt)
+        {
+            _lastEventAt = evt.EventTime;
+            _lastEventType = evt.Type.ToString();
+            if (evt.PositionId is not null)
+                _positionId = evt.PositionId;
+
+            switch (evt.Type)
+            {
+                case StrategyReplayEventType.SignalCreated:
+                    _signalCreatedCount++;
+                    break;
+                case StrategyReplayEventType.OrderFilled:
+                case StrategyReplayEventType.PositionOpened:
+                    Executed = true;
+                    break;
+                case StrategyReplayEventType.TradeCompleted:
+                    Completed = true;
+                    _realizedR = evt.RealizedR;
+                    _exitReason = evt.ReasonCode ?? evt.Reason;
+                    break;
+                case StrategyReplayEventType.RiskRejected:
+                case StrategyReplayEventType.OrderRejected:
+                case StrategyReplayEventType.TradingConditionRejected:
+                    RejectionCount++;
+                    LastReasonCode = evt.ReasonCode ?? evt.Reason;
+                    break;
+                case StrategyReplayEventType.SetupExpired:
+                    Expired = true;
+                    break;
+                case StrategyReplayEventType.SetupInvalidated:
+                    Invalidated = true;
+                    break;
+            }
+        }
+
+        private DateTimeOffset _lastEventAt;
+        private string? _lastEventType;
+        private string? _positionId;
+        private int _signalCreatedCount;
+        private decimal? _realizedR;
+        private string? _exitReason;
+
+        public SignalLifecycleRow ToRow()
+        {
+            string disposition = Executed
+                ? (Completed ? "Completed" : "OpenAtEndOfRun")
+                : Expired ? "Expired"
+                : Invalidated ? "Invalidated"
+                : RejectionCount > 0 ? "Rejected"
+                : "Unresolved";
+
+            return new SignalLifecycleRow(
+                _setupId,
+                _strategyId,
+                _firstSeenAt,
+                _lastEventAt,
+                _signalCreatedCount,
+                RejectionCount,
+                disposition,
+                LastReasonCode,
+                _lastEventType,
+                Completed,
+                _realizedR,
+                _exitReason,
+                _positionId);
+        }
+    }
+
+    private sealed record SignalFunnelSummary(
+        int SchemaVersion,
+        string StrategyId,
+        string StrategyName,
+        DateTimeOffset GeneratedAt,
+        IReadOnlyDictionary<string, int> EventTypeCounts,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, int>> ReasonCodesByEventType,
+        SignalConversionSummary SignalConversion);
+
+    private sealed record SignalConversionSummary(
+        int DistinctSignals,
+        int Executed,
+        int Rejected,
+        int ExpiredOrInvalidated,
+        int Unresolved,
+        decimal ConversionRatePercent,
+        IReadOnlyDictionary<string, int> RejectionReasonCounts);
+
+    private sealed record SignalLifecycleRow(
+        string SetupId,
+        string StrategyId,
+        DateTimeOffset FirstSeenAt,
+        DateTimeOffset LastEventAt,
+        int SignalCreatedCount,
+        int RejectionCount,
+        string Disposition,
+        string? LastReasonCode,
+        string? LastEventType,
+        bool Completed,
+        decimal? RealizedR,
+        string? ExitReason,
+        string? PositionId);
 
     private sealed class ExecutionDetailState(
         string strategyId,

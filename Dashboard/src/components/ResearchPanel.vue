@@ -2,8 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import type {
   CalibrationArtifactMetadata,
+  CalibrationBundleCandidate,
   ResearchArtifactSelection,
   ResearchJobSnapshot,
+  TradingPolicyProfile,
 } from '../types'
 import { RESEARCH_ARTIFACT_SELECTION_KEY } from '../types'
 
@@ -47,6 +49,11 @@ const error = ref<string | null>(null)
 const notice = ref<string | null>(null)
 const activeJobId = ref<string | null>(null)
 
+const policyProfiles = ref<TradingPolicyProfile[]>([])
+const candidates = ref<CalibrationBundleCandidate[]>([])
+const candidateStatusFilter = ref<'PendingReview' | 'all'>('PendingReview')
+const candidateBusyId = ref<string | null>(null)
+
 let pollTimer: number | undefined
 
 const filteredArtifacts = computed(() => {
@@ -71,6 +78,7 @@ onMounted(async () => {
   await refreshAll()
   pollTimer = window.setInterval(() => {
     void refreshJobs()
+    void refreshCandidates()
     if (activeJob.value && (activeJob.value.status === 'Queued' || activeJob.value.status === 'Running')) {
       void refreshArtifacts()
     }
@@ -154,10 +162,75 @@ async function refreshAll() {
   loading.value = true
   error.value = null
   try {
-    await Promise.all([refreshArtifacts(), refreshJobs()])
+    await Promise.all([refreshArtifacts(), refreshJobs(), refreshPolicyProfiles(), refreshCandidates()])
   } finally {
     loading.value = false
   }
+}
+
+async function refreshPolicyProfiles() {
+  const response = await fetch(`${apiBase()}api/trading-policy-profiles`)
+  if (!response.ok) return
+  policyProfiles.value = await response.json() as TradingPolicyProfile[]
+}
+
+async function refreshCandidates() {
+  const query = candidateStatusFilter.value === 'all' ? '' : `?status=${candidateStatusFilter.value}`
+  const response = await fetch(`${apiBase()}api/calibration-candidates${query}`)
+  if (!response.ok) return
+  candidates.value = await response.json() as CalibrationBundleCandidate[]
+}
+
+async function approveCandidate(candidate: CalibrationBundleCandidate) {
+  const approvedBy = window.prompt('Approve as (your name)?')
+  if (!approvedBy?.trim()) return
+  candidateBusyId.value = candidate.id
+  error.value = null
+  try {
+    const response = await fetch(`${apiBase()}api/calibration-candidates/${candidate.id}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approvedBy: approvedBy.trim() }),
+    })
+    if (!response.ok) throw new Error(await readApiError(response, 'Could not approve candidate'))
+    notice.value = `Approved candidate ${shortId(candidate.id)} - now live in the policy store.`
+    await Promise.all([refreshCandidates(), refreshPolicyProfiles()])
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    candidateBusyId.value = null
+  }
+}
+
+async function rejectCandidate(candidate: CalibrationBundleCandidate) {
+  const rejectedBy = window.prompt('Reject as (your name)?')
+  if (!rejectedBy?.trim()) return
+  const reason = window.prompt('Reason for rejection?')
+  if (!reason?.trim()) return
+  candidateBusyId.value = candidate.id
+  error.value = null
+  try {
+    const response = await fetch(`${apiBase()}api/calibration-candidates/${candidate.id}/reject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rejectedBy: rejectedBy.trim(), reason: reason.trim() }),
+    })
+    if (!response.ok) throw new Error(await readApiError(response, 'Could not reject candidate'))
+    notice.value = `Rejected candidate ${shortId(candidate.id)}.`
+    await refreshCandidates()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    candidateBusyId.value = null
+  }
+}
+
+function candidateStatusClass(status: string): string {
+  const value = status.toLowerCase()
+  if (value === 'approved') return 'positive-text'
+  if (value === 'rejected') return 'negative-text'
+  if (value === 'pendingreview') return 'amber-text'
+  return ''
 }
 
 async function refreshArtifacts() {
@@ -433,6 +506,115 @@ function statusClass(status: string): string {
                 <button type="button" class="button button-secondary" @click="useArtifact(artifact)">Use</button>
                 <button type="button" class="button button-secondary danger" @click="deleteArtifact(artifact)">Delete</button>
               </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="research-card" aria-label="Calibration candidate review">
+      <div class="research-card-head">
+        <h3>Calibration candidate review</h3>
+        <label class="inline-filter">
+          Status
+          <select v-model="candidateStatusFilter" @change="refreshCandidates">
+            <option value="PendingReview">Pending review</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted">
+        Automated calibration pipeline proposals, awaiting a human approve/reject before they
+        become a live-eligible policy profile. Nothing here is ever auto-approved.
+      </p>
+      <div class="table-wrap">
+        <table class="research-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Strategy</th>
+              <th>Proposed profile</th>
+              <th>Artifacts (setup / meta / mgmt)</th>
+              <th>Created</th>
+              <th>Reviewed</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="candidates.length === 0">
+              <td colspan="7" class="muted">No candidates for this filter.</td>
+            </tr>
+            <tr v-for="candidate in candidates" :key="candidate.id">
+              <td :class="candidateStatusClass(candidate.status)">{{ candidate.status }}</td>
+              <td>{{ candidate.proposedProfile.strategyId }}</td>
+              <td><code :title="candidate.proposedProfile.profileId">{{ shortId(candidate.proposedProfile.profileId) }}</code> rev {{ candidate.proposedProfile.revision }}</td>
+              <td class="mono">
+                {{ shortId(candidate.setupArtifactId) }} / {{ shortId(candidate.metaModelArtifactId) }} / {{ shortId(candidate.managementArtifactId) }}
+              </td>
+              <td>{{ formatTime(candidate.createdAt) }}</td>
+              <td>
+                <template v-if="candidate.reviewedBy">
+                  {{ candidate.reviewedBy }} · {{ formatTime(candidate.reviewedAt) }}
+                  <template v-if="candidate.rejectionReason"><br /><span class="negative-text">{{ candidate.rejectionReason }}</span></template>
+                </template>
+                <span v-else class="muted">—</span>
+              </td>
+              <td class="row-actions">
+                <template v-if="candidate.status === 'PendingReview'">
+                  <button
+                    type="button" class="button button-secondary"
+                    :disabled="candidateBusyId === candidate.id"
+                    @click="approveCandidate(candidate)"
+                  >Approve</button>
+                  <button
+                    type="button" class="button button-secondary danger"
+                    :disabled="candidateBusyId === candidate.id"
+                    @click="rejectCandidate(candidate)"
+                  >Reject</button>
+                </template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="research-card" aria-label="Live trading policy profiles">
+      <h3>Live trading policy profiles</h3>
+      <p class="muted">
+        Every profile ever persisted via <code>ITradingPolicyProfileStore</code> - approved
+        candidates above, and simulations promoted from the Simulator tab. Newest revision per
+        strategy with status <strong>ApprovedForDemo</strong> is what live/shadow runtimes pick up.
+      </p>
+      <div class="table-wrap">
+        <table class="research-table">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>Revision</th>
+              <th>Status</th>
+              <th>Profile ID</th>
+              <th>Calibration artifacts</th>
+              <th>Created</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="policyProfiles.length === 0">
+              <td colspan="7" class="muted">No trading policy profiles persisted yet.</td>
+            </tr>
+            <tr v-for="profile in policyProfiles" :key="`${profile.profileId}:${profile.revision}`">
+              <td>{{ profile.strategyId }}<small class="mono">{{ profile.strategyVersion }}</small></td>
+              <td>{{ profile.revision }}</td>
+              <td :class="{ 'positive-text': profile.status === 'ApprovedForDemo', 'amber-text': profile.status === 'Reviewed' }">{{ profile.status }}</td>
+              <td><code :title="profile.profileId">{{ shortId(profile.profileId) }}</code></td>
+              <td class="mono">
+                {{ profile.setupCalibrationArtifactId ? shortId(profile.setupCalibrationArtifactId) : '—' }} /
+                {{ profile.metaModelArtifactId ? shortId(profile.metaModelArtifactId) : '—' }} /
+                {{ profile.managementCalibrationArtifactId ? shortId(profile.managementCalibrationArtifactId) : '—' }}
+              </td>
+              <td>{{ formatTime(profile.createdAt) }}</td>
+              <td>{{ profile.description || '—' }}</td>
             </tr>
           </tbody>
         </table>

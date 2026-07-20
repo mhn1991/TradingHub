@@ -3,6 +3,8 @@ using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Engine;
+using ChartAnnotator.Liquidity;
+using ChartAnnotator.SupplyDemand;
 using RiskManager;
 using RiskManager.Calibration;
 using RiskManager.Safety;
@@ -19,6 +21,7 @@ using ChartAnnotator.Value;
 using ChartAnnotator.NeoWave;
 using Simulator.Execution;
 using Simulator.Financing;
+using Agent.Configuration;
 
 namespace BacktestRunner;
 
@@ -195,6 +198,13 @@ internal sealed record BacktestCommandOptions
     public bool TradingConditionsEnabled { get; init; } = true;
     /// <summary>Enabled by default (2026-07-16 agent decision-quality pass) - drawdown/volatility-scaled risk is proven and tested.</summary>
     public bool AdaptiveRiskEnabled { get; init; } = true;
+    /// <summary>
+    /// Enabled by default so CLI behavior matches the Dashboard's interactive single-run
+    /// default. Building chart replay chunks measured at roughly a third of throughput
+    /// locally; --no-capture-market-replay opts out for a faster run when the replay chart
+    /// isn't needed (e.g. metrics-only/perf-testing runs).
+    /// </summary>
+    public bool CaptureMarketReplay { get; init; } = true;
     public decimal MaximumPortfolioHeatPercent { get; init; } = 1.5m;
     public decimal MaximumNetCurrencyExposurePercent { get; init; } = 300m;
     public decimal MaximumGrossCurrencyExposurePercent { get; init; } = 300m;
@@ -240,7 +250,9 @@ internal sealed record BacktestCommandOptions
                 "legacy-neo-wave-invalidation-exit" or "improved-neo-wave-invalidation-exit" or
                 "regime" or "no-regime" or "trading-conditions" or "no-trading-conditions" or
                 "adaptive-risk" or "no-adaptive-risk" or "financing" or
-                "neo-wave" or "auto-train-calibration")
+                "neo-wave" or "auto-train-calibration" or
+                "capture-market-replay" or "no-capture-market-replay" or
+                "pullback-only")
             {
                 values[key] = "true";
                 continue;
@@ -425,6 +437,9 @@ internal sealed record BacktestCommandOptions
             // Enabled by default (2026-07-16 agent decision-quality pass); --no-adaptive-risk opts out.
             // --adaptive-risk is still accepted as a harmless legacy no-op.
             ,AdaptiveRiskEnabled = !values.ContainsKey("no-adaptive-risk")
+            // Matches the Dashboard's interactive single-run default; --no-capture-market-replay
+            // opts out for a faster run. --capture-market-replay is accepted as a harmless no-op.
+            ,CaptureMarketReplay = !values.ContainsKey("no-capture-market-replay")
             ,NeoWaveEnabled = values.ContainsKey("neo-wave")
             ,NeoWaveEvidence = new NeoWaveEvidenceOptions
             {
@@ -477,6 +492,7 @@ internal sealed record BacktestCommandOptions
         PriceActionConfirmation = PriceActionConfirmation,
         MinimumPriceActionConfidence = MinimumPriceActionConfidence,
         RejectStrongOpposingPriceAction = RejectStrongOpposingPriceAction,
+        CaptureMarketReplay = CaptureMarketReplay,
         OutputDirectory = Path.Combine(OutputDirectory, "simulations"),
         CacheDirectory = CacheDirectory,
         JobsDirectory = JobsDirectory,
@@ -517,12 +533,15 @@ internal sealed record BacktestCommandOptions
             LegacyPositionManagement = LegacyPositionManagement,
             ImprovedPositionManagement = ImprovedPositionManagement,
             PositionSizing = PositionSizing,
-            AnnotationOptions = AnnotationOptions with
+            // Structural playbooks consume detector output. Defaults leave SupplyDemand/Liquidity
+            // disabled, which yields StructuralZoneUnavailable / no pools forever. Auto-enable when
+            // structural-confluence is on the run (Dashboard workspace already does this).
+            AnnotationOptions = EnableStructuralDetectorsIfNeeded(AnnotationOptions with
             {
                 EfficiencyRatioPeriod = EfficiencyRatioPeriod,
                 MarketRegime = AnnotationOptions.MarketRegime with { Enabled = RegimeEnabled },
                 NeoWave = AnnotationOptions.NeoWave with { Enabled = NeoWaveEnabled }
-            },
+            }, Strategies, StrategyAssignments),
             MarketRegimeRouting = MarketRegimeRouting with { Enabled = RegimeEnabled },
             ValueLocationEvidence = ValueLocationEvidence,
             CurrencyStrengthEvidence = CurrencyStrengthEvidence,
@@ -973,4 +992,24 @@ internal sealed record BacktestCommandOptions
         "shared" or "sharedportfolioaccount" => SimulationAccountMode.SharedPortfolioAccount,
         _ => throw new ArgumentException("--account-mode must be independent or shared.")
     };
+
+    private static ChartAnnotationOptions EnableStructuralDetectorsIfNeeded(
+        ChartAnnotationOptions annotation,
+        IReadOnlyList<string> strategies,
+        IReadOnlyList<StrategyInstrumentAssignment>? assignments)
+    {
+        bool structural = strategies.Any(item =>
+                string.Equals(item, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase)) ||
+            assignments is { Count: > 0 } list && list.Any(item =>
+                string.Equals(item.StrategyType, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase) ||
+                item.AgentDefinitionOverride?.Kind == TradingAgentKind.StructuralConfluence);
+        if (!structural)
+            return annotation;
+
+        return annotation with
+        {
+            SupplyDemand = annotation.SupplyDemand with { Enabled = true },
+            Liquidity = annotation.Liquidity with { Enabled = true }
+        };
+    }
 }

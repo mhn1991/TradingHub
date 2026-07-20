@@ -45,12 +45,10 @@ Open `http://localhost:5173`. Use Space to play or pause, and the left/right arr
 
 ## Run a historical dual-strategy backtest
 
-From the repository root, set your OANDA practice credentials and run the new CLI:
+From the repository root, bootstrap the broker credential vault as described in
+[`BROKER_CREDENTIAL_VAULT.md`](../Implementation%26PhasingDocs/BROKER_CREDENTIAL_VAULT.md), then run the CLI:
 
 ```bash
-export Oanda__AccountId='YOUR_PRACTICE_ACCOUNT_ID'
-export Oanda__AccessToken='YOUR_PRACTICE_ACCESS_TOKEN'
-
 dotnet run --configuration Release --project BacktestRunner/BacktestRunner.csproj -- \
   --instrument FX:GBP/JPY \
   --from 2025-07-13 \
@@ -78,13 +76,9 @@ Workspaces are saved in browser storage. The environment badge is deliberately e
 
 ### Connect an OANDA practice workspace
 
-OANDA credentials stay in the backend process. Do not add a token to the Vue environment or commit it to `appsettings.json`. Configure the practice account through environment variables before starting `DashboardLive`:
+OANDA credentials stay in the backend process. Do not add a token to the Vue environment or commit it to `appsettings.json`. Import the practice account into the broker credential vault before starting `DashboardLive`:
 
 ```bash
-export Oanda__Enabled=true
-export Oanda__Environment=Demo
-export Oanda__AccountId='your-practice-account-id'
-export Oanda__AccessToken='your-personal-access-token'
 dotnet run --project DashboardLive/DashboardLive.csproj
 ```
 

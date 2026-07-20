@@ -4,6 +4,7 @@ import AnalysisChart from './components/AnalysisChart.vue'
 import SimulatorPanel from './components/SimulatorPanel.vue'
 import LiveDemoPanel from './components/LiveDemoPanel.vue'
 import ResearchPanel from './components/ResearchPanel.vue'
+import ReportingPanel from './components/ReportingPanel.vue'
 import { duration, price, timestamp } from './format'
 import { metricsAt } from './seriesMetrics'
 import type {
@@ -74,7 +75,8 @@ const workspaceCatalog = ref<WorkspaceCatalog>(fallbackCatalog)
 const workspaces = ref<WorkspaceDefinition[]>([])
 const activeWorkspaceId = ref('')
 const mode = ref<'replay' | 'live'>('replay')
-const uiView = ref<'workspaces' | 'simulator' | 'research' | 'live-demo'>('workspaces')
+const uiView = ref<'workspaces' | 'simulator' | 'research' | 'live-demo' | 'reports'>('workspaces')
+const reportTarget = reactive({ kind: 'live-session' as 'live-session' | 'experiment', identifier: '', autoLoad: false })
 const liveStatus = ref<LiveFeedStatus | null>(null)
 const activeSeriesIndex = ref(0)
 const selectedIndex = ref(0)
@@ -125,6 +127,13 @@ let liveEvents: EventSource | undefined
 let orderEvents: EventSource | undefined
 let sourceAbortController: AbortController | undefined
 let sourceGeneration = 0
+
+function openExperimentReport(experimentId: string): void {
+  reportTarget.kind = 'experiment'
+  reportTarget.identifier = experimentId
+  reportTarget.autoLoad = true
+  uiView.value = 'reports'
+}
 
 function humanizeEnum(value: string | null | undefined): string {
   if (!value || value === 'Unknown' || value === 'None') return 'Waiting for context'
@@ -1429,6 +1438,12 @@ function isAbortError(error: unknown) {
             :class="{ active: uiView === 'live-demo' }"
             @click="uiView = 'live-demo'"
           >Live Demo</button>
+          <button
+            type="button"
+            class="button button-secondary"
+            :class="{ active: uiView === 'reports' }"
+            @click="uiView = 'reports'"
+          >Reports</button>
         </div>
         <div class="engine-status">
           <span :class="['status-dot', sourceStateClass]"></span>
@@ -1441,9 +1456,15 @@ function isAbortError(error: unknown) {
       </div>
     </header>
 
-    <SimulatorPanel v-if="uiView === 'simulator'" />
+    <SimulatorPanel v-if="uiView === 'simulator'" @open-experiment-report="openExperimentReport" />
     <ResearchPanel v-if="uiView === 'research'" />
     <LiveDemoPanel v-if="uiView === 'live-demo'" />
+    <ReportingPanel
+      v-if="uiView === 'reports'"
+      :initial-kind="reportTarget.kind"
+      :initial-identifier="reportTarget.identifier"
+      :auto-load="reportTarget.autoLoad"
+    />
 
     <section v-if="uiView === 'workspaces' && activeWorkspace" class="workspace-dock" aria-label="Trading workspaces">
       <div class="workspace-tabs" role="tablist" aria-label="Open workspaces">

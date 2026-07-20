@@ -14,7 +14,7 @@ public sealed record ResearchCalibrationRequest
     /// <summary>One of: setup, management, metamodel.</summary>
     public required string Kind { get; init; }
     public required string Instrument { get; init; }
-    /// <summary>Strategy id: improved or legacy.</summary>
+    /// <summary>Catalog strategy id: legacy, improved, or structural-confluence.</summary>
     public required string Strategy { get; init; }
     public required DateTimeOffset From { get; init; }
     public required DateTimeOffset To { get; init; }

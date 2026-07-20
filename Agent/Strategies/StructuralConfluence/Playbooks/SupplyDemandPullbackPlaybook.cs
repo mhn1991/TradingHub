@@ -3,6 +3,7 @@ using Agent.Strategies.StructuralConfluence.Evidence;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
 using ChartAnnotator.SupplyDemand;
+using ChartAnnotator.TargetManagement;
 
 namespace Agent.Strategies.StructuralConfluence.Playbooks;
 
@@ -26,9 +27,12 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
     public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
     {
         decimal price = evidence.Trigger.LatestCandle.Prices.Close;
+        // Prefer nearer zones, then HTF-aligned side (demand in bullish context / supply in
+        // bearish), then quality. Avoids always taking a counter-trend nearest print.
         SupplyDemandZone? zone = evidence.SupplyDemand.Zones
             .Where(item => _options.PermittedZoneStates.Contains(item.State))
             .OrderBy(item => Distance(price, item))
+            .ThenBy(item => ContextAffinityRank(evidence, item))
             .ThenByDescending(item => item.QualityScore)
             .ThenByDescending(item => item.AvailableAt)
             .ThenBy(item => item.ZoneId)
@@ -48,8 +52,17 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
             (item.EventType is SupplyDemandZoneEventType.Invalidated or SupplyDemandZoneEventType.Mitigated) &&
             item.AvailableAt <= evidence.AvailableAt);
         bool contextAligned = IsContextAligned(evidence, direction);
-        bool contextAllowed = !_options.RequireTrendAlignment || contextAligned ||
-            _options.AllowRangeBoundaryContext && evidence.Context.MarketRegime.Regime == MarketRegime.Range;
+        bool illiquidUnsafe = evidence.Context.MarketRegime.Regime == MarketRegime.IlliquidUnsafe;
+        // Illiquid/unsafe is never a tradable context for new pullbacks (trading-condition filter
+        // would also reject; fail here so we don't emit SignalCreated then TC-reject).
+        // Gate on "not opposed" rather than "aligned": a 2H regime read of Range/Compression/
+        // Unknown isn't contradicting the trade, it's just not confidently classified either way,
+        // and requiring an explicit TrendingUp/TrendingDown label rejected ~1/3 of every SD-pullback
+        // candidate in production even when nothing was actually against the trade. Symmetric for
+        // both directions via IsContextOpposed. AllowRangeBoundaryContext is now subsumed by this
+        // (Range was never "opposed") but left in place rather than removed.
+        bool contextAllowed = !illiquidUnsafe &&
+            (!_options.RequireTrendAlignment || !IsContextOpposed(evidence, direction));
         DateTimeOffset catalystAt = reaction?.AvailableAt ?? zone.AvailableAt;
         (PriceActionEvent? triggerEvent, PriceActionSetup? triggerSetup, decimal triggerQuality) =
             StructuralPlaybookRules.Trigger(evidence, direction, _root.Trigger.MinimumPriceActionConfidence,
@@ -59,14 +72,21 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
         bool alternativeConfirmation = HasAlternativeConfirmation(evidence, direction);
         bool confirmationPasses = _options.CciMode != StructuralConfirmationMode.Required ||
             cci.Alignment == EvidenceAlignment.Aligned || alternativeConfirmation;
+        // QualityScore and FreshnessScore are both unit-interval [0, 1].
         decimal locationQuality = Math.Clamp(Math.Min(zone.QualityScore, zone.FreshnessScore) * 100m, 0m, 100m);
 
         var gates = new List<MandatoryGate>
         {
-            Gate("Context", contextAllowed, ContextQuality(evidence, direction), "StructuralContextOpposed"),
+            Gate("Context", contextAllowed, ContextQuality(evidence, direction),
+                illiquidUnsafe ? "StructuralContextIlliquidUnsafe" : "StructuralContextOpposed"),
             Gate("ZoneQuality", zone.QualityScore >= _options.MinimumZoneQuality, locationQuality, "StructuralZoneQualityLow"),
             Gate("ZoneState", _options.PermittedZoneStates.Contains(zone.State), locationQuality, "StructuralZoneStateRejected"),
-            Gate("ZoneTouches", zone.TouchCount <= _options.MaximumPriorTouches, locationQuality, "StructuralZoneTouchLimitExceeded"),
+            // DistinctTouchCount (cooldown-throttled), not raw TouchCount: a zone price simply sat
+            // on for several consecutive candles inflates TouchCount without representing multiple
+            // genuine visits, which was disqualifying zones that were really only tested once (see
+            // LiquidityPool.DistinctTouchCount's doc comment for the same fix applied to
+            // break-retest's PoolQuality gate).
+            Gate("ZoneTouches", zone.DistinctTouchCount <= _options.MaximumPriorTouches, locationQuality, "StructuralZoneTouchLimitExceeded"),
             Gate("ZonePenetration", zone.PenetrationRatio <= _options.MaximumPenetrationRatio, locationQuality, "StructuralZonePenetrationExceeded"),
             Gate("ZoneValid", !invalidated, locationQuality, "StructuralZoneInvalidated"),
             Gate("ZoneReaction", reaction is not null || priceAtZone, reaction is null ? 50m : locationQuality, "StructuralZoneReactionMissing"),
@@ -75,7 +95,15 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
         };
 
         decimal rawStop = buy ? Math.Min(zone.ProximalPrice, zone.DistalPrice) : Math.Max(zone.ProximalPrice, zone.DistalPrice);
-        StructuralGeometry geometry = _geometry.Build(evidence, direction, rawStop, $"SupplyDemandZone:{zone.ZoneId:N}");
+        string catalystSourceId = $"SupplyDemandZone:{zone.ZoneId:N}";
+        // Exit-policy routing (plan §4.1): trend-aligned pullback runs a partial-then-runner,
+        // range-boundary reversal takes a fixed target. The opposed-context reject case needs no
+        // extra logic here - the existing "Context" gate above already fails it either way.
+        StructuralGeometry geometry = _root.AdaptiveTargetManagement.Enabled
+            ? _geometry.BuildAdaptive(evidence, direction, rawStop, catalystSourceId,
+                contextAligned ? TradeExitPolicy.PartialThenRunner : TradeExitPolicy.FixedStructuralTarget,
+                [catalystSourceId])
+            : _geometry.Build(evidence, direction, rawStop, catalystSourceId);
         gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
 
         string catalystIdentity = reaction?.EventId.ToString("N") ?? $"zone-{zone.ZoneId:N}";
@@ -138,11 +166,40 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
 
     private static bool IsContextAligned(StructuralEvidencePacket evidence, PriceActionDirection direction)
     {
+        if (evidence.Context.MarketRegime.Regime == MarketRegime.IlliquidUnsafe)
+            return false;
         bool buy = direction == PriceActionDirection.Bullish;
         MarketRegime regime = evidence.Context.MarketRegime.Regime;
         return buy
             ? regime is MarketRegime.TrendingUp or MarketRegime.BreakoutExpansionUp || evidence.Context.MarketStructure.Direction == MarketStructureDirection.Rising
             : regime is MarketRegime.TrendingDown or MarketRegime.BreakoutExpansionDown || evidence.Context.MarketStructure.Direction == MarketStructureDirection.Falling;
+    }
+
+    /// <summary>
+    /// 0 = zone side matches HTF context, 1 = neutral/unclear, 2 = opposed.
+    /// Used only as a soft ranking key when multiple permitted zones exist near price.
+    /// </summary>
+    private static int ContextAffinityRank(StructuralEvidencePacket evidence, SupplyDemandZone zone)
+    {
+        PriceActionDirection direction = zone.Type == SupplyDemandZoneType.Demand
+            ? PriceActionDirection.Bullish
+            : PriceActionDirection.Bearish;
+        if (IsContextAligned(evidence, direction))
+            return 0;
+        if (IsContextOpposed(evidence, direction))
+            return 2;
+        return 1;
+    }
+
+    private static bool IsContextOpposed(StructuralEvidencePacket evidence, PriceActionDirection direction)
+    {
+        if (evidence.Context.MarketRegime.Regime == MarketRegime.IlliquidUnsafe)
+            return true;
+        bool buy = direction == PriceActionDirection.Bullish;
+        MarketRegime regime = evidence.Context.MarketRegime.Regime;
+        return buy
+            ? regime is MarketRegime.TrendingDown or MarketRegime.BreakoutExpansionDown
+            : regime is MarketRegime.TrendingUp or MarketRegime.BreakoutExpansionUp;
     }
 
     private bool HasAlternativeConfirmation(StructuralEvidencePacket evidence, PriceActionDirection direction)

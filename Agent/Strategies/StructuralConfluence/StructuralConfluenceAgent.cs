@@ -5,6 +5,7 @@ using Agent.Strategies.StructuralConfluence.Evidence;
 using Agent.Strategies.StructuralConfluence.Playbooks;
 using Brokers.Models;
 using ChartAnnotator.Models;
+using ChartAnnotator.TargetManagement;
 
 namespace Agent.Strategies.StructuralConfluence;
 
@@ -30,6 +31,8 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
             playbooks.Add(new LiquiditySweepReversalPlaybook(options));
         if (options.SupplyDemandPullback.Enabled)
             playbooks.Add(new SupplyDemandPullbackPlaybook(options));
+        if (options.IndicatorConfluence.Enabled)
+            playbooks.Add(new IndicatorConfluencePlaybook(options));
         _playbooks = playbooks.OrderBy(item => item.PlaybookId, StringComparer.Ordinal).ToArray();
         _arbitrator = new StructuralCandidateArbitrator(options.Arbitration);
         RequiredIntervals = options.RequiredIntervals;
@@ -38,7 +41,20 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
     public string Name => "Structural Confluence";
     public IReadOnlySet<BarInterval> RequiredIntervals { get; }
     public BarInterval TriggerInterval => _options.TriggerInterval;
-    public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.Bracket;
+
+    /// <summary>
+    /// A structural-confluence-v2 profile (<see cref="AdaptiveTargetManagementOptions.Enabled"/>)
+    /// can produce managed (non-bracket) decisions, so the whole agent runs under
+    /// <see cref="AgentExitManagementMode.ProtectiveStopAndStrategyExit"/> instead - required so
+    /// pre-trade risk stops demanding a take-profit on every entry (plan §4.3) and, once wired,
+    /// so the trade manager is required rather than optional. FixedStructuralTarget decisions
+    /// still carry a real <see cref="AgentDecision.TakeProfitPrice"/> and are still submitted as
+    /// a genuine broker bracket order - this mode only changes pre-trade admission, not whether
+    /// an individual decision has a target order.
+    /// </summary>
+    public AgentExitManagementMode ExitManagementMode => _options.AdaptiveTargetManagement.Enabled
+        ? AgentExitManagementMode.ProtectiveStopAndStrategyExit
+        : AgentExitManagementMode.Bracket;
 
     public Task<AgentDecision> EvaluateAsync(
         AgentMarketContext context,
@@ -128,10 +144,14 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
             OrderType = StandardOrderType.Market,
             ReferencePrice = geometry.Entry,
             StopLossPrice = geometry.Stop,
-            TakeProfitPrice = geometry.Target,
+            // A managed policy never submits a hard broker target (plan §4.3); legacy v1
+            // decisions (ExitPolicy null) and FixedStructuralTarget keep the bracket TP.
+            TakeProfitPrice = geometry.ExitPolicy is null or TradeExitPolicy.FixedStructuralTarget ? geometry.Target : null,
             StopSource = geometry.StopSource,
             TargetSource = geometry.TargetSource,
             ExpectedRewardRisk = geometry.RewardRisk,
+            ExitPolicy = geometry.ExitPolicy,
+            TargetPlan = geometry.TargetPlan,
             Confidence = candidate.Confidence,
             CreatedAt = context.Timestamp,
             Reason = candidate.ReasonCode,

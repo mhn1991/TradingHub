@@ -179,7 +179,8 @@ public sealed class SafeTradingPipeline
                 decision.StrategyId ?? decision.StrategyName ?? "unknown",
                 InstrumentGroup(decision.Instrument),
                 (decision.RegimeLabel ?? calibrationSnapshot.MarketRegime.Regime).ToString(),
-                decision.Confidence);
+                decision.Confidence,
+                decision.PlaybookId);
             Append(
                 TradeJournalEventType.SetupCalibrationEvaluated,
                 context,

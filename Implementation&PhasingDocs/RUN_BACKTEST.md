@@ -45,10 +45,10 @@ curl -s -X POST http://localhost:5XXX/api/simulations \
 
 ## CLI (same service)
 
-```bash
-export Oanda__AccountId='YOUR_PRACTICE_ACCOUNT_ID'
-export Oanda__AccessToken='YOUR_PRACTICE_ACCESS_TOKEN'
+The broker credential vault must be bootstrapped first; see
+[`BROKER_CREDENTIAL_VAULT.md`](BROKER_CREDENTIAL_VAULT.md).
 
+```bash
 dotnet run -c Release --project BacktestRunner/BacktestRunner.csproj -- \
   --instrument FX:EUR/USD \
   --from 2026-06-01 \

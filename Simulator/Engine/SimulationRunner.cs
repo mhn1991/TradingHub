@@ -255,6 +255,8 @@ public sealed class SimulationRunner
                 .Sum(entry => entry.Amount);
             _activeTrade = new SimulatedTradeRecord
             {
+                StrategyId = decision.StrategyId ?? decision.StrategyName ?? "unknown",
+                PlaybookId = decision.PlaybookId ?? "unknown",
                 StrategyName = decision.StrategyName ?? _agent.Name,
                 SetupId = decision.SetupId ?? decision.DecisionId ?? $"setup:{timestamp:O}",
                 Instrument = decision.Instrument,

@@ -141,6 +141,11 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             state.Rsi.IsReady ? state.Rsi.Current : null,
             confirmed,
             state.Atr.IsReady ? state.Atr.Current : null);
+        CciAnalysisSnapshot cciAnalysis = state.CciAnalysis.Update(
+            candleEvent.Candle,
+            state.Cci.IsReady ? state.Cci.Current : null,
+            confirmed,
+            state.Atr.IsReady ? state.Atr.Current : null);
 
         if (confirmed.Count > 0)
         {
@@ -177,19 +182,22 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
                     currentAtr,
                     candleEvent.Candle.Prices.Close);
 
-                state.Trendlines = _trendlineDetector.Detect(
-                    swingSnapshot,
-                    currentAtr,
-                    state.Version,
-                    structure.Direction,
-                    closeTime);
+                if (_options.TrendlineChannelDetectionEnabled)
+                {
+                    state.Trendlines = _trendlineDetector.Detect(
+                        swingSnapshot,
+                        currentAtr,
+                        state.Version,
+                        structure.Direction,
+                        closeTime);
+                }
             }
 
             // Channel validation is inexpensive because the trendline collection is
             // small. Run it for every closed candle so a projected channel advances
             // to the current time and is removed immediately when the latest close
             // breaks outside it. Trendline fitting remains on the heavy schedule.
-            state.Channels = state.Trendlines.Count == 0
+            state.Channels = !_options.TrendlineChannelDetectionEnabled || state.Trendlines.Count == 0
                 ? []
                 : _channelDetector.Detect(
                     state.Trendlines,
@@ -208,6 +216,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             BollingerUpper = state.Bollinger.IsReady ? state.Bollinger.Upper : null,
             BollingerLower = state.Bollinger.IsReady ? state.Bollinger.Lower : null,
             Cci = state.Cci.IsReady ? state.Cci.Current : null,
+            CciAnalysis = cciAnalysis,
             Sma50 = state.Sma50.IsReady ? state.Sma50.Current : null,
             Sma200 = state.Sma200.IsReady ? state.Sma200.Current : null,
             EfficiencyRatio = state.EfficiencyRatio.IsReady ? state.EfficiencyRatio.Current : null,
@@ -324,7 +333,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
             indicators.VolumeAnalysis,
             indicators.Cci,
             indicators.Sma50,
-            indicators.Sma200));
+            indicators.Sma200,
+            indicators.CciAnalysis));
         return snapshot;
     }
 
@@ -421,6 +431,16 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
                 options.BollingerPeriod,
                 options.BollingerStandardDeviations);
             Cci = new CciState(options.CciPeriod);
+            CciAnalysis = new CciAnalysisState(
+                Math.Max(options.IndicatorCapacity, options.CciMomentumLookback + 1),
+                Math.Max(options.SwingCapacity, 2),
+                options.CciMomentumLookback,
+                options.CciMomentumThreshold,
+                options.CciExtremeNegativeThreshold,
+                options.CciExtremePositiveThreshold,
+                options.CciMinimumDivergenceDifference,
+                options.CciMinimumPriceDifferenceAtr,
+                options.CciSignalLifetimeCandles);
             Sma50 = new SmaState(options.SmaFastPeriod);
             Sma200 = new SmaState(options.SmaSlowPeriod);
             BollingerAnalysis = new BollingerAnalysisState(
@@ -475,6 +495,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         public RsiAnalysisState RsiAnalysis { get; }
         public BollingerState Bollinger { get; }
         public CciState Cci { get; }
+        public CciAnalysisState CciAnalysis { get; }
         public SmaState Sma50 { get; }
         public SmaState Sma200 { get; }
         public BollingerAnalysisState BollingerAnalysis { get; }

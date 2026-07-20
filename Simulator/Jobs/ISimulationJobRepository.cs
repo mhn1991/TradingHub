@@ -4,6 +4,8 @@ namespace Simulator.Jobs;
 
 public interface ISimulationJobRepository
 {
+    Task MarkInterruptedJobsAsync(CancellationToken cancellationToken = default);
+
     Task SaveAsync(SimulationJobSnapshot snapshot, CancellationToken cancellationToken = default);
 
     Task<SimulationJobSnapshot?> GetAsync(Guid id, CancellationToken cancellationToken = default);

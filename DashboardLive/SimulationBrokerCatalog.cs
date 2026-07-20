@@ -2,6 +2,7 @@ using Brokers;
 using Brokers.Abstractions;
 using Brokers.Models;
 using Brokers.Oanda;
+using Microsoft.Extensions.Options;
 using Simulator.MarketData;
 
 namespace Dashboard.Live;
@@ -38,6 +39,7 @@ internal sealed class SimulationBrokerCatalogService
     private readonly BinanceWorkspaceMarketData _workspaceMarketData;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<SimulationBrokerCatalogService> _logger;
+    private readonly OandaWorkspaceOptions _oandaOptions;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SimulationBrokerCatalog? _catalog;
     private DateTimeOffset _expiresAt;
@@ -45,10 +47,12 @@ internal sealed class SimulationBrokerCatalogService
     public SimulationBrokerCatalogService(
         BinanceWorkspaceMarketData workspaceMarketData,
         TimeProvider timeProvider,
+        IOptions<OandaWorkspaceOptions> oandaOptions,
         ILogger<SimulationBrokerCatalogService> logger)
     {
         _workspaceMarketData = workspaceMarketData ?? throw new ArgumentNullException(nameof(workspaceMarketData));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _oandaOptions = oandaOptions?.Value ?? throw new ArgumentNullException(nameof(oandaOptions));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -194,14 +198,9 @@ internal sealed class SimulationBrokerCatalogService
     private async Task<SimulationBrokerOption> BuildOandaFromSimulatorCredentialsAsync(
         CancellationToken cancellationToken)
     {
-        string? accountId = Environment.GetEnvironmentVariable("OANDA_ACCOUNT_ID")
-            ?? Environment.GetEnvironmentVariable("Oanda__AccountId");
-        string? accessToken = Environment.GetEnvironmentVariable("OANDA_ACCESS_TOKEN")
-            ?? Environment.GetEnvironmentVariable("OANDA_TOKEN")
-            ?? Environment.GetEnvironmentVariable("Oanda__AccessToken");
-        BrokerEnvironment environment = ParseOandaEnvironment(
-            Environment.GetEnvironmentVariable("OANDA_ENVIRONMENT")
-            ?? Environment.GetEnvironmentVariable("Oanda__Environment"));
+        string? accountId = _oandaOptions.AccountId;
+        string? accessToken = _oandaOptions.AccessToken;
+        BrokerEnvironment environment = _oandaOptions.Environment;
 
         if (string.IsNullOrWhiteSpace(accountId) || string.IsNullOrWhiteSpace(accessToken))
         {
@@ -212,7 +211,7 @@ internal sealed class SimulationBrokerCatalogService
                 HistoricalDataSourceKind.OandaCandles.ToString(),
                 IsAvailable: false,
                 RequiresCredentials: true,
-                "Set OANDA_ACCOUNT_ID and OANDA_ACCESS_TOKEN (or Oanda__AccountId/Oanda__AccessToken) to discover the instruments available to the account.",
+                "Store enabled OANDA credentials in the broker credential database to discover the instruments available to the account.",
                 FormatIntervals(OandaCandleCapabilities.Instance.SupportedExecutionIntervals),
                 []);
         }

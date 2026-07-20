@@ -1,5 +1,7 @@
 using System.IO.Compression;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Agent.Configuration;
 using Agent.Strategies;
 using Brokers.Abstractions;
 using Brokers.Models;
@@ -23,7 +25,10 @@ using PortfolioManager.Risk;
 using PortfolioManager.Correlation;
 using PortfolioManager.CrossMarket;
 using ChartAnnotator.Value;
+using ChartAnnotator.Models;
 using Simulator.Execution;
+using Simulator.Experiments.Models;
+using Simulator.Experiments.Persistence;
 using Simulator.Financing;
 using TradingPolicies;
 using QuantResearch.Training.Pipeline;
@@ -32,6 +37,13 @@ namespace Dashboard.Live;
 
 public static class SimulationApi
 {
+    private const long MaximumInteractiveReplayChunkBytes = 64L * 1024 * 1024;
+
+    private static readonly JsonSerializerOptions ReplayJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
+
     public static void MapSimulationEndpoints(this WebApplication app)
     {
         string importRoot = Path.GetFullPath(Path.Combine(
@@ -175,16 +187,14 @@ public static class SimulationApi
             return Results.Ok(result);
         });
 
-        app.MapGet("/api/simulations/health", (ISimulationJobRepository repository) =>
+        app.MapGet("/api/simulations/health", (
+            ISimulationJobRepository repository,
+            Microsoft.Extensions.Options.IOptions<OandaWorkspaceOptions> oandaOptions) =>
         {
             SimulationJobRecoveryReport recovery = repository is FileSimulationJobRepository files
                 ? files.LastRecoveryReport
                 : new SimulationJobRecoveryReport();
-            bool oandaConfigured = !string.IsNullOrWhiteSpace(
-                    Environment.GetEnvironmentVariable("OANDA_ACCOUNT_ID")) &&
-                !string.IsNullOrWhiteSpace(
-                    Environment.GetEnvironmentVariable("OANDA_ACCESS_TOKEN")
-                    ?? Environment.GetEnvironmentVariable("OANDA_TOKEN"));
+            bool oandaConfigured = oandaOptions.Value.IsConfigured;
             return Results.Ok(new
             {
                 status = "Healthy",
@@ -203,76 +213,158 @@ public static class SimulationApi
             CreateSimulationRequest body,
             IBacktestApplicationService service,
             SimulationBrokerCatalogService catalog,
+            ISimulationStrategyProfileStore profileStore,
             ICalibrationArtifactRepository calibrationArtifacts,
             PreRunCalibrationService preRunCalibration,
+            PendingAutoCalibrationTracker pendingTracker,
             CancellationToken cancellationToken) =>
         {
             try
             {
+                SimulationStrategyProfile? profile = await ResolveSimulationProfileAsync(
+                    body, profileStore, cancellationToken);
                 SimulationBrokerOption selectedBroker = await catalog.ValidateSelectionAsync(
                     body.ResolveBrokerId(),
-                    body.Instrument,
+                    profile?.Instrument.Value ?? body.Instrument,
                     cancellationToken);
-                SetupCalibrationArtifact? setupCalibrationArtifact = await ResolveSetupCalibrationArtifactAsync(
-                    body.SetupCalibrationArtifactId, calibrationArtifacts, cancellationToken);
-                TradeManagementCalibration? managementCalibrationArtifact = await ResolveManagementCalibrationArtifactAsync(
-                    body.ManagementCalibrationArtifactId, calibrationArtifacts, cancellationToken);
-                MetaModelArtifact? metaModelArtifact = await ResolveMetaModelArtifactAsync(
-                    body.MetaModelArtifactId, calibrationArtifacts, cancellationToken);
+                ResolvedCalibration calibration = profile is null
+                    ? new ResolvedCalibration(
+                        await ResolveSetupCalibrationArtifactAsync(
+                            body.SetupCalibrationArtifactId, calibrationArtifacts, cancellationToken),
+                        await ResolveManagementCalibrationArtifactAsync(
+                            body.ManagementCalibrationArtifactId, calibrationArtifacts, cancellationToken),
+                        await ResolveMetaModelArtifactAsync(
+                            body.MetaModelArtifactId, calibrationArtifacts, cancellationToken))
+                    : await ResolveProfileCalibrationAsync(profile, calibrationArtifacts, cancellationToken);
+                SetupCalibrationArtifact? setupCalibrationArtifact = calibration.Setup;
+                TradeManagementCalibration? managementCalibrationArtifact = calibration.Management;
+                MetaModelArtifact? metaModelArtifact = calibration.MetaModel;
 
                 // When auto-calibration is on and the caller did not supply manual artifact
                 // IDs, train setup→meta→management on a past window (default 2 months) ending
                 // EmbargoDays before From, with one parallel chain per strategy (legacy/improved).
-                PreRunCalibrationResult? autoCal = null;
-                if (body.ShouldAutoCalibrate(
+                bool shouldAutoCalibrate = profile?.Calibration.Mode ==
+                        ExperimentCalibrationMode.TrainFreshAndUseForHeldOutEvaluation ||
+                    profile is null && body.ShouldAutoCalibrate(
                         setupCalibrationArtifact,
                         managementCalibrationArtifact,
-                        metaModelArtifact))
+                        metaModelArtifact);
+
+                if (shouldAutoCalibrate)
                 {
-                    BacktestRequest seed = body.ToBacktestRequest(selectedBroker);
-                    string[] strategies = ResolveTrainingStrategies(body);
-                    autoCal = await preRunCalibration.TrainAsync(
-                        new PreRunCalibrationRequest
+                    // Training is a full nested backtest over the training window (minutes, and
+                    // it competes for CPU with every other running simulation) - running it
+                    // inline here would hold this HTTP request open for the entire duration with
+                    // no job id to poll in the meantime. Register a placeholder immediately,
+                    // return it, and do the training + real StartAsync in the background against
+                    // an independent CancellationToken (the request's own token dies with the
+                    // HTTP response).
+                    BacktestRequest trainingSeed = body.ToBacktestRequest(selectedBroker);
+                    if (profile is not null)
+                        trainingSeed = ApplySimulationProfile(trainingSeed, profile, null, null, null);
+                    string[] trainingStrategies = ResolveTrainingStrategies(trainingSeed);
+
+                    Guid placeholderId = Guid.NewGuid();
+                    DateTimeOffset now = DateTimeOffset.UtcNow;
+                    SimulationJobSnapshot placeholder = new()
+                    {
+                        Id = placeholderId,
+                        Status = SimulationJobStatus.Queued,
+                        CreatedAt = now,
+                        Instrument = trainingSeed.Instrument.Value,
+                        RequestedFrom = body.From,
+                        RequestedTo = body.To,
+                        WarmupFrom = trainingSeed.ResolveWarmupFrom(),
+                        ProcessedBaseCandles = 0,
+                        ProgressPercent = 0m,
+                        CandlesPerSecond = 0m,
+                        Strategies = trainingStrategies.Select(name => new StrategyProgressSnapshot
                         {
-                            Instrument = seed.Instrument,
-                            Strategies = strategies,
-                            EvaluationFrom = body.From,
-                            EvaluationTo = body.To,
-                            Runtime = seed.Runtime,
-                            StartingBalance = body.StartingBalance,
-                            Quantity = body.Quantity,
-                            TrainMonths = body.AutoCalibrateTrainMonths,
-                            EmbargoDays = body.AutoCalibrateEmbargoDays,
-                            Description =
-                                $"pre-run auto-cal before sim · {body.Instrument} · " +
-                                $"{body.From:yyyy-MM-dd}→{body.To:yyyy-MM-dd}"
-                        },
-                        cancellationToken).ConfigureAwait(false);
-                    setupCalibrationArtifact = autoCal.Setup;
-                    metaModelArtifact = autoCal.MetaModel;
-                    managementCalibrationArtifact = autoCal.Management;
+                            StrategyId = name,
+                            StrategyName = name,
+                            Balance = trainingSeed.StartingBalance,
+                            Equity = trainingSeed.StartingBalance,
+                            UnrealizedProfitLoss = 0m,
+                            OpenPositions = 0,
+                            CompletedTrades = 0,
+                            ActiveSetups = 0,
+                            NetProfit = 0m,
+                            Status = "Training"
+                        }).ToArray(),
+                        DataSourceStatus = "Training"
+                    };
+                    Guid registeredId = pendingTracker.Register(placeholder, out CancellationToken trainingToken);
+
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            PreRunCalibrationResult autoCal = await preRunCalibration.TrainAsync(
+                                new PreRunCalibrationRequest
+                                {
+                                    Instrument = trainingSeed.Instrument,
+                                    Strategies = trainingStrategies,
+                                    AgentDefinition = profile?.Agent,
+                                    EvaluationFrom = body.From,
+                                    EvaluationTo = body.To,
+                                    Runtime = trainingSeed.Runtime,
+                                    StartingBalance = trainingSeed.StartingBalance,
+                                    Quantity = trainingSeed.Quantity,
+                                    TrainMonths = body.AutoCalibrateTrainMonths,
+                                    EmbargoDays = body.AutoCalibrateEmbargoDays,
+                                    Description =
+                                        $"pre-run auto-cal before sim · {trainingSeed.Instrument} · " +
+                                        $"{body.From:yyyy-MM-dd}→{body.To:yyyy-MM-dd}"
+                                },
+                                trainingToken).ConfigureAwait(false);
+
+                            BacktestRequest resolvedRequest = body.ToBacktestRequest(
+                                selectedBroker, autoCal.Setup, autoCal.Management, autoCal.MetaModel);
+                            if (profile is not null)
+                            {
+                                resolvedRequest = ApplySimulationProfile(
+                                    resolvedRequest, profile, autoCal.Setup, autoCal.Management, autoCal.MetaModel);
+                            }
+
+                            SimulationJobHandle handle = await service.StartAsync(resolvedRequest, trainingToken)
+                                .ConfigureAwait(false);
+                            pendingTracker.Resolve(registeredId, handle.SimulationId);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Cancelled via the tracker's own cancel path - already marked there.
+                        }
+                        catch (Exception exception)
+                        {
+                            pendingTracker.Fail(registeredId, exception.Message);
+                        }
+                    }, CancellationToken.None);
+
+                    return Results.Accepted($"/api/simulations/{registeredId:N}", new
+                    {
+                        simulationId = registeredId,
+                        status = "Queued",
+                        training = true
+                    });
                 }
 
                 BacktestRequest request = body.ToBacktestRequest(
                     selectedBroker, setupCalibrationArtifact, managementCalibrationArtifact, metaModelArtifact);
+                if (profile is not null)
+                {
+                    request = ApplySimulationProfile(
+                        request,
+                        profile,
+                        setupCalibrationArtifact,
+                        managementCalibrationArtifact,
+                        metaModelArtifact);
+                }
                 SimulationJobHandle handle = await service.StartAsync(request, cancellationToken);
                 return Results.Accepted($"/api/simulations/{handle.SimulationId:N}", new
                 {
                     simulationId = handle.SimulationId,
                     status = handle.Status.ToString(),
-                    autoCalibration = autoCal is null
-                        ? null
-                        : new
-                        {
-                            trainFrom = autoCal.Window.TrainFrom,
-                            trainTo = autoCal.Window.TrainTo,
-                            embargoDays = autoCal.Window.EmbargoDays,
-                            trainMonths = autoCal.Window.TrainMonths,
-                            strategies = autoCal.Strategies,
-                            setupArtifactId = autoCal.SetupArtifactId,
-                            metaModelArtifactId = autoCal.MetaModelArtifactId,
-                            managementArtifactId = autoCal.ManagementArtifactId
-                        }
+                    autoCalibration = (object?)null
                 });
             }
             catch (HistoricalGranularityNotSupportedException exception)
@@ -310,20 +402,24 @@ public static class SimulationApi
 
         app.MapGet("/api/simulations", async (
             IBacktestApplicationService service,
+            PendingAutoCalibrationTracker pendingTracker,
             int? take,
             CancellationToken cancellationToken) =>
         {
             IReadOnlyList<SimulationJobSnapshot> jobs =
                 await service.ListAsync(take ?? 50, cancellationToken);
-            return Results.Ok(jobs);
+            IReadOnlyList<SimulationJobSnapshot> pending = pendingTracker.ListPending();
+            return Results.Ok(pending.Count == 0 ? jobs : pending.Concat(jobs).ToArray());
         });
 
         app.MapGet("/api/simulations/{id:guid}", async (
             Guid id,
             IBacktestApplicationService service,
+            PendingAutoCalibrationTracker pendingTracker,
             CancellationToken cancellationToken) =>
         {
-            SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
+            SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken)
+                ?? await pendingTracker.TryGetSnapshotAsync(id, service.GetAsync, cancellationToken);
             return snapshot is null ? Results.NotFound() : Results.Ok(snapshot);
         });
 
@@ -332,6 +428,7 @@ public static class SimulationApi
             string strategy,
             PromoteTradingPolicyRequest promotion,
             IBacktestApplicationService service,
+            ITradingPolicyProfileStore profiles,
             CancellationToken cancellationToken) =>
         {
             SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
@@ -359,7 +456,7 @@ public static class SimulationApi
             {
                 return Results.BadRequest(new
                 {
-                    error = $"Unknown strategy '{strategy}'. Use legacy or improved.",
+                    error = $"Unknown strategy '{strategy}'. Use legacy, improved, or structural-confluence.",
                     code = "UnknownStrategy"
                 });
             }
@@ -375,9 +472,14 @@ public static class SimulationApi
                 });
             }
 
-            ProgressiveAgentKind kind = normalized == "legacy"
-                ? ProgressiveAgentKind.Legacy
-                : ProgressiveAgentKind.Improved;
+            StrategyInstrumentAssignment? selectedAssignment = snapshot.Request.StrategyAssignments?
+                .FirstOrDefault(item => TryNormalizePromotedStrategy(item.StrategyType) == normalized);
+            TradingAgentDefinition agentDefinition = selectedAssignment is null
+                ? snapshot.Request.ResolveAgentDefinition(normalized)
+                : snapshot.Request.ResolveAgentDefinition(
+                    selectedAssignment.StrategyType,
+                    selectedAssignment.AgentDefinitionOverride,
+                    selectedAssignment.AgentOptionsOverride);
             string strategyVersion = string.IsNullOrWhiteSpace(promotion.StrategyVersion)
                 ? $"{normalized}:{snapshot.SimulationConfigurationId ?? "unversioned"}"
                 : promotion.StrategyVersion.Trim();
@@ -386,8 +488,7 @@ public static class SimulationApi
                 snapshot.Request.Runtime,
                 normalized,
                 strategyVersion,
-                kind,
-                snapshot.Request.ResolveProgressiveStrategyOptions(),
+                agentDefinition,
                 profileId,
                 promotion.Revision,
                 DateTimeOffset.UtcNow,
@@ -398,6 +499,15 @@ public static class SimulationApi
                 promotion.ManagementCalibrationArtifactId,
                 promotion.MetaModelArtifactId,
                 promotion.Description);
+
+            try
+            {
+                await profiles.StoreAsync(profile, cancellationToken);
+            }
+            catch (InvalidOperationException exception)
+            {
+                return Results.Conflict(new { error = exception.Message, code = "PolicyProfileAlreadyExists" });
+            }
 
             return Results.Ok(profile);
         });
@@ -445,8 +555,12 @@ public static class SimulationApi
         app.MapPost("/api/simulations/{id:guid}/cancel", async (
             Guid id,
             IBacktestApplicationService service,
+            PendingAutoCalibrationTracker pendingTracker,
             CancellationToken cancellationToken) =>
         {
+            if (pendingTracker.TryCancelPending(id, out SimulationJobSnapshot? _))
+                return Results.Accepted();
+
             try
             {
                 await service.CancelAsync(id, cancellationToken);
@@ -686,13 +800,9 @@ public static class SimulationApi
             {
                 await using FileStream file = File.OpenRead(path);
                 await using var gzip = new GZipStream(file, CompressionMode.Decompress);
-                JsonElement[]? chunk = await JsonSerializer.DeserializeAsync<JsonElement[]>(
-                    gzip,
-                    cancellationToken: cancellationToken);
-                if (chunk is null)
-                    continue;
-
-                foreach (JsonElement row in chunk)
+                await foreach (JsonElement row in JsonSerializer.DeserializeAsyncEnumerable<JsonElement>(
+                                   gzip,
+                                   cancellationToken: cancellationToken))
                 {
                     long sequence = 0;
                     if (row.TryGetProperty("sequence", out JsonElement seqEl))
@@ -790,40 +900,43 @@ public static class SimulationApi
         app.MapGet("/api/simulations/{id:guid}/replay/chunks/{chunkId}", async (
             Guid id,
             string chunkId,
+            int? take,
+            HttpContext context,
             IBacktestApplicationService service,
             CancellationToken cancellationToken) =>
         {
-            if (chunkId.Contains("..", StringComparison.Ordinal) ||
-                chunkId.Contains('/', StringComparison.Ordinal) ||
-                chunkId.Contains('\\', StringComparison.Ordinal))
-            {
+            string normalizedChunkId = chunkId.EndsWith(".json.gz", StringComparison.OrdinalIgnoreCase)
+                ? chunkId[..^8]
+                : chunkId;
+            if (!IsSafeChunkId(normalizedChunkId))
                 return Results.BadRequest(new { error = "Invalid chunk id." });
-            }
 
             SimulationJobSnapshot? snapshot = await service.GetAsync(id, cancellationToken);
             if (snapshot?.OutputDirectory is null)
                 return Results.NotFound();
 
             string marketRoot = Path.GetFullPath(Path.Combine(snapshot.OutputDirectory, "market"));
-            string path = Path.GetFullPath(Path.Combine(marketRoot, $"{chunkId}.json.gz"));
+            string path = Path.GetFullPath(Path.Combine(marketRoot, $"{normalizedChunkId}.json.gz"));
             if (!path.StartsWith(marketRoot, StringComparison.Ordinal))
                 return Results.BadRequest(new { error = "Invalid chunk path." });
 
             if (!File.Exists(path))
+                return Results.NotFound();
+
+            if (take is not null)
             {
-                path = Path.GetFullPath(Path.Combine(
-                    marketRoot,
-                    chunkId.EndsWith(".json.gz", StringComparison.Ordinal) ? chunkId : chunkId + ".json.gz"));
-                if (!path.StartsWith(marketRoot, StringComparison.Ordinal) || !File.Exists(path))
-                    return Results.NotFound();
+                if (new FileInfo(path).Length > MaximumInteractiveReplayChunkBytes)
+                {
+                    return Results.Problem(
+                        statusCode: StatusCodes.Status413PayloadTooLarge,
+                        title: "Replay chunk is too large for interactive playback.",
+                        detail: "This replay was produced by an older runtime with oversized chunks. " +
+                                "Start a new run after restarting Dashboard.Live; full gzip download remains available.");
+                }
+                return await ReadReplayChunkTailAsync(path, take.Value, cancellationToken);
             }
 
-            await using FileStream file = File.OpenRead(path);
-            await using var gzip = new GZipStream(file, CompressionMode.Decompress);
-            JsonElement? payload = await JsonSerializer.DeserializeAsync<JsonElement>(
-                gzip,
-                cancellationToken: cancellationToken);
-            return Results.Ok(payload);
+            return GzipJsonFile(context, path);
         });
 
         app.MapGet("/api/simulations/{id:guid}/replay/execution-detail", async (
@@ -864,6 +977,7 @@ public static class SimulationApi
             string chunkId,
             string strategy,
             string setupId,
+            HttpContext context,
             IBacktestApplicationService service,
             CancellationToken cancellationToken) =>
         {
@@ -880,13 +994,65 @@ public static class SimulationApi
             string path = Path.GetFullPath(Path.Combine(directory, $"{chunkId}.json.gz"));
             if (!path.StartsWith(detailRoot, StringComparison.Ordinal) || !File.Exists(path))
                 return Results.NotFound();
-            await using FileStream file = File.OpenRead(path);
-            await using var gzip = new GZipStream(file, CompressionMode.Decompress);
-            JsonElement payload = await JsonSerializer.DeserializeAsync<JsonElement>(
-                gzip,
-                cancellationToken: cancellationToken);
-            return Results.Ok(payload);
+            return GzipJsonFile(context, path);
         });
+    }
+
+    private static IResult GzipJsonFile(HttpContext context, string path)
+    {
+        // Replay chunks are already valid JSON compressed by the writer. Serving the
+        // stored representation lets the HTTP client decompress it incrementally and
+        // avoids building a second, potentially very large, server-side JSON DOM.
+        context.Response.Headers["Content-Encoding"] = "gzip";
+        context.Response.Headers["Vary"] = "Accept-Encoding";
+        return Results.File(path, "application/json");
+    }
+
+    private static async Task<IResult> ReadReplayChunkTailAsync(
+        string path,
+        int requestedTake,
+        CancellationToken cancellationToken)
+    {
+        const int maximumTake = 750;
+        const int swingLimit = 100;
+        int take = Math.Clamp(requestedTake, 1, maximumTake);
+        var rows = new Queue<DashboardReplayRow>(take);
+        await using FileStream file = new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var gzip = new GZipStream(file, CompressionMode.Decompress);
+        await foreach (DashboardReplayRow? source in JsonSerializer.DeserializeAsyncEnumerable<DashboardReplayRow>(
+                           gzip,
+                           ReplayJsonOptions,
+                           cancellationToken))
+        {
+            if (source is null)
+                continue;
+
+            DashboardReplayRow row = source;
+            if (source.Analysis is { } analysis && analysis.Swings.Count > swingLimit)
+            {
+                row = source with
+                {
+                    Analysis = analysis with
+                    {
+                        Swings = analysis.Swings
+                            .Skip(analysis.Swings.Count - swingLimit)
+                            .ToArray()
+                    }
+                };
+            }
+
+            if (rows.Count == take)
+                rows.Dequeue();
+            rows.Enqueue(row);
+        }
+
+        return Results.Ok(rows.ToArray());
     }
 
     private static string SanitizePathSegment(string value) => string.Concat(value.Select(character =>
@@ -940,9 +1106,9 @@ public static class SimulationApi
         }
     }
 
-    private static string[] ResolveTrainingStrategies(CreateSimulationRequest body)
+    private static string[] ResolveTrainingStrategies(BacktestRequest request)
     {
-        if (body.StrategyAssignments is { Length: > 0 } assignments)
+        if (request.StrategyAssignments is { Count: > 0 } assignments)
         {
             return assignments
                 .Select(item => item.StrategyType)
@@ -952,12 +1118,146 @@ public static class SimulationApi
                 .ToArray();
         }
 
-        return body.Strategies
+        return request.Strategies
             .Where(item => !string.IsNullOrWhiteSpace(item))
             .Select(item => item.Trim().ToLowerInvariant())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
+
+    private static async Task<SimulationStrategyProfile?> ResolveSimulationProfileAsync(
+        CreateSimulationRequest body,
+        ISimulationStrategyProfileStore store,
+        CancellationToken cancellationToken)
+    {
+        if (body.SimulationProfileId.HasValue != body.SimulationProfileRevision.HasValue)
+            throw new ArgumentException(
+                "SimulationProfileId and SimulationProfileRevision must be supplied together.");
+        if (body.SimulationProfileId is not Guid profileId ||
+            body.SimulationProfileRevision is not int revision)
+            return null;
+        if (profileId == Guid.Empty || revision < 1)
+            throw new ArgumentException("The selected simulation profile revision is invalid.");
+
+        SimulationStrategyProfile profile = await store.ReadAsync(profileId, revision, cancellationToken)
+            ?? throw new ArgumentException("The selected simulation profile revision does not exist.");
+        profile.ValidateForExecution();
+        return profile;
+    }
+
+    private static async Task<ResolvedCalibration> ResolveProfileCalibrationAsync(
+        SimulationStrategyProfile profile,
+        ICalibrationArtifactRepository repository,
+        CancellationToken cancellationToken)
+    {
+        if (profile.Calibration.Mode == ExperimentCalibrationMode.Disabled)
+            return new ResolvedCalibration();
+        if (profile.Calibration.Mode == ExperimentCalibrationMode.TrainFreshPendingReviewOnly)
+        {
+            throw new ArgumentException(
+                "This profile trains artifacts for review only and cannot be evaluated as a Single Run. " +
+                "Run it as an Experiment or create a revision that reuses/uses calibration artifacts.");
+        }
+        if (profile.Calibration.Mode == ExperimentCalibrationMode.TrainFreshAndUseForHeldOutEvaluation)
+            return new ResolvedCalibration();
+
+        SetupCalibrationArtifact? setup = null;
+        TradeManagementCalibration? management = null;
+        MetaModelArtifact? metaModel = null;
+        foreach (Guid artifactId in profile.Calibration.ArtifactIds)
+        {
+            CalibrationArtifactMetadata metadata = await repository
+                .GetMetadataAsync(artifactId, cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new ArgumentException(
+                    $"The profile references calibration artifact '{artifactId}' which no longer exists.");
+            switch (metadata.Type)
+            {
+                case CalibrationArtifactType.Setup when setup is null:
+                    setup = await repository.GetSetupAsync(artifactId, cancellationToken).ConfigureAwait(false)
+                        ?? throw new ArgumentException($"Setup artifact '{artifactId}' has no stored content.");
+                    break;
+                case CalibrationArtifactType.Management when management is null:
+                    management = await repository.GetManagementAsync(artifactId, cancellationToken).ConfigureAwait(false)
+                        ?? throw new ArgumentException($"Management artifact '{artifactId}' has no stored content.");
+                    break;
+                case CalibrationArtifactType.MetaModel when metaModel is null:
+                    metaModel = await repository.GetMetaModelAsync(artifactId, cancellationToken).ConfigureAwait(false)
+                        ?? throw new ArgumentException($"Meta-model artifact '{artifactId}' has no stored content.");
+                    break;
+                default:
+                    throw new ArgumentException(
+                        $"The profile contains more than one '{metadata.Type}' calibration artifact.");
+            }
+        }
+
+        return new ResolvedCalibration(setup, management, metaModel);
+    }
+
+    private static BacktestRequest ApplySimulationProfile(
+        BacktestRequest request,
+        SimulationStrategyProfile profile,
+        SetupCalibrationArtifact? setup,
+        TradeManagementCalibration? management,
+        MetaModelArtifact? metaModel)
+    {
+        string strategyType = TradingAgentTypeIds.Format(profile.Agent.Kind);
+        (decimal quantity, decimal rewardRisk) = profile.Agent.Kind switch
+        {
+            TradingAgentKind.LegacyProgressive or TradingAgentKind.ImprovedProgressive =>
+                (profile.Agent.Progressive!.Quantity, profile.Agent.Progressive.MinimumRewardRisk),
+            TradingAgentKind.StructuralConfluence =>
+                (profile.Agent.StructuralConfluence!.Quantity,
+                    profile.Agent.StructuralConfluence.MinimumRewardRisk),
+            _ => throw new ArgumentOutOfRangeException(nameof(profile))
+        };
+        BacktestRuntimeOptions runtime = profile.Runtime.Options with
+        {
+            SourceKind = request.Runtime.SourceKind,
+            ImportedCandlePath = request.Runtime.ImportedCandlePath,
+            RefreshCache = request.Runtime.RefreshCache,
+            NoCache = request.Runtime.NoCache,
+            AnnotationOptions = profile.Analysis,
+            LegacyPositionManagement = profile.Management,
+            ImprovedPositionManagement = profile.Management,
+            StructuralPositionManagement = profile.Management,
+            MaximumParallelStrategies = 1,
+            SetupCalibration = profile.Runtime.Options.SetupCalibration with { Enabled = setup is not null },
+            SetupCalibrationArtifact = setup,
+            ManagementCalibration = profile.Runtime.Options.ManagementCalibration with
+            {
+                Enabled = management is not null
+            },
+            ManagementCalibrationArtifact = management,
+            MetaModel = profile.Runtime.Options.MetaModel with { Enabled = metaModel is not null },
+            MetaModelArtifact = metaModel
+        };
+
+        return request with
+        {
+            Instrument = profile.Instrument,
+            Strategies = [strategyType],
+            StrategyAssignments =
+            [
+                new StrategyInstrumentAssignment
+                {
+                    Id = $"profile-{profile.ProfileId:N}-r{profile.Revision}",
+                    StrategyType = strategyType,
+                    Instrument = profile.Instrument,
+                    AgentDefinitionOverride = profile.Agent,
+                    AnalysisOptionsOverride = profile.Analysis
+                }
+            ],
+            Quantity = quantity,
+            MinimumRewardRisk = rewardRisk,
+            Runtime = runtime
+        };
+    }
+
+    private sealed record ResolvedCalibration(
+        SetupCalibrationArtifact? Setup = null,
+        TradeManagementCalibration? Management = null,
+        MetaModelArtifact? MetaModel = null);
 
     private static async Task<SetupCalibrationArtifact?> ResolveSetupCalibrationArtifactAsync(
         string? id, ICalibrationArtifactRepository repository, CancellationToken cancellationToken)
@@ -994,12 +1294,9 @@ public static class SimulationApi
 
     private static string? TryNormalizePromotedStrategy(string value)
     {
-        string normalized = value.Trim().ToLowerInvariant();
-        if (normalized.Contains("legacy", StringComparison.Ordinal))
-            return "legacy";
-        if (normalized.Contains("improved", StringComparison.Ordinal))
-            return "improved";
-        return null;
+        return TradingAgentTypeIds.TryParse(value, out TradingAgentKind kind)
+            ? TradingAgentTypeIds.Format(kind)
+            : null;
     }
 
     private static Guid DerivePolicyProfileId(
@@ -1017,10 +1314,12 @@ public static class SimulationApi
 /// <summary>API-facing (plain-string) mirror of Simulator.Models.StrategyInstrumentAssignment.</summary>
 public sealed record StrategyInstrumentAssignmentDto
 {
-    /// <summary>"legacy" or "improved".</summary>
+    /// <summary>"legacy", "improved", or "structural-confluence".</summary>
     public required string StrategyType { get; init; }
     public required string Instrument { get; init; }
     public string? Id { get; init; }
+    public TradingAgentDefinition? AgentDefinitionOverride { get; init; }
+    public ProgressiveStrategyOptions? AgentOptionsOverride { get; init; }
 }
 
 public sealed record CreateSimulationRequest
@@ -1032,6 +1331,9 @@ public sealed record CreateSimulationRequest
 
     /// <summary>Catalog broker ID: oanda, binance, or imported.</summary>
     public string? BrokerId { get; init; }
+    /// <summary>Optional immutable strategy-profile identity. Must be paired with its exact revision.</summary>
+    public Guid? SimulationProfileId { get; init; }
+    public int? SimulationProfileRevision { get; init; }
     public string Instrument { get; init; } = RecommendedSimulationDefaults.Instrument;
     public DateTimeOffset From { get; init; }
     public DateTimeOffset To { get; init; }
@@ -1202,6 +1504,12 @@ public sealed record CreateSimulationRequest
         new Dictionary<string, FinancingRate>(StringComparer.OrdinalIgnoreCase);
     public bool RefreshCache { get; init; }
     public bool NoCache { get; init; }
+    /// <summary>
+    /// Whether to build the chart replay chunks for this run. Measured locally at roughly a
+    /// third of throughput (candles/second) - true by default so the Dashboard replay chart
+    /// keeps working out of the box, but callers that only need metrics/trades can turn it off.
+    /// </summary>
+    public bool CaptureMarketReplay { get; init; } = true;
     public PositionManagementRequest LegacyPositionManagement { get; init; } =
         PositionManagementRequest.LegacyDefaults;
     public PositionManagementRequest ImprovedPositionManagement { get; init; } =
@@ -1335,7 +1643,9 @@ public sealed record CreateSimulationRequest
             {
                 StrategyType = assignment.StrategyType,
                 Instrument = new InstrumentKey(assignment.Instrument),
-                Id = assignment.Id
+                Id = assignment.Id,
+                AgentDefinitionOverride = assignment.AgentDefinitionOverride,
+                AgentOptionsOverride = assignment.AgentOptionsOverride
             }).ToArray(),
             StartingBalance = StartingBalance,
             Quantity = Quantity,
@@ -1347,6 +1657,7 @@ public sealed record CreateSimulationRequest
             PriceActionConfirmation = Enum.Parse<PriceActionConfirmationMode>(PriceActionConfirmation, ignoreCase: true),
             MinimumPriceActionConfidence = MinimumPriceActionConfidence,
             RejectStrongOpposingPriceAction = RejectStrongOpposingPriceAction,
+            CaptureMarketReplay = CaptureMarketReplay,
             OutputDirectory = Path.Combine(solutionRoot, "Dashboard", "public", "data", "simulations"),
             CacheDirectory = Path.Combine(solutionRoot, ".cache", "historical"),
             JobsDirectory = Path.Combine(solutionRoot, ".cache", "simulation-jobs"),
@@ -1737,6 +2048,20 @@ internal sealed record TradeIndexEntryDto(
     int Length,
     string SetupId,
     DateTimeOffset? ClosedAt);
+
+internal sealed record DashboardReplayRow(
+    long Sequence,
+    DateTimeOffset AvailableAt,
+    DateTimeOffset OpenTime,
+    decimal Open,
+    decimal High,
+    decimal Low,
+    decimal Close,
+    decimal Volume,
+    IReadOnlyList<string> ClosedIntervals,
+    bool IsWarmup,
+    AnalysisSnapshot? Analysis,
+    string? Instrument = null);
 
 public sealed record ImportedDatasetMetadata(
     string DatasetId,

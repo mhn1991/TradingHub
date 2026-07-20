@@ -11,4 +11,8 @@ public sealed class LiveStatusRealtimePublisher(IHubContext<LiveStatusHub> hub)
 {
     public Task PublishAsync(LiveEngineStatusDto snapshot, CancellationToken cancellationToken = default) =>
         hub.Clients.All.SendAsync("LiveStatusChanged", snapshot, cancellationToken);
+
+    public Task PublishDeploymentChangedAsync(object deployment,
+        CancellationToken cancellationToken = default) =>
+        hub.Clients.All.SendAsync("DeploymentChanged", deployment, cancellationToken);
 }

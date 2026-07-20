@@ -56,6 +56,19 @@ public sealed record SupplyDemandCalculationProfile
     public bool RequireStructureBreak { get; init; }
     public bool RequireFairValueGap { get; init; }
 
+    // Origination move into the base (opt-in, off by default like the other Require* gates
+    // above). The standard supply/demand definition is a 3-step pattern - strong move in, base,
+    // strong move out ("Drop-Base-Rally"/"Rally-Base-Drop") - but until this option, only the
+    // base and the departure (move out) were checked; nothing validated that price actually
+    // arrived at the base via a genuine prior move rather than slow drift. Mirrors the departure
+    // move's own ATR/efficiency checks, in the opposite direction (a demand zone's base should be
+    // preceded by a bearish approach, matching "Drop-Base-Rally").
+    public bool RequireOriginationMove { get; init; }
+    public int MinimumOriginationCandles { get; init; } = 1;
+    public int MaximumOriginationCandles { get; init; } = 5;
+    public decimal MinimumOriginationAtr { get; init; } = 0.75m;
+    public decimal MinimumOriginationEfficiency { get; init; } = 0.50m;
+
     // Boundary / invalidation (§5.6 / §5.7)
     public ZoneBoundaryMode BoundaryMode { get; init; } = ZoneBoundaryMode.FullWickRange;
     public ZoneInvalidationMode InvalidationMode { get; init; } = ZoneInvalidationMode.CloseBeyondDistal;
@@ -74,6 +87,14 @@ public sealed record SupplyDemandCalculationProfile
     public decimal PartialMitigationPenetrationRatio { get; init; } = 0.50m;
     public int MaximumActiveZones { get; init; } = 50;
     public int MaximumRetainedEvents { get; init; } = 200;
+
+    /// <summary>
+    /// Minimum bars between two touches for the second to count toward
+    /// <see cref="SupplyDemandZone.DistinctTouchCount"/>. Standard cooldown-based touch counting
+    /// (industry default is 5 bars) so one consolidation sitting on the zone across many
+    /// consecutive candles cannot be mistaken for repeated distinct tests/pullbacks.
+    /// </summary>
+    public int MinimumDistinctTouchBars { get; init; } = 5;
 
     public SupplyDemandScoringWeights ScoringWeights { get; init; } = SupplyDemandScoringWeights.Default;
 
@@ -98,6 +119,10 @@ public sealed record SupplyDemandCalculationProfile
             MinimumDepartureEfficiency is < 0m or > 1m ||
             MinimumDirectionalBodyRatio is < 0m or > 1m ||
             MaximumDepartureCandles < 1 ||
+            MinimumOriginationCandles < 1 ||
+            MaximumOriginationCandles < MinimumOriginationCandles ||
+            MinimumOriginationAtr <= 0m ||
+            MinimumOriginationEfficiency is < 0m or > 1m ||
             InvalidationPenetrationRatio <= 0m ||
             (MaximumZoneAgeBars is int age && age < 1) ||
             MergeOverlapRatio is < 0m or > 1m ||
@@ -108,6 +133,7 @@ public sealed record SupplyDemandCalculationProfile
             MaximumRetainedEvents < 1 ||
             !Enum.IsDefined(BoundaryMode) ||
             !Enum.IsDefined(InvalidationMode) ||
+            MinimumDistinctTouchBars < 0 ||
             RuleSetVersion < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(SupplyDemandCalculationProfile));

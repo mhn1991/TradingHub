@@ -121,6 +121,73 @@ export interface ReplayTrade {
   entryManagementProfileId?: string
   currentManagementProfileId?: string
   managementProfileSwitchReason?: string | null
+  /** Structural Indicator and Adaptive Target Management plan: null for legacy/v1 trades and
+   *  any non-structural agent - only set when the entry decision came from a
+   *  structural-confluence-v2 managed policy. */
+  exitPolicy?: 'FixedStructuralTarget' | 'PartialThenRunner' | 'ManagedExpansion' | null
+  targetPlan?: TradeTargetPlan | null
+  targetPlanRevisions?: TargetPlanRevision[]
+  /** Weighted planned reward at entry (never changes after entry, even after stop amendments). */
+  plannedR?: number | null
+  /** Net trade P&L / original never-recalculated risk cash. Same ratio as rMultiple for v2
+   *  trades - populated separately under the plan's own name for report consumers. */
+  realizedR?: number | null
+  initialRiskCash?: number | null
+}
+
+export type TradeTargetRole = 'Checkpoint' | 'Terminal' | 'HardBarrier' | 'Projection'
+export type TradeTargetSourceKind = 'Swing' | 'LiquidityPool' | 'SupplyDemandZone' | 'RMultipleProjection'
+export type TradeTargetSignificanceTier = 'TierA' | 'TierB' | 'TierC'
+
+export interface TradeTargetCandidate {
+  candidateId: string
+  clusterId: string
+  sourceKind: TradeTargetSourceKind
+  sourceId: string
+  sourceInterval: string
+  lifecycleState: string
+  lowerBoundary: number
+  upperBoundary: number
+  executionPrice: number
+  role: TradeTargetRole
+  tier: TradeTargetSignificanceTier
+  quality: number
+  prominence: number
+  freshness: number
+  priorTouchCount?: number | null
+  distanceAtr: number
+  targetR?: number | null
+  constituentSourceIds: string[]
+  availableAt: string
+  reasonCodes: string[]
+}
+
+export interface TradeTargetPlan {
+  planVersion: number
+  revision: number
+  exitPolicy: 'FixedStructuralTarget' | 'PartialThenRunner' | 'ManagedExpansion'
+  originalEntry: number
+  originalStop: number
+  initialRiskPrice: number
+  selectedCheckpointId?: string | null
+  selectedTerminalId?: string | null
+  candidates: TradeTargetCandidate[]
+  partialFraction: number
+  minimumRunnerFraction: number
+  plannedR: number
+  conservativeOpportunityR: number
+  createdAt: string
+  lastRevisedAt: string
+  lastRevisionReason?: string | null
+}
+
+export interface TargetPlanRevision {
+  previousRevision: number
+  newRevision: number
+  triggeringEvent: string
+  consumedCandidateId?: string | null
+  newlySelectedCandidateId?: string | null
+  decisionAt: string
 }
 
 export interface PartialExitRecord {
@@ -403,6 +470,58 @@ export interface ResearchArtifactSelection {
 }
 
 export const RESEARCH_ARTIFACT_SELECTION_KEY = 'tradinghub.research.artifacts.v1'
+
+export type TradingPolicyProfileStatus = 'Research' | 'Reviewed' | 'ApprovedForDemo' | 'Retired'
+
+/** Display-only subset of the backend's TradingPolicyProfile - the full record also carries the
+ *  agent definition and every risk/management option, which the Dashboard never edits directly. */
+export interface TradingPolicyProfile {
+  profileId: string
+  revision: number
+  strategyId: string
+  strategyVersion: string
+  status: TradingPolicyProfileStatus | string
+  setupCalibrationArtifactId?: string | null
+  managementCalibrationArtifactId?: string | null
+  metaModelArtifactId?: string | null
+  createdAt: string
+  sourceCommit: string
+  description?: string | null
+  configurationHash: string
+}
+
+export interface PromoteTradingPolicyRequest {
+  revision?: number
+  approveForDemo: boolean
+  strategyVersion?: string | null
+  setupCalibrationArtifactId?: string | null
+  managementCalibrationArtifactId?: string | null
+  metaModelArtifactId?: string | null
+  description?: string | null
+}
+
+export type CalibrationBundleCandidateStatus = 'PendingReview' | 'Approved' | 'Rejected' | 'Superseded'
+
+export interface CalibrationBundleCandidate {
+  id: string
+  setupArtifactId: string
+  metaModelArtifactId: string
+  managementArtifactId: string
+  proposedProfile: TradingPolicyProfile
+  status: CalibrationBundleCandidateStatus | string
+  createdAt: string
+  reviewedBy?: string | null
+  reviewedAt?: string | null
+  rejectionReason?: string | null
+  approvedProfileId?: string | null
+  approvedProfileRevision?: number | null
+}
+
+export interface SimulationProfileDiff {
+  leftResolvedJson: string
+  rightResolvedJson: string
+  changedPaths: string[]
+}
 
 export interface BacktestManifestRun {
   id: string
@@ -689,6 +808,55 @@ export interface AdxAnalysisSnapshot {
   isTrendStrengthening: boolean
 }
 
+export type CciZone =
+  | 'Unknown'
+  | 'ExtremeNegative'
+  | 'Negative'
+  | 'Neutral'
+  | 'Positive'
+  | 'ExtremePositive'
+
+export type CciRelationshipType =
+  | 'None'
+  | 'RegularBullishDivergence'
+  | 'RegularBearishDivergence'
+  | 'HiddenBullishDivergence'
+  | 'HiddenBearishDivergence'
+  | 'BullishConvergence'
+  | 'BearishConvergence'
+
+export interface CciRelationshipSnapshot {
+  type: CciRelationshipType
+  firstPivotTime: string
+  secondPivotTime: string
+  confirmedAt: string
+  firstPrice: number
+  secondPrice: number
+  firstCci: number
+  secondCci: number
+  priceChange: number
+  cciChange: number
+  strength: number
+  ageCandles: number
+  isDivergence: boolean
+}
+
+export interface CciAnalysisSnapshot {
+  zone: CciZone
+  momentumDirection: MomentumDirection
+  momentumChange: number | null
+  previousValue: number | null
+  crossedUpFromExtremeNegative: boolean
+  crossedDownFromExtremePositive: boolean
+  crossedUpZero: boolean
+  crossedDownZero: boolean
+  barsSinceExtremeNegative: number
+  barsSinceExtremePositive: number
+  latestRelationship: CciRelationshipSnapshot | null
+  isNewRelationship: boolean
+  sampleCount: number
+}
+
 export interface IndicatorSnapshot {
   atr: number | null
   rsi: number | null
@@ -701,6 +869,7 @@ export interface IndicatorSnapshot {
   efficiencyRatio: number | null
   atrAnalysis?: AtrAnalysisSnapshot
   rsiAnalysis?: RsiAnalysisSnapshot
+  cciAnalysis?: CciAnalysisSnapshot
   bollingerAnalysis?: BollingerAnalysisSnapshot
   adxAnalysis?: AdxAnalysisSnapshot
   efficiencyAnalysis?: EfficiencyAnalysisSnapshot

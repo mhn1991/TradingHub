@@ -12,15 +12,11 @@ The Dashboard simulator now discovers instruments from the selected historical d
 - Supports fast 1-minute execution and OANDA-native 5-second precision.
 - Historical execution currently uses midpoint candles plus the configured spread model.
 
-Configuration names accepted by the backend:
+Broker credentials are loaded from the encrypted PostgreSQL vault. Bootstrap or rotate them with
+the procedure in [`BROKER_CREDENTIAL_VAULT.md`](BROKER_CREDENTIAL_VAULT.md). Non-secret broker
+environment selection remains in application configuration.
 
-```bash
-export OANDA_ACCOUNT_ID="..."
-export OANDA_ACCESS_TOKEN="..."
-export OANDA_ENVIRONMENT="Demo"
-```
-
-`OANDA_TOKEN` remains accepted for compatibility, but `OANDA_ACCESS_TOKEN` is the preferred name.
+Secret environment variables are intentionally not used by the runtime.
 
 ### Binance Spot
 

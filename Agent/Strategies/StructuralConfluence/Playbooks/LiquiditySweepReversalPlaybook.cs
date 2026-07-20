@@ -2,7 +2,9 @@ using Agent.Models;
 using Agent.Strategies.StructuralConfluence.Evidence;
 using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 using ChartAnnotator.SupplyDemand;
+using ChartAnnotator.TargetManagement;
 
 namespace Agent.Strategies.StructuralConfluence.Playbooks;
 
@@ -61,8 +63,22 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
         CciAssessment cci = StructuralPlaybookRules.AssessCci(evidence, direction, continuation: false);
         bool cciPasses = StructuralPlaybookRules.ConfirmationPasses(_options.CciMode, cci);
 
+        // Identity is tied to the sweep event itself (PoolId/ZoneId/SweepId/AvailableAt), not to
+        // whether it already produced a trade - a later candle's confirmation trigger firing off
+        // the SAME still-fresh sweep after an earlier attempt on it already closed would
+        // otherwise re-arm and re-enter on a thesis the market just invalidated at that exact
+        // level (observed 2026-07-20: same setupId, two entries 25 minutes apart, second one
+        // stopped out in 1 minute). state.LastReadySetupId is sticky across non-ready frames and
+        // frozen for the whole holding period (StructuralConfluenceAgent skips Evaluate entirely
+        // while a position is open), so this only blocks a genuine repeat of the same identity,
+        // never a setup that's simply still armed across consecutive frames pre-entry.
+        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
+            pool.PoolId, zone?.ZoneId, sweep.SweepId.ToString("N"), sweep.AvailableAt, direction);
+        bool notAlreadySignaled = setupId != state.LastReadySetupId;
+
         var gates = new List<MandatoryGate>
         {
+            Gate("NotAlreadySignaled", notAlreadySignaled, sweep.QualityScore * 100m, "StructuralSweepAlreadySignaled"),
             Gate("PoolPreExisting", pool.AvailableAt <= sweep.SweepStartedAt, pool.QualityScore * 100m, "StructuralPoolNotPreExisting"),
             Gate("PoolQuality", pool.QualityScore >= _options.MinimumPoolQuality, pool.QualityScore * 100m, "StructuralPoolQualityLow"),
             Gate("PoolType", _options.AllowedPoolTypes.Contains(pool.Type), pool.QualityScore * 100m, "StructuralPoolTypeRejected"),
@@ -79,12 +95,20 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
         decimal rawStop = sweep.ExtremePrice;
         if (zone is not null)
             rawStop = buy ? Math.Min(rawStop, Math.Min(zone.ProximalPrice, zone.DistalPrice)) : Math.Max(rawStop, Math.Max(zone.ProximalPrice, zone.DistalPrice));
-        StructuralGeometry geometry = _geometry.Build(evidence, direction, rawStop,
-            zone is null ? $"Sweep:{sweep.SweepId:N}" : $"SweepAndZone:{sweep.SweepId:N}:{zone.ZoneId:N}");
+        string stopSource = zone is null ? $"Sweep:{sweep.SweepId:N}" : $"SweepAndZone:{sweep.SweepId:N}:{zone.ZoneId:N}";
+        // Exit-policy routing (plan §4.1): a range/countertrend sweep takes a fixed target; a
+        // sweep aligned with context after displacement and a confirmed structure shift is
+        // treated as continuation and gets a partial-then-runner instead. A sweep never rejects
+        // purely on context here - it is a reversal trade, being countertrend is expected.
+        bool alignedContinuation = _root.AdaptiveTargetManagement.Enabled &&
+            IsContextAligned(evidence, direction) && sweep.DisplacementConfirmed && sweep.StructureShiftConfirmed;
+        StructuralGeometry geometry = _root.AdaptiveTargetManagement.Enabled
+            ? _geometry.BuildAdaptive(evidence, direction, rawStop, stopSource,
+                alignedContinuation ? TradeExitPolicy.PartialThenRunner : TradeExitPolicy.FixedStructuralTarget,
+                [$"LiquidityPool:{pool.PoolId:N}"])
+            : _geometry.Build(evidence, direction, rawStop, stopSource);
         gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
 
-        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
-            pool.PoolId, zone?.ZoneId, sweep.SweepId.ToString("N"), sweep.AvailableAt, direction);
         bool structuralPassed = gates.Where(item => item.Name is not ("Trigger" or "Cci" or "Geometry")).All(item => item.Passed);
         bool ready = gates.All(item => item.Passed);
         decimal contextQuality = DirectionContextQuality(evidence, direction);
@@ -147,6 +171,15 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
         Lifecycle = StructuralSetupLifecycle.Dormant,
         ReasonCode = reasonCode
     };
+
+    private static bool IsContextAligned(StructuralEvidencePacket evidence, PriceActionDirection direction)
+    {
+        bool buy = direction == PriceActionDirection.Bullish;
+        MarketRegime regime = evidence.Context.MarketRegime.Regime;
+        return buy
+            ? regime is MarketRegime.TrendingUp or MarketRegime.BreakoutExpansionUp || evidence.Context.MarketStructure.Direction == MarketStructureDirection.Rising
+            : regime is MarketRegime.TrendingDown or MarketRegime.BreakoutExpansionDown || evidence.Context.MarketStructure.Direction == MarketStructureDirection.Falling;
+    }
 
     private static bool IsUsable(SupplyDemandZone zone) => zone.State is not
         (SupplyDemandZoneState.Invalidated or SupplyDemandZoneState.Mitigated or SupplyDemandZoneState.Expired or SupplyDemandZoneState.Merged);

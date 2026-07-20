@@ -2,6 +2,7 @@ using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.MarketData;
 using ChartAnnotator.Regime;
+using ChartAnnotator.TargetManagement;
 using Simulator.Execution;
 using Simulator.Financing;
 
@@ -120,7 +121,9 @@ public enum PartialExitReason
     RiskReduction,
     RegimeDegradation,
     Manual,
-    Unknown
+    Unknown,
+    /// <summary>Target-aware partial from an adaptive <see cref="ChartAnnotator.TargetManagement.TradeTargetPlan"/> (plan §4.4).</summary>
+    AdaptiveTargetCheckpoint
 }
 
 public sealed record PartialExitRecord
@@ -151,6 +154,7 @@ public sealed record PartialExitRecord
 public sealed record SimulatedTradeRecord
 {
     public string StrategyId { get; init; } = "unknown";
+    public string PlaybookId { get; init; } = "unknown";
     public required string StrategyName { get; init; }
     public required string SetupId { get; init; }
     public string? PositionId { get; init; }
@@ -241,6 +245,9 @@ public sealed record SimulatedTradeRecord
     public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
     public string? EntrySupplyDemandZoneState { get; init; }
     public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? OriginatingLiquidityPoolId { get; init; }
+    public Guid? OriginatingLiquiditySweepId { get; init; }
+    public string? OriginatingLiquidityProfileHash { get; init; }
     public Guid? TargetLiquidityPoolId { get; init; }
     public string? TargetLiquidityProfileHash { get; init; }
     public decimal? StructuralInvalidationReference { get; init; }
@@ -260,6 +267,8 @@ public sealed record SimulatedTradeRecord
     /// <c>calibrate-metamodel</c> can bucket by it later.
     /// </summary>
     public decimal? EntryMultiTimeframeAlignment { get; init; }
+    public string? EntryCciConfirmationState { get; init; }
+    public string? EntryStructuralConfluenceState { get; init; }
     /// <summary>
     /// Bar-by-bar MFE/MAE excursion path from entry to close. Null unless
     /// <see cref="BacktestRuntimeOptions.DetailedExcursionTracking"/> is enabled (off by
@@ -268,6 +277,21 @@ public sealed record SimulatedTradeRecord
     /// just the peak <see cref="MaximumFavourableExcursionR"/>/<see cref="MaximumAdverseExcursionR"/>.
     /// </summary>
     public IReadOnlyList<SimulatedTradePathPoint>? ExcursionPath { get; init; }
+
+    /// <summary>
+    /// Adaptive target management (Structural Indicator and Adaptive Target Management Plan
+    /// §5.2, §5.5). Null unless the trade was opened under a structural-confluence-v2 managed
+    /// policy, so every existing persisted/replayed record deserializes unchanged.
+    /// </summary>
+    public TradeExitPolicy? ExitPolicy { get; init; }
+    public TradeTargetPlan? TargetPlan { get; init; }
+    public IReadOnlyList<TargetPlanRevision> TargetPlanRevisions { get; init; } = [];
+    /// <summary>Weighted planned reward at entry, per plan §3.7's <c>PlannedR</c> definition.</summary>
+    public decimal? PlannedR { get; init; }
+    /// <summary>Net trade P&amp;L divided by the original, never-recalculated risk cash (plan §3.7).</summary>
+    public decimal? RealizedR { get; init; }
+    /// <summary>Original cost-adjusted risk cash, pinned at entry (plan §3.7).</summary>
+    public decimal? InitialRiskCash { get; init; }
 }
 
 public sealed record SimulatedTradePathPoint

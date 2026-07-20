@@ -50,6 +50,9 @@ public sealed record LiveOrderRecord
     public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
     public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
     public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? OriginatingLiquidityPoolId { get; init; }
+    public Guid? OriginatingLiquiditySweepId { get; init; }
+    public string? OriginatingLiquidityProfileHash { get; init; }
     public Guid? TargetLiquidityPoolId { get; init; }
     public string? TargetLiquidityProfileHash { get; init; }
     public decimal? StructuralInvalidationReference { get; init; }
@@ -97,6 +100,9 @@ public sealed record LivePositionRecord
     public decimal? EntrySupplyDemandZoneUpperPrice { get; init; }
     public SupplyDemandZoneState? EntrySupplyDemandZoneState { get; init; }
     public string? EntrySupplyDemandProfileHash { get; init; }
+    public Guid? OriginatingLiquidityPoolId { get; init; }
+    public Guid? OriginatingLiquiditySweepId { get; init; }
+    public string? OriginatingLiquidityProfileHash { get; init; }
     public Guid? TargetLiquidityPoolId { get; init; }
     public string? TargetLiquidityProfileHash { get; init; }
     public decimal? StructuralInvalidationReference { get; init; }
@@ -212,6 +218,9 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
             EntrySupplyDemandZoneUpperPrice = decision.Decision.EntrySupplyDemandZoneUpperPrice,
             EntrySupplyDemandZoneState = decision.Decision.EntrySupplyDemandZoneState,
             EntrySupplyDemandProfileHash = decision.Decision.EntrySupplyDemandProfileHash,
+            OriginatingLiquidityPoolId = decision.Decision.OriginatingLiquidityPoolId,
+            OriginatingLiquiditySweepId = decision.Decision.OriginatingLiquiditySweepId,
+            OriginatingLiquidityProfileHash = decision.Decision.OriginatingLiquidityProfileHash,
             TargetLiquidityPoolId = decision.Decision.TargetLiquidityPoolId,
             TargetLiquidityProfileHash = decision.Decision.TargetLiquidityProfileHash,
             StructuralInvalidationReference = decision.Decision.StructuralInvalidationReference,
@@ -377,6 +386,12 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                             updatedOrder.EntrySupplyDemandZoneState,
                         EntrySupplyDemandProfileHash = existing?.EntrySupplyDemandProfileHash ??
                             updatedOrder.EntrySupplyDemandProfileHash,
+                        OriginatingLiquidityPoolId = existing?.OriginatingLiquidityPoolId ??
+                            updatedOrder.OriginatingLiquidityPoolId,
+                        OriginatingLiquiditySweepId = existing?.OriginatingLiquiditySweepId ??
+                            updatedOrder.OriginatingLiquiditySweepId,
+                        OriginatingLiquidityProfileHash = existing?.OriginatingLiquidityProfileHash ??
+                            updatedOrder.OriginatingLiquidityProfileHash,
                         TargetLiquidityPoolId = existing?.TargetLiquidityPoolId ?? updatedOrder.TargetLiquidityPoolId,
                         TargetLiquidityProfileHash = existing?.TargetLiquidityProfileHash ??
                             updatedOrder.TargetLiquidityProfileHash,
@@ -622,6 +637,12 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                         ownershipOrder?.EntrySupplyDemandZoneState,
                     EntrySupplyDemandProfileHash = existing?.EntrySupplyDemandProfileHash ??
                         ownershipOrder?.EntrySupplyDemandProfileHash,
+                    OriginatingLiquidityPoolId = existing?.OriginatingLiquidityPoolId ??
+                        ownershipOrder?.OriginatingLiquidityPoolId,
+                    OriginatingLiquiditySweepId = existing?.OriginatingLiquiditySweepId ??
+                        ownershipOrder?.OriginatingLiquiditySweepId,
+                    OriginatingLiquidityProfileHash = existing?.OriginatingLiquidityProfileHash ??
+                        ownershipOrder?.OriginatingLiquidityProfileHash,
                     TargetLiquidityPoolId = existing?.TargetLiquidityPoolId ?? ownershipOrder?.TargetLiquidityPoolId,
                     TargetLiquidityProfileHash = existing?.TargetLiquidityProfileHash ??
                         ownershipOrder?.TargetLiquidityProfileHash,

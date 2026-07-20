@@ -3,6 +3,7 @@ using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
 using ChartAnnotator.SupplyDemand;
+using ChartAnnotator.TargetManagement;
 
 namespace TradeManager;
 
@@ -77,7 +78,9 @@ public enum PositionReductionReason
     SessionRisk,
     ExecutionCostStress,
     RiskReduction,
-    RegimeDegradation
+    RegimeDegradation,
+    /// <summary>Target-aware partial from an adaptive <see cref="TradeTargetPlan"/> (plan §4.4), replacing generic scale-out rules for that trade.</summary>
+    AdaptiveTargetCheckpoint
 }
 
 public enum ScaleOutTriggerMode
@@ -264,6 +267,11 @@ public record PositionManagementOptions
     {
         Mode = TrailingStopMode.StructureAtr,
         EvaluateMechanicalProtectionOnEveryExecutionFrame = true,
+        // These are historical convenience defaults (matching Legacy/StructuralConfluence's
+        // typical 5m/15m/1h stack), not a guarantee for every agent. The actual enforcement is
+        // SimulationStrategyProfile.ValidateManagementTimeframeAlignment, which throws at profile
+        // creation time if these values (whether from this preset or a custom override) don't
+        // match the specific agent this options object gets paired with.
         FastStructureInterval = BarInterval.Minutes(5),
         MainStructureInterval = BarInterval.Minutes(15),
         ThesisInterval = BarInterval.Hours(1),
@@ -331,6 +339,11 @@ public record PositionManagementOptions
     {
         Mode = TrailingStopMode.StructureAtr,
         EvaluateMechanicalProtectionOnEveryExecutionFrame = true,
+        // These are historical convenience defaults (matching Legacy/StructuralConfluence's
+        // typical 5m/15m/1h stack), not a guarantee for every agent. The actual enforcement is
+        // SimulationStrategyProfile.ValidateManagementTimeframeAlignment, which throws at profile
+        // creation time if these values (whether from this preset or a custom override) don't
+        // match the specific agent this options object gets paired with.
         FastStructureInterval = BarInterval.Minutes(5),
         MainStructureInterval = BarInterval.Minutes(15),
         ThesisInterval = BarInterval.Hours(1),
@@ -384,6 +397,88 @@ public record PositionManagementOptions
         MomentumDecayReductionFraction = 0.10m,
         EnableVolatilityExhaustionReduction = true,
         VolatilityExhaustionMinimumOpenProfitR = 2.00m,
+        VolatilityExhaustionReductionFraction = 0.10m,
+        EnableRegimeDegradationReduction = true,
+        RegimeDegradationMinimumOpenProfitR = 1.25m,
+        RegimeDegradationReductionFraction = 0.20m,
+        EnableRiskWindowReduction = false,
+        EnableExecutionCostStressReduction = false
+    };
+
+    /// <summary>
+    /// Dedicated bracket-management policy for the structural-confluence agent. Structural
+    /// thesis inputs are pinned when the position opens; later analysis may manage that thesis
+    /// but must not silently replace its zone, liquidity pool, or policy revision.
+    /// </summary>
+    public static PositionManagementOptions StructuralDefaults { get; } = new()
+    {
+        Mode = TrailingStopMode.StructureAtr,
+        EvaluateMechanicalProtectionOnEveryExecutionFrame = true,
+        // These are historical convenience defaults (matching Legacy/StructuralConfluence's
+        // typical 5m/15m/1h stack), not a guarantee for every agent. The actual enforcement is
+        // SimulationStrategyProfile.ValidateManagementTimeframeAlignment, which throws at profile
+        // creation time if these values (whether from this preset or a custom override) don't
+        // match the specific agent this options object gets paired with.
+        FastStructureInterval = BarInterval.Minutes(5),
+        MainStructureInterval = BarInterval.Minutes(15),
+        ThesisInterval = BarInterval.Hours(1),
+        // Low and equal so structural trailing (now including nearby Supply/Demand zones, see
+        // FindStructuralCandidate) can protect profit as soon as a qualifying zone sits near
+        // price, rather than waiting for a full 1R+ move: "small profit + zone nearby -> move
+        // the stop" rather than a fixed-R breakeven/trail schedule.
+        BreakEvenActivationR = 0.3m,
+        StructureTrailActivationR = 0.3m,
+        AtrBufferMultiplier = 0.25m,
+        SupplyDemandManagementEnabled = true,
+        LiquidityManagementEnabled = true,
+        StructuralManagementPolicyRevision = "structural-confluence-v1",
+        PreserveBracketTarget = true,
+        EnableScaleOut = true,
+        ScaleOutRules =
+        [
+            new ScaleOutRule
+            {
+                StageId = "scale-1.5r",
+                ActivationR = 1.5m,
+                MinimumOpenProfitR = 1.25m,
+                FractionOfInitialQuantity = 0.15m,
+                TriggerMode = ScaleOutTriggerMode.RThreshold
+            },
+            new ScaleOutRule
+            {
+                StageId = "scale-2r-or-structure",
+                ActivationR = 2m,
+                MinimumOpenProfitR = 1.5m,
+                FractionOfInitialQuantity = 0.15m,
+                TriggerMode = ScaleOutTriggerMode.RThresholdOrOpposingStructure
+            }
+        ],
+        MinimumRunnerFraction = 0.50m,
+        EnableProfitFloor = true,
+        ProfitFloorRules =
+        [
+            new ProfitFloorRule { ActivationR = 1m, LockedProfitR = 0m },
+            new ProfitFloorRule { ActivationR = 1.75m, LockedProfitR = 0.50m },
+            new ProfitFloorRule { ActivationR = 2.5m, LockedProfitR = 1.25m }
+        ],
+        EnableMaximumGiveback = true,
+        MaximumGivebackRules =
+        [
+            new ProfitGivebackRule { ActivationR = 2m, MaximumGivebackR = 0.75m },
+            new ProfitGivebackRule { ActivationR = 3m, MaximumGivebackR = 0.50m }
+        ],
+        EnableStagnationReduction = true,
+        StagnationMinimumOpenProfitR = 1m,
+        StagnationBars = 14,
+        StagnationReductionFraction = 0.10m,
+        EnableStructuralDeteriorationReduction = true,
+        StructuralDeteriorationReductionFraction = 0.15m,
+        MaximumStructuralDeteriorationReductions = 1,
+        EnableMomentumDecayReduction = true,
+        MomentumDecayMinimumOpenProfitR = 1.5m,
+        MomentumDecayReductionFraction = 0.10m,
+        EnableVolatilityExhaustionReduction = true,
+        VolatilityExhaustionMinimumOpenProfitR = 2m,
         VolatilityExhaustionReductionFraction = 0.10m,
         EnableRegimeDegradationReduction = true,
         RegimeDegradationMinimumOpenProfitR = 1.25m,
@@ -565,6 +660,19 @@ public sealed record ManagedTradeState
 
     /// <summary>Liquidity management opt-in captured at entry.</summary>
     public bool EntryLiquidityManagementEnabled { get; init; }
+
+    /// <summary>
+    /// Adaptive target management (Structural Indicator and Adaptive Target Management Plan
+    /// §5.3). Null unless the entry decision came from a structural-confluence-v2 managed
+    /// policy, so every existing caller's state stays byte-identical.
+    /// </summary>
+    public TradeExitPolicy? ExitPolicy { get; init; }
+    public TradeTargetPlan? TargetPlan { get; init; }
+    public TargetPlanRevision? LastTargetPlanRevision { get; init; }
+    /// <summary>Checkpoint candidate identities already partial-closed, for restart-safe at-most-once partials.</summary>
+    public IReadOnlySet<string> ProcessedTargetCheckpointIds { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Original cost-adjusted risk cash, pinned at entry and never recalculated (plan §3.7).</summary>
+    public decimal? InitialRiskCash { get; init; }
 }
 
 public sealed record PositionReductionRecommendation
@@ -1069,7 +1177,19 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                 $"{_options.MaximumSpreadToAtrRatio:F3}.");
         }
 
-        if (_options.EnableScaleOut)
+        // Adaptive target management (plan §4.4): a v2 trade (ExitPolicy set) replaces the
+        // generic ScaleOutRules loop below with a single target-aware checkpoint partial, so the
+        // two mechanisms never both fire for the same trade. Legacy/other-agent trades
+        // (ExitPolicy null) keep the existing generic scale-out behavior unchanged. Falls through
+        // to stagnation below (unrelated mechanism, not disabled by this plan) if no checkpoint
+        // partial is due yet.
+        if (trade.ExitPolicy is not null)
+        {
+            PositionReductionRecommendation? checkpointReduction = FindAdaptiveTargetCheckpointReduction(trade, openProfitR);
+            if (checkpointReduction is not null)
+                return checkpointReduction;
+        }
+        else if (_options.EnableScaleOut)
         {
             // P2: R-threshold scale-outs require a management-bar scope (fast/main), not a
             // pure mechanical execution frame, so 1s/5s noise does not fire partials.
@@ -1241,6 +1361,40 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         return true;
     }
 
+    /// <summary>
+    /// Adaptive target-map partial (plan §4.4): close the plan's <see cref="TradeTargetPlan.PartialFraction"/>
+    /// exactly once when open profit reaches the selected checkpoint's cost-adjusted R (real
+    /// structural checkpoint or the synthetic fallback the target-map builder already
+    /// materialized at entry - see <see cref="TradeTargetPlan.SelectedCheckpointId"/>). Reuses
+    /// <see cref="ManagedTradeState.CompletedReductionStageIds"/> for the at-most-once guard, the
+    /// same restart-safe mechanism generic scale-outs already use, keyed by candidate id instead
+    /// of a scale-out stage id.
+    /// </summary>
+    private PositionReductionRecommendation? FindAdaptiveTargetCheckpointReduction(
+        ManagedTradeState trade,
+        decimal openProfitR)
+    {
+        TradeTargetPlan? plan = trade.TargetPlan;
+        if (plan is null || plan.PartialFraction <= 0m || plan.SelectedCheckpointId is null)
+            return null;
+        if (trade.CompletedReductionStageIds.Contains(plan.SelectedCheckpointId))
+            return null;
+
+        TradeTargetCandidate? checkpoint = plan.Candidates
+            .FirstOrDefault(item => string.Equals(item.CandidateId, plan.SelectedCheckpointId, StringComparison.Ordinal));
+        if (checkpoint?.TargetR is not decimal checkpointR || openProfitR < checkpointR)
+            return null;
+
+        return CreateReduction(
+            trade,
+            plan.SelectedCheckpointId,
+            plan.PartialFraction,
+            PositionReductionReason.AdaptiveTargetCheckpoint,
+            $"Adaptive target checkpoint '{plan.SelectedCheckpointId}' ({checkpoint.SourceKind}:{checkpoint.SourceId}) reached at {openProfitR:F2}R.",
+            checkpoint.SourceId,
+            checkpoint.ExecutionPrice);
+    }
+
     private PositionReductionRecommendation? CreateReduction(
         ManagedTradeState trade,
         string stageId,
@@ -1250,7 +1404,10 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
         string? structureSource = null,
         decimal? structuralLevel = null)
     {
-        decimal minimumRemaining = trade.InitialQuantity * _options.MinimumRunnerFraction;
+        // A trade opened under an adaptive target plan pins its own runner floor at entry (plan
+        // §3.8/§9); it can only ever raise the generic per-profile floor below, never lower it.
+        decimal effectiveMinimumRunnerFraction = Math.Max(_options.MinimumRunnerFraction, trade.TargetPlan?.MinimumRunnerFraction ?? 0m);
+        decimal minimumRemaining = trade.InitialQuantity * effectiveMinimumRunnerFraction;
         decimal maximumReducible = Math.Max(0m, trade.CurrentQuantity - minimumRemaining);
         decimal desired = trade.InitialQuantity * fractionOfInitialQuantity;
         decimal quantity = Math.Min(desired, maximumReducible);
@@ -1466,6 +1623,24 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                     zone.Strength);
             }
 
+            foreach (SupplyDemandZone zone in analysis.SupplyDemand.Zones.Where(zone =>
+                         zone.Type == SupplyDemandZoneType.Demand &&
+                         zone.State is SupplyDemandZoneState.ConfirmedFresh or SupplyDemandZoneState.Approached or
+                             SupplyDemandZoneState.Tested or SupplyDemandZoneState.PartiallyMitigated &&
+                         zone.QualityScore * 100m >= _options.MinimumZoneStrengthForManagement))
+            {
+                decimal lower = Math.Min(zone.ProximalPrice, zone.DistalPrice);
+                if (lower >= trade.CurrentPrice)
+                    continue;
+                bool postEntry = lower > trade.InitialStopPrice;
+                Consider(
+                    lower,
+                    StopAmendmentReason.StructureSupplyDemandZone,
+                    $"demand zone {zone.ZoneId:N}",
+                    postEntry,
+                    zone.QualityScore * 100m);
+            }
+
             foreach (PriceChannel channel in analysis.Channels.Where(channel =>
                          channel.Confidence >= _options.MinimumChannelConfidenceForManagement))
             {
@@ -1510,6 +1685,24 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                     $"confirmed {zone.Type.ToString().ToLowerInvariant()} zone",
                     postEntry,
                     zone.Strength);
+            }
+
+            foreach (SupplyDemandZone zone in analysis.SupplyDemand.Zones.Where(zone =>
+                         zone.Type == SupplyDemandZoneType.Supply &&
+                         zone.State is SupplyDemandZoneState.ConfirmedFresh or SupplyDemandZoneState.Approached or
+                             SupplyDemandZoneState.Tested or SupplyDemandZoneState.PartiallyMitigated &&
+                         zone.QualityScore * 100m >= _options.MinimumZoneStrengthForManagement))
+            {
+                decimal upper = Math.Max(zone.ProximalPrice, zone.DistalPrice);
+                if (upper <= trade.CurrentPrice)
+                    continue;
+                bool postEntry = upper < trade.InitialStopPrice;
+                Consider(
+                    upper,
+                    StopAmendmentReason.StructureSupplyDemandZone,
+                    $"supply zone {zone.ZoneId:N}",
+                    postEntry,
+                    zone.QualityScore * 100m);
             }
 
             foreach (PriceChannel channel in analysis.Channels.Where(channel =>

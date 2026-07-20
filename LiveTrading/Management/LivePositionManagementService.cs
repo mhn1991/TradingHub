@@ -1,3 +1,4 @@
+using Agent.Configuration;
 using Agent.Models;
 using Brokers.Models;
 using ChartAnnotator.Models;
@@ -280,6 +281,12 @@ public sealed class LivePositionManagementService(
             recommendation.Action.ToString(),
             $"[{scope}] {recommendation.Reason}",
             timeProvider.GetUtcNow());
+
+        // Ordinary unchanged management evaluations are intentionally aggregate-only telemetry.
+        // Persisting one journal row per Hold would make event volume proportional to candle count.
+        if (recommendation.Action == TradeManagementAction.Hold)
+            return;
+
         await persistence.AppendAsync("management-events", new
         {
             position.PositionId,
@@ -292,8 +299,6 @@ public sealed class LivePositionManagementService(
 
         switch (recommendation.Action)
         {
-            case TradeManagementAction.Hold:
-                return;
             case TradeManagementAction.Exit:
                 await ReduceAsync(
                     position,
@@ -525,17 +530,39 @@ public sealed class LivePositionManagementService(
 
     private static PositionManagementOptions ResolveOptions(
         string strategyId,
-        LiveTradingPolicyBundle policy) => strategyId.Contains("legacy", StringComparison.OrdinalIgnoreCase)
-        ? policy.LegacyManagement
-        : policy.ImprovedManagement;
+        LiveTradingPolicyBundle policy)
+    {
+        if (string.Equals(
+                strategyId.Trim(),
+                TradingAgentTypeIds.StructuralConfluence,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return policy.StructuralManagement;
+        }
+
+        return strategyId.Contains("legacy", StringComparison.OrdinalIgnoreCase)
+            ? policy.LegacyManagement
+            : policy.ImprovedManagement;
+    }
+
+    // TODO(task #9 follow-up): LiveTradingPolicyBundle carries no reference to the paired agent's
+    // own RequiredIntervals/TriggerInterval, so unlike StrategySimulationSession (backtesting) this
+    // path cannot yet derive Fast/Main/Thesis from the agent that actually produced the trade.
+    // These fallbacks only preserve pre-existing live behavior (the values StructuralDefaults/
+    // LegacyDefaults/ImprovedDefaults used to hardcode) so removing those hardcoded preset values
+    // for backtesting's benefit doesn't silently disable live structural/thesis-scope management.
+    // Real agent-derived alignment for live still needs to be built.
+    private static readonly BarInterval FallbackFastStructureInterval = BarInterval.Minutes(5);
+    private static readonly BarInterval FallbackMainStructureInterval = BarInterval.Minutes(15);
+    private static readonly BarInterval FallbackThesisInterval = BarInterval.Hours(1);
 
     private static (TradeManagementEvaluationScope Scope, BarInterval? Interval) SelectEvaluation(
         MarketAnalysisUpdate update,
         PositionManagementOptions options)
     {
-        BarInterval? thesis = options.ThesisInterval;
-        BarInterval? main = options.MainStructureInterval ?? options.ManagementInterval;
-        BarInterval? fast = options.FastStructureInterval;
+        BarInterval? thesis = options.ThesisInterval ?? FallbackThesisInterval;
+        BarInterval? main = options.MainStructureInterval ?? options.ManagementInterval ?? FallbackMainStructureInterval;
+        BarInterval? fast = options.FastStructureInterval ?? FallbackFastStructureInterval;
         if (thesis is BarInterval thesisInterval && update.ClosedIntervals.Contains(thesisInterval))
             return (TradeManagementEvaluationScope.Thesis, thesisInterval);
         if (main is BarInterval mainInterval && update.ClosedIntervals.Contains(mainInterval))

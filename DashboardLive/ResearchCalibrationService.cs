@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Agent.Configuration;
 using Brokers.Models;
 using ChartAnnotator.Engine;
 using QuantResearch.Training.Pipeline;
@@ -54,6 +55,7 @@ public sealed class ResearchCalibrationService
             throw new ArgumentException("Instrument is required.");
         if (string.IsNullOrWhiteSpace(request.Strategy))
             throw new ArgumentException("Strategy is required.");
+        string strategy = NormalizeStrategy(request.Strategy);
         if (request.From >= request.To)
             throw new ArgumentException("From must be earlier than To.");
         if (request.StartingBalance <= 0m || request.Quantity <= 0m)
@@ -71,7 +73,7 @@ public sealed class ResearchCalibrationService
             Status = ResearchJobStatus.Queued,
             CreatedAt = DateTimeOffset.UtcNow,
             Instrument = request.Instrument.Trim(),
-            Strategy = request.Strategy.Trim().ToLowerInvariant(),
+            Strategy = strategy,
             From = request.From,
             To = request.To,
             Message = "Queued behind any active simulation/research work."
@@ -142,7 +144,7 @@ public sealed class ResearchCalibrationService
         };
 
         var instrument = new InstrumentKey(request.Instrument.Trim());
-        string strategy = request.Strategy.Trim().ToLowerInvariant();
+        string strategy = NormalizeStrategy(request.Strategy);
         string description = request.Description?.Trim() is { Length: > 0 } text
             ? text
             : $"{kind} calibration · {request.Instrument} · {strategy} · {request.From:yyyy-MM-dd}→{request.To:yyyy-MM-dd}";
@@ -227,4 +229,7 @@ public sealed class ResearchCalibrationService
                 "Kind must be one of: setup, management, metamodel.")
         };
     }
+
+    private static string NormalizeStrategy(string strategy) =>
+        TradingAgentTypeIds.Format(TradingAgentTypeIds.Parse(strategy));
 }

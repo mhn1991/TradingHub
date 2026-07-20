@@ -1,3 +1,4 @@
+using Agent.Configuration;
 using Brokers.Models;
 using Microsoft.Extensions.Logging;
 using RiskManager.Calibration;
@@ -11,6 +12,7 @@ public sealed record PreRunCalibrationRequest
 {
     public required InstrumentKey Instrument { get; init; }
     public required IReadOnlyList<string> Strategies { get; init; }
+    public TradingAgentDefinition? AgentDefinition { get; init; }
     public required DateTimeOffset EvaluationFrom { get; init; }
     public required DateTimeOffset EvaluationTo { get; init; }
     public required BacktestRuntimeOptions Runtime { get; init; }
@@ -34,7 +36,7 @@ public sealed record PreRunCalibrationResult
 }
 
 /// <summary>
-/// Trains setup → meta → management for each requested strategy (legacy/improved) on a
+/// Trains setup → meta → management for each requested catalog strategy on a
 /// leakage-safe window ending before simulation evaluation, with strategy chains running in
 /// parallel and stages remaining sequential within each chain.
 /// </summary>
@@ -108,6 +110,7 @@ public sealed class PreRunCalibrationService
             {
                 Instruments = [request.Instrument],
                 Strategies = [strategy],
+                AgentDefinition = request.AgentDefinition,
                 From = window.TrainFrom,
                 To = window.TrainTo,
                 Runtime = trainingRuntime,
@@ -200,13 +203,5 @@ public sealed class PreRunCalibrationService
     }
 
     private static string NormalizeStrategy(string strategy)
-    {
-        string normalized = strategy.Trim().ToLowerInvariant();
-        if (normalized.Contains("legacy", StringComparison.Ordinal))
-            return "legacy";
-        if (normalized.Contains("improved", StringComparison.Ordinal))
-            return "improved";
-        throw new ArgumentException(
-            $"Unknown strategy '{strategy}' for pre-run calibration. Use legacy or improved.");
-    }
+        => TradingAgentTypeIds.Format(TradingAgentTypeIds.Parse(strategy));
 }

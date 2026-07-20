@@ -29,6 +29,13 @@ public interface ILivePolicyRegistry
         TradeManagementCalibrationOptions? managementCalibrationOptions = null);
 
     /// <summary>
+    /// Makes an immutable revision available for exact candidate and open-position lookups without
+    /// changing the revision used by current-slot resolution. This is the preparation half of a
+    /// controlled hot-swap; <see cref="Activate"/> is the commit half.
+    /// </summary>
+    void RegisterHistorical(AgentInstanceKey key, LivePolicyRegistration registration);
+
+    /// <summary>
     /// Activates a new (or updated) policy revision as the "current" one for <paramref name="key"/>.
     /// New candidates for this key resolve against it from this call onward; positions already
     /// open under an earlier revision are unaffected - that revision remains permanently
@@ -146,6 +153,30 @@ public sealed class LivePolicyRegistry : ILivePolicyRegistry
         }
     }
 
+    public void RegisterHistorical(AgentInstanceKey key, LivePolicyRegistration registration)
+    {
+        ArgumentNullException.ThrowIfNull(registration);
+        if (registration.Key != key)
+            throw new ArgumentException("Registration key must match the historical key.", nameof(registration));
+        Validate(registration.Policy, registration.Mode, registration.ManagementCalibration,
+            registration.ManagementCalibrationOptions, key);
+        lock (_sync)
+        {
+            if (_history.TryGetValue(key, out LivePolicyRegistration? existing))
+            {
+                if (existing.Policy.ConfigurationHash != registration.Policy.ConfigurationHash
+                    || existing.Mode != registration.Mode)
+                {
+                    throw new InvalidOperationException(
+                        $"Agent instance {key} is already registered with different policy content or mode.");
+                }
+                return;
+            }
+
+            _history.Add(key, registration);
+        }
+    }
+
     public LiveTradingPolicyBundle Resolve(LiveTradeCandidate candidate)
     {
         ArgumentNullException.ThrowIfNull(candidate);
@@ -185,11 +216,17 @@ public sealed class LivePolicyRegistry : ILivePolicyRegistry
         ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
         lock (_sync)
         {
-            var key = new AgentInstanceKey(_deploymentId, instrument, strategyId, policyBundleId, revision);
-            if (!_history.TryGetValue(key, out LivePolicyRegistration? item))
-            {
+            LivePolicyRegistration[] matches = _history.Values.Where(item =>
+                    item.Key.Instrument == instrument
+                    && string.Equals(item.Key.StrategyId, strategyId, StringComparison.Ordinal)
+                    && item.Key.PolicyBundleId == policyBundleId
+                    && item.Key.Revision == revision)
+                .ToArray();
+            if (matches.Length == 0)
                 return null;
-            }
+            LivePolicyRegistration item = matches[0];
+            if (matches.Any(candidate => candidate.Policy.ConfigurationHash != item.Policy.ConfigurationHash))
+                throw new InvalidOperationException("Conflicting policy content exists for the pinned revision.");
             return new LiveManagementPolicy
             {
                 Policy = item.Policy,
@@ -220,9 +257,19 @@ public sealed class LivePolicyRegistry : ILivePolicyRegistry
         ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
         lock (_sync)
         {
-            return _current.TryGetValue((_deploymentId, instrument, strategyId), out LivePolicyRegistration? item)
-                ? item
-                : throw new KeyNotFoundException($"No active policy is registered for {strategyId}/{instrument}.");
+            if (_current.TryGetValue((_deploymentId, instrument, strategyId), out LivePolicyRegistration? item))
+                return item;
+            LivePolicyRegistration[] matches = _current.Values.Where(candidate =>
+                    candidate.Key.Instrument == instrument
+                    && string.Equals(candidate.Key.StrategyId, strategyId, StringComparison.Ordinal))
+                .ToArray();
+            return matches.Length switch
+            {
+                1 => matches[0],
+                0 => throw new KeyNotFoundException($"No active policy is registered for {strategyId}/{instrument}."),
+                _ => throw new InvalidOperationException(
+                    $"More than one deployment owns the current policy slot for {strategyId}/{instrument}.")
+            };
         }
     }
 

@@ -3,6 +3,7 @@ namespace RiskManager.Calibration;
 public sealed record SetupCalibrationBucket
 {
     public required string StrategyId { get; init; }
+    public string PlaybookId { get; init; } = "unknown";
     public required string InstrumentGroup { get; init; }
     public required string Regime { get; init; }
     public required decimal ConfidenceFrom { get; init; }
@@ -31,16 +32,23 @@ public sealed record SetupCalibrationArtifact
 
     public void Validate(string? requiredFeatureSchemaHash = null)
     {
+        if (requiredFeatureSchemaHash is not null && !string.Equals(
+                requiredFeatureSchemaHash, FeatureSchemaHash, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Setup calibration schema '{FeatureSchemaHash}' is incompatible with required schema " +
+                $"'{requiredFeatureSchemaHash}'. Retraining is required.");
+        }
+
         if (SchemaVersion != 1 || string.IsNullOrWhiteSpace(CalibrationId) || TrainingFrom >= TrainingTo ||
             Instruments is null || Instruments.Count == 0 || string.IsNullOrWhiteSpace(StrategyVersion) ||
             string.IsNullOrWhiteSpace(FeatureSchemaHash) || Parameters is null || TotalSamples < 0 ||
-            string.IsNullOrWhiteSpace(DataHash) || Buckets is null ||
-            requiredFeatureSchemaHash is not null && !string.Equals(
-                requiredFeatureSchemaHash, FeatureSchemaHash, StringComparison.Ordinal))
+            string.IsNullOrWhiteSpace(DataHash) || Buckets is null)
             throw new ArgumentException("The setup calibration artifact is missing, incompatible, or invalid.");
         foreach (SetupCalibrationBucket bucket in Buckets)
         {
-            if (string.IsNullOrWhiteSpace(bucket.StrategyId) || string.IsNullOrWhiteSpace(bucket.InstrumentGroup) ||
+            if (string.IsNullOrWhiteSpace(bucket.StrategyId) || string.IsNullOrWhiteSpace(bucket.PlaybookId) ||
+                string.IsNullOrWhiteSpace(bucket.InstrumentGroup) ||
                 string.IsNullOrWhiteSpace(bucket.Regime) || bucket.ConfidenceFrom < 0m ||
                 bucket.ConfidenceTo <= bucket.ConfidenceFrom || bucket.ConfidenceTo > 100m ||
                 bucket.Samples < 0 || bucket.WinRate is < 0m or > 1m || bucket.BrierScore is < 0m or > 1m)
@@ -81,7 +89,8 @@ public interface ISetupCalibrationPolicy
         string strategyId,
         string instrumentGroup,
         string regime,
-        decimal confidence);
+        decimal confidence,
+        string? playbookId = null);
 }
 
 public sealed class SetupCalibrationPolicy : ISetupCalibrationPolicy
@@ -107,15 +116,18 @@ public sealed class SetupCalibrationPolicy : ISetupCalibrationPolicy
         string strategyId,
         string instrumentGroup,
         string regime,
-        decimal confidence)
+        decimal confidence,
+        string? playbookId = null)
     {
         if (!_options.Enabled)
             return Decision(true, 1m, "SetupCalibrationDisabled", "Setup calibration is disabled.");
         SetupCalibrationBucket? bucket = _artifact!.Buckets
             .Where(item => string.Equals(item.StrategyId, strategyId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(item.PlaybookId, NormalizePlaybook(playbookId), StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(item.InstrumentGroup, instrumentGroup, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(item.Regime, regime, StringComparison.OrdinalIgnoreCase) &&
-                confidence >= item.ConfidenceFrom && confidence < item.ConfidenceTo)
+                confidence >= item.ConfidenceFrom &&
+                (confidence < item.ConfidenceTo || item.ConfidenceTo == 100m && confidence <= item.ConfidenceTo))
             .OrderByDescending(item => item.Samples)
             .ThenBy(item => item.ConfidenceFrom)
             .FirstOrDefault();
@@ -129,6 +141,9 @@ public sealed class SetupCalibrationPolicy : ISetupCalibrationPolicy
             return Decision(true, _options.WeakPositiveRiskMultiplier, "WeakCalibratedExpectancy", $"Validated expected R is only {bucket.ExpectedR:F3}; risk was reduced.", _artifact.CalibrationId, bucket);
         return Decision(true, 1m, "StrongCalibratedExpectancy", $"Validated expected R is {bucket.ExpectedR:F3}.", _artifact.CalibrationId, bucket);
     }
+
+    private static string NormalizePlaybook(string? playbookId) =>
+        string.IsNullOrWhiteSpace(playbookId) ? "unknown" : playbookId.Trim();
 
     private static SetupCalibrationDecision Decision(
         bool trade,
