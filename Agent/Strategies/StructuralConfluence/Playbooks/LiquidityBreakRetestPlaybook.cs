@@ -59,8 +59,20 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
         bool expansion = ExpansionAligned(evidence, direction);
         bool expansionPasses = _options.ExpansionMode != StructuralConfirmationMode.Required || expansion;
 
+        // Identity is tied to the accepted-break event, not to whether it already produced a
+        // trade - see LiquiditySweepReversalPlaybook's identical guard for the observed bug this
+        // prevents (same identity re-arming and re-entering immediately after a prior attempt on
+        // it already closed). state.LastReadySetupId is sticky across non-ready frames and frozen
+        // for the whole holding period (StructuralConfluenceAgent skips Evaluate entirely while a
+        // position is open), so this only blocks a genuine repeat, never a setup that's simply
+        // still armed across consecutive pre-entry frames.
+        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
+            pool.PoolId, null, acceptedBreak.EventId.ToString("N"), acceptedBreak.AvailableAt, direction);
+        bool notAlreadySignaled = setupId != state.LastReadySetupId;
+
         var gates = new List<MandatoryGate>
         {
+            Gate("NotAlreadySignaled", notAlreadySignaled, pool.QualityScore * 100m, "StructuralPoolAlreadySignaled"),
             Gate("PoolPreExisting", pool.AvailableAt <= acceptedBreak.OccurredAt, pool.QualityScore * 100m, "StructuralPoolNotPreExisting"),
             Gate("PoolQuality",
                 pool.QualityScore >= _options.MinimumPoolQuality ||
@@ -106,8 +118,6 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
                 [stopSource]);
         }
         gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
-        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
-            pool.PoolId, null, acceptedBreak.EventId.ToString("N"), acceptedBreak.AvailableAt, direction);
         decimal contextQuality = ContextQuality(evidence, direction);
         decimal confirmationAdjustment = StructuralPlaybookRules.ConfirmationAdjustment(_options.CciMode, cci, _root.Confirmation);
         if (expansion)
@@ -115,7 +125,9 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
         decimal confidence = StructuralPlaybookRules.Confidence(gates, (contextQuality - 50m) / 6.25m,
             confirmationAdjustment, 0m);
         bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
-        bool catalystPassed = gates.Take(8).All(item => item.Passed);
+        // Name-based, not positional (gates.Take(N)) - a magic-number slice silently misclassifies
+        // lifecycle the moment a gate gets reordered or inserted without updating the count.
+        bool catalystPassed = gates.Where(item => item.Name is not ("Trigger" or "Cci" or "Expansion" or "Geometry")).All(item => item.Passed);
 
         return new PlaybookEvaluation
         {

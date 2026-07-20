@@ -102,9 +102,20 @@ public static class AnalysisWarmupPlanner
         }
     }
 
+    // Widened from the original 6 tokens after surveying real option-class field names across
+    // ChartAnnotator/Agent/RiskManager/TradeManager: the original list missed several genuine
+    // lookback-shaped fields entirely, e.g. *MinimumSamples (AdxCalibrationMinimumSamples,
+    // BollingerWidthMinimumSamples, ...), *MinimumBaseCandles/*MinimumOriginationCandles, and
+    // MinimumConfirmedMonoWaves ("Confirmed" doesn't substring-match "Confirmation"). A missed
+    // token here means the computed warmup requirement silently under-counts, which the
+    // sufficiency check downstream cannot catch since it only validates the computed number
+    // against available data, not whether the computation itself found every real requirement.
     private static bool IsBarRequirement(string name) =>
-        new[] { "Period", "Lookback", "Capacity", "Window", "Bars", "Persistence", "Confirmation" }
-            .Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase));
+        new[]
+        {
+            "Period", "Lookback", "Capacity", "Window", "Bars", "Persistence", "Confirmation",
+            "Confirmed", "Samples", "Candles", "Touch", "History"
+        }.Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase));
 
     private static TimeSpan ApproximateDuration(BarInterval interval) => interval.Unit switch
     {

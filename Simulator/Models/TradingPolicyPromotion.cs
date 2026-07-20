@@ -34,7 +34,7 @@ public static class TradingPolicyPromotion
         runtime.Validate();
         resolvedAgentOptions.Validate();
 
-        RuntimeFeaturePolicy featurePolicy = CreateFeaturePolicy(runtime);
+        RuntimeFeaturePolicy featurePolicy = CreateFeaturePolicy(runtime, setupCalibrationArtifactId);
 
         return TradingPolicyProfile.Create(
             profileId,
@@ -55,7 +55,10 @@ public static class TradingPolicyPromotion
             runtime.ImprovedPositionManagement,
             runtime.StructuralPositionManagement,
             runtime.RegimeManagement,
-            runtime.ManagementCalibration,
+            // AGENT-02: Enabled must always agree with whether this specific profile actually
+            // has a management-calibration artifact attached, not with runtime.ManagementCalibration's
+            // own unrelated consumption toggle - same rationale as the MetaModel reconciliation below.
+            runtime.ManagementCalibration with { Enabled = managementCalibrationArtifactId.HasValue },
             // AGENT-02: Enabled must always agree with whether this specific profile actually
             // has a meta-model artifact attached, not with runtime.MetaModel's own unrelated
             // consumption toggle (e.g. the auto-train pipeline reuses the *source* backtest's
@@ -98,7 +101,7 @@ public static class TradingPolicyPromotion
             strategyVersion,
             agentDefinition,
             status,
-            CreateFeaturePolicy(runtime),
+            CreateFeaturePolicy(runtime, setupCalibrationArtifactId),
             runtime.PositionSizing,
             runtime.AdaptiveRisk,
             runtime.PortfolioRisk,
@@ -109,7 +112,8 @@ public static class TradingPolicyPromotion
             runtime.ImprovedPositionManagement,
             runtime.StructuralPositionManagement,
             runtime.RegimeManagement,
-            runtime.ManagementCalibration,
+            // AGENT-02: see the other CreateProfile overload for the rationale.
+            runtime.ManagementCalibration with { Enabled = managementCalibrationArtifactId.HasValue },
             runtime.MetaModel with { Enabled = metaModelArtifactId.HasValue },
             createdAt,
             setupCalibrationArtifactId,
@@ -118,7 +122,13 @@ public static class TradingPolicyPromotion
             description);
     }
 
-    private static RuntimeFeaturePolicy CreateFeaturePolicy(BacktestRuntimeOptions runtime) => new()
+    // AGENT-02: SetupCalibration.Enabled must always agree with whether this specific promotion
+    // actually attached a setup-calibration artifact, not with runtime.SetupCalibration's own
+    // unrelated consumption toggle - same rationale as the ManagementCalibration/MetaModel
+    // reconciliation in both CreateProfile overloads above.
+    private static RuntimeFeaturePolicy CreateFeaturePolicy(
+        BacktestRuntimeOptions runtime,
+        Guid? setupCalibrationArtifactId) => new()
     {
         AnnotationOptions = runtime.AnnotationOptions,
         MarketRegimeRouting = runtime.MarketRegimeRouting,
@@ -127,7 +137,7 @@ public static class TradingPolicyPromotion
         RsiBollingerSignals = runtime.RsiBollingerSignals,
         DmiConfirmationEnabled = runtime.DmiConfirmationEnabled,
         CurrencyStrength = runtime.CurrencyStrength,
-        SetupCalibration = runtime.SetupCalibration,
+        SetupCalibration = runtime.SetupCalibration with { Enabled = setupCalibrationArtifactId.HasValue },
         NeoWaveEvidence = runtime.NeoWaveEvidence
     };
 }

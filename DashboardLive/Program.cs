@@ -14,6 +14,9 @@ using Microsoft.Extensions.Options;
 using QuantResearch.Training.Pipeline;
 using Simulator.Calibration;
 using Simulator.Experiments;
+using Simulator.Experiments.IndicatorCalibration;
+using Simulator.Experiments.IndicatorCalibration.Persistence;
+using Simulator.Experiments.IndicatorCalibration.Strategies;
 using Simulator.Experiments.Persistence;
 using Simulator.Jobs;
 using Simulator.Services;
@@ -189,6 +192,14 @@ builder.Services.AddSingleton<ISimulationExperimentExecutor>(services =>
 builder.Services.AddSingleton<SimulationExperimentApplicationService>();
 builder.Services.AddSingleton<ISimulationExperimentApplicationService>(services =>
     services.GetRequiredService<SimulationExperimentApplicationService>());
+builder.Services.AddSingleton<IIndicatorCalibrationLedgerRepository>(_ => new FileIndicatorCalibrationLedgerRepository());
+builder.Services.AddSingleton(services => new IndicatorCalibrationApplicationService(
+    services.GetRequiredService<IBacktestApplicationService>(),
+    services.GetRequiredService<ICalibrationArtifactRepository>(),
+    services.GetRequiredService<IIndicatorCalibrationLedgerRepository>(),
+    [new IndicatorConfluenceCalibrationStrategyAdapter(), new LiquidityBreakRetestCalibrationStrategyAdapter()]));
+builder.Services.AddSingleton<IIndicatorCalibrationApplicationService>(services =>
+    services.GetRequiredService<IndicatorCalibrationApplicationService>());
 builder.Services.AddSingleton(services => new PreRunCalibrationService(
     services.GetRequiredService<CalibrationTrainingPipeline>(),
     services.GetRequiredService<ICalibrationArtifactRepository>(),
@@ -720,6 +731,7 @@ app.MapGet("/api/live/events", async (
 app.MapSimulationEndpoints();
 app.MapSimulationProfileEndpoints();
 app.MapSimulationExperimentEndpoints();
+app.MapIndicatorCalibrationEndpoints();
 app.MapCalibrationEndpoints();
 app.MapCalibrationBundleEndpoints();
 app.MapResearchEndpoints();

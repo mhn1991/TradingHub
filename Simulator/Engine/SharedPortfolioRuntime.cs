@@ -336,6 +336,13 @@ public sealed class SharedPortfolioRuntime
                 CorrelationRiskMultiplier = correlation.RiskMultiplier,
                 RiskClusterId = correlation.ClusterId
             };
+            // Fold this opportunity's own direction into the working direction map so a
+            // second, correlated-instrument opportunity queued later in the *same* batch is
+            // evaluated against it too - existingDirections was only seeded from state that
+            // existed before this flush (open lots + already-pending reservations), and
+            // without this update every opportunity in one batch would be scored as if it
+            // were the only new position, missing intra-batch correlation entirely.
+            existingDirections[decision.Instrument] = decision.Action == AgentAction.Sell ? -1 : 1;
             decimal riskMultiplier = RiskMultiplier(decision);
             PositionSizingResult sizing = new PositionSizer(_sizingOptions).Calculate(new PositionSizingContext
             {

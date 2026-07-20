@@ -202,6 +202,12 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
             LiquiditySweepId = candidate.Sweep?.SweepId,
             LiquidityProfileHash = candidate.Pool?.ProfileHash,
             LiquidityReasonCodes = candidate.Pool is null ? [] : ["StructuralCatalystPool"],
+            // Always full risk (1m), not computed like ProgressiveStrategyBase's dynamic
+            // StructuralEvidenceEvaluator-derived value: that field exists so a NON-structural-aware
+            // strategy (Progressive's core signal is trend/momentum, not S&D/liquidity) can apply
+            // structural evidence as a secondary risk-scaling overlay. This agent's own Confidence
+            // and mandatory gates already fully incorporate that same evidence into the decision -
+            // scaling risk by it again here would double-count it.
             StructuralEvidenceRiskMultiplier = 1m,
             EntrySupplyDemandZoneId = candidate.Zone?.ZoneId,
             EntrySupplyDemandZoneLowerPrice = candidate.Zone is null ? null : Math.Min(candidate.Zone.ProximalPrice, candidate.Zone.DistalPrice),

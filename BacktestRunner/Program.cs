@@ -9,6 +9,9 @@ using Dashboard.Contracts;
 using DBManager.Abstractions.Credentials;
 using DBManager.Postgres.Security;
 using QuantResearch.Training.Pipeline;
+using Simulator.Calibration;
+using Simulator.Experiments.IndicatorCalibration;
+using Simulator.Experiments.IndicatorCalibration.Strategies;
 using Simulator.Jobs;
 using Simulator.Models;
 using Simulator.Services;
@@ -32,6 +35,17 @@ internal static class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (IndicatorCalibrationCli.Matches(args))
+        {
+            using var calibrationCancellation = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, eventArgs) =>
+            {
+                eventArgs.Cancel = true;
+                calibrationCancellation.Cancel();
+            };
+            return await IndicatorCalibrationCli.RunAsync(args, calibrationCancellation.Token).ConfigureAwait(false);
+        }
+
         try
         {
             string? requestJsonPath = ExtractRequestJsonPath(args);
@@ -67,6 +81,14 @@ internal static class Program
                     "Playbook filter: supply/demand pullback only (sweep + break/retest disabled); " +
                     "RequireTrendAlignment=false (step A).");
             }
+
+            if (options.AutoApplyIndicatorCalibration)
+            {
+                request = await ApplyAutoCalibrationPinsAsync(
+                    request, options.CalibrationArtifactsDirectory, cancellation.Token).ConfigureAwait(false);
+            }
+            request = await ResolveIndicatorCalibrationOverlaysAsync(
+                request, options.CalibrationArtifactsDirectory, cancellation.Token).ConfigureAwait(false);
 
             BrokerCredentialDatabaseConfiguration? databaseConfiguration =
                 BrokerCredentialDatabaseConfiguration.TryLoad(Directory.GetCurrentDirectory(), out string repositoryRoot);
@@ -325,6 +347,101 @@ internal static class Program
         }
 
         return options;
+    }
+
+    /// <summary>
+    /// For every structural-confluence assignment missing an explicit
+    /// indicator-confluence/liquidity-break-retest calibration pin, resolves the most recent
+    /// Approved+Improved artifact for that assignment's instrument and this request's execution
+    /// interval and fills the pin in - exactly as if a human had typed the GUID via
+    /// <c>--request-json</c>. This is the tooling-layer half of the "auto-apply" flow: it never
+    /// bakes a "latest approved" lookup into the engine itself, only resolves once per invocation
+    /// here and hands the overlay resolver (<see cref="ResolveIndicatorCalibrationOverlaysAsync"/>)
+    /// an ordinary explicit GUID, which still runs its own compatibility check afterward.
+    /// </summary>
+    private static async Task<BacktestRequest> ApplyAutoCalibrationPinsAsync(
+        BacktestRequest request, string calibrationArtifactsDirectory, CancellationToken cancellationToken)
+    {
+        if (request.StrategyAssignments is not { Count: > 0 } assignments)
+            return request;
+
+        var artifacts = new FileCalibrationArtifactRepository(calibrationArtifactsDirectory);
+        var indicatorConfluenceStrategyId = new IndicatorConfluenceCalibrationManifest().StrategyId;
+        var liquidityBreakRetestStrategyId = new LiquidityBreakRetestCalibrationManifest().StrategyId;
+
+        var updatedAssignments = new List<StrategyInstrumentAssignment>(assignments.Count);
+        bool anyChanged = false;
+        foreach (StrategyInstrumentAssignment assignment in assignments)
+        {
+            if (!string.Equals(assignment.StrategyType, TradingAgentTypeIds.StructuralConfluence, StringComparison.Ordinal))
+            {
+                updatedAssignments.Add(assignment);
+                continue;
+            }
+
+            StrategyInstrumentAssignment updated = assignment;
+            if (updated.IndicatorCalibrationArtifactId is null)
+            {
+                Guid? resolved = await BestApprovedCalibrationArtifactResolver.ResolveAsync(
+                    artifacts, indicatorConfluenceStrategyId, updated.Instrument, request.Runtime.ExecutionInterval,
+                    cancellationToken).ConfigureAwait(false);
+                if (resolved is { } indicatorArtifactId)
+                {
+                    updated = updated with { IndicatorCalibrationArtifactId = indicatorArtifactId };
+                    Console.WriteLine(
+                        $"Auto-apply: resolved indicator-confluence artifact '{indicatorArtifactId}' for assignment '{assignment.Id ?? assignment.Instrument.Value}'.");
+                    anyChanged = true;
+                }
+            }
+            if (updated.LiquidityBreakRetestCalibrationArtifactId is null)
+            {
+                Guid? resolved = await BestApprovedCalibrationArtifactResolver.ResolveAsync(
+                    artifacts, liquidityBreakRetestStrategyId, updated.Instrument, request.Runtime.ExecutionInterval,
+                    cancellationToken).ConfigureAwait(false);
+                if (resolved is { } liquidityArtifactId)
+                {
+                    updated = updated with { LiquidityBreakRetestCalibrationArtifactId = liquidityArtifactId };
+                    Console.WriteLine(
+                        $"Auto-apply: resolved liquidity-break-retest artifact '{liquidityArtifactId}' for assignment '{assignment.Id ?? assignment.Instrument.Value}'.");
+                    anyChanged = true;
+                }
+            }
+            updatedAssignments.Add(updated);
+        }
+
+        return anyChanged ? request with { StrategyAssignments = updatedAssignments } : request;
+    }
+
+    /// <summary>
+    /// Applies each structural-confluence assignment's pinned indicator-confluence and/or
+    /// liquidity-break-retest calibration artifacts (blueprint §19 Phase 7/8), if any, via the
+    /// shared per-strategy <c>RequestOverlayResolver</c> library entry points. An assignment
+    /// without any pin is returned completely unchanged - a true no-op for every request that
+    /// doesn't opt in. A pinned artifact that turns out incompatible fails the whole run loudly.
+    /// </summary>
+    private static async Task<BacktestRequest> ResolveIndicatorCalibrationOverlaysAsync(
+        BacktestRequest request, string calibrationArtifactsDirectory, CancellationToken cancellationToken)
+    {
+        if (request.StrategyAssignments is not { Count: > 0 } assignments || assignments.All(assignment =>
+                assignment.IndicatorCalibrationArtifactId is null &&
+                assignment.LiquidityBreakRetestCalibrationArtifactId is null))
+        {
+            return request;
+        }
+
+        var artifacts = new FileCalibrationArtifactRepository(calibrationArtifactsDirectory);
+        BacktestRequest resolved = await IndicatorConfluenceRequestOverlayResolver
+            .ApplyToRequestAsync(request, artifacts, cancellationToken).ConfigureAwait(false);
+        resolved = await LiquidityBreakRetestRequestOverlayResolver
+            .ApplyToRequestAsync(resolved, artifacts, cancellationToken).ConfigureAwait(false);
+        foreach (StrategyInstrumentAssignment assignment in assignments)
+        {
+            if (assignment.IndicatorCalibrationArtifactId is { } indicatorArtifactId)
+                Console.WriteLine($"Applied indicator-calibration overlay '{indicatorArtifactId}' to assignment '{assignment.Id}'.");
+            if (assignment.LiquidityBreakRetestCalibrationArtifactId is { } liquidityArtifactId)
+                Console.WriteLine($"Applied liquidity-break-retest calibration overlay '{liquidityArtifactId}' to assignment '{assignment.Id}'.");
+        }
+        return resolved;
     }
 
     /// <summary>
@@ -632,6 +749,12 @@ Options:
   --auto-train-calibration-folds 5
   --auto-train-calibration-embargo-hours 24
   --auto-train-calibration-strategy-version <text>  (default: "{strategy}-auto")
+  --auto-apply-calibration                 (for every structural-confluence assignment without an
+                                             explicit indicator-confluence/liquidity-break-retest
+                                             pin, auto-resolves and pins the most recent Approved+
+                                             Improved artifact for that instrument/execution
+                                             interval - see 'indicator-calibration pending/review'
+                                             to see what is available before relying on this)
   --warmup-days 21
   --quantity 1000                         (manual/fixed-quantity fallback)
   --position-sizing-mode fixed-fractional|fixed-cash|fixed-quantity

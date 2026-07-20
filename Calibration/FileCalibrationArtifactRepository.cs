@@ -94,6 +94,22 @@ public sealed class FileCalibrationArtifactRepository : ICalibrationArtifactRepo
         return metadata;
     }
 
+    public async Task<CalibrationArtifactMetadata> StoreIndicatorParametersAsync(
+        IndicatorCalibrationArtifact artifact,
+        string? description = null,
+        CalibrationArtifactProvenance? provenance = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        artifact.Validate();
+        JsonElement payload = JsonSerializer.SerializeToElement(artifact, JsonOptions);
+        CalibrationArtifactMetadata metadata = BuildMetadata(
+            CalibrationArtifactType.IndicatorParameters, artifact.SchemaVersion, artifact.CalibrationId, payload,
+            description, provenance);
+        await WriteAsync(metadata, payload, cancellationToken).ConfigureAwait(false);
+        return metadata;
+    }
+
     private static CalibrationArtifactMetadata BuildMetadata(
         CalibrationArtifactType type,
         int schemaVersion,
@@ -152,6 +168,20 @@ public sealed class FileCalibrationArtifactRepository : ICalibrationArtifactRepo
         if (envelope is null || envelope.Metadata.Type != CalibrationArtifactType.Management)
             return null;
         return envelope.Payload.Deserialize<TradeManagementCalibration>(JsonOptions);
+    }
+
+    public async Task<IndicatorCalibrationArtifact?> GetIndicatorParametersAsync(
+        Guid id, CancellationToken cancellationToken = default)
+    {
+        ArtifactEnvelope<JsonElement>? envelope = await ReadEnvelopeAsync(id, cancellationToken).ConfigureAwait(false);
+        if (envelope is null || envelope.Metadata.Type != CalibrationArtifactType.IndicatorParameters)
+            return null;
+        IndicatorCalibrationArtifact? payload = envelope.Payload.Deserialize<IndicatorCalibrationArtifact>(JsonOptions);
+        // The stored payload is immutable (its bytes are content-hash-verified), but
+        // UpdatePromotionStatusAsync only ever updates the envelope metadata's PromotionStatus -
+        // reconcile here so a caller never observes the artifact's own stale, as-calibrated status
+        // instead of the actual current one.
+        return payload is null ? null : payload with { PromotionStatus = envelope.Metadata.PromotionStatus };
     }
 
     public async Task<CalibrationArtifactMetadata?> GetMetadataAsync(Guid id, CancellationToken cancellationToken = default)

@@ -113,7 +113,7 @@ public sealed record LiquidityBreakRetestOptions
     {
         if (MinimumPoolQuality is < 0m or > 1m || MaximumBarsSinceAcceptedBreak < 1 ||
             MinimumAcceptanceCloses < 1 || MinimumDisplacementAtr < 0m || MaximumRetestDistanceAtr < 0m ||
-            MinimumAdx < 0m || MinimumEfficiencyRatio is < 0m or > 1m ||
+            MinimumAdx is < 0m or > 100m || MinimumEfficiencyRatio is < 0m or > 1m ||
             MinimumConfidence is < 0m or > 100m || !Enum.IsDefined(CciMode) || !Enum.IsDefined(ExpansionMode) ||
             MinimumDistinctTouchesForQualityExemption < 1)
             throw new ArgumentException("Liquidity break/retest options are invalid.");

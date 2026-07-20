@@ -75,8 +75,21 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
         // QualityScore and FreshnessScore are both unit-interval [0, 1].
         decimal locationQuality = Math.Clamp(Math.Min(zone.QualityScore, zone.FreshnessScore) * 100m, 0m, 100m);
 
+        // Identity is tied to the zone + catalyst reaction, not to whether it already produced a
+        // trade - see LiquiditySweepReversalPlaybook's identical guard for the observed bug this
+        // prevents (same identity re-arming and re-entering immediately after a prior attempt on
+        // it already closed). state.LastReadySetupId is sticky across non-ready frames and frozen
+        // for the whole holding period (StructuralConfluenceAgent skips Evaluate entirely while a
+        // position is open), so this only blocks a genuine repeat, never a setup that's simply
+        // still armed across consecutive pre-entry frames.
+        string catalystIdentity = reaction?.EventId.ToString("N") ?? $"zone-{zone.ZoneId:N}";
+        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
+            null, zone.ZoneId, catalystIdentity, catalystAt, direction);
+        bool notAlreadySignaled = setupId != state.LastReadySetupId;
+
         var gates = new List<MandatoryGate>
         {
+            Gate("NotAlreadySignaled", notAlreadySignaled, locationQuality, "StructuralZoneAlreadySignaled"),
             Gate("Context", contextAllowed, ContextQuality(evidence, direction),
                 illiquidUnsafe ? "StructuralContextIlliquidUnsafe" : "StructuralContextOpposed"),
             Gate("ZoneQuality", zone.QualityScore >= _options.MinimumZoneQuality, locationQuality, "StructuralZoneQualityLow"),
@@ -106,9 +119,6 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
             : _geometry.Build(evidence, direction, rawStop, catalystSourceId);
         gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
 
-        string catalystIdentity = reaction?.EventId.ToString("N") ?? $"zone-{zone.ZoneId:N}";
-        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
-            null, zone.ZoneId, catalystIdentity, catalystAt, direction);
         decimal contextQuality = ContextQuality(evidence, direction);
         decimal confirmationAdjustment = StructuralPlaybookRules.ConfirmationAdjustment(_options.CciMode, cci, _root.Confirmation);
         if (alternativeConfirmation && cci.Alignment != EvidenceAlignment.Conflicting)
@@ -116,7 +126,9 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
         decimal confidence = StructuralPlaybookRules.Confidence(gates, (contextQuality - 50m) / 6.25m,
             confirmationAdjustment, 0m);
         bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
-        bool locationPassed = gates.Take(7).All(item => item.Passed);
+        // Name-based, not positional (gates.Take(N)) - a magic-number slice silently misclassifies
+        // lifecycle the moment a gate gets reordered or inserted without updating the count.
+        bool locationPassed = gates.Where(item => item.Name is not ("Trigger" or "Confirmation" or "Geometry")).All(item => item.Passed);
 
         return new PlaybookEvaluation
         {

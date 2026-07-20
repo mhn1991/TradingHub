@@ -43,7 +43,9 @@ public enum ArtifactRole
 {
     SetupCalibration,
     MetaModel,
-    ManagementCalibration
+    ManagementCalibration,
+    /// <summary>Stored as the existing smallint column - purely additive, no migration required.</summary>
+    IndicatorParameters
 }
 
 /// <summary>How a deployment is allowed to act on Agent decisions.</summary>

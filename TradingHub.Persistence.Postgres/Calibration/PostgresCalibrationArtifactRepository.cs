@@ -66,6 +66,42 @@ public sealed class PostgresCalibrationArtifactRepository(
             artifact.Buckets.Sum(x => (long)x.Samples), artifact, description, provenance, cancellationToken);
     }
 
+    public Task<CalibrationArtifactMetadata> StoreIndicatorParametersAsync(
+        IndicatorCalibrationArtifact artifact, string? description = null,
+        CalibrationArtifactProvenance? provenance = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        artifact.Validate();
+        // featureSchemaHash slot: TimeframeTopologyHash is the closest analog for this artifact
+        // type - the identity that determines whether the artifact remains structurally
+        // meaningful. trainingFrom/trainingTo: the compact artifact deliberately does not carry
+        // the full experiment window (that lives in the research ledger, referenced by
+        // ExperimentLedgerId) - CreatedAt is used for both as a documented simplification.
+        return StoreAsync(
+            CalibrationArtifactType.IndicatorParameters, artifact.SchemaVersion, artifact.CalibrationId,
+            artifact.StrategyId, artifact.StrategyImplementationVersion, artifact.TimeframeTopologyHash,
+            artifact.CreatedAt, artifact.CreatedAt, artifact.Evidence.TotalCandidatesEvaluated,
+            artifact, description, provenance, cancellationToken);
+    }
+
+    public async Task<IndicatorCalibrationArtifact?> GetIndicatorParametersAsync(
+        Guid id, CancellationToken cancellationToken = default)
+    {
+        await using TradingHubDbContext db = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        CalibrationArtifactEntity? row = await db.CalibrationArtifacts.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.ArtifactId == id, cancellationToken).ConfigureAwait(false);
+        if (row is null || DomainType(row.ArtifactType) != CalibrationArtifactType.IndicatorParameters || row.PayloadJson is null)
+            return null;
+        if (!string.Equals(ComputeHash(row.PayloadJson), row.ContentHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Calibration artifact {id:N} failed content-hash verification.");
+        IndicatorCalibrationArtifact? payload = JsonSerializer.Deserialize<IndicatorCalibrationArtifact>(row.PayloadJson, Json);
+        // The stored payload is immutable (its bytes are content-hash-verified), but
+        // UpdatePromotionStatusAsync only ever updates row.Status/MetricsJson - reconcile here so
+        // a caller never observes the artifact's own stale, as-calibrated status instead of the
+        // actual current one (mirrors the equivalent fix in FileCalibrationArtifactRepository).
+        return payload is null ? null : payload with { PromotionStatus = DeserializeMetadata(row).PromotionStatus };
+    }
+
     public Task<SetupCalibrationArtifact?> GetSetupAsync(Guid id, CancellationToken cancellationToken = default) =>
         GetPayloadAsync<SetupCalibrationArtifact>(id, CalibrationArtifactType.Setup, cancellationToken);
 
@@ -264,6 +300,7 @@ public sealed class PostgresCalibrationArtifactRepository(
         CalibrationArtifactType.Setup => ArtifactRole.SetupCalibration,
         CalibrationArtifactType.MetaModel => ArtifactRole.MetaModel,
         CalibrationArtifactType.Management => ArtifactRole.ManagementCalibration,
+        CalibrationArtifactType.IndicatorParameters => ArtifactRole.IndicatorParameters,
         _ => throw new ArgumentOutOfRangeException(nameof(type))
     };
 
@@ -272,6 +309,7 @@ public sealed class PostgresCalibrationArtifactRepository(
         ArtifactRole.SetupCalibration => CalibrationArtifactType.Setup,
         ArtifactRole.MetaModel => CalibrationArtifactType.MetaModel,
         ArtifactRole.ManagementCalibration => CalibrationArtifactType.Management,
+        ArtifactRole.IndicatorParameters => CalibrationArtifactType.IndicatorParameters,
         _ => throw new ArgumentOutOfRangeException(nameof(role))
     };
 

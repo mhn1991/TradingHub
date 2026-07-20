@@ -468,13 +468,20 @@ public sealed class StreamingComparativeEngine
                         }
                     }
                 }
-                catch (Exception exception) when (
+                catch (Exception) when (
                     options.Runtime.StrategyFailurePolicy == StrategyFailurePolicy.StopFailedStrategyOnly)
                 {
-                    // Sequential path: mark the first non-failed session that threw.
-                    StrategySimulationSession? culprit = activeSessions.FirstOrDefault(s => s.IsFailed)
-                        ?? activeSessions.FirstOrDefault();
-                    culprit?.MarkFailed(executionBatch[^1].Sequence, exception.ToString());
+                    // A per-session catch inside ProcessSequentialBatchAsync/ProcessParallelWorkersBatchAsync
+                    // already calls session.MarkFailed before rethrowing, so the genuine culprit is
+                    // identifiable here by IsFailed. If nothing is marked failed, this exception did not
+                    // originate from a single strategy's evaluation (e.g. sharedPortfolio.FlushAsync itself
+                    // threw) - blaming an arbitrary "first active session" would misattribute the failure
+                    // and let every other strategy keep trading against a batch/portfolio state that might
+                    // itself be corrupted. Rethrow instead of guessing; StopFailedStrategyOnly only isolates
+                    // failures it can actually attribute to one strategy.
+                    StrategySimulationSession? culprit = activeSessions.FirstOrDefault(s => s.IsFailed);
+                    if (culprit is null)
+                        throw;
                     if (sessions.All(s => s.IsFailed))
                         throw;
                     return;

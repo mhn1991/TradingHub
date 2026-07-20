@@ -534,6 +534,27 @@ public sealed record StrategyInstrumentAssignment
     /// (<c>Guid.Empty</c>/<c>0</c>) identity - see <c>StrategyWorkerHost</c>'s constructor.</summary>
     public Guid? PolicyBundleId { get; init; }
     public int? PolicyRevision { get; init; }
+
+    /// <summary>
+    /// Indicator-calibration blueprint §15.1: explicit pinning only, never a "latest approved"
+    /// lookup. Null (the default, existing behaviour) means this assignment runs with whatever
+    /// <see cref="AgentDefinitionOverride"/>/strategy defaults it would have used anyway - setting
+    /// this alone changes nothing until something actually resolves the referenced artifact and
+    /// applies it (see <c>Simulator.Experiments.IndicatorCalibration.IndicatorCalibrationOverlayResolver</c>).
+    /// <c>BacktestApplicationService</c> itself never reads this field - consistent with how
+    /// Setup/Management/MetaModel calibration artifacts are already resolved by the caller before
+    /// a request reaches the engine, not by the engine itself.
+    /// </summary>
+    public Guid? IndicatorCalibrationArtifactId { get; init; }
+
+    /// <summary>
+    /// The <c>LiquidityBreakRetestOptions</c> counterpart to <see cref="IndicatorCalibrationArtifactId"/> -
+    /// same explicit-pinning-only semantics, resolved by
+    /// <c>Simulator.Experiments.IndicatorCalibration.Strategies.LiquidityBreakRetestRequestOverlayResolver</c>.
+    /// An assignment may pin both this and <see cref="IndicatorCalibrationArtifactId"/> at once, since
+    /// they overlay different sub-objects of <c>StructuralConfluenceStrategyOptions</c>.
+    /// </summary>
+    public Guid? LiquidityBreakRetestCalibrationArtifactId { get; init; }
 }
 
 /// <summary>User/API request that starts a simulation job.</summary>

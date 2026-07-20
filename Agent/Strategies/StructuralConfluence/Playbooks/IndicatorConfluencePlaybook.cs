@@ -41,7 +41,11 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         PriceActionDirection direction = adx.DirectionalBias;
         bool buy = direction == PriceActionDirection.Bullish;
         decimal price = evidence.Trigger.LatestCandle.Prices.Close;
-        decimal? atr = evidence.Indicators.Atr ?? evidence.Trigger.Indicators.Atr;
+        // evidence.Indicators is built from trigger.Indicators verbatim (see
+        // StructuralEvidencePacketFactory), so the two are always identical - unlike
+        // LiquiditySweepReversalPlaybook's `?? evidence.Setup.Indicators.Atr`, which is a real
+        // cross-interval fallback, this one can never actually fire.
+        decimal? atr = evidence.Indicators.Atr;
 
         RsiAnalysisSnapshot rsi = indicators.RsiAnalysis;
         decimal? rsiValue = indicators.Rsi;
@@ -97,9 +101,24 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         // every evaluation even while the same trade opportunity was still live. Carry the prior
         // bar's identity forward for as long as the same direction stays ready; only mint a new one
         // when this is a fresh (or re-armed, or direction-flipped) candidate.
+        //
+        // continuedWithoutGap guards against a second failure mode: StructuralConfluenceAgent skips
+        // Evaluate entirely for the whole time a position is open, so state.LastEvaluation stays
+        // frozen at whatever it was when that position was entered. If indicators are STILL
+        // confluent the instant that position closes, the carry-forward above would otherwise reuse
+        // the exact same SetupId for what is functionally a brand-new entry attempt - the same
+        // re-entry-after-close bug found and fixed (via a discrete NotAlreadySignaled gate) in the
+        // other three playbooks, just manifesting as a reused identity here instead of a re-armed
+        // one, since this playbook has no one-time catalyst event to gate on directly. A gap larger
+        // than about one evaluation cycle since this playbook was last advanced is the signal that
+        // evaluation was suspended in between (there is no other reason for a gap this large - the
+        // agent evaluates every bar otherwise), so the carry-forward is skipped and a fresh identity
+        // is minted instead.
+        bool continuedWithoutGap = state.LastAvailableAt != DateTimeOffset.MinValue &&
+            evidence.AvailableAt - state.LastAvailableAt <= StructuralPlaybookRules.Bars(evidence.Trigger.Interval, 2);
         DateTimeOffset catalystAt;
         string setupId;
-        if (ready && state.LastEvaluation is { IsReady: true, SetupId: not null } lastReady &&
+        if (ready && continuedWithoutGap && state.LastEvaluation is { IsReady: true, SetupId: not null } lastReady &&
             lastReady.Direction == direction)
         {
             setupId = lastReady.SetupId;

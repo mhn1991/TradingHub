@@ -187,6 +187,19 @@ internal sealed record BacktestCommandOptions
     public int AutoTrainCalibrationEmbargoHours { get; init; } = 24;
     /// <summary>Optional; defaults to "{strategy}-auto" per strategy when unset.</summary>
     public string? AutoTrainCalibrationStrategyVersion { get; init; }
+
+    /// <summary>
+    /// For every structural-confluence assignment that does not already carry an explicit
+    /// <see cref="StrategyInstrumentAssignment.IndicatorCalibrationArtifactId"/>/
+    /// <see cref="StrategyInstrumentAssignment.LiquidityBreakRetestCalibrationArtifactId"/> pin,
+    /// resolves the most recent Approved+Improved artifact for that assignment's instrument and
+    /// this request's <see cref="BacktestRequest.ExecutionInterval"/> (via
+    /// <see cref="BestApprovedCalibrationArtifactResolver"/>) and pins it for this one invocation -
+    /// same as if a human had typed <c>--request-json</c> with that GUID already filled in. Never
+    /// changes anything server-side; a run with no matching approved artifact simply runs
+    /// unpinned. Default false preserves today's behaviour exactly.
+    /// </summary>
+    public bool AutoApplyIndicatorCalibration { get; init; }
     public SimulationAccountMode AccountMode { get; init; } = SimulationAccountMode.IndependentStrategyAccounts;
     /// <summary>Enabled by default (2026-07-16 agent decision-quality pass) - regime routing/risk is proven and tested.</summary>
     public bool RegimeEnabled { get; init; } = true;
@@ -470,6 +483,7 @@ internal sealed record BacktestCommandOptions
             ,AutoTrainCalibrationEmbargoHours = ParseInt(
                 values.GetValueOrDefault("auto-train-calibration-embargo-hours"), 24, 0, 24 * 30, "auto-train-calibration-embargo-hours")
             ,AutoTrainCalibrationStrategyVersion = values.GetValueOrDefault("auto-train-calibration-strategy-version")
+            ,AutoApplyIndicatorCalibration = values.ContainsKey("auto-apply-calibration")
         };
     }
 

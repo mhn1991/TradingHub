@@ -197,6 +197,23 @@ public sealed class SupplyDemandAnalyzer
                 }
             }
 
+            // QualityScore was previously computed once at formation and never revisited, so the
+            // TouchPenalty/PenetrationPenalty/AgePenalty weights ComputeQualityScore already
+            // accepts parameters for were dead in practice - every consumer (zone-quality gates,
+            // TargetMapBuilder's tiering, StructureBasedTradeManager's stop-trail candidate
+            // scoring) always saw a zone's day-one quality no matter how stale or heavily-tested
+            // it had since become, even though TouchCount/DistinctTouchCount/PenetrationRatio/State
+            // were all correctly tracked live. Mirrors LiquidityPool's own live-recompute pattern
+            // (see LiquidityAnalyzer.UpdateExistingPools). DistinctTouchCount (cooldown-throttled),
+            // not raw TouchCount, for the same reason the zone-touch gates already prefer it.
+            int ageBars = checked((int)Math.Max(0, sequence - state.ConfirmedAtSequence));
+            zone = zone with
+            {
+                QualityScore = ComputeQualityScore(
+                    zone.DepartureAtr, zone.DepartureEfficiency, zone.BaseCompactness, zone.BaseCandleCount,
+                    zone.BrokeStructure, zone.HasFairValueGap, zone.FreshnessScore,
+                    touchCount: zone.DistinctTouchCount, penetrationRatio: zone.PenetrationRatio, ageBars)
+            };
             state.Zone = zone;
 
             bool invalidated = IsInvalidated(zone, candle, lower, upper);

@@ -31,6 +31,14 @@ public interface ICalibrationArtifactRepository
         CalibrationArtifactProvenance? provenance = null,
         CancellationToken cancellationToken = default);
 
+    Task<CalibrationArtifactMetadata> StoreIndicatorParametersAsync(
+        IndicatorCalibrationArtifact artifact,
+        string? description = null,
+        CalibrationArtifactProvenance? provenance = null,
+        CancellationToken cancellationToken = default);
+
+    Task<IndicatorCalibrationArtifact?> GetIndicatorParametersAsync(Guid id, CancellationToken cancellationToken = default);
+
     /// <summary>Updates only the promotion status of an already-stored artifact's metadata (envelope content stays unchanged).</summary>
     Task<CalibrationArtifactMetadata?> UpdatePromotionStatusAsync(
         Guid id, CalibrationPromotionStatus status, CancellationToken cancellationToken = default);

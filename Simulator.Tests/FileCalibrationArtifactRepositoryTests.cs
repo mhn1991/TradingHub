@@ -8,6 +8,57 @@ namespace Simulator.Tests;
 public sealed class FileCalibrationArtifactRepositoryTests
 {
     [Test]
+    public async Task StoreIndicatorParametersAsync_ThenGetIndicatorParametersAsync_RoundTrips()
+    {
+        var repository = new FileCalibrationArtifactRepository(TempDirectory());
+        IndicatorCalibrationArtifact artifact = BuildIndicatorParametersArtifact();
+
+        CalibrationArtifactMetadata metadata = await repository.StoreIndicatorParametersAsync(artifact, "test artifact");
+        IndicatorCalibrationArtifact? loaded = await repository.GetIndicatorParametersAsync(metadata.Id);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(metadata.Type, Is.EqualTo(CalibrationArtifactType.IndicatorParameters));
+            Assert.That(metadata.CalibrationId, Is.EqualTo(artifact.CalibrationId));
+            Assert.That(loaded, Is.Not.Null);
+            Assert.That(loaded!.StrategyId, Is.EqualTo(artifact.StrategyId));
+            Assert.That(loaded.Instrument, Is.EqualTo(artifact.Instrument));
+            Assert.That(loaded.Overrides, Has.Count.EqualTo(1));
+            Assert.That(loaded.Overrides[0].CalibratedValue, Is.EqualTo(artifact.Overrides[0].CalibratedValue));
+            Assert.That(loaded.PromotionStatus, Is.EqualTo(CalibrationPromotionStatus.PendingReview));
+        });
+    }
+
+    [Test]
+    public async Task UpdatePromotionStatusAsync_ThenGetIndicatorParametersAsync_ReflectsTheNewStatus()
+    {
+        // Regression test: the stored payload's own PromotionStatus field is immutable (its bytes
+        // are content-hash-verified) - UpdatePromotionStatusAsync only ever updates the envelope
+        // metadata's status. GetIndicatorParametersAsync must reconcile the two, or a caller would
+        // see the artifact's stale as-calibrated status (PendingReview) forever, even after
+        // approval/rejection - found while testing IndicatorCalibrationApplicationService.ApproveAsync.
+        var repository = new FileCalibrationArtifactRepository(TempDirectory());
+        IndicatorCalibrationArtifact artifact = BuildIndicatorParametersArtifact();
+        CalibrationArtifactMetadata metadata = await repository.StoreIndicatorParametersAsync(artifact);
+
+        await repository.UpdatePromotionStatusAsync(metadata.Id, CalibrationPromotionStatus.Approved);
+        IndicatorCalibrationArtifact? loaded = await repository.GetIndicatorParametersAsync(metadata.Id);
+
+        Assert.That(loaded!.PromotionStatus, Is.EqualTo(CalibrationPromotionStatus.Approved));
+    }
+
+    [Test]
+    public async Task GetIndicatorParametersAsync_WrongType_ReturnsNull()
+    {
+        var repository = new FileCalibrationArtifactRepository(TempDirectory());
+        CalibrationArtifactMetadata metadata = await repository.StoreSetupAsync(BuildSetupArtifact());
+
+        IndicatorCalibrationArtifact? loaded = await repository.GetIndicatorParametersAsync(metadata.Id);
+
+        Assert.That(loaded, Is.Null);
+    }
+
+    [Test]
     public async Task StoreSetupAsync_ThenGetSetupAsync_RoundTrips()
     {
         var repository = new FileCalibrationArtifactRepository(TempDirectory());
@@ -190,6 +241,57 @@ public sealed class FileCalibrationArtifactRepositoryTests
                 MedianStopDistance = 0.005m
             }
         ]
+    };
+
+    private static IndicatorCalibrationArtifact BuildIndicatorParametersArtifact() => new()
+    {
+        SchemaVersion = 1,
+        CalibrationId = "calibration-test-1",
+        StrategyId = "structural.indicator-confluence",
+        StrategyImplementationVersion = "1.0",
+        OptionsSchemaVersion = "indicator-confluence-options-v1",
+        ManifestVersion = "indicator-confluence-manifest-v1",
+        Scope = IndicatorCalibrationArtifact.InstrumentScope,
+        Instrument = "FX:EUR/USD",
+        TimeframeTopologyHash = "topology-hash",
+        CandleDataIdentityHash = "candle-hash",
+        BaselineConfigurationHash = "baseline-hash",
+        ResolvedCandidateConfigurationHash = "candidate-hash",
+        Overrides =
+        [
+            new CalibratedParameterOverride
+            {
+                ParameterId = "minimum-adx",
+                DefaultValue = 20m,
+                CalibratedValue = 25m,
+                FoldSupportPercent = 80m,
+                PlateauWidth = 5m,
+                SelectionStage = "CoordinateDescent"
+            }
+        ],
+        AblationOverrides = new Dictionary<string, bool>(StringComparer.Ordinal),
+        Evidence = new CalibrationEvidenceSummary
+        {
+            FoldCount = 5,
+            AcceptableFoldCount = 4,
+            AcceptableFoldPercent = 80m,
+            MedianValidationExpectancyR = 0.1m,
+            MedianValidationDrawdownR = 2m,
+            MedianValidationTradeCount = 30,
+            TrainValidationDegradation = 0.1m,
+            BaselineMedianExpectancyR = -0.47m,
+            ImprovementOverBaseline = 0.57m,
+            ExternalHoldoutExpectancyR = 0.05m,
+            ExternalHoldoutDrawdownR = 2.5m,
+            ExternalHoldoutTradeCount = 15,
+            ExternalHoldoutBaselineExpectancyR = -0.4m,
+            TotalCandidatesEvaluated = 250
+        },
+        Outcome = CalibrationOutcome.Improved,
+        ExperimentLedgerId = "ledger-test-1",
+        ExperimentLedgerChecksum = "ledger-checksum",
+        PromotionStatus = CalibrationPromotionStatus.PendingReview,
+        CreatedAt = DateTimeOffset.UtcNow
     };
 
     private static string TempDirectory()

@@ -155,6 +155,22 @@ public sealed record TradingPolicyProfile
                 "MetaModelPolicy.Enabled must agree with whether MetaModelArtifactId is set.",
                 nameof(MetaModelPolicy));
         }
+        // AGENT-02: same rationale as MetaModel above - a stale/leftover artifact id with
+        // Enabled=false (or vice versa) for setup or management calibration must fail fast at
+        // construction rather than silently promoting a policy that claims one state while
+        // storing the other.
+        if (SetupCalibrationArtifactId.HasValue != FeaturePolicy.SetupCalibration.Enabled)
+        {
+            throw new ArgumentException(
+                "FeaturePolicy.SetupCalibration.Enabled must agree with whether SetupCalibrationArtifactId is set.",
+                nameof(FeaturePolicy));
+        }
+        if (ManagementCalibrationArtifactId.HasValue != ManagementCalibration.Enabled)
+        {
+            throw new ArgumentException(
+                "ManagementCalibration.Enabled must agree with whether ManagementCalibrationArtifactId is set.",
+                nameof(ManagementCalibration));
+        }
 
         string computed = ComputeConfigurationHash(this with { ConfigurationHash = string.Empty });
         if (!string.Equals(ConfigurationHash, computed, StringComparison.Ordinal))

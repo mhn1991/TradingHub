@@ -4,7 +4,9 @@ public enum CalibrationArtifactType
 {
     Setup,
     Management,
-    MetaModel
+    MetaModel,
+    /// <summary>Blueprint §4.3: per-instrument calibrated indicator-parameter/threshold overlay artifacts.</summary>
+    IndicatorParameters
 }
 
 /// <summary>
