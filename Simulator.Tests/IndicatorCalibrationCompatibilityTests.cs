@@ -22,7 +22,7 @@ public sealed class IndicatorCalibrationCompatibilityTests
     // updating the constant, since every previously-issued artifact's DefaultConfigurationHash
     // becomes incompatible the moment this changes.
     private const string PinnedIndicatorConfluenceDefaultHash =
-        "6ecefb9c93338b61a638e9f65c966b6e50c41baea162f46b74988b875a2c6817";
+        "8733a66d6d9dee5e026ac44dac7a64fc3b8820cbec097a401b3f4329bcc25121";
 
     [Test]
     public void IndicatorConfluenceDefaults_MatchPinnedSnapshot()

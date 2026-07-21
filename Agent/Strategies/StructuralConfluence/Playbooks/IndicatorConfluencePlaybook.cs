@@ -1,6 +1,7 @@
 using Agent.Models;
 using Agent.Strategies.StructuralConfluence.Evidence;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 
 namespace Agent.Strategies.StructuralConfluence.Playbooks;
 
@@ -26,7 +27,7 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
     }
 
     public string PlaybookId => StableId;
-    public string Version => "1.0";
+    public string Version => "1.1";
 
     public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
     {
@@ -41,11 +42,11 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         PriceActionDirection direction = adx.DirectionalBias;
         bool buy = direction == PriceActionDirection.Bullish;
         decimal price = evidence.Trigger.LatestCandle.Prices.Close;
-        // evidence.Indicators is built from trigger.Indicators verbatim (see
-        // StructuralEvidencePacketFactory), so the two are always identical - unlike
-        // LiquiditySweepReversalPlaybook's `?? evidence.Setup.Indicators.Atr`, which is a real
-        // cross-interval fallback, this one can never actually fire.
-        decimal? atr = evidence.Indicators.Atr;
+        // Prefer setup ATR for geometry so stop distance matches the structural TF; fall back to
+        // trigger ATR when setup is not ready (should be rare once evidence packet is valid).
+        decimal? atr = _options.PreferSetupAtrForGeometry
+            ? evidence.Setup.Indicators.Atr ?? evidence.Indicators.Atr
+            : evidence.Indicators.Atr ?? evidence.Setup.Indicators.Atr;
 
         RsiAnalysisSnapshot rsi = indicators.RsiAnalysis;
         decimal? rsiValue = indicators.Rsi;
@@ -57,13 +58,18 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         bool momentumDirectionMatches = buy
             ? rsi.MomentumDirection == MomentumDirection.Rising
             : rsi.MomentumDirection == MomentumDirection.Falling;
-        bool momentumNotExhausted = rsiValue is decimal rsiVal &&
-            (buy ? rsiVal <= _options.MaximumRsiForBuy : rsiVal >= _options.MinimumRsiForSell);
-        bool momentumPasses = momentumDirectionMatches && momentumNotExhausted;
+        bool momentumInBand = rsiValue is decimal rsiVal &&
+            (buy
+                ? rsiVal >= _options.MinimumRsiForBuy && rsiVal <= _options.MaximumRsiForBuy
+                : rsiVal >= _options.MinimumRsiForSell && rsiVal <= _options.MaximumRsiForSell);
+        bool momentumPasses = momentumDirectionMatches && momentumInBand;
 
         bool volatilityPasses = _options.RequireSqueezeBreakout
             ? !bollinger.IsSqueeze && bollinger.WidthDirection == VolatilityDirection.Expanding
             : !bollinger.IsSqueeze;
+
+        bool contextPasses = !_options.RequireContextAlignment || IsContextAligned(evidence, direction);
+        bool cooldownPasses = IsCooldownElapsed(evidence, state);
 
         decimal adxQuality = adx.Adx is decimal adxForQuality
             ? Math.Clamp(50m + (adxForQuality - _options.MinimumAdx) * 2m, 0m, 100m)
@@ -80,19 +86,21 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         decimal bollingerQuality = bollinger.WidthPercentile is decimal widthPercentile
             ? Math.Clamp(widthPercentile, 0m, 100m)
             : 50m;
+        decimal contextQuality = buy
+            ? evidence.ContextEvidence.BullishQuality
+            : evidence.ContextEvidence.BearishQuality;
 
         var gates = new List<MandatoryGate>
         {
             Gate("Trend", trendPasses, adxQuality, "StructuralIndicatorTrendBelowMinimum"),
             Gate("Momentum", momentumPasses, rsiQuality, "StructuralIndicatorMomentumNotAligned"),
-            Gate("Volatility", volatilityPasses, bollingerQuality, "StructuralIndicatorVolatilityInsufficient")
+            Gate("Volatility", volatilityPasses, bollingerQuality, "StructuralIndicatorVolatilityInsufficient"),
+            Gate("Context", contextPasses, Math.Clamp(contextQuality, 0m, 100m), "StructuralIndicatorContextOpposed"),
+            Gate("Cooldown", cooldownPasses, cooldownPasses ? 70m : 0m, "StructuralIndicatorCooldownActive")
         };
 
         StructuralGeometry geometry = BuildAtrGeometry(direction, price, atr, evidence.ExecutableSpread);
         gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
-
-        decimal confidence = StructuralPlaybookRules.Confidence(gates, 0m, 0m, 0m);
-        bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
 
         // Unlike the other three playbooks, there is no persistent zone/pool/break event to anchor
         // identity to - confluence is recomputed fresh from indicator state every bar. Without this,
@@ -108,17 +116,15 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         // confluent the instant that position closes, the carry-forward above would otherwise reuse
         // the exact same SetupId for what is functionally a brand-new entry attempt - the same
         // re-entry-after-close bug found and fixed (via a discrete NotAlreadySignaled gate) in the
-        // other three playbooks, just manifesting as a reused identity here instead of a re-armed
-        // one, since this playbook has no one-time catalyst event to gate on directly. A gap larger
-        // than about one evaluation cycle since this playbook was last advanced is the signal that
-        // evaluation was suspended in between (there is no other reason for a gap this large - the
-        // agent evaluates every bar otherwise), so the carry-forward is skipped and a fresh identity
-        // is minted instead.
+        // other three playbooks. A gap larger than about one evaluation cycle means evaluation was
+        // suspended (position open), so carry-forward is skipped and a fresh identity is minted.
+        bool provisionalReady = gates.All(item => item.Passed);
         bool continuedWithoutGap = state.LastAvailableAt != DateTimeOffset.MinValue &&
             evidence.AvailableAt - state.LastAvailableAt <= StructuralPlaybookRules.Bars(evidence.Trigger.Interval, 2);
         DateTimeOffset catalystAt;
         string setupId;
-        if (ready && continuedWithoutGap && state.LastEvaluation is { IsReady: true, SetupId: not null } lastReady &&
+        if (provisionalReady && continuedWithoutGap &&
+            state.LastEvaluation is { IsReady: true, SetupId: not null } lastReady &&
             lastReady.Direction == direction)
         {
             setupId = lastReady.SetupId;
@@ -132,6 +138,14 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
                 null, null, catalystIdentity, catalystAt, direction);
         }
 
+        // Sticky LastReadySetupId: refuse to re-signal the exact identity already traded.
+        bool notAlreadySignaled = setupId != state.LastReadySetupId;
+        gates.Add(Gate("NotAlreadySignaled", notAlreadySignaled, notAlreadySignaled ? 70m : 0m,
+            "StructuralIndicatorAlreadySignaled"));
+
+        decimal confidence = StructuralPlaybookRules.Confidence(gates, 0m, 0m, 0m);
+        bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
+
         return new PlaybookEvaluation
         {
             PlaybookId = PlaybookId,
@@ -141,14 +155,14 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
             SetupId = setupId,
             CatalystAt = catalystAt,
             MandatoryGates = gates.AsReadOnly(),
-            SupportingEvidence = BuildSupport(trendPasses, momentumPasses, volatilityPasses),
+            SupportingEvidence = BuildSupport(trendPasses, momentumPasses, volatilityPasses, contextPasses),
             ConflictingEvidence = [],
             ConfidenceContributions =
             [
                 new("Trend", 0m, trendPasses ? "StructuralIndicatorTrendAligned" : "StructuralIndicatorTrendMissing"),
                 new("Momentum", 0m, momentumPasses ? "StructuralIndicatorMomentumAligned" : "StructuralIndicatorMomentumMissing")
             ],
-            ContextQuality = adxQuality,
+            ContextQuality = Math.Max(adxQuality, contextQuality),
             LocationQuality = 0m,
             CatalystQuality = rsiQuality,
             TriggerQuality = rsiQuality,
@@ -160,6 +174,44 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
             IsReady = ready,
             Geometry = geometry
         };
+    }
+
+    private bool IsCooldownElapsed(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
+    {
+        if (_options.MinimumBarsBetweenEntries <= 0)
+            return true;
+        // Only enforce after we have already produced a ready (and typically traded) identity.
+        if (state.LastReadySetupId is null)
+            return true;
+        DateTimeOffset? lastSignalAt = state.LastEvaluation?.CatalystAt;
+        if (lastSignalAt is null)
+            return true;
+        TimeSpan cooldown = StructuralPlaybookRules.Bars(evidence.Trigger.Interval, _options.MinimumBarsBetweenEntries);
+        return evidence.AvailableAt >= lastSignalAt.Value + cooldown;
+    }
+
+    private static bool IsContextAligned(StructuralEvidencePacket evidence, PriceActionDirection direction)
+    {
+        if (evidence.Context.MarketRegime.Regime == MarketRegime.IlliquidUnsafe)
+            return false;
+
+        MarketRegime regime = evidence.Context.MarketRegime.Regime;
+        bool structureOk = direction == PriceActionDirection.Bullish
+            ? regime is MarketRegime.TrendingUp or MarketRegime.BreakoutExpansionUp
+                || evidence.Context.MarketStructure.Direction == MarketStructureDirection.Rising
+            : regime is MarketRegime.TrendingDown or MarketRegime.BreakoutExpansionDown
+                || evidence.Context.MarketStructure.Direction == MarketStructureDirection.Falling;
+
+        EvidenceAlignment alignment = direction == PriceActionDirection.Bullish
+            ? evidence.ContextEvidence.BullishAlignment
+            : evidence.ContextEvidence.BearishAlignment;
+
+        // Allow when context is explicitly aligned or structure/regime agrees; block hard conflict.
+        if (alignment == EvidenceAlignment.Conflicting)
+            return false;
+        if (alignment == EvidenceAlignment.Aligned)
+            return true;
+        return structureOk;
     }
 
     private StructuralGeometry BuildAtrGeometry(
@@ -212,12 +264,13 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         ReasonCode = reasonCode
     };
 
-    private static IReadOnlyList<string> BuildSupport(bool trend, bool momentum, bool volatility)
+    private static IReadOnlyList<string> BuildSupport(bool trend, bool momentum, bool volatility, bool context)
     {
         var result = new List<string>();
         if (trend) result.Add("StructuralIndicatorTrendAligned");
         if (momentum) result.Add("StructuralIndicatorMomentumAligned");
         if (volatility) result.Add("StructuralIndicatorVolatilitySupportive");
+        if (context) result.Add("StructuralIndicatorContextAligned");
         return result.AsReadOnly();
     }
 

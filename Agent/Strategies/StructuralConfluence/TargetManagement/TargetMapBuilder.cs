@@ -56,7 +56,9 @@ public sealed class TargetMapBuilder
     {
         ArgumentNullException.ThrowIfNull(evidence);
         bool buy = direction == PriceActionDirection.Bullish;
-        decimal? atrValue = evidence.Indicators.Atr ?? evidence.Setup.Indicators.Atr;
+        // Align with StructuralGeometryBuilder: obstacle distances in ATR units use setup ATR
+        // (same timeframe as structural stop / liquidity / zones on the setup snapshot).
+        decimal? atrValue = evidence.Setup.Indicators.Atr ?? evidence.Indicators.Atr;
         decimal risk = buy ? entry - stop : stop - entry;
         if (atrValue is not > 0m || risk <= 0m)
             return Invalid("StructuralTargetMapAtrOrRiskUnavailable");

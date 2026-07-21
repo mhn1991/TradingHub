@@ -9,6 +9,7 @@ using RiskManager;
 using RiskManager.Calibration;
 using RiskManager.Safety;
 using Simulator.Calibration;
+using Simulator.Experiments.IndicatorCalibration.Strategies;
 using Simulator.MarketData;
 using Simulator.Models;
 using TradeManager;
@@ -32,6 +33,10 @@ internal sealed record BacktestCommandOptions
     public DateTimeOffset To { get; init; }
     public BarInterval ExecutionInterval { get; init; } = BarInterval.Minutes(1);
     public BarInterval AnalysisBaseInterval { get; init; } = BarInterval.Minutes(1);
+    /// <summary>Structural-confluence's own trigger/setup/context timeframe - see the identical fields on <see cref="BacktestRuntimeOptions"/>.</summary>
+    public BarInterval StructuralTriggerInterval { get; init; } = BarInterval.Minutes(5);
+    public BarInterval StructuralSetupInterval { get; init; } = Simulator.Calibration.StandardTimeframeTopologyFactory.DefaultSetupInterval;
+    public BarInterval StructuralContextInterval { get; init; } = Simulator.Calibration.StandardTimeframeTopologyFactory.DefaultContextInterval;
     public IReadOnlyList<BarInterval> AnalysisIntervals { get; init; } =
         RecommendedSimulationDefaults.AnalysisIntervals;
     public SimulationPrecisionMode PrecisionMode { get; init; } = SimulationPrecisionMode.Fast;
@@ -104,6 +109,8 @@ internal sealed record BacktestCommandOptions
         PositionManagementOptions.LegacyDefaults;
     public PositionManagementOptions ImprovedPositionManagement { get; init; } =
         PositionManagementOptions.ImprovedDefaults;
+    public PositionManagementOptions StructuralPositionManagement { get; init; } =
+        PositionManagementOptions.StructuralDefaults;
     /// <summary>
     /// ChartAnnotator indicator/regime-classification configuration. Programmatic/JSON
     /// callers may set this directly; no individual --flag parsing yet.
@@ -193,7 +200,7 @@ internal sealed record BacktestCommandOptions
     /// <see cref="StrategyInstrumentAssignment.IndicatorCalibrationArtifactId"/>/
     /// <see cref="StrategyInstrumentAssignment.LiquidityBreakRetestCalibrationArtifactId"/> pin,
     /// resolves the most recent Approved+Improved artifact for that assignment's instrument and
-    /// this request's <see cref="BacktestRequest.ExecutionInterval"/> (via
+    /// this request's <see cref="BacktestRuntimeOptions.StructuralTriggerInterval"/> (via
     /// <see cref="BestApprovedCalibrationArtifactResolver"/>) and pins it for this one invocation -
     /// same as if a human had typed <c>--request-json</c> with that GUID already filled in. Never
     /// changes anything server-side; a run with no matching approved artifact simply runs
@@ -298,6 +305,15 @@ internal sealed record BacktestCommandOptions
         BarInterval analysisBase = ParseInterval(
             values.GetValueOrDefault("analysis-base-interval") ??
             BarIntervalParser.Format(precisionDefaults.AnalysisBaseInterval));
+        BarInterval structuralTriggerInterval = values.GetValueOrDefault("structural-trigger-interval") is { } rawStructuralTrigger
+            ? ParseInterval(rawStructuralTrigger)
+            : BarInterval.Minutes(5);
+        BarInterval structuralSetupInterval = values.GetValueOrDefault("structural-setup-interval") is { } rawStructuralSetup
+            ? ParseInterval(rawStructuralSetup)
+            : Simulator.Calibration.StandardTimeframeTopologyFactory.DefaultSetupInterval;
+        BarInterval structuralContextInterval = values.GetValueOrDefault("structural-context-interval") is { } rawStructuralContext
+            ? ParseInterval(rawStructuralContext)
+            : Simulator.Calibration.StandardTimeframeTopologyFactory.DefaultContextInterval;
         BarInterval[] analysis = (values.GetValueOrDefault("analysis-intervals") ?? "5m,15m,30m,1h,2h")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(ParseInterval)
@@ -319,6 +335,15 @@ internal sealed record BacktestCommandOptions
                 ?? values.GetValueOrDefault("strategy")
                 ?? "legacy,improved")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (strategies.Any(item => string.Equals(item, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase)) &&
+            (BarIntervalParser.CompareDuration(structuralTriggerInterval, structuralSetupInterval) > 0 ||
+             BarIntervalParser.CompareDuration(structuralSetupInterval, structuralContextInterval) > 0))
+        {
+            throw new ArgumentException(
+                $"Structural-confluence timeframe stack must satisfy structural-trigger-interval ({BarIntervalParser.Format(structuralTriggerInterval)}) <= " +
+                $"structural-setup-interval ({BarIntervalParser.Format(structuralSetupInterval)}) <= " +
+                $"structural-context-interval ({BarIntervalParser.Format(structuralContextInterval)}).");
+        }
         BarInterval entryInterval = ParseInterval(values.GetValueOrDefault("entry-interval") ?? "5m");
         BarInterval[] secondaryTrendIntervals = ParseIntervalList(
             values.GetValueOrDefault("secondary-trend-intervals") ?? "1h");
@@ -359,6 +384,23 @@ internal sealed record BacktestCommandOptions
             entryInterval,
             structureDefault: 2m,
             preserveTarget: true);
+        PositionManagementOptions structuralManagement = PositionManagementOptions.StructuralDefaults;
+        if (strategies.Any(item => string.Equals(item, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase)))
+        {
+            // BacktestRuntimeOptions.Validate() checks the Legacy/Improved/Structural
+            // position-management stacks unconditionally regardless of which strategies are active,
+            // so all three must agree with whatever structural timeframe stack this run targets -
+            // reusing the same helper the indicator-calibration adapters use. At the 5m/15m/1h
+            // default this reproduces each preset's existing values exactly, so this is a no-op
+            // unless a non-default --structural-trigger-interval/--structural-setup-interval/
+            // --structural-context-interval is given. Only fires when structural-confluence is
+            // actually in --strategies, so a plain legacy/improved run's own --legacy-*/--improved-*
+            // flags are never touched; running structural-confluence together with legacy/improved at
+            // a non-default structural timeframe will override those flags here too, since all three
+            // stacks must agree.
+            (legacyManagement, improvedManagement, structuralManagement) = CalibrationTimeframeStack.BuildPositionManagementOverrides(
+                structuralTriggerInterval, structuralSetupInterval, structuralContextInterval);
+        }
 
         return new BacktestCommandOptions
         {
@@ -369,6 +411,9 @@ internal sealed record BacktestCommandOptions
             To = to,
             ExecutionInterval = execution,
             AnalysisBaseInterval = analysisBase,
+            StructuralTriggerInterval = structuralTriggerInterval,
+            StructuralSetupInterval = structuralSetupInterval,
+            StructuralContextInterval = structuralContextInterval,
             AnalysisIntervals = analysis,
             PrecisionMode = precision,
             SourceKind = source,
@@ -438,7 +483,8 @@ internal sealed record BacktestCommandOptions
             AmbiguousPolicy = values.GetValueOrDefault("ambiguous-policy") ?? "stop-first",
             TrailingComparison = values.ContainsKey("trailing-comparison"),
             LegacyPositionManagement = legacyManagement,
-            ImprovedPositionManagement = improvedManagement
+            ImprovedPositionManagement = improvedManagement,
+            StructuralPositionManagement = structuralManagement
             ,AccountMode = ParseAccountMode(values.GetValueOrDefault("account-mode"))
             // Enabled by default (2026-07-16 agent decision-quality pass); --no-regime opts out.
             // --regime is still accepted as a harmless legacy no-op.
@@ -515,6 +561,9 @@ internal sealed record BacktestCommandOptions
             AccountMode = AccountMode,
             ExecutionInterval = ExecutionInterval,
             AnalysisBaseInterval = AnalysisBaseInterval,
+            StructuralTriggerInterval = StructuralTriggerInterval,
+            StructuralSetupInterval = StructuralSetupInterval,
+            StructuralContextInterval = StructuralContextInterval,
             AnalysisIntervals = AnalysisIntervals,
             PrecisionMode = PrecisionMode,
             SourceKind = SourceKind,
@@ -546,6 +595,7 @@ internal sealed record BacktestCommandOptions
             NoCache = NoCache,
             LegacyPositionManagement = LegacyPositionManagement,
             ImprovedPositionManagement = ImprovedPositionManagement,
+            StructuralPositionManagement = StructuralPositionManagement,
             PositionSizing = PositionSizing,
             // Structural playbooks consume detector output. Defaults leave SupplyDemand/Liquidity
             // disabled, which yields StructuralZoneUnavailable / no pools forever. Auto-enable when

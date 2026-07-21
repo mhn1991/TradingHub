@@ -236,28 +236,46 @@ public sealed record IndicatorConfluenceOptions
     public bool Enabled { get; init; }
 
     // Trend (ADX/DMI): is there a trend, and which way.
-    public decimal MinimumAdx { get; init; } = 20m;
-    public bool RequireTrendStrengthening { get; init; }
+    // Raised from 20 → 25 so IC only fires in clearer trends (was over-trading on 5m noise).
+    public decimal MinimumAdx { get; init; } = 25m;
+    // Default on: require ADX still rising so we skip late/exhausted trends.
+    public bool RequireTrendStrengthening { get; init; } = true;
 
-    // Momentum (RSI): is momentum turning in our favor right now, not already exhausted.
-    public decimal MaximumRsiForBuy { get; init; } = 70m;
-    public decimal MinimumRsiForSell { get; init; } = 30m;
+    // Momentum (RSI): pullback-in-trend band rather than "anything not extreme".
+    // Buy only when RSI has turned up but is not already extended; sell mirrored.
+    public decimal MinimumRsiForBuy { get; init; } = 42m;
+    public decimal MaximumRsiForBuy { get; init; } = 58m;
+    public decimal MinimumRsiForSell { get; init; } = 42m;
+    public decimal MaximumRsiForSell { get; init; } = 58m;
 
-    // Volatility (Bollinger): is there enough room to move. RequireSqueezeBreakout demands the
-    // stricter "just expanding out of a squeeze" timing instead of merely "not squeezed".
-    public bool RequireSqueezeBreakout { get; init; }
+    // Volatility (Bollinger): demand expansion out of squeeze rather than merely "not squeezed".
+    public bool RequireSqueezeBreakout { get; init; } = true;
 
-    public decimal MinimumConfidence { get; init; } = 55m;
+    public decimal MinimumConfidence { get; init; } = 62m;
+
+    // Prefer setup-interval ATR for stop/target when available (same lesson as structural stops).
+    public bool PreferSetupAtrForGeometry { get; init; } = true;
+
+    // HTF context: do not take IC longs into strong bearish context (and vice versa).
+    public bool RequireContextAlignment { get; init; } = true;
+
+    // After a ready IC signal was produced, refuse a new ready identity for this many trigger bars.
+    // At 5m, 24 bars ≈ 2 hours — cuts the re-entry grind that produced ~6 trades/day.
+    public int MinimumBarsBetweenEntries { get; init; } = 24;
 
     // Plain ATR-multiple stop/target (no structural anchor exists for this playbook).
-    public decimal StopAtr { get; init; } = 1.5m;
-    public decimal TargetAtr { get; init; } = 3.0m;
+    // Slightly wider stop / closer target than 1.5/3.0 to improve hit rate vs noise.
+    public decimal StopAtr { get; init; } = 2.0m;
+    public decimal TargetAtr { get; init; } = 2.5m;
 
     public void Validate()
     {
-        if (MinimumAdx is < 0m or > 100m || MaximumRsiForBuy is < 0m or > 100m ||
-            MinimumRsiForSell is < 0m or > 100m || MinimumRsiForSell >= MaximumRsiForBuy ||
-            MinimumConfidence is < 0m or > 100m || StopAtr <= 0m || TargetAtr <= 0m)
+        if (MinimumAdx is < 0m or > 100m ||
+            MinimumRsiForBuy is < 0m or > 100m || MaximumRsiForBuy is < 0m or > 100m ||
+            MinimumRsiForSell is < 0m or > 100m || MaximumRsiForSell is < 0m or > 100m ||
+            MinimumRsiForBuy >= MaximumRsiForBuy || MinimumRsiForSell >= MaximumRsiForSell ||
+            MinimumConfidence is < 0m or > 100m || StopAtr <= 0m || TargetAtr <= 0m ||
+            MinimumBarsBetweenEntries < 0)
             throw new ArgumentException("Indicator confluence options are invalid.");
     }
 }
@@ -294,9 +312,9 @@ public sealed record StructuralConfluenceStrategyOptions
         if (!ContextInterval.IsValid || !SetupInterval.IsValid || !TriggerInterval.IsValid ||
             AdditionalContextIntervals is null || AdditionalContextIntervals.Any(item => !item.IsValid))
             throw new ArgumentException("All structural-confluence intervals must be valid.");
-        if (BarIntervalParser.CompareDuration(TriggerInterval, SetupInterval) >= 0 ||
-            BarIntervalParser.CompareDuration(SetupInterval, ContextInterval) >= 0)
-            throw new ArgumentException("Structural intervals must satisfy TriggerInterval < SetupInterval < ContextInterval.");
+        if (BarIntervalParser.CompareDuration(TriggerInterval, SetupInterval) > 0 ||
+            BarIntervalParser.CompareDuration(SetupInterval, ContextInterval) > 0)
+            throw new ArgumentException("Structural intervals must satisfy TriggerInterval <= SetupInterval <= ContextInterval.");
         if (AdditionalContextIntervals.Distinct().Count() != AdditionalContextIntervals.Count ||
             AdditionalContextIntervals.Contains(ContextInterval) || AdditionalContextIntervals.Contains(SetupInterval) ||
             AdditionalContextIntervals.Contains(TriggerInterval) ||

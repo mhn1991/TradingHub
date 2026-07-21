@@ -111,7 +111,12 @@ public sealed class RegimeAwareStructureBasedTradeManager : IStructureBasedTrade
             ApplicableRegimes = [MarketRegime.BreakoutExpansionUp, MarketRegime.BreakoutExpansionDown],
             Options = basis with
             {
+                // StructureTrailActivationR must stay >= BreakEvenActivationR (Validate()'s own
+                // invariant) - raising BreakEven alone breaks presets whose StructureTrailActivationR
+                // starts below the new floor (e.g. StructuralDefaults' 0.3/0.3), so raise both
+                // together the same way the range-early-reduction profile below already does.
                 BreakEvenActivationR = Math.Max(basis.BreakEvenActivationR, 1m),
+                StructureTrailActivationR = Math.Max(basis.StructureTrailActivationR, Math.Max(basis.BreakEvenActivationR, 1m)),
                 MinimumStructuralTrailDistanceAtr = Math.Max(basis.MinimumStructuralTrailDistanceAtr, 0.50m)
             }
         },

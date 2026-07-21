@@ -383,7 +383,7 @@ internal static class Program
             if (updated.IndicatorCalibrationArtifactId is null)
             {
                 Guid? resolved = await BestApprovedCalibrationArtifactResolver.ResolveAsync(
-                    artifacts, indicatorConfluenceStrategyId, updated.Instrument, request.Runtime.ExecutionInterval,
+                    artifacts, indicatorConfluenceStrategyId, updated.Instrument, request.Runtime.StructuralTriggerInterval,
                     cancellationToken).ConfigureAwait(false);
                 if (resolved is { } indicatorArtifactId)
                 {
@@ -396,7 +396,7 @@ internal static class Program
             if (updated.LiquidityBreakRetestCalibrationArtifactId is null)
             {
                 Guid? resolved = await BestApprovedCalibrationArtifactResolver.ResolveAsync(
-                    artifacts, liquidityBreakRetestStrategyId, updated.Instrument, request.Runtime.ExecutionInterval,
+                    artifacts, liquidityBreakRetestStrategyId, updated.Instrument, request.Runtime.StructuralTriggerInterval,
                     cancellationToken).ConfigureAwait(false);
                 if (resolved is { } liquidityArtifactId)
                 {
@@ -698,6 +698,12 @@ Options:
   --imported-candles /server/path/to/candles.csv
   --analysis-base-interval 1m
   --analysis-intervals 5m,15m,30m,1h,2h
+  --structural-trigger-interval 5m        (structural-confluence's own decision/trigger timeframe;
+                                            independent of --execution-interval, which only governs
+                                            fill precision and the raw-candle fetch/aggregation base;
+                                            must satisfy trigger <= setup <= context)
+  --structural-setup-interval 15m         (structural-confluence's own setup timeframe)
+  --structural-context-interval 1h        (structural-confluence's own context timeframe)
   --trend-interval 2h
   --secondary-trend-intervals 1h
   --setup-intervals 30m
@@ -752,7 +758,7 @@ Options:
   --auto-apply-calibration                 (for every structural-confluence assignment without an
                                              explicit indicator-confluence/liquidity-break-retest
                                              pin, auto-resolves and pins the most recent Approved+
-                                             Improved artifact for that instrument/execution
+                                             Improved artifact for that instrument/trigger
                                              interval - see 'indicator-calibration pending/review'
                                              to see what is available before relying on this)
   --warmup-days 21

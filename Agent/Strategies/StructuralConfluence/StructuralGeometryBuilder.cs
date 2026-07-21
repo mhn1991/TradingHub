@@ -18,7 +18,10 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
         decimal rawStop,
         string stopSource)
     {
-        decimal? atrValue = evidence.Indicators.Atr ?? evidence.Setup.Indicators.Atr;
+        // Stop invalidation is setup-interval structure (sweep/zone). Buffer and risk gates must
+        // use setup ATR so a 15m stop is not cushioned by a much smaller 5m trigger ATR.
+        // Entry price still comes from the trigger bar close below.
+        decimal? atrValue = ResolveGeometryAtr(evidence);
         decimal close = evidence.Trigger.LatestCandle.Prices.Close;
         bool buy = direction == PriceActionDirection.Bullish;
         decimal entry = close + (buy ? evidence.ExecutableSpread : -evidence.ExecutableSpread) / 2m;
@@ -107,7 +110,7 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
         TradeExitPolicy exitPolicy,
         IReadOnlyCollection<string>? excludedSourceIds = null)
     {
-        decimal? atrValue = evidence.Indicators.Atr ?? evidence.Setup.Indicators.Atr;
+        decimal? atrValue = ResolveGeometryAtr(evidence);
         decimal close = evidence.Trigger.LatestCandle.Prices.Close;
         bool buy = direction == PriceActionDirection.Bullish;
         decimal entry = close + (buy ? evidence.ExecutableSpread : -evidence.ExecutableSpread) / 2m;
@@ -149,6 +152,13 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
             TargetPlan = map.Plan
         };
     }
+
+    /// <summary>
+    /// ATR for stop buffer / risk gates / geometry quality. Prefers setup-interval ATR because
+    /// raw stops are setup structure; trigger ATR only as fallback if setup is not ready.
+    /// </summary>
+    private static decimal? ResolveGeometryAtr(StructuralEvidencePacket evidence) =>
+        evidence.Setup.Indicators.Atr ?? evidence.Indicators.Atr;
 
     private static StructuralGeometry Invalid(decimal entry, string reasonCode) => new()
     {

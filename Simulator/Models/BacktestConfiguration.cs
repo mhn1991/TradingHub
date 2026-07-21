@@ -99,6 +99,21 @@ public sealed record BacktestRuntimeOptions
     public IReadOnlyList<BarInterval> AnalysisIntervals { get; init; } =
         RecommendedSimulationDefaults.AnalysisIntervals;
 
+    /// <summary>
+    /// Structural-confluence's own trigger/setup/context timeframe, used only when
+    /// <see cref="BacktestRequest.ResolveAgentDefinition"/> builds a default (no explicit
+    /// <c>AgentDefinitionOverride</c>) <c>StructuralConfluence</c> agent - setup/context mirror
+    /// <c>Simulator.Calibration.StandardTimeframeTopologyFactory</c>'s own defaults so a plain
+    /// backtest and a calibration request agree on the same 15m/1h default. Independent of
+    /// <see cref="ExecutionInterval"/>, which only governs simulation fill precision and raw-candle
+    /// fetch/aggregation base - it no longer doubles as the agent's trigger interval.
+    /// </summary>
+    public BarInterval StructuralTriggerInterval { get; init; } = BarInterval.Minutes(5);
+
+    public BarInterval StructuralSetupInterval { get; init; } = Simulator.Calibration.StandardTimeframeTopologyFactory.DefaultSetupInterval;
+
+    public BarInterval StructuralContextInterval { get; init; } = Simulator.Calibration.StandardTimeframeTopologyFactory.DefaultContextInterval;
+
     public SimulationPrecisionMode PrecisionMode { get; init; } = SimulationPrecisionMode.Fast;
     public HistoricalDataSourceKind SourceKind { get; init; } = HistoricalDataSourceKind.OandaCandles;
     public string? ImportedCandlePath { get; init; }
@@ -280,6 +295,8 @@ public sealed record BacktestRuntimeOptions
             throw new ArgumentException("ExecutionInterval must be valid.");
         if (!AnalysisBaseInterval.IsValid)
             throw new ArgumentException("AnalysisBaseInterval must be valid.");
+        if (!StructuralTriggerInterval.IsValid)
+            throw new ArgumentException("StructuralTriggerInterval must be valid.");
         if (AnalysisIntervals is null || AnalysisIntervals.Count == 0)
             throw new ArgumentException("At least one analysis interval is required.");
         if (AnalysisIntervals.Any(interval => !interval.IsValid))
@@ -664,10 +681,19 @@ public sealed record BacktestRequest
                 {
                     Quantity = Quantity,
                     MinimumRewardRisk = MinimumRewardRisk,
+                    TriggerInterval = Runtime.StructuralTriggerInterval,
+                    SetupInterval = Runtime.StructuralSetupInterval,
+                    ContextInterval = Runtime.StructuralContextInterval,
                     Trigger = new StructuralTriggerOptions
                     {
                         MinimumPriceActionConfidence = MinimumPriceActionConfidence
-                    }
+                    },
+                    // All four playbooks on for CLI/sim structural runs. IC uses tightened
+                    // IndicatorConfluenceOptions defaults (ADX/RSI/cooldown/setup ATR).
+                    LiquiditySweepReversal = new LiquiditySweepReversalOptions { Enabled = true },
+                    SupplyDemandPullback = new SupplyDemandPullbackOptions { Enabled = true },
+                    LiquidityBreakRetest = new LiquidityBreakRetestOptions { Enabled = true },
+                    IndicatorConfluence = new IndicatorConfluenceOptions { Enabled = true }
                 }
             },
             _ => throw new ArgumentOutOfRangeException(nameof(strategyType))

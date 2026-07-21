@@ -106,7 +106,7 @@ public sealed class IndicatorConfluenceCalibrationManifest : IIndicatorCalibrati
         new CalibrationParameterDescriptor<IndicatorConfluenceOptions>(
             "minimum-adx", "IndicatorConfluence.MinimumAdx",
             CalibrationParameterCategory.Entry, CalibrationValueKind.IndicatorLevel, CalibrationSpacing.Linear,
-            defaultValue: 20m, hardMinimum: 5m, hardMaximum: 60m,
+            defaultValue: 25m, hardMinimum: 5m, hardMaximum: 60m,
             coarseGrid: [15m, 20m, 25m, 30m, 35m], refinementStep: 1m,
             conservativeStartingValue: 30m, permissiveStartingValue: 15m, declaredSearchOrder: 0,
             read: o => o.MinimumAdx, apply: (o, v) => o with { MinimumAdx = v });
@@ -115,54 +115,54 @@ public sealed class IndicatorConfluenceCalibrationManifest : IIndicatorCalibrati
         new CalibrationParameterDescriptor<IndicatorConfluenceOptions>(
             "maximum-rsi-for-buy", "IndicatorConfluence.MaximumRsiForBuy",
             CalibrationParameterCategory.Confirmation, CalibrationValueKind.PercentageZeroToHundred, CalibrationSpacing.Linear,
-            defaultValue: 70m, hardMinimum: 50m, hardMaximum: 90m,
-            coarseGrid: [60m, 65m, 70m, 75m, 80m], refinementStep: 1m,
-            conservativeStartingValue: 60m, permissiveStartingValue: 80m, declaredSearchOrder: 1,
+            defaultValue: 58m, hardMinimum: 50m, hardMaximum: 90m,
+            coarseGrid: [55m, 58m, 60m, 65m, 70m], refinementStep: 1m,
+            conservativeStartingValue: 55m, permissiveStartingValue: 70m, declaredSearchOrder: 1,
             read: o => o.MaximumRsiForBuy, apply: (o, v) => o with { MaximumRsiForBuy = v });
 
     private static ICalibrationParameterDescriptor<IndicatorConfluenceOptions> MinimumRsiForSellDescriptor() =>
         new CalibrationParameterDescriptor<IndicatorConfluenceOptions>(
             "minimum-rsi-for-sell", "IndicatorConfluence.MinimumRsiForSell",
             CalibrationParameterCategory.Confirmation, CalibrationValueKind.PercentageZeroToHundred, CalibrationSpacing.Linear,
-            defaultValue: 30m, hardMinimum: 10m, hardMaximum: 50m,
-            coarseGrid: [20m, 25m, 30m, 35m, 40m], refinementStep: 1m,
-            conservativeStartingValue: 40m, permissiveStartingValue: 20m, declaredSearchOrder: 2,
+            defaultValue: 42m, hardMinimum: 10m, hardMaximum: 50m,
+            coarseGrid: [30m, 35m, 40m, 42m, 45m], refinementStep: 1m,
+            conservativeStartingValue: 45m, permissiveStartingValue: 30m, declaredSearchOrder: 2,
             read: o => o.MinimumRsiForSell, apply: (o, v) => o with { MinimumRsiForSell = v });
 
     private static ICalibrationParameterDescriptor<IndicatorConfluenceOptions> MinimumConfidenceDescriptor() =>
         new CalibrationParameterDescriptor<IndicatorConfluenceOptions>(
             "minimum-confidence", "IndicatorConfluence.MinimumConfidence",
             CalibrationParameterCategory.Entry, CalibrationValueKind.PercentageZeroToHundred, CalibrationSpacing.Linear,
-            defaultValue: 55m, hardMinimum: 0m, hardMaximum: 100m,
-            coarseGrid: [45m, 50m, 55m, 60m, 65m], refinementStep: 1m,
-            conservativeStartingValue: 65m, permissiveStartingValue: 45m, declaredSearchOrder: 3,
+            defaultValue: 62m, hardMinimum: 0m, hardMaximum: 100m,
+            coarseGrid: [55m, 58m, 62m, 65m, 70m], refinementStep: 1m,
+            conservativeStartingValue: 70m, permissiveStartingValue: 55m, declaredSearchOrder: 3,
             read: o => o.MinimumConfidence, apply: (o, v) => o with { MinimumConfidence = v });
 
     private static ICalibrationParameterDescriptor<IndicatorConfluenceOptions> StopAtrDescriptor() =>
         new CalibrationParameterDescriptor<IndicatorConfluenceOptions>(
             "stop-atr", "IndicatorConfluence.StopAtr",
             CalibrationParameterCategory.Stop, CalibrationValueKind.AtrMultiple, CalibrationSpacing.Linear,
-            defaultValue: 1.5m, hardMinimum: 0.5m, hardMaximum: 4m,
-            coarseGrid: [1.0m, 1.25m, 1.5m, 2.0m, 2.5m], refinementStep: 0.1m,
-            conservativeStartingValue: 1.0m, permissiveStartingValue: 2.5m, declaredSearchOrder: 4,
+            defaultValue: 2.0m, hardMinimum: 0.5m, hardMaximum: 4m,
+            coarseGrid: [1.5m, 1.75m, 2.0m, 2.25m, 2.5m], refinementStep: 0.1m,
+            conservativeStartingValue: 2.0m, permissiveStartingValue: 1.5m, declaredSearchOrder: 4,
             read: o => o.StopAtr, apply: (o, v) => o with { StopAtr = v });
 
     private static ICalibrationParameterDescriptor<IndicatorConfluenceOptions> TargetAtrDescriptor() =>
         new CalibrationParameterDescriptor<IndicatorConfluenceOptions>(
             "target-atr", "IndicatorConfluence.TargetAtr",
             CalibrationParameterCategory.Target, CalibrationValueKind.AtrMultiple, CalibrationSpacing.Linear,
-            defaultValue: 3.0m, hardMinimum: 1m, hardMaximum: 8m,
-            coarseGrid: [2.0m, 2.5m, 3.0m, 4.0m, 5.0m], refinementStep: 0.25m,
-            conservativeStartingValue: 2.0m, permissiveStartingValue: 5.0m, declaredSearchOrder: 5,
+            defaultValue: 2.5m, hardMinimum: 1m, hardMaximum: 8m,
+            coarseGrid: [2.0m, 2.25m, 2.5m, 3.0m, 3.5m], refinementStep: 0.25m,
+            conservativeStartingValue: 2.5m, permissiveStartingValue: 3.5m, declaredSearchOrder: 5,
             read: o => o.TargetAtr, apply: (o, v) => o with { TargetAtr = v });
 
     private static ICalibrationAblationDescriptor<IndicatorConfluenceOptions> RequireTrendStrengtheningAblation() =>
         new CalibrationAblationDescriptor<IndicatorConfluenceOptions>(
-            "require-trend-strengthening", "IndicatorConfluence.RequireTrendStrengthening", defaultValue: false,
+            "require-trend-strengthening", "IndicatorConfluence.RequireTrendStrengthening", defaultValue: true,
             read: o => o.RequireTrendStrengthening, apply: (o, v) => o with { RequireTrendStrengthening = v });
 
     private static ICalibrationAblationDescriptor<IndicatorConfluenceOptions> RequireSqueezeBreakoutAblation() =>
         new CalibrationAblationDescriptor<IndicatorConfluenceOptions>(
-            "require-squeeze-breakout", "IndicatorConfluence.RequireSqueezeBreakout", defaultValue: false,
+            "require-squeeze-breakout", "IndicatorConfluence.RequireSqueezeBreakout", defaultValue: true,
             read: o => o.RequireSqueezeBreakout, apply: (o, v) => o with { RequireSqueezeBreakout = v });
 }

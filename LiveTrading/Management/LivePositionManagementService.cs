@@ -545,13 +545,13 @@ public sealed class LivePositionManagementService(
             : policy.ImprovedManagement;
     }
 
-    // TODO(task #9 follow-up): LiveTradingPolicyBundle carries no reference to the paired agent's
-    // own RequiredIntervals/TriggerInterval, so unlike StrategySimulationSession (backtesting) this
-    // path cannot yet derive Fast/Main/Thesis from the agent that actually produced the trade.
-    // These fallbacks only preserve pre-existing live behavior (the values StructuralDefaults/
-    // LegacyDefaults/ImprovedDefaults used to hardcode) so removing those hardcoded preset values
-    // for backtesting's benefit doesn't silently disable live structural/thesis-scope management.
-    // Real agent-derived alignment for live still needs to be built.
+    // Structural-confluence Fast/Main/Thesis are now agent-derived upstream, at the single shared
+    // resolution path every environment goes through
+    // (ResolvedAgentPackage.Create -> AlignStructuralManagementInterval), so
+    // LiveTradingPolicyBundle.StructuralManagement already carries the paired agent's real
+    // TriggerInterval/SetupInterval/ContextInterval by the time it reaches here - these constants
+    // are now a defensive last resort (e.g. Legacy/Improved, which aren't agent-derived), not the
+    // primary path for structural-confluence.
     private static readonly BarInterval FallbackFastStructureInterval = BarInterval.Minutes(5);
     private static readonly BarInterval FallbackMainStructureInterval = BarInterval.Minutes(15);
     private static readonly BarInterval FallbackThesisInterval = BarInterval.Hours(1);

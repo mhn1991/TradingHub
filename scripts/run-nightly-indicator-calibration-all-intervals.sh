@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Launch indicator calibration for 1m, 5m, 15m, and 1h in parallel.
+# Launch indicator calibration for 5m and 15m in parallel.
 # No runtime budget: each interval runs to Completed/Failed/Cancelled (full search plan).
+#
+# 5m and 15m are the two execution (== trigger/decision) intervals worth calibrating for this
+# strategy - 1m has no decision role (the strategy never looks at 1m bars), so there's no reason to
+# annotate/search at that granularity. run-nightly-indicator-calibration.sh derives matching
+# setup/context intervals for whichever execution interval it's given (see its own
+# SETUP_INTERVAL/CONTEXT_INTERVAL case statement), so both entries here run against a valid,
+# internally-consistent timeframe stack rather than the old fixed 5m/15m/1h shape.
 #
 # Usage:
 #   scripts/run-nightly-indicator-calibration-all-intervals.sh <strategy> <instrument>
@@ -22,7 +29,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 RUNNER="$SCRIPT_DIR/run-nightly-indicator-calibration.sh"
-INTERVALS=(1m 5m 15m 1h)
+INTERVALS=(5m 15m)
 LOG_DIR="$REPO_ROOT/.cache/nightly-calibration-logs"
 mkdir -p "$LOG_DIR"
 

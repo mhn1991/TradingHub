@@ -83,7 +83,12 @@ internal static class IndicatorCalibrationCli
 
         await using var service = new IndicatorCalibrationApplicationService(
             backtests, artifacts, ledgers,
-            [new IndicatorConfluenceCalibrationStrategyAdapter(), new LiquidityBreakRetestCalibrationStrategyAdapter()]);
+            [
+                new IndicatorConfluenceCalibrationStrategyAdapter(),
+                new LiquidityBreakRetestCalibrationStrategyAdapter(),
+                new LiquiditySweepReversalCalibrationStrategyAdapter(),
+                new SupplyDemandPullbackCalibrationStrategyAdapter()
+            ]);
 
         return subcommand switch
         {
@@ -399,7 +404,9 @@ internal static class IndicatorCalibrationCli
         try
         {
             string strategyName = ReadOption(args, "--strategy")
-                ?? throw new ArgumentException("--strategy <indicator-confluence|liquidity-break-retest> is required.");
+                ?? throw new ArgumentException(
+                    "--strategy <indicator-confluence|liquidity-break-retest|liquidity-sweep-reversal|" +
+                    "supply-demand-pullback> is required.");
             string instrumentValue = ReadOption(args, "--instrument")
                 ?? throw new ArgumentException("--instrument <key> is required, e.g. FX:EUR/USD.");
             string outputPath = ReadOption(args, "--output")
@@ -423,9 +430,28 @@ internal static class IndicatorCalibrationCli
             BarInterval executionInterval = ReadOption(args, "--execution-interval") is { } rawInterval
                 ? BarIntervalParser.Parse(rawInterval)
                 : BarInterval.Minutes(1);
+            // Also the strategy's own trigger/decision interval (Part 2 of this session's timeframe
+            // parametrization) - execution precision and decision cadence are the same knob here,
+            // there is no reason to annotate/decide at a finer granularity than the strategy uses.
+            BarInterval setupInterval = ReadOption(args, "--setup-interval") is { } rawSetup
+                ? BarIntervalParser.Parse(rawSetup)
+                : StandardTimeframeTopologyFactory.DefaultSetupInterval;
+            BarInterval contextInterval = ReadOption(args, "--context-interval") is { } rawContext
+                ? BarIntervalParser.Parse(rawContext)
+                : StandardTimeframeTopologyFactory.DefaultContextInterval;
+            if (BarIntervalParser.CompareDuration(executionInterval, setupInterval) > 0 ||
+                BarIntervalParser.CompareDuration(setupInterval, contextInterval) > 0)
+            {
+                throw new ArgumentException(
+                    $"Timeframe stack must satisfy execution-interval ({BarIntervalParser.Format(executionInterval)}) <= " +
+                    $"setup-interval ({BarIntervalParser.Format(setupInterval)}) <= " +
+                    $"context-interval ({BarIntervalParser.Format(contextInterval)}) - matches " +
+                    "StructuralConfluenceStrategyOptions.Validate()'s own TriggerInterval <= SetupInterval <= ContextInterval rule.");
+            }
 
             var instrument = new InstrumentKey(instrumentValue);
-            TimeframeTopology topology = StandardTimeframeTopologyFactory.Build(executionInterval, warmupDays);
+            TimeframeTopology topology = StandardTimeframeTopologyFactory.Build(
+                executionInterval, warmupDays, setupInterval, contextInterval);
             DateTimeOffset externalHoldoutTo = asOf;
             DateTimeOffset externalHoldoutFrom = externalHoldoutTo.AddDays(-holdoutDays);
             DateTimeOffset learningTo = externalHoldoutFrom.AddDays(-embargoDays);
@@ -435,8 +461,11 @@ internal static class IndicatorCalibrationCli
             {
                 "indicator-confluence" => ResolveIndicatorConfluenceIdentity(),
                 "liquidity-break-retest" => ResolveLiquidityBreakRetestIdentity(),
+                "liquidity-sweep-reversal" => ResolveLiquiditySweepReversalIdentity(),
+                "supply-demand-pullback" => ResolveSupplyDemandPullbackIdentity(),
                 _ => throw new ArgumentException(
-                    $"Unknown --strategy '{strategyName}' - expected 'indicator-confluence' or 'liquidity-break-retest'.")
+                    $"Unknown --strategy '{strategyName}' - expected 'indicator-confluence', " +
+                    "'liquidity-break-retest', 'liquidity-sweep-reversal', or 'supply-demand-pullback'.")
             };
 
             var request = new IndicatorCalibrationRequest
@@ -474,7 +503,9 @@ internal static class IndicatorCalibrationCli
             Console.WriteLine($"Wrote {outputPath}");
             Console.WriteLine($"  Strategy:  {strategyId} / {manifestVersion}");
             Console.WriteLine($"  Instrument: {instrumentValue}");
-            Console.WriteLine($"  Timeframe: {BarIntervalParser.Format(executionInterval)}");
+            Console.WriteLine(
+                $"  Timeframe: trigger {BarIntervalParser.Format(executionInterval)} / " +
+                $"setup {BarIntervalParser.Format(setupInterval)} / context {BarIntervalParser.Format(contextInterval)}");
             Console.WriteLine($"  Learning:  {learningFrom:yyyy-MM-dd} .. {learningTo:yyyy-MM-dd}");
             Console.WriteLine($"  Holdout:   {externalHoldoutFrom:yyyy-MM-dd} .. {externalHoldoutTo:yyyy-MM-dd}");
             return 0;
@@ -496,7 +527,8 @@ internal static class IndicatorCalibrationCli
     private static (string StrategyId, string ManifestVersion, string BaselineHash) ResolveIndicatorConfluenceIdentity()
     {
         var manifest = new IndicatorConfluenceCalibrationManifest();
-        string hash = IndicatorCalibrationHash.ComputeOfObject(new StructuralConfluenceStrategyOptions().IndicatorConfluence);
+        string hash = IndicatorCalibrationHash.ComputeOfObject(
+            IndicatorConfluenceCalibrationStrategyAdapter.DefaultCalibrationBaseline.IndicatorConfluence);
         return (manifest.StrategyId, manifest.ManifestVersion, hash);
     }
 
@@ -504,6 +536,20 @@ internal static class IndicatorCalibrationCli
     {
         var manifest = new LiquidityBreakRetestCalibrationManifest();
         string hash = IndicatorCalibrationHash.ComputeOfObject(new StructuralConfluenceStrategyOptions().LiquidityBreakRetest);
+        return (manifest.StrategyId, manifest.ManifestVersion, hash);
+    }
+
+    private static (string StrategyId, string ManifestVersion, string BaselineHash) ResolveLiquiditySweepReversalIdentity()
+    {
+        var manifest = new LiquiditySweepReversalCalibrationManifest();
+        string hash = IndicatorCalibrationHash.ComputeOfObject(new StructuralConfluenceStrategyOptions().LiquiditySweepReversal);
+        return (manifest.StrategyId, manifest.ManifestVersion, hash);
+    }
+
+    private static (string StrategyId, string ManifestVersion, string BaselineHash) ResolveSupplyDemandPullbackIdentity()
+    {
+        var manifest = new SupplyDemandPullbackCalibrationManifest();
+        string hash = IndicatorCalibrationHash.ComputeOfObject(new StructuralConfluenceStrategyOptions().SupplyDemandPullback);
         return (manifest.StrategyId, manifest.ManifestVersion, hash);
     }
 
@@ -554,8 +600,12 @@ internal static class IndicatorCalibrationCli
             indicator-calibration <subcommand> [options]
 
             Subcommands:
-              generate-request --strategy <indicator-confluence|liquidity-break-retest> --instrument <key> --output <path.json>
-                  [--execution-interval 1m|5m|15m|1h|...=1m] [--learning-days N=60] [--holdout-days N=14]
+              generate-request --strategy <indicator-confluence|liquidity-break-retest|liquidity-sweep-reversal|supply-demand-pullback>
+                  --instrument <key> --output <path.json>
+                  [--execution-interval 1m|5m|15m|1h|...=1m] (also the strategy's own trigger/decision interval)
+                  [--setup-interval 15m|1h|...=15m] [--context-interval 1h|4h|...=1h]
+                  (must satisfy execution-interval <= setup-interval <= context-interval)
+                  [--learning-days N=60] [--holdout-days N=14]
                   [--embargo-days N=2] [--warmup-days N=10] [--fold-count N=3] [--as-of <date>=today]
                   [--hard-runtime-limit-hours N=8]
                   [--overflow-policy Reject|ReduceRefinement|ReduceStartingPoints|SkipLowerPriorityInteractions=ReduceRefinement]

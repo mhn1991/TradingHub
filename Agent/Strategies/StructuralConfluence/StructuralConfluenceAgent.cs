@@ -123,7 +123,10 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
         string setupId = candidate.SetupId!;
         string decisionId = StructuralIdentity.Decision(setupId, evidence.AvailableAt, snapshotVersion);
         bool buy = candidate.Direction == PriceActionDirection.Bullish;
-        decimal? atr = evidence.Indicators.Atr is > 0m ? evidence.Indicators.Atr : null;
+        // Geometry distances in ATR use setup ATR (same units as stop buffer / risk).
+        decimal? atr = evidence.Setup.Indicators.Atr is > 0m
+            ? evidence.Setup.Indicators.Atr
+            : evidence.Indicators.Atr is > 0m ? evidence.Indicators.Atr : null;
         IReadOnlyList<string> reasons = candidate.MandatoryGates.Select(item => item.ReasonCode)
             .Concat(candidate.SupportingEvidence).Distinct(StringComparer.Ordinal).ToArray();
 

@@ -197,7 +197,12 @@ builder.Services.AddSingleton(services => new IndicatorCalibrationApplicationSer
     services.GetRequiredService<IBacktestApplicationService>(),
     services.GetRequiredService<ICalibrationArtifactRepository>(),
     services.GetRequiredService<IIndicatorCalibrationLedgerRepository>(),
-    [new IndicatorConfluenceCalibrationStrategyAdapter(), new LiquidityBreakRetestCalibrationStrategyAdapter()]));
+    [
+        new IndicatorConfluenceCalibrationStrategyAdapter(),
+        new LiquidityBreakRetestCalibrationStrategyAdapter(),
+        new LiquiditySweepReversalCalibrationStrategyAdapter(),
+        new SupplyDemandPullbackCalibrationStrategyAdapter()
+    ]));
 builder.Services.AddSingleton<IIndicatorCalibrationApplicationService>(services =>
     services.GetRequiredService<IndicatorCalibrationApplicationService>());
 builder.Services.AddSingleton(services => new PreRunCalibrationService(

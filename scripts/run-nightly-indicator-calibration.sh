@@ -39,9 +39,22 @@
 #     (.cache/nightly-calibration-state/<key>.json) to deliberately start over.
 set -euo pipefail
 
-STRATEGY="${1:?Usage: $0 <indicator-confluence|liquidity-break-retest> <instrument> [execution-interval=1m]}"
-INSTRUMENT="${2:?Usage: $0 <indicator-confluence|liquidity-break-retest> <instrument> [execution-interval=1m]}"
-EXECUTION_INTERVAL="${3:-1m}"
+STRATEGY="${1:?Usage: $0 <strategy> <instrument> [execution-interval=5m]}"
+INSTRUMENT="${2:?Usage: $0 <strategy> <instrument> [execution-interval=5m]}"
+EXECUTION_INTERVAL="${3:-5m}"
+
+# Setup/context scale with the chosen execution (== trigger/decision) interval so
+# BacktestRuntimeOptions.Validate() (which requires every derived interval >= the analysis base)
+# passes for any execution interval, not just the fixed 5m/15m/1h default stack. Same ~4x/~4x ratio
+# the original 5m->15m->1h stack already uses; add a case here for any new execution interval this
+# script gets asked to run.
+case "$EXECUTION_INTERVAL" in
+    5m)  SETUP_INTERVAL=15m; CONTEXT_INTERVAL=1h ;;
+    15m) SETUP_INTERVAL=1h;  CONTEXT_INTERVAL=4h ;;
+    1m)  SETUP_INTERVAL=15m; CONTEXT_INTERVAL=1h ;;
+    *)   echo "No known setup/context interval mapping for execution interval '$EXECUTION_INTERVAL' - add one above." >&2
+         exit 1 ;;
+esac
 
 # Ceiling for the estimator only (must be > 0). Large enough that overflow never shrinks the plan.
 # Not a process kill timer - the script waits for a real terminal state.
@@ -134,6 +147,8 @@ build_backtest_runner() {
             --strategy "$STRATEGY" \
             --instrument "$INSTRUMENT" \
             --execution-interval "$EXECUTION_INTERVAL" \
+            --setup-interval "$SETUP_INTERVAL" \
+            --context-interval "$CONTEXT_INTERVAL" \
             --hard-runtime-limit-hours "$UNLIMITED_HARD_RUNTIME_LIMIT_HOURS" \
             --output "$REQUEST_FILE"
 

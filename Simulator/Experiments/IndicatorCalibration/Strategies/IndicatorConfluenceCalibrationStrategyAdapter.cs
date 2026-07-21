@@ -5,6 +5,7 @@ using Simulator.Calibration;
 using Simulator.Experiments.IndicatorCalibration.Persistence;
 using Simulator.Models;
 using Simulator.Services;
+using TradeManager;
 
 namespace Simulator.Experiments.IndicatorCalibration.Strategies;
 
@@ -32,9 +33,27 @@ public sealed class IndicatorConfluenceCalibrationStrategyAdapter(
     string candidateCacheRootDirectory = ".cache/indicator-calibration-candidates")
     : IIndicatorCalibrationStrategyAdapter
 {
+    /// <summary>
+    /// The default baseline used whenever a caller doesn't supply its own
+    /// <c>resolveBaselineOptions</c> - i.e. every real production call site today
+    /// (<c>IndicatorCalibrationCli.cs</c>, <c>DashboardLive/Program.cs</c>). Overrides only
+    /// <see cref="IndicatorConfluenceOptions.Enabled"/> to <c>true</c>; every other field keeps its
+    /// own declared default. <see cref="IndicatorConfluenceOptions.Enabled"/> defaults to
+    /// <c>false</c> on the record itself (unlike the other three structural playbooks), so without
+    /// this override the calibration search would vary thresholds on a playbook that
+    /// <see cref="Agent.Strategies.StructuralConfluence.StructuralConfluenceAgent"/> never actually
+    /// evaluates - every candidate indistinguishable from every other, no fold ever produces
+    /// evidence. Also referenced by <c>IndicatorCalibrationCli.ResolveIndicatorConfluenceIdentity</c>
+    /// so the request's recorded baseline hash matches what <c>start</c> actually runs against.
+    /// </summary>
+    public static StructuralConfluenceStrategyOptions DefaultCalibrationBaseline { get; } = new()
+    {
+        IndicatorConfluence = new IndicatorConfluenceOptions { Enabled = true }
+    };
+
     private readonly IndicatorConfluenceCalibrationManifest _manifest = new();
     private readonly Func<InstrumentKey, StructuralConfluenceStrategyOptions> _resolveBaselineOptions =
-        resolveBaselineOptions ?? (_ => new StructuralConfluenceStrategyOptions());
+        resolveBaselineOptions ?? (_ => DefaultCalibrationBaseline);
 
     public string StrategyId => _manifest.StrategyId;
     public string ManifestVersion => _manifest.ManifestVersion;
@@ -54,7 +73,13 @@ public sealed class IndicatorConfluenceCalibrationStrategyAdapter(
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(backtests);
 
-        StructuralConfluenceStrategyOptions baselineStructuralOptions = _resolveBaselineOptions(request.Instrument);
+        StructuralConfluenceStrategyOptions baselineStructuralOptions = CalibrationTimeframeStack.ApplyTo(
+            _resolveBaselineOptions(request.Instrument), request.TimeframeTopology);
+        (PositionManagementOptions legacyManagement, PositionManagementOptions improvedManagement,
+                PositionManagementOptions structuralManagement) =
+            CalibrationTimeframeStack.BuildPositionManagementOverrides(
+                request.TimeframeTopology.ExecutionInterval, request.TimeframeTopology.SetupInterval,
+                request.TimeframeTopology.TrendIntervals[0]);
 
         var analysisIntervals = new List<BarInterval> { request.TimeframeTopology.SetupInterval };
         analysisIntervals.AddRange(request.TimeframeTopology.ConfirmationIntervals);
@@ -72,7 +97,10 @@ public sealed class IndicatorConfluenceCalibrationStrategyAdapter(
                 AnalysisIntervals = analysisIntervals.Distinct().ToArray(),
                 BaseCandleGapPolicy = request.TimeframeTopology.AlignmentPolicy,
                 MaximumParallelStrategies = 1,
-                StrategyExecutionMode = StrategyExecutionMode.Sequential
+                StrategyExecutionMode = StrategyExecutionMode.Sequential,
+                LegacyPositionManagement = legacyManagement,
+                ImprovedPositionManagement = improvedManagement,
+                StructuralPositionManagement = structuralManagement
                 // SourceKind left at its default (OandaCandles): no Candles are supplied below,
                 // so BacktestCandidateEvaluator lets the engine read historical data itself,
                 // exactly like a normal backtest.

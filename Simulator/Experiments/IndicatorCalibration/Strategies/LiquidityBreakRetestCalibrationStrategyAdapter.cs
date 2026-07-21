@@ -5,6 +5,7 @@ using Simulator.Calibration;
 using Simulator.Experiments.IndicatorCalibration.Persistence;
 using Simulator.Models;
 using Simulator.Services;
+using TradeManager;
 
 namespace Simulator.Experiments.IndicatorCalibration.Strategies;
 
@@ -53,7 +54,13 @@ public sealed class LiquidityBreakRetestCalibrationStrategyAdapter(
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(backtests);
 
-        StructuralConfluenceStrategyOptions baselineStructuralOptions = _resolveBaselineOptions(request.Instrument);
+        StructuralConfluenceStrategyOptions baselineStructuralOptions = CalibrationTimeframeStack.ApplyTo(
+            _resolveBaselineOptions(request.Instrument), request.TimeframeTopology);
+        (PositionManagementOptions legacyManagement, PositionManagementOptions improvedManagement,
+                PositionManagementOptions structuralManagement) =
+            CalibrationTimeframeStack.BuildPositionManagementOverrides(
+                request.TimeframeTopology.ExecutionInterval, request.TimeframeTopology.SetupInterval,
+                request.TimeframeTopology.TrendIntervals[0]);
 
         var analysisIntervals = new List<BarInterval> { request.TimeframeTopology.SetupInterval };
         analysisIntervals.AddRange(request.TimeframeTopology.ConfirmationIntervals);
@@ -71,7 +78,10 @@ public sealed class LiquidityBreakRetestCalibrationStrategyAdapter(
                 AnalysisIntervals = analysisIntervals.Distinct().ToArray(),
                 BaseCandleGapPolicy = request.TimeframeTopology.AlignmentPolicy,
                 MaximumParallelStrategies = 1,
-                StrategyExecutionMode = StrategyExecutionMode.Sequential
+                StrategyExecutionMode = StrategyExecutionMode.Sequential,
+                LegacyPositionManagement = legacyManagement,
+                ImprovedPositionManagement = improvedManagement,
+                StructuralPositionManagement = structuralManagement
             },
             WarmupDays = request.Timeline.WarmupDays,
             Cache = new FileCalibrationCandidateCache(Path.Combine(candidateCacheRootDirectory, calibrationId))

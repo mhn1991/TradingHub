@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Agent.Configuration;
 using Agent.Factories;
+using Agent.Strategies.StructuralConfluence;
 using Brokers.Models;
 using ChartAnnotator.Engine;
 using PortfolioManager.Correlation;
@@ -75,7 +76,8 @@ public sealed record ResolvedAgentPackage
         {
             TradingAgentTypeIds.LegacyProgressive => profile.LegacyManagement,
             TradingAgentTypeIds.ImprovedProgressive => profile.ImprovedManagement,
-            TradingAgentTypeIds.StructuralConfluence => profile.StructuralManagement,
+            TradingAgentTypeIds.StructuralConfluence =>
+                AlignStructuralManagementInterval(profile.StructuralManagement, definition.ReadStructuralOptions()),
             _ => throw new InvalidOperationException($"Unknown agent type '{definition.AgentTypeId}'.")
         };
         string agentHash = Hash(JsonSerializer.Serialize(definition));
@@ -129,6 +131,30 @@ public sealed record ResolvedAgentPackage
 
     private static string Hash(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    /// <summary>
+    /// Re-pins <see cref="PositionManagementOptions.FastStructureInterval"/>/
+    /// <see cref="PositionManagementOptions.MainStructureInterval"/>/
+    /// <see cref="PositionManagementOptions.ThesisInterval"/> to the resolved agent's own
+    /// <see cref="StructuralConfluenceStrategyOptions.TriggerInterval"/>/<c>SetupInterval</c>/
+    /// <c>ContextInterval</c>, keeping every other tuned field on <paramref name="management"/>
+    /// untouched. Without this, an agent configured at a non-default cadence would silently inherit
+    /// whatever fixed interval values <paramref name="management"/> happened to carry (typically the
+    /// 5m/15m/1h historical defaults) instead of the agent it is actually paired with - this is the
+    /// single shared resolution path simulation, parity, and live all go through
+    /// (<c>LiveTradingPolicyBundle.FromResolvedPackage</c> copies <see cref="PositionManagement"/>
+    /// straight through), so fixing it here fixes all three. At the
+    /// 5m/15m/1h default this reproduces the input unchanged - zero behavior change for every
+    /// deployment that exists today.
+    /// </summary>
+    private static PositionManagementOptions AlignStructuralManagementInterval(
+        PositionManagementOptions management, StructuralConfluenceStrategyOptions structural) =>
+        management with
+        {
+            FastStructureInterval = structural.TriggerInterval,
+            MainStructureInterval = structural.SetupInterval,
+            ThesisInterval = structural.ContextInterval
+        };
 }
 
 public interface IAgentPackageResolver
