@@ -1,4 +1,5 @@
 using Agent.Models;
+using Agent.Strategies;
 using Agent.Strategies.StructuralConfluence.Evidence;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
@@ -7,10 +8,10 @@ namespace Agent.Strategies.StructuralConfluence.Playbooks;
 
 /// <summary>
 /// Entry driven purely by indicator confluence rather than structure: ADX/DMI establishes trend
-/// presence and direction, RSI confirms momentum is turning in that direction (and isn't already
-/// exhausted), and Bollinger Bands confirm there's enough volatility for the move to travel. Each
-/// indicator answers a different question - deliberately not stacking two indicators that measure
-/// the same thing (e.g. RSI and CCI would both just be momentum oscillators agreeing with
+/// presence and direction, RsiBollingerSignalPolicy confirms momentum/volatility are actually
+/// signaling (not just sitting at some static level), and ADX supplies the trend-regime filter.
+/// Each indicator answers a different question - deliberately not stacking two indicators that
+/// measure the same thing (e.g. RSI and CCI would both just be momentum oscillators agreeing with
 /// themselves). Has no zone/pool/level to anchor risk to, so unlike the other three playbooks its
 /// stop/target is a plain ATR multiple.
 /// </summary>
@@ -48,25 +49,40 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
             ? evidence.Setup.Indicators.Atr ?? evidence.Indicators.Atr
             : evidence.Indicators.Atr ?? evidence.Setup.Indicators.Atr;
 
-        RsiAnalysisSnapshot rsi = indicators.RsiAnalysis;
-        decimal? rsiValue = indicators.Rsi;
-        BollingerAnalysisSnapshot bollinger = indicators.BollingerAnalysis;
-
         bool trendPasses = adx.Adx is decimal adxValue && adxValue >= _options.MinimumAdx &&
             (!_options.RequireTrendStrengthening || adx.IsTrendStrengthening);
 
-        bool momentumDirectionMatches = buy
-            ? rsi.MomentumDirection == MomentumDirection.Rising
-            : rsi.MomentumDirection == MomentumDirection.Falling;
-        bool momentumInBand = rsiValue is decimal rsiVal &&
-            (buy
-                ? rsiVal >= _options.MinimumRsiForBuy && rsiVal <= _options.MaximumRsiForBuy
-                : rsiVal >= _options.MinimumRsiForSell && rsiVal <= _options.MaximumRsiForSell);
-        bool momentumPasses = momentumDirectionMatches && momentumInBand;
+        // The actual momentum/volatility SIGNALS, not static levels: RsiBollingerSignalPolicy reads
+        // RSI relationship freshness/strength (RsiRelationshipSnapshot.AgeCandles/Strength - a stale
+        // divergence from many bars ago no longer counts) and a genuine Bollinger squeeze-RELEASE
+        // event (SqueezeReleased), not just "currently not squeezed." HasEntryTrigger is true when
+        // either a fresh, strong-enough RSI relationship or a directional squeeze release actually
+        // fired; IsVetoed is a hard block on a strong opposing RSI relationship or opposing
+        // Bollinger expansion, independent of everything else passing.
+        RsiBollingerSignalAssessment signal = RsiBollingerSignalPolicy.Evaluate(
+            evidence.Trigger, direction, _options.RsiBollingerSignals);
 
-        bool volatilityPasses = _options.RequireSqueezeBreakout
-            ? !bollinger.IsSqueeze && bollinger.WidthDirection == VolatilityDirection.Expanding
-            : !bollinger.IsSqueeze;
+        // A second, faster entry path alongside RsiBollingerSignalPolicy's own trigger: RSI
+        // divergence/convergence already confirmed (signal.AlignedRsiRelationship, same freshness/
+        // strength bar as the policy's other checks) AND RSI sitting in the oversold/overbought
+        // zone (the reversal setup) AND Bollinger still compressed (energy building, not yet
+        // released) AND StochRSI's fast line already snapping to an extreme - StochRSI reacts to a
+        // momentum shift several bars before raw RSI would, so this can confirm the move is
+        // actually underway before RsiBollingerSignalPolicy's own release/position trigger would
+        // fire. Mirrored for sell: overbought RSI, fast line <= (100 - threshold).
+        RsiAnalysisSnapshot rsi = indicators.RsiAnalysis;
+        BollingerAnalysisSnapshot bollinger = indicators.BollingerAnalysis;
+        StochRsiSnapshot stochRsi = indicators.StochRsi;
+        bool rsiExtremeZone = buy ? rsi.Zone == RsiZone.Oversold : rsi.Zone == RsiZone.Overbought;
+        bool stochRsiExtreme = stochRsi.Fast is decimal stochFast &&
+            (buy
+                ? stochFast >= _options.StochRsiFastExtremeThreshold
+                : stochFast <= 100m - _options.StochRsiFastExtremeThreshold);
+        bool stochRsiEarlyTrigger = signal.AlignedRsiRelationship is not null &&
+            rsiExtremeZone && bollinger.IsSqueeze && stochRsiExtreme;
+
+        bool signalNotVetoed = !signal.IsVetoed;
+        bool signalTriggered = signal.HasEntryTrigger || stochRsiEarlyTrigger;
 
         bool contextPasses = !_options.RequireContextAlignment || IsContextAligned(evidence, direction);
         bool cooldownPasses = IsCooldownElapsed(evidence, state);
@@ -74,27 +90,24 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         decimal adxQuality = adx.Adx is decimal adxForQuality
             ? Math.Clamp(50m + (adxForQuality - _options.MinimumAdx) * 2m, 0m, 100m)
             : 0m;
-        // Distance from neutral (50), not the raw RSI value - using RSI itself as quality made
-        // Confidence = min(gate qualities) silently require RSI >= MinimumConfidence (55 by
-        // default) for every buy, since that gate's quality would otherwise sit below the
-        // confidence floor even when the actual momentum gate (momentumPasses above) had already
-        // passed. Centering on neutral means a fresh momentum shift right off 50 doesn't get
-        // penalized just for not yet being deep into overbought/oversold territory.
-        decimal rsiQuality = rsiValue is decimal rsiForQuality
-            ? Math.Clamp(50m + (buy ? rsiForQuality - 50m : 50m - rsiForQuality) * 1.5m, 0m, 100m)
-            : 0m;
-        decimal bollingerQuality = bollinger.WidthPercentile is decimal widthPercentile
-            ? Math.Clamp(widthPercentile, 0m, 100m)
-            : 50m;
+        // Centered on 50 (neutral), shifted by the policy's own ±MaximumConfidenceAdjustment (8 by
+        // default) range - keeps this in the same 0-100 scale every other gate's quality uses
+        // without letting a merely-adequate signal silently sit below MinimumConfidence the way a
+        // raw indicator value used directly as quality did before.
+        decimal signalQuality = Math.Clamp(
+            50m + signal.ConfidenceAdjustment * 5m + (stochRsiEarlyTrigger ? 10m : 0m), 0m, 100m);
         decimal contextQuality = buy
             ? evidence.ContextEvidence.BullishQuality
             : evidence.ContextEvidence.BearishQuality;
 
+        string vetoReasonCode = signal.VetoReasonCode is { } veto
+            ? $"StructuralIndicator{veto}"
+            : "StructuralIndicatorSignalVetoed";
         var gates = new List<MandatoryGate>
         {
             Gate("Trend", trendPasses, adxQuality, "StructuralIndicatorTrendBelowMinimum"),
-            Gate("Momentum", momentumPasses, rsiQuality, "StructuralIndicatorMomentumNotAligned"),
-            Gate("Volatility", volatilityPasses, bollingerQuality, "StructuralIndicatorVolatilityInsufficient"),
+            Gate("SignalVeto", signalNotVetoed, signalNotVetoed ? 70m : 0m, vetoReasonCode),
+            Gate("SignalTrigger", signalTriggered, signalQuality, "StructuralIndicatorSignalMissing"),
             Gate("Context", contextPasses, Math.Clamp(contextQuality, 0m, 100m), "StructuralIndicatorContextOpposed"),
             Gate("Cooldown", cooldownPasses, cooldownPasses ? 70m : 0m, "StructuralIndicatorCooldownActive")
         };
@@ -143,7 +156,7 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         gates.Add(Gate("NotAlreadySignaled", notAlreadySignaled, notAlreadySignaled ? 70m : 0m,
             "StructuralIndicatorAlreadySignaled"));
 
-        decimal confidence = StructuralPlaybookRules.Confidence(gates, 0m, 0m, 0m);
+        decimal confidence = StructuralPlaybookRules.Confidence(gates, 0m, signal.ConfidenceAdjustment, 0m);
         bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
 
         return new PlaybookEvaluation
@@ -155,18 +168,18 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
             SetupId = setupId,
             CatalystAt = catalystAt,
             MandatoryGates = gates.AsReadOnly(),
-            SupportingEvidence = BuildSupport(trendPasses, momentumPasses, volatilityPasses, contextPasses),
-            ConflictingEvidence = [],
+            SupportingEvidence = BuildSupport(trendPasses, signal, contextPasses, stochRsiEarlyTrigger),
+            ConflictingEvidence = signal.IsVetoed ? [vetoReasonCode] : [],
             ConfidenceContributions =
             [
                 new("Trend", 0m, trendPasses ? "StructuralIndicatorTrendAligned" : "StructuralIndicatorTrendMissing"),
-                new("Momentum", 0m, momentumPasses ? "StructuralIndicatorMomentumAligned" : "StructuralIndicatorMomentumMissing")
+                new("IndicatorSignal", signal.ConfidenceAdjustment, signal.Explanation)
             ],
             ContextQuality = Math.Max(adxQuality, contextQuality),
             LocationQuality = 0m,
-            CatalystQuality = rsiQuality,
-            TriggerQuality = rsiQuality,
-            ConfirmationQuality = bollingerQuality,
+            CatalystQuality = signalQuality,
+            TriggerQuality = signalQuality,
+            ConfirmationQuality = signalQuality,
             GeometryQuality = geometry.Quality,
             Confidence = confidence,
             ExpiresAt = catalystAt + StructuralPlaybookRules.Bars(evidence.Trigger.Interval, _root.MaximumArmedSetupBars),
@@ -181,9 +194,13 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         if (_options.MinimumBarsBetweenEntries <= 0)
             return true;
         // Only enforce after we have already produced a ready (and typically traded) identity.
+        // Reads LastReadyCatalystAt (only ever updated by a ready evaluation), not
+        // LastEvaluation.CatalystAt (updated by every evaluation, ready or not) - the latter let a
+        // non-ready bar's freshly minted catalyst keep pushing the cooldown window forward forever,
+        // permanently locking the playbook out after its first trade.
         if (state.LastReadySetupId is null)
             return true;
-        DateTimeOffset? lastSignalAt = state.LastEvaluation?.CatalystAt;
+        DateTimeOffset? lastSignalAt = state.LastReadyCatalystAt;
         if (lastSignalAt is null)
             return true;
         TimeSpan cooldown = StructuralPlaybookRules.Bars(evidence.Trigger.Interval, _options.MinimumBarsBetweenEntries);
@@ -231,8 +248,16 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         decimal reward = buy ? target - entry : entry - target;
         if (risk <= 0m || reward <= 0m)
             return Invalid(entry, "StructuralIndicatorGeometryInvalid");
+        if (executableSpread > 0m && reward < executableSpread * _options.MinimumRewardToSpreadMultiple)
+            return Invalid(entry, "StructuralIndicatorRewardBelowCostFloor");
 
         decimal rewardRisk = reward / risk;
+        // Matches the other three playbooks' floor (via StructuralGeometryBuilder.Build), which
+        // this ATR-multiple geometry bypassed entirely before - StopAtr/TargetAtr fixed the ratio
+        // regardless of _root.MinimumRewardRisk, so raising --minimum-rr silently had no effect
+        // here. Reason code matches StructuralGeometryBuilder's for consistent funnel reporting.
+        if (rewardRisk < _root.MinimumRewardRisk)
+            return Invalid(entry, "StructuralRewardRiskBelowMinimum");
         decimal quality = Math.Clamp(50m + Math.Min(40m, (rewardRisk - 1m) * 15m), 0m, 100m);
         return new StructuralGeometry
         {
@@ -264,12 +289,17 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         ReasonCode = reasonCode
     };
 
-    private static IReadOnlyList<string> BuildSupport(bool trend, bool momentum, bool volatility, bool context)
+    private static IReadOnlyList<string> BuildSupport(
+        bool trend, RsiBollingerSignalAssessment signal, bool context, bool stochRsiEarlyTrigger)
     {
         var result = new List<string>();
         if (trend) result.Add("StructuralIndicatorTrendAligned");
-        if (momentum) result.Add("StructuralIndicatorMomentumAligned");
-        if (volatility) result.Add("StructuralIndicatorVolatilitySupportive");
+        if (signal.RsiMomentumAligned) result.Add("StructuralIndicatorMomentumAligned");
+        if (signal.AlignedRsiRelationship is not null)
+            result.Add($"StructuralIndicatorRsi{signal.AlignedRsiRelationship.Type}");
+        if (signal.BollingerReleaseTrigger) result.Add("StructuralIndicatorBollingerSqueezeRelease");
+        else if (signal.BollingerExpansionAligned) result.Add("StructuralIndicatorBollingerExpansionAligned");
+        if (stochRsiEarlyTrigger) result.Add("StructuralIndicatorStochRsiEarlyTrigger");
         if (context) result.Add("StructuralIndicatorContextAligned");
         return result.AsReadOnly();
     }

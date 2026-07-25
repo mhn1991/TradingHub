@@ -335,6 +335,29 @@ internal sealed record BacktestCommandOptions
                 ?? values.GetValueOrDefault("strategy")
                 ?? "legacy,improved")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        // Portfolio v1: every strategy in --strategies trades every instrument in --instruments
+        // (cartesian). Same source/broker for all of them - --source stays a single global flag.
+        // Mode is left at its record default (Shadow) rather than forced to Executable: Shadow
+        // vs Executable isn't read anywhere in the backtest engine yet (only validated for the
+        // live host's "one owner per instrument" rule), so setting it would only risk tripping
+        // that validation on multi-strategy/instrument runs for no behavioural benefit here.
+        string[] instrumentTokens = (values.GetValueOrDefault("instruments") ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Concat(ReadInstrumentsFile(values.GetValueOrDefault("instruments-file")))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        IReadOnlyList<StrategyInstrumentAssignment>? strategyAssignments = instrumentTokens.Length == 0
+            ? null
+            : instrumentTokens
+                .Select(token => new InstrumentKey(token))
+                .SelectMany(instrument => strategies.Select(strategy => new StrategyInstrumentAssignment
+                {
+                    StrategyType = TradingAgentTypeIds.Normalize(strategy),
+                    Instrument = instrument
+                }))
+                .ToArray();
+
         if (strategies.Any(item => string.Equals(item, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase)) &&
             (BarIntervalParser.CompareDuration(structuralTriggerInterval, structuralSetupInterval) > 0 ||
              BarIntervalParser.CompareDuration(structuralSetupInterval, structuralContextInterval) > 0))
@@ -418,6 +441,7 @@ internal sealed record BacktestCommandOptions
             PrecisionMode = precision,
             SourceKind = source,
             ImportedCandlePath = importedPath,
+            StrategyAssignments = strategyAssignments,
             TrendInterval = ParseInterval(values.GetValueOrDefault("trend-interval") ?? "2h"),
             SecondaryTrendIntervals = secondaryTrendIntervals,
             SetupIntervals = setupIntervals,
@@ -960,6 +984,24 @@ internal sealed record BacktestCommandOptions
         if (!TimeOnly.TryParseExact(value, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out TimeOnly parsed))
             throw new ArgumentException($"UTC time '{value}' must use HH:mm.");
         return parsed;
+    }
+
+    /// <summary>
+    /// One instrument key per line; blank lines and lines starting with '#' are ignored so a
+    /// watchlist file can carry comments. Merged (union, deduplicated) with any --instruments
+    /// tokens given on the same command line rather than requiring one or the other.
+    /// </summary>
+    private static IEnumerable<string> ReadInstrumentsFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return [];
+        string resolved = ResolvePath(path);
+        if (!File.Exists(resolved))
+            throw new ArgumentException($"--instruments-file '{resolved}' does not exist.");
+        return File.ReadLines(resolved)
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith('#'))
+            .ToArray();
     }
 
     private static string ResolvePath(string path)

@@ -689,7 +689,14 @@ Usage:
   dotnet run --project BacktestRunner -- --request-json path/to/BacktestRequest.json
 
 Options:
-  --instrument FX:EUR/USD                  (default: liquid major)
+  --instrument FX:EUR/USD                  (default: liquid major; candle-request template - still
+                                             required even when --instruments is set)
+  --instruments FX:EUR/USD,FX:GBP/USD,...  (portfolio v1: every --strategies entry trades every
+                                             instrument listed here, cartesian; all from the same
+                                             --source. Use --account-mode shared to pool capital
+                                             and enable correlation-aware risk across them.)
+  --instruments-file watchlist.txt         (one instrument key per line, '#' comments allowed;
+                                             merged/deduplicated with --instruments if both given)
   --from YYYY-MM-DD                        (default: start of previous UTC month)
   --to YYYY-MM-DD                          (default: start of current UTC month)
   --execution-interval 1m / --base-interval 1m

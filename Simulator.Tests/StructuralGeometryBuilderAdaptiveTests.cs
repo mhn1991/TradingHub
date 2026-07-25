@@ -111,7 +111,7 @@ public sealed class StructuralGeometryBuilderAdaptiveTests
         Liquidity = new LiquidityPacket(setup.Liquidity.Pools, [], []),
         TriggerEvidence = new TriggerPacket([], []),
         Indicators = new IndicatorConfirmationPacket(
-            atr, null, CciAnalysisSnapshot.Empty, null, RsiAnalysisSnapshot.Empty,
+            atr, null, CciAnalysisSnapshot.Empty, null, RsiAnalysisSnapshot.Empty, StochRsiSnapshot.Empty,
             BollingerAnalysisSnapshot.Empty, AdxAnalysisSnapshot.Empty, null)
     };
 

@@ -223,6 +223,15 @@ public sealed record SimulatedTradeRecord
     public string? ManagementProfileSwitchReason { get; init; }
     public decimal EntryConfidence { get; init; }
     public string EntrySetupType { get; init; } = "Unknown";
+    /// <summary>
+    /// AgentDecision.PlaybookId at entry (e.g. "structural.indicator-confluence") - null for
+    /// agents that don't set it (Legacy/Improved Progressive). Lets trade management vary by
+    /// which playbook produced the trade rather than only by strategy id - see
+    /// PlaybookAwareTradeManager, which uses this to give IndicatorConfluencePlaybook's ATR-only
+    /// trades (no zone/pool to anchor a structural trail to) their own profile instead of
+    /// StructuralDefaults' zone-anchored one.
+    /// </summary>
+    public string? EntryPlaybookId { get; init; }
     public string EntrySession { get; init; } = "Unknown";
     public string EntryVolatilityBucket { get; init; } = "Unknown";
     public decimal? EntryRegimeConfidence { get; init; }

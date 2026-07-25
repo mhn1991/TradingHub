@@ -248,7 +248,7 @@ public sealed class StructuralTargetMapBuilderTests
         Liquidity = new LiquidityPacket([], [], []),
         TriggerEvidence = new TriggerPacket([], []),
         Indicators = new IndicatorConfirmationPacket(
-            atr, null, CciAnalysisSnapshot.Empty, null, RsiAnalysisSnapshot.Empty,
+            atr, null, CciAnalysisSnapshot.Empty, null, RsiAnalysisSnapshot.Empty, StochRsiSnapshot.Empty,
             BollingerAnalysisSnapshot.Empty, AdxAnalysisSnapshot.Empty, null)
     };
 

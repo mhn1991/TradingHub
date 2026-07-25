@@ -413,10 +413,20 @@ public sealed record AnchoredValueReference
     public decimal? DataCoveragePercent { get; init; }
 }
 
+/// <summary>Stochastic of RSI (see StochRsiState) - Fast is %K, Slow is %D.</summary>
+public sealed record StochRsiSnapshot
+{
+    public static StochRsiSnapshot Empty { get; } = new();
+
+    public decimal? Fast { get; init; }
+    public decimal? Slow { get; init; }
+}
+
 public sealed record IndicatorSnapshot
 {
     public decimal? Atr { get; init; }
     public decimal? Rsi { get; init; }
+    public StochRsiSnapshot StochRsi { get; init; } = StochRsiSnapshot.Empty;
     public decimal? BollingerMiddle { get; init; }
     public decimal? BollingerUpper { get; init; }
     public decimal? BollingerLower { get; init; }

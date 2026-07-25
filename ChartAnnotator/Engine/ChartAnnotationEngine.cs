@@ -109,6 +109,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         state.Atr.Update(candleEvent.Candle);
         bool atrBecameReady = !atrWasReady && state.Atr.IsReady;
         state.Rsi.Update(candleEvent.Candle.Prices.Close);
+        state.StochRsi.Update(state.Rsi.IsReady ? state.Rsi.Current : null);
         state.Bollinger.Update(candleEvent.Candle.Prices.Close);
         state.Cci.Update(candleEvent.Candle);
         state.Sma50.Update(candleEvent.Candle.Prices.Close);
@@ -212,6 +213,9 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         {
             Atr = state.Atr.IsReady ? state.Atr.Current : null,
             Rsi = state.Rsi.IsReady ? state.Rsi.Current : null,
+            StochRsi = state.StochRsi.IsReady
+                ? new StochRsiSnapshot { Fast = state.StochRsi.Fast, Slow = state.StochRsi.Slow }
+                : StochRsiSnapshot.Empty,
             BollingerMiddle = state.Bollinger.IsReady ? state.Bollinger.Middle : null,
             BollingerUpper = state.Bollinger.IsReady ? state.Bollinger.Upper : null,
             BollingerLower = state.Bollinger.IsReady ? state.Bollinger.Lower : null,
@@ -419,6 +423,8 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
                 options.VolumeHighRelativeThreshold,
                 options.VolumeSpikeRelativeThreshold);
             Rsi = new RsiState(options.RsiPeriod);
+            StochRsi = new StochRsiState(
+                options.StochRsiPeriod, options.StochRsiFastSmoothing, options.StochRsiSlowSmoothing);
             RsiAnalysis = new RsiAnalysisState(
                 Math.Max(options.IndicatorCapacity, options.RsiMomentumLookback + 1),
                 Math.Max(options.SwingCapacity, 2),
@@ -492,6 +498,7 @@ public sealed class ChartAnnotationEngine : IChartAnnotator, ICalibratableChartA
         public AtrAnalysisState AtrAnalysis { get; }
         public VolumeAnalysisState VolumeAnalysis { get; }
         public RsiState Rsi { get; }
+        public StochRsiState StochRsi { get; }
         public RsiAnalysisState RsiAnalysis { get; }
         public BollingerState Bollinger { get; }
         public CciState Cci { get; }

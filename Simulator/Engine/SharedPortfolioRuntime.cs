@@ -68,10 +68,11 @@ public sealed class SharedPortfolioRuntime
     /// Feeds every portfolio instrument's completed trailing-return observation (e.g. a
     /// closed 1h candle's log return) for one timestamp into the correlation engine in a
     /// single call, so pair correlation can match observations by exact timestamp. Must
-    /// be called with strictly increasing timestamps. Today's simulator streams one
-    /// instrument per run, so the engine always passes a one-entry dictionary; once the
-    /// multi-instrument portfolio clock lands, every basket instrument closing at the
-    /// same timestamp should be included in one call.
+    /// be called with strictly increasing timestamps - <see cref="StreamingComparativeEngine"/>
+    /// buffers per-instrument returns by timestamp and flushes once per distinct correlation-
+    /// interval close (relying on its merged candle stream's global timestamp ordering) rather
+    /// than calling this once per instrument, which used to violate strict ordering the moment a
+    /// second multi-instrument portfolio run had two instruments close at the same timestamp.
     /// </summary>
     internal void ObserveCompletedReturns(DateTimeOffset availableAt, IReadOnlyDictionary<InstrumentKey, decimal> completedReturns)
     {
@@ -83,11 +84,9 @@ public sealed class SharedPortfolioRuntime
 
     /// <summary>
     /// Real correlation evaluation for a candidate against currently open/reserved
-    /// portfolio directions. Internal (rather than private) so it can be exercised
-    /// directly by tests without needing a full multi-instrument market-data feed -
-    /// today's simulator only streams one instrument per run, so this is normally
-    /// exercised end-to-end only with synthetic multi-instrument decisions until the
-    /// multi-instrument portfolio clock lands.
+    /// portfolio directions. Internal (rather than private) so it can be exercised directly by
+    /// tests with synthetic multi-instrument decisions, without needing a full multi-instrument
+    /// market-data feed.
     /// </summary>
     internal CorrelationPenaltyDecision EvaluateCorrelation(
         InstrumentKey candidate,

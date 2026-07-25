@@ -138,6 +138,7 @@ public sealed class StreamingComparativeEngine
                 annotationOptions: resolvedAnnotationOptions,
                 analysisProfile: sessionProfile,
                 positionManagementOptions: options.Runtime.GetPositionManagement(id),
+                playbookManagementOverrides: options.Runtime.GetPlaybookManagementOverrides(id),
                 managementInterval: options.Runtime.ResolveManagementInterval(id),
                 positionSizingOptions: options.Runtime.PositionSizing,
                 adaptiveRiskOptions: options.Runtime.AdaptiveRisk,
@@ -313,6 +314,27 @@ public sealed class StreamingComparativeEngine
         IReadOnlySet<BarInterval> emptyClosed = new HashSet<BarInterval>();
         var pendingExecutionBatch = new List<MarketFrame>();
         InstrumentKey? pendingBatchInstrument = null;
+
+        // SharedPortfolioRuntime.ObserveCompletedReturns must see every instrument's completed
+        // correlation-interval return for a given timestamp in one call (it enforces strictly
+        // increasing timestamps - see its own doc comment about "once the multi-instrument
+        // portfolio clock lands"). The merged stream below hands us one instrument's candle per
+        // iteration, tie-broken by instrument ordinal when timestamps match, so several
+        // instruments closing at the same correlation-interval timestamp arrive as consecutive
+        // (never interleaved with a different timestamp) iterations - buffer by timestamp and
+        // flush on change instead of calling per-instrument, which used to throw
+        // "Correlation observations must be chronological" the moment a second instrument's
+        // candle closed at a timestamp already observed.
+        DateTimeOffset? pendingCorrelationAt = null;
+        var pendingCorrelationReturns = new Dictionary<InstrumentKey, decimal>();
+        void FlushPendingCorrelation()
+        {
+            if (pendingCorrelationAt is not DateTimeOffset at || pendingCorrelationReturns.Count == 0)
+                return;
+            sharedPortfolio!.ObserveCompletedReturns(at, new Dictionary<InstrumentKey, decimal>(pendingCorrelationReturns));
+            pendingCorrelationReturns.Clear();
+            pendingCorrelationAt = null;
+        }
 
         IReadOnlyList<InstrumentKey> tradedInstruments = _strategies
             .Select(item => item.Instrument)
@@ -649,9 +671,11 @@ public sealed class StreamingComparativeEngine
                             if (pipeline.LastCorrelationClose is decimal previousClose && previousClose > 0m && close > 0m)
                             {
                                 decimal logReturn = (decimal)Math.Log((double)(close / previousClose));
-                                sharedPortfolio.ObserveCompletedReturns(
-                                    closedEvent.Candle.CloseTime ?? marketCandle.AvailableAt,
-                                    new Dictionary<InstrumentKey, decimal> { [closedEvent.Instrument] = logReturn });
+                                DateTimeOffset closeAt = closedEvent.Candle.CloseTime ?? marketCandle.AvailableAt;
+                                if (pendingCorrelationAt is DateTimeOffset currentBatch && currentBatch != closeAt)
+                                    FlushPendingCorrelation();
+                                pendingCorrelationAt = closeAt;
+                                pendingCorrelationReturns[closedEvent.Instrument] = logReturn;
                             }
                             pipeline.LastCorrelationClose = close;
                         }
@@ -732,6 +756,8 @@ public sealed class StreamingComparativeEngine
                         $"Strategy '{failed.StrategyName}' failed at sequence {failed.FailedSequence}: {failed.FailureMessage}");
                 }
             }
+
+            FlushPendingCorrelation();
 
             foreach (StrategyWorkerHost host in workerHosts)
                 host.Complete();

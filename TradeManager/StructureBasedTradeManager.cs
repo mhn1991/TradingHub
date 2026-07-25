@@ -406,6 +406,46 @@ public record PositionManagementOptions
     };
 
     /// <summary>
+    /// IndicatorConfluencePlaybook's own profile - see PlaybookAwareTradeManager, which routes its
+    /// trades here instead of StructuralDefaults. StructuralDefaults' BreakEvenActivationR/
+    /// StructureTrailActivationR are deliberately low (0.3R) specifically because a real nearby
+    /// Supply/Demand zone justifies tightening the stop that early; IndicatorConfluencePlaybook has
+    /// no zone/pool/level to anchor risk to at all (plain ATR-multiple stop/target), so the same
+    /// 0.3R threshold was cutting winners to ~0.37R average (realized) against a planned 1.6R
+    /// target while losers ran to ~-1.05R - confirmed via replay: trades routinely reached
+    /// 0.5-1.0R+ maximum favourable excursion before giving almost all of it back. Based on
+    /// ImprovedDefaults (already a patient 1R/2R schedule) rather than hand-tuned from scratch,
+    /// with structure-dependent features explicitly turned off since there is no real structure
+    /// behind these trades to check.
+    /// </summary>
+    public static PositionManagementOptions IndicatorConfluenceDefaults { get; } = ImprovedDefaults with
+    {
+        StructuralManagementPolicyRevision = "indicator-confluence-v1",
+        SupplyDemandManagementEnabled = false,
+        LiquidityManagementEnabled = false,
+        EnableStructuralDeteriorationReduction = false,
+        ScaleOutRules =
+        [
+            new ScaleOutRule
+            {
+                StageId = "scale-1r",
+                ActivationR = 1m,
+                MinimumOpenProfitR = 1m,
+                FractionOfInitialQuantity = 0.15m,
+                TriggerMode = ScaleOutTriggerMode.RThreshold
+            },
+            new ScaleOutRule
+            {
+                StageId = "scale-2r",
+                ActivationR = 2m,
+                MinimumOpenProfitR = 1.25m,
+                FractionOfInitialQuantity = 0.15m,
+                TriggerMode = ScaleOutTriggerMode.RThreshold
+            }
+        ]
+    };
+
+    /// <summary>
     /// Dedicated bracket-management policy for the structural-confluence agent. Structural
     /// thesis inputs are pinned when the position opens; later analysis may manage that thesis
     /// but must not silently replace its zone, liquidity pool, or policy revision.
@@ -597,6 +637,9 @@ public sealed record ManagedTradeState
     public string StrategyId { get; init; } = "unknown";
     public string InstrumentGroup { get; init; } = "Unknown";
     public string SetupType { get; init; } = "Unknown";
+    /// <summary>AgentDecision.PlaybookId at entry, when the originating agent sets one. See
+    /// PlaybookAwareTradeManager, which dispatches on this.</summary>
+    public string? PlaybookId { get; init; }
     public string EntrySession { get; init; } = "Unknown";
     public string EntryVolatilityBucket { get; init; } = "Unknown";
     public decimal EntryConfidence { get; init; }

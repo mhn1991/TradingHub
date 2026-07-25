@@ -28,18 +28,39 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
     {
         decimal price = evidence.Trigger.LatestCandle.Prices.Close;
         // Prefer nearer zones, then HTF-aligned side (demand in bullish context / supply in
-        // bearish), then quality. Avoids always taking a counter-trend nearest print.
-        SupplyDemandZone? zone = evidence.SupplyDemand.Zones
+        // bearish), then quality. Avoids always taking a counter-trend nearest print. Evaluates
+        // every permitted zone (not just the single top-ranked one) so a zone still waiting on its
+        // trigger/confirmation isn't dropped from consideration just because a closer or
+        // higher-quality zone also happens to be live this same bar - see
+        // LiquidityBreakRetestPlaybook's identical fix for the starvation bug this prevents.
+        SupplyDemandZone[] candidates = evidence.SupplyDemand.Zones
             .Where(item => _options.PermittedZoneStates.Contains(item.State))
             .OrderBy(item => Distance(price, item))
             .ThenBy(item => ContextAffinityRank(evidence, item))
             .ThenByDescending(item => item.QualityScore)
             .ThenByDescending(item => item.AvailableAt)
             .ThenBy(item => item.ZoneId)
-            .FirstOrDefault();
-        if (zone is null)
+            .ToArray();
+        if (candidates.Length == 0)
             return Dormant("StructuralZoneUnavailable");
 
+        PlaybookEvaluation? best = null;
+        foreach (SupplyDemandZone candidate in candidates)
+        {
+            PlaybookEvaluation evaluation = EvaluateCandidate(candidate, evidence, state);
+            if (evaluation.IsReady && (best is null || evaluation.Confidence > best.Confidence))
+                best = evaluation;
+        }
+
+        // Nothing ready this bar - report on the top-ranked zone, matching the previous
+        // single-candidate telemetry/lifecycle for the common (non-ready) case.
+        return best ?? EvaluateCandidate(candidates[0], evidence, state);
+    }
+
+    private PlaybookEvaluation EvaluateCandidate(
+        SupplyDemandZone zone, StructuralEvidencePacket evidence, PlaybookRuntimeState state)
+    {
+        decimal price = evidence.Trigger.LatestCandle.Prices.Close;
         PriceActionDirection direction = zone.Type == SupplyDemandZoneType.Demand
             ? PriceActionDirection.Bullish
             : PriceActionDirection.Bearish;
@@ -48,6 +69,12 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
             .Where(item => item.ZoneId == zone.ZoneId && item.EventType is SupplyDemandZoneEventType.Approached or SupplyDemandZoneEventType.Touched or SupplyDemandZoneEventType.PartiallyMitigated)
             .OrderByDescending(item => item.AvailableAt).ThenBy(item => item.EventId).FirstOrDefault();
         bool priceAtZone = Distance(price, zone) == 0m;
+        // Without this, a zone touched once stayed a valid reaction catalyst forever - entry
+        // (built off current price) vs. a stop anchored to that ancient zone routinely blew past
+        // Geometry's MaximumStopDistanceAtr many bars later, once price had run on. See
+        // MaximumBarsSinceReaction's doc comment for the replay evidence behind this fix.
+        bool reactionFresh = reaction is not null &&
+            StructuralPlaybookRules.IsFresh(reaction.AvailableAt, evidence.AvailableAt, evidence.Setup.Interval, _options.MaximumBarsSinceReaction);
         bool invalidated = evidence.SupplyDemand.Events.Any(item => item.ZoneId == zone.ZoneId &&
             (item.EventType is SupplyDemandZoneEventType.Invalidated or SupplyDemandZoneEventType.Mitigated) &&
             item.AvailableAt <= evidence.AvailableAt);
@@ -102,7 +129,7 @@ public sealed class SupplyDemandPullbackPlaybook : IStructuralPlaybook
             Gate("ZoneTouches", zone.DistinctTouchCount <= _options.MaximumPriorTouches, locationQuality, "StructuralZoneTouchLimitExceeded"),
             Gate("ZonePenetration", zone.PenetrationRatio <= _options.MaximumPenetrationRatio, locationQuality, "StructuralZonePenetrationExceeded"),
             Gate("ZoneValid", !invalidated, locationQuality, "StructuralZoneInvalidated"),
-            Gate("ZoneReaction", reaction is not null || priceAtZone, reaction is null ? 50m : locationQuality, "StructuralZoneReactionMissing"),
+            Gate("ZoneReaction", reactionFresh || priceAtZone, reaction is null ? 50m : locationQuality, "StructuralZoneReactionMissing"),
             Gate("Trigger", triggerPresent, triggerPresent ? Math.Max(triggerQuality, 50m) : 0m, "StructuralTriggerMissing"),
             Gate("Confirmation", confirmationPasses, Math.Max(cci.Quality, alternativeConfirmation ? 55m : 0m), "StructuralConfirmationMissing")
         };

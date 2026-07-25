@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Strategies;
 using Agent.Strategies.StructuralConfluence;
+using Agent.Strategies.StructuralConfluence.Playbooks;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.CurrencyStrength;
@@ -437,18 +438,49 @@ public sealed record BacktestRuntimeOptions
     public PositionManagementOptions GetPositionManagement(string strategyId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
-        if (string.Equals(
-                strategyId.Trim(),
-                TradingAgentTypeIds.StructuralConfluence,
-                StringComparison.OrdinalIgnoreCase))
-        {
+        if (IsStructuralConfluence(strategyId))
             return StructuralPositionManagement;
-        }
 
         return strategyId.Contains("legacy", StringComparison.OrdinalIgnoreCase)
             ? LegacyPositionManagement
             : ImprovedPositionManagement;
     }
+
+    /// <summary>
+    /// Per-playbook position-management overrides for the structural-confluence agent - see
+    /// PlaybookAwareTradeManager. IndicatorConfluencePlaybook's trades have no zone/pool to anchor
+    /// risk to (plain ATR-multiple stop/target), so StructuralPositionManagement's zone-anchored
+    /// 0.3R breakeven/trail activation (appropriate for the other three playbooks) cuts its
+    /// winners far short of their planned target; this routes its trades to
+    /// PositionManagementOptions.IndicatorConfluenceDefaults instead. Null for every other
+    /// strategy id (Legacy/Improved Progressive never set AgentDecision.PlaybookId, so the
+    /// wrapper would be a permanent no-op for them anyway, but skip constructing it at all).
+    /// </summary>
+    public IReadOnlyDictionary<string, PositionManagementOptions>? GetPlaybookManagementOverrides(string strategyId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
+        return IsStructuralConfluence(strategyId)
+            ? new Dictionary<string, PositionManagementOptions>(StringComparer.Ordinal)
+            {
+                [IndicatorConfluencePlaybook.StableId] = PositionManagementOptions.IndicatorConfluenceDefaults
+            }
+            : null;
+    }
+
+    /// <summary>
+    /// True for the bare strategy type ("structural-confluence") and for a §7 multi-instrument
+    /// portfolio assignment id ("structural-confluence:FX:EUR/USD", the default
+    /// StrategyInstrumentAssignment.Id shape) alike - matching only the bare type, as this method
+    /// did before, silently misclassified every structural-confluence assignment in a portfolio
+    /// run as Improved instead (StrategyInstrumentAssignment.Id defaults to
+    /// "{StrategyType}:{Instrument.Value}", which never equals the bare type exactly). Still
+    /// heuristic like the legacy/improved Contains check below it - an explicit custom
+    /// StrategyInstrumentAssignment.Id that doesn't start with the type id won't match.
+    /// </summary>
+    private static bool IsStructuralConfluence(string strategyId) =>
+        string.Equals(strategyId.Trim(), TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase) ||
+        strategyId.Trim().StartsWith(
+            TradingAgentTypeIds.StructuralConfluence + ":", StringComparison.OrdinalIgnoreCase);
 
     public BarInterval ResolveManagementInterval(string strategyId)
     {

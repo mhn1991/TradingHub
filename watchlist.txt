@@ -1,0 +1,15 @@
+# Portfolio watchlist for BacktestRunner --instruments-file.
+# One instrument key per line; '#' starts a comment.
+
+# Major FX pairs (OANDA)
+FX:EUR/USD
+FX:GBP/USD
+FX:USD/JPY
+FX:USD/CHF
+FX:USD/CAD
+FX:AUD/USD
+FX:NZD/USD
+
+# Metals (OANDA)
+METAL:XAU/USD
+METAL:XAG/USD

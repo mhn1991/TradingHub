@@ -101,6 +101,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         IChartAnnotator? independentAnnotator = null,
         PositionManagementOptions? positionManagementOptions = null,
         IStructureBasedTradeManager? tradeManager = null,
+        IReadOnlyDictionary<string, PositionManagementOptions>? playbookManagementOverrides = null,
         BarInterval? managementInterval = null,
         RegimeManagementOptions? regimeManagement = null,
         TradeManagementCalibrationOptions? managementCalibrationOptions = null,
@@ -153,7 +154,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 "Management intervals must be ordered fast <= main <= thesis.",
                 nameof(positionManagementOptions));
         }
-        _tradeManager = tradeManager ?? (managementCalibrationOptions is { Enabled: true }
+        IStructureBasedTradeManager resolvedTradeManager = tradeManager ?? (managementCalibrationOptions is { Enabled: true }
             ? new CalibratedStructureBasedTradeManager(
                 _positionManagementOptions,
                 managementCalibrationArtifact ?? throw new ArgumentException(
@@ -163,6 +164,13 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             : regimeManagement is { Enabled: true }
                 ? new RegimeAwareStructureBasedTradeManager(_positionManagementOptions, regimeManagement)
                 : new StructureBasedTradeManager(_positionManagementOptions));
+        // Wraps rather than replaces resolvedTradeManager, so calibration/regime-awareness above
+        // is unaffected for every playbook without its own entry here - see
+        // PlaybookAwareTradeManager for why this exists (IndicatorConfluencePlaybook's ATR-only
+        // trades need a different profile than StructuralDefaults' zone-anchored one).
+        _tradeManager = playbookManagementOverrides is { Count: > 0 }
+            ? new PlaybookAwareTradeManager(resolvedTradeManager, playbookManagementOverrides)
+            : resolvedTradeManager;
         Pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));
     }
 
@@ -220,6 +228,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         AnalysisSharingMode analysisSharing = AnalysisSharingMode.SharedImmutableSnapshots,
         ChartAnnotationOptions? annotationOptions = null,
         PositionManagementOptions? positionManagementOptions = null,
+        IReadOnlyDictionary<string, PositionManagementOptions>? playbookManagementOverrides = null,
         BarInterval? managementInterval = null,
         PositionSizingOptions? positionSizingOptions = null,
         AdaptiveRiskOptions? adaptiveRiskOptions = null,
@@ -345,6 +354,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             decisionRuntime.Pipeline,
             independent,
             positionManagementOptions,
+            playbookManagementOverrides: playbookManagementOverrides,
             managementInterval: managementInterval,
             regimeManagement: regimeManagementOptions,
             managementCalibrationOptions: managementCalibrationOptions,
@@ -1041,6 +1051,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 CurrentManagementProfileId = decision.RegimeManagementProfileId ?? "default",
                 EntryConfidence = decision.Confidence,
                 EntrySetupType = decision.PriceActionSetupType?.ToString() ?? decision.ReasonCode ?? "Unknown",
+                EntryPlaybookId = decision.PlaybookId,
                 EntrySession = SessionName(timestamp),
                 EntryVolatilityBucket = VolatilityBucket(decision.AtrPercentile),
                 EntryRegimeConfidence = decision.RegimeConfidence,
@@ -1821,6 +1832,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 StrategyId = _activeTrade.StrategyId,
                 InstrumentGroup = InstrumentGroup(_activeTrade.Instrument),
                 SetupType = _activeTrade.EntrySetupType,
+                PlaybookId = _activeTrade.EntryPlaybookId,
                 EntrySession = _activeTrade.EntrySession,
                 EntryVolatilityBucket = _activeTrade.EntryVolatilityBucket,
                 EntryConfidence = _activeTrade.EntryConfidence,

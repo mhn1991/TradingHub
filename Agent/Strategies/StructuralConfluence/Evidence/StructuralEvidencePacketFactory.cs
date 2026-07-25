@@ -81,6 +81,7 @@ public sealed class StructuralEvidencePacketFactory
                 trigger.Indicators.CciAnalysis,
                 trigger.Indicators.Rsi,
                 trigger.Indicators.RsiAnalysis,
+                trigger.Indicators.StochRsi,
                 trigger.Indicators.BollingerAnalysis,
                 trigger.Indicators.AdxAnalysis,
                 trigger.Indicators.EfficiencyRatio)

@@ -90,4 +90,14 @@ public sealed record PlaybookRuntimeState
     /// whole holding period, then compared against on the first post-close evaluation.
     /// </summary>
     public string? LastReadySetupId { get; init; }
+    /// <summary>
+    /// Sticky in the same way as <see cref="LastReadySetupId"/> (only overwritten by a new ready
+    /// evaluation) - unlike <see cref="LastEvaluation"/>'s own <c>CatalystAt</c>, which gets
+    /// overwritten on every bar regardless of readiness. <see cref="IndicatorConfluencePlaybook"/>'s
+    /// cooldown needs the timestamp of the last bar that actually went ready, not the last bar
+    /// evaluated - reading <c>LastEvaluation.CatalystAt</c> directly let a non-ready bar's freshly
+    /// minted catalyst keep pushing the cooldown window forward every subsequent bar, permanently
+    /// locking the playbook out after its first trade.
+    /// </summary>
+    public DateTimeOffset? LastReadyCatalystAt { get; init; }
 }

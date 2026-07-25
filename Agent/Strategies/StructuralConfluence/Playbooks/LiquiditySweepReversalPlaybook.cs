@@ -28,15 +28,35 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
     public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
     {
         Dictionary<Guid, LiquidityPool> pools = evidence.Liquidity.Pools.ToDictionary(item => item.PoolId);
-        LiquiditySweepEvent? sweep = evidence.Liquidity.Sweeps
+        // One candidate per distinct pool (its own most recent sweep), not just the single most
+        // recent sweep system-wide - see LiquidityBreakRetestPlaybook's identical fix for the
+        // starvation bug this prevents: a sweep awaiting its confirmation trigger must not get
+        // dropped just because a different, unrelated pool swept more recently this same bar.
+        LiquiditySweepEvent[] candidates = evidence.Liquidity.Sweeps
             .Where(item => pools.ContainsKey(item.PoolId))
-            .OrderByDescending(item => item.AvailableAt)
-            .ThenBy(item => item.SweepId)
-            .FirstOrDefault();
-        if (sweep is null)
+            .GroupBy(item => item.PoolId)
+            .Select(group => group.OrderByDescending(item => item.AvailableAt).ThenBy(item => item.SweepId).First())
+            .OrderByDescending(item => item.AvailableAt).ThenBy(item => item.SweepId)
+            .ToArray();
+        if (candidates.Length == 0)
             return Dormant("StructuralSweepUnavailable");
 
-        LiquidityPool pool = pools[sweep.PoolId];
+        PlaybookEvaluation? best = null;
+        foreach (LiquiditySweepEvent candidate in candidates)
+        {
+            PlaybookEvaluation evaluation = EvaluateCandidate(candidate, pools[candidate.PoolId], evidence, state);
+            if (evaluation.IsReady && (best is null || evaluation.Confidence > best.Confidence))
+                best = evaluation;
+        }
+
+        // Nothing ready this bar - report on the freshest candidate, matching the previous
+        // single-candidate telemetry/lifecycle for the common (non-ready) case.
+        return best ?? EvaluateCandidate(candidates[0], pools[candidates[0].PoolId], evidence, state);
+    }
+
+    private PlaybookEvaluation EvaluateCandidate(
+        LiquiditySweepEvent sweep, LiquidityPool pool, StructuralEvidencePacket evidence, PlaybookRuntimeState state)
+    {
         PriceActionDirection direction = pool.Side == LiquiditySide.SellSide
             ? PriceActionDirection.Bullish
             : PriceActionDirection.Bearish;

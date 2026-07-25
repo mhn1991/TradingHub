@@ -29,6 +29,9 @@ public sealed record ChartAnnotationOptions
     public decimal RsiMinimumDivergenceDifference { get; init; } = 2m;
     public decimal RsiMinimumPriceDifferenceAtr { get; init; } = 0.05m;
     public int RsiSignalLifetimeCandles { get; init; } = 50;
+    public int StochRsiPeriod { get; init; } = 14;
+    public int StochRsiFastSmoothing { get; init; } = 3;
+    public int StochRsiSlowSmoothing { get; init; } = 3;
     public int BollingerPeriod { get; init; } = 20;
     public decimal BollingerStandardDeviations { get; init; } = 2m;
     public int CciPeriod { get; init; } = 20;
@@ -112,6 +115,9 @@ public sealed record ChartAnnotationOptions
             RsiMinimumDivergenceDifference < 0m ||
             RsiMinimumPriceDifferenceAtr < 0m ||
             RsiSignalLifetimeCandles < 1 ||
+            StochRsiPeriod <= 1 ||
+            StochRsiFastSmoothing < 1 ||
+            StochRsiSlowSmoothing < 1 ||
             BollingerPeriod <= 1 ||
             BollingerStandardDeviations <= 0m ||
             CciPeriod < 2 ||

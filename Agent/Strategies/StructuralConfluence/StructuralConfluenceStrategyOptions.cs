@@ -1,3 +1,4 @@
+using Agent.Strategies;
 using Brokers.Models;
 using ChartAnnotator.Liquidity;
 using ChartAnnotator.SupplyDemand;
@@ -65,12 +66,24 @@ public sealed record SupplyDemandPullbackOptions
     public bool AllowBollingerReEntryConfirmation { get; init; } = true;
     public decimal MinimumConfidence { get; init; } = 55m;
 
+    /// <summary>
+    /// Measured in evidence.Setup.Interval bars (matching LiquidityBreakRetestOptions'
+    /// MaximumBarsSinceAcceptedBreak/LiquiditySweepReversalOptions' MaximumBarsSinceSweep, both of
+    /// which SupplyDemandZoneEvent's Approached/Touched/PartiallyMitigated selection was missing
+    /// entirely until this field was added - without it, a zone touched once stayed a valid
+    /// "reaction" catalyst forever, so entry (built off current price, many ATR away by then) vs.
+    /// a stop anchored to that ancient zone routinely blew past Geometry's MaximumStopDistanceAtr.
+    /// Confirmed via replay: 384 of 4,117 evaluated bars failed only at Geometry, with a median
+    /// entry-to-zone distance of 3.4 ATR (up to 16 ATR) among them.
+    /// </summary>
+    public int MaximumBarsSinceReaction { get; init; } = 20;
+
     public void Validate()
     {
         if (MinimumZoneQuality is < 0m or > 1m || PermittedZoneStates is null || PermittedZoneStates.Count == 0 ||
             PermittedZoneStates.Distinct().Count() != PermittedZoneStates.Count ||
             MaximumPriorTouches < 0 || MaximumPenetrationRatio is < 0m or > 1m ||
-            MinimumConfidence is < 0m or > 100m || !Enum.IsDefined(CciMode))
+            MinimumConfidence is < 0m or > 100m || !Enum.IsDefined(CciMode) || MaximumBarsSinceReaction < 1)
             throw new ArgumentException("Supply/demand pullback options are invalid.");
     }
 }
@@ -233,7 +246,7 @@ public sealed record AdaptiveTargetManagementOptions
 /// </summary>
 public sealed record IndicatorConfluenceOptions
 {
-    public bool Enabled { get; init; }
+    public bool Enabled { get; init; } = true;
 
     // Trend (ADX/DMI): is there a trend, and which way.
     // Raised from 20 → 25 so IC only fires in clearer trends (was over-trading on 5m noise).
@@ -241,15 +254,30 @@ public sealed record IndicatorConfluenceOptions
     // Default on: require ADX still rising so we skip late/exhausted trends.
     public bool RequireTrendStrengthening { get; init; } = true;
 
-    // Momentum (RSI): pullback-in-trend band rather than "anything not extreme".
-    // Buy only when RSI has turned up but is not already extended; sell mirrored.
-    public decimal MinimumRsiForBuy { get; init; } = 42m;
-    public decimal MaximumRsiForBuy { get; init; } = 58m;
-    public decimal MinimumRsiForSell { get; init; } = 42m;
-    public decimal MaximumRsiForSell { get; init; } = 58m;
+    /// <summary>
+    /// Momentum/volatility confirmation now goes entirely through RsiBollingerSignalPolicy - the
+    /// same shared policy ProgressiveStrategyBase/RuleBasedMultiTimeframeAgent already use -
+    /// instead of a bespoke static RSI band + Bollinger squeeze/expansion re-check. That policy
+    /// reads the actual indicator SIGNALS this playbook was ignoring: freshness- and strength-
+    /// bounded RSI divergence/convergence (RsiRelationshipSnapshot.AgeCandles/Strength, not just
+    /// the type), a genuine Bollinger squeeze-RELEASE event (BollingerAnalysisSnapshot.
+    /// SqueezeReleased) rather than a "currently expanding" state that can stay true for many bars
+    /// after the actual breakout, and an explicit opposing-signal veto - not just a looser filter.
+    /// Replaces the old MinimumRsiForBuy/MaximumRsiForBuy/MinimumRsiForSell/MaximumRsiForSell/
+    /// AllowRsiDivergenceAlternative/RequireSqueezeBreakout fields entirely rather than layering
+    /// on top of them.
+    /// </summary>
+    public RsiBollingerSignalOptions RsiBollingerSignals { get; init; } = new();
 
-    // Volatility (Bollinger): demand expansion out of squeeze rather than merely "not squeezed".
-    public bool RequireSqueezeBreakout { get; init; } = true;
+    /// <summary>
+    /// A second, faster entry path alongside RsiBollingerSignals' own trigger: RSI
+    /// divergence/convergence + RSI oversold/overbought zone + Bollinger still squeezed (not yet
+    /// released) + StochRSI's fast (%K) line already at this extreme. StochRSI (Stochastic applied
+    /// to the RSI series) reacts several bars before raw RSI would, so this can catch a momentum
+    /// shift while Bollinger is still compressed instead of waiting for the release event. Buy
+    /// requires Fast >= this threshold; sell mirrors it (Fast &lt;= 100 - threshold).
+    /// </summary>
+    public decimal StochRsiFastExtremeThreshold { get; init; } = 90m;
 
     public decimal MinimumConfidence { get; init; } = 62m;
 
@@ -264,19 +292,37 @@ public sealed record IndicatorConfluenceOptions
     public int MinimumBarsBetweenEntries { get; init; } = 24;
 
     // Plain ATR-multiple stop/target (no structural anchor exists for this playbook).
-    // Slightly wider stop / closer target than 1.5/3.0 to improve hit rate vs noise.
+    // Reverted from a 0.6/1.0 tight-scalp attempt: replay showed it didn't raise win rate at all
+    // (33.3% vs 35.6%, essentially noise given 45-48 trades) and made average realized losses
+    // proportionally worse (-1.28R vs -0.94R) - a fixed spread/slippage cost per trade eats a much
+    // bigger fraction of a tight 0.6 ATR stop than a wide 2.0 ATR one. Trade count and win rate
+    // were near-identical at both widths, meaning stop/target size isn't the lever that controls
+    // either - see IndicatorConfluencePlaybook's own gates for what actually decides whether a
+    // bar produces a signal at all. Back to 3.2/2.0 (RR 1.6), clearing MinimumRewardRisk's
+    // default floor (1.5) with headroom.
     public decimal StopAtr { get; init; } = 2.0m;
-    public decimal TargetAtr { get; init; } = 2.5m;
+    public decimal TargetAtr { get; init; } = 3.2m;
+
+    /// <summary>
+    /// Rejects a candidate whose planned reward (price distance, not yet risk-sized into dollars -
+    /// quantity isn't decided until PositionSizer runs after this) is not comfortably larger than
+    /// the round-trip cost already baked into entry via ExecutableSpread. A tight enough target
+    /// could otherwise be barely bigger than the spread itself, so the "win" mostly just covers
+    /// getting in and out rather than being a real edge - the geometry-stage proxy for "is this
+    /// worth taking after expenses" (commission/slippage dollars aren't visible here, since they
+    /// scale with the quantity PositionSizer hasn't computed yet).
+    /// </summary>
+    public decimal MinimumRewardToSpreadMultiple { get; init; } = 4m;
 
     public void Validate()
     {
+        ArgumentNullException.ThrowIfNull(RsiBollingerSignals);
         if (MinimumAdx is < 0m or > 100m ||
-            MinimumRsiForBuy is < 0m or > 100m || MaximumRsiForBuy is < 0m or > 100m ||
-            MinimumRsiForSell is < 0m or > 100m || MaximumRsiForSell is < 0m or > 100m ||
-            MinimumRsiForBuy >= MaximumRsiForBuy || MinimumRsiForSell >= MaximumRsiForSell ||
             MinimumConfidence is < 0m or > 100m || StopAtr <= 0m || TargetAtr <= 0m ||
-            MinimumBarsBetweenEntries < 0)
+            MinimumBarsBetweenEntries < 0 || StochRsiFastExtremeThreshold is < 50m or > 100m ||
+            MinimumRewardToSpreadMultiple < 0m)
             throw new ArgumentException("Indicator confluence options are invalid.");
+        RsiBollingerSignals.Validate();
     }
 }
 

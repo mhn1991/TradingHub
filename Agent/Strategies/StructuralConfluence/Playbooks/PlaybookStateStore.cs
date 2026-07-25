@@ -38,7 +38,8 @@ public sealed class PlaybookStateStore(int capacity = 256)
                 ArmedAt = current.SetupId == evaluation.SetupId ? current.ArmedAt : availableAt,
                 ExpiresAt = evaluation.ExpiresAt,
                 LastEvaluation = evaluation,
-                LastReadySetupId = evaluation.IsReady ? evaluation.SetupId : current.LastReadySetupId
+                LastReadySetupId = evaluation.IsReady ? evaluation.SetupId : current.LastReadySetupId,
+                LastReadyCatalystAt = evaluation.IsReady ? evaluation.CatalystAt : current.LastReadyCatalystAt
             };
 
             if (_states.Count > _capacity)

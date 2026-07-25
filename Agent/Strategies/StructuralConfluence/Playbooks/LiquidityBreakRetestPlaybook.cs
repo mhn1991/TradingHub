@@ -27,13 +27,39 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
     public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
     {
         Dictionary<Guid, LiquidityPool> pools = evidence.Liquidity.Pools.ToDictionary(item => item.PoolId);
-        LiquidityEvent? acceptedBreak = evidence.Liquidity.Events
+        // One candidate per distinct pool (its own most recent accepted break), not just the single
+        // most recent accepted break system-wide - a pool mid-retest must not get starved out of
+        // consideration just because some other, unrelated pool broke more recently this same bar.
+        // Confirmed via replay against real candles: with the old single-candidate pick, 1,942 of
+        // 1,946 distinct accepted-break setups over a 2.5-month window never got a chance to retest
+        // (94.6% displaced within 1 bar / 30 minutes), while only 8 (0.4%) ever ran out the
+        // freshness window - the bottleneck was never the window, it was only ever looking at one
+        // candidate at a time.
+        LiquidityEvent[] candidates = evidence.Liquidity.Events
             .Where(item => item.EventType == LiquidityEventType.AcceptedBreak && pools.ContainsKey(item.PoolId))
-            .OrderByDescending(item => item.AvailableAt).ThenBy(item => item.EventId).FirstOrDefault();
-        if (acceptedBreak is null)
+            .GroupBy(item => item.PoolId)
+            .Select(group => group.OrderByDescending(item => item.AvailableAt).ThenBy(item => item.EventId).First())
+            .OrderByDescending(item => item.AvailableAt).ThenBy(item => item.EventId)
+            .ToArray();
+        if (candidates.Length == 0)
             return Dormant("StructuralAcceptedBreakUnavailable");
 
-        LiquidityPool pool = pools[acceptedBreak.PoolId];
+        PlaybookEvaluation? best = null;
+        foreach (LiquidityEvent candidate in candidates)
+        {
+            PlaybookEvaluation evaluation = EvaluateCandidate(candidate, pools[candidate.PoolId], evidence, state);
+            if (evaluation.IsReady && (best is null || evaluation.Confidence > best.Confidence))
+                best = evaluation;
+        }
+
+        // Nothing ready this bar - report on the freshest candidate, matching the previous
+        // single-candidate telemetry/lifecycle for the common (non-ready) case.
+        return best ?? EvaluateCandidate(candidates[0], pools[candidates[0].PoolId], evidence, state);
+    }
+
+    private PlaybookEvaluation EvaluateCandidate(
+        LiquidityEvent acceptedBreak, LiquidityPool pool, StructuralEvidencePacket evidence, PlaybookRuntimeState state)
+    {
         PriceActionDirection direction = pool.Side == LiquiditySide.BuySide
             ? PriceActionDirection.Bullish
             : PriceActionDirection.Bearish;

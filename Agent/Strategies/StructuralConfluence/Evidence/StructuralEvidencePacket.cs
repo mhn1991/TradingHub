@@ -38,6 +38,7 @@ public sealed record IndicatorConfirmationPacket(
     CciAnalysisSnapshot CciAnalysis,
     decimal? Rsi,
     RsiAnalysisSnapshot RsiAnalysis,
+    StochRsiSnapshot StochRsi,
     BollingerAnalysisSnapshot BollingerAnalysis,
     AdxAnalysisSnapshot AdxAnalysis,
     decimal? EfficiencyRatio);
