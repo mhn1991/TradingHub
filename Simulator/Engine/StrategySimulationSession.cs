@@ -25,6 +25,10 @@ namespace Simulator.Engine;
 /// </summary>
 public sealed class StrategySimulationSession : IAsyncDisposable
 {
+    /// <summary>Minimum trade-journal capacity regardless of SimulationOptions.LedgerCapacity -
+    /// see the comment where this is used in Create().</summary>
+    private const int TradeJournalCapacity = 200_000;
+
     private long _lastProcessedLedgerSequence;
     private long _lastProcessedOrderEventSequence;
     private AgentDecision? _pendingEntryDecision;
@@ -82,6 +86,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private bool _failed;
     private string? _failureMessage;
     private long? _failedSequence;
+    private StrategyFailureRecord? _failureRecord;
     private EquityProtectionDirective? _sharedEquityProtectionDirective;
     private PortfolioRiskStatusSnapshot? _sharedPortfolioRiskStatus;
     private readonly PortfolioManager.CrossMarket.CrossMarketAnalysisCoordinator? _crossMarket;
@@ -199,6 +204,11 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     public bool IsFailed => _failed;
     public string? FailureMessage => _failureMessage;
     public long? FailedSequence => _failedSequence;
+    /// <summary>Richer context captured at the moment of failure - null when the session was
+    /// marked failed via <see cref="MarkFailed"/> instead of catching its own exception (e.g. a
+    /// StopFailedStrategyOnly barrier placeholder), since there is no frame to capture from
+    /// there.</summary>
+    public StrategyFailureRecord? FailureRecord => _failureRecord;
 
     internal void SetSharedEquityProtectionDirective(EquityHighWatermarkSnapshot snapshot)
     {
@@ -257,7 +267,13 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             TripOnCriticalDataQualityIssue = true
         };
         var safety = new TradingSafetyController(resolvedSafety);
-        var journal = new InMemoryTradeJournal(options.LedgerCapacity);
+        // Deliberately not options.LedgerCapacity: the journal records once per signal
+        // evaluation (every trigger-interval close), a far higher-frequency stream than the
+        // financial ledger it was previously sized after (deposits/commissions/PnL, roughly
+        // once per trade). Reusing that number meant a multi-month backtest could silently
+        // overflow and lose its early decision history well before the run finished - by the
+        // time WriteJournalAsync exports it, only the tail would remain.
+        var journal = new InMemoryTradeJournal(Math.Max(options.LedgerCapacity, TradeJournalCapacity));
         var dataQuality = new MarketDataQualityGate(dataQualityOptions ?? new MarketDataQualityOptions
         {
             RequireIndicatorsReady = true,
@@ -607,10 +623,59 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             _failed = true;
             _failureMessage = exception.ToString();
             _failedSequence = frame.Sequence;
+            _failureRecord = await BuildFailureRecordSafeAsync(frame, exception).ConfigureAwait(false);
             sw.Stop();
             RecordTiming(sw.Elapsed);
             throw;
         }
+    }
+
+    /// <summary>Captures broker/setup context at the moment of failure for post-mortem
+    /// debugging (previously only the bare exception was kept, discarding what the strategy
+    /// was actually doing when it broke). SimulationId is filled in by the caller, which is the
+    /// only place that knows it. Broker queries are best-effort: a failure querying broker
+    /// state here must never mask or replace the original exception already being handled.</summary>
+    private async Task<StrategyFailureRecord> BuildFailureRecordSafeAsync(MarketFrame frame, Exception exception)
+    {
+        string? openPosition = null;
+        int pendingOrders = 0;
+        try
+        {
+            BrokerPosition? position = (await Broker.Positions
+                .GetOpenPositionsAsync(CancellationToken.None).ConfigureAwait(false))
+                .FirstOrDefault(item => item.Instrument == frame.ExecutionCandle.Mid.Instrument);
+            if (position is not null)
+            {
+                openPosition = $"{position.Side} {position.Quantity:F8} @ {position.AveragePrice:F8}, " +
+                    $"unrealized={position.UnrealizedProfitLoss:F2}";
+            }
+
+            pendingOrders = (await Broker.Orders
+                .GetOpenOrdersAsync(cancellationToken: CancellationToken.None).ConfigureAwait(false)).Count;
+        }
+        catch
+        {
+            // Best-effort context capture only - the original exception is what matters and
+            // must propagate untouched regardless of whether this secondary query succeeds.
+        }
+
+        SimulatedTradeRecord? lastTrade = _trades.Count > 0 ? _trades[^1] : null;
+        return new StrategyFailureRecord
+        {
+            SimulationId = Guid.Empty,
+            StrategyName = StrategyName,
+            Sequence = frame.Sequence,
+            MarketTime = frame.AvailableAt,
+            InputStreamId = frame.InputStreamId,
+            CurrentSetup = _activeTrade?.SetupId,
+            OpenPosition = openPosition,
+            PendingOrders = pendingOrders,
+            LastCompletedTrade = lastTrade is null
+                ? null
+                : $"{lastTrade.PositionId} {lastTrade.Side} entry={lastTrade.EntryPrice:F8} " +
+                  $"exit={lastTrade.ExitPrice:F8} pnl={lastTrade.NetProfitLoss:F2} closedAt={lastTrade.ClosedAt:O}",
+            Exception = exception.ToString()
+        };
     }
 
     public void RecordBarrierWait(TimeSpan wait) => _barrierWait += wait;

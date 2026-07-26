@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using Serilog;
 using Brokers.Abstractions;
 using Brokers.Oanda;
 using Agent.Factories;
@@ -47,6 +48,24 @@ using TradingHub.Persistence.Postgres.Bootstrap;
 using TradingPolicies;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+// Durable logging: the default host-provided console logger only survives as long as the
+// console session (or whatever process manager captures its stdout). File defaults live here,
+// not just in appsettings.json's Logging section, so a normal checkout still gets a durable log
+// even before an operator configures anything - matches how safety-critical defaults elsewhere
+// in this host (e.g. LiveExecution:BrokerWritesEnabled) are meant to be safe out of the box.
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
+    .Enrich.FromLogContext()
+    .ReadFrom.Configuration(builder.Configuration)
+    .WriteTo.Console()
+    .WriteTo.File(
+        Path.Combine(".state", "live-trading", "logs", "live-.log"),
+        rollingInterval: RollingInterval.Day,
+        retainedFileCountLimit: 30,
+        shared: true)
+    .CreateLogger();
+builder.Host.UseSerilog();
 BrokerCredentialDatabaseConfiguration? databaseConfiguration =
     BrokerCredentialDatabaseConfiguration.TryLoad(builder.Environment.ContentRootPath, out string repositoryRoot);
 if (databaseConfiguration is null)
@@ -384,4 +403,11 @@ app.MapLiveStatusEndpoints();
 app.MapLiveDeploymentEndpoints();
 app.MapTradingReportEndpoints();
 app.MapHub<LiveStatusHub>("/hubs/live");
-app.Run();
+try
+{
+    app.Run();
+}
+finally
+{
+    Log.CloseAndFlush();
+}

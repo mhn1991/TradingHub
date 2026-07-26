@@ -1022,7 +1022,8 @@ internal sealed class SimulatedBrokerState
             return false;
         }
 
-        string quoteCurrency = pair[(separator + 1)..];
+        string baseCurrency = pair[..separator].Trim();
+        string quoteCurrency = pair[(separator + 1)..].Trim();
         if (string.Equals(quoteCurrency, _options.BaseCurrency, StringComparison.OrdinalIgnoreCase))
         {
             rate = 1m;
@@ -1038,6 +1039,23 @@ internal sealed class SimulatedBrokerState
                 error = null;
                 return true;
             }
+        }
+
+        // No direct match and no explicit override: when the instrument's own BASE currency is
+        // the account currency (e.g. USD/JPY on a USD account), the quote-to-account rate is
+        // exactly derivable from the pair's own price - 1 USD = 148.50 JPY means 1 JPY =
+        // 1/148.50 USD - rather than needing a separately maintained (and inevitably staler)
+        // rate table entry. ExecutionCoordinator.ResolveQuoteToAccountRate already relies on this
+        // same derivation for risk/sizing; without it here, every base-currency-is-account-
+        // currency pair passed sizing/risk checks only to be silently rejected at this, the
+        // final step, with every one of those upstream checks having been pointless work.
+        if (string.Equals(baseCurrency, _options.BaseCurrency, StringComparison.OrdinalIgnoreCase) &&
+            _latestCandles.TryGetValue(instrument, out Candle? latest) &&
+            latest.Prices.Close > 0m)
+        {
+            rate = 1m / latest.Prices.Close;
+            error = null;
+            return true;
         }
 
         rate = 0m;

@@ -295,6 +295,11 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
                         : "ObserveOnly recorded decision diagnostics without opening a paper or real position."
                 };
                 RecordDecision(nonExecuting);
+                // Durable, not just the 500-entry in-memory ring buffer: ObserveOnly/Shadow are
+                // the modes an operator runs first specifically to review what the strategy
+                // would have done, so their diagnostic trail must survive a restart the same way
+                // an executed decision's does.
+                await PersistAsync("portfolio-decisions", nonExecuting, cancellationToken).ConfigureAwait(false);
             }
             if (executableCandidates.Length == 0)
             {
@@ -306,13 +311,15 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
             {
                 foreach (LiveTradeCandidate candidate in executableCandidates)
                 {
-                    RecordDecision(new PortfolioDecision
+                    PortfolioDecision decision = new()
                     {
                         Candidate = candidate,
                         Approved = false,
                         ReasonCode = "BrokerWritesDisabled",
                         Explanation = "The Agent is executable but the deployment-level broker write guard is disabled."
-                    });
+                    };
+                    RecordDecision(decision);
+                    await PersistAsync("portfolio-decisions", decision, cancellationToken).ConfigureAwait(false);
                 }
                 return;
             }
@@ -325,13 +332,15 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
             {
                 foreach (LiveTradeCandidate candidate in executableCandidates)
                 {
-                    RecordDecision(new PortfolioDecision
+                    PortfolioDecision decision = new()
                     {
                         Candidate = candidate,
                         Approved = false,
                         ReasonCode = "IncompleteDecisionEpoch",
                         Explanation = "At least one expected market or agent failed to complete the deterministic epoch barrier."
-                    });
+                    };
+                    RecordDecision(decision);
+                    await PersistAsync("portfolio-decisions", decision, cancellationToken).ConfigureAwait(false);
                 }
                 return;
             }
@@ -340,13 +349,15 @@ public sealed class LiveTradingRuntimeCoordinator : ILiveTradingRuntimeCoordinat
             {
                 foreach (LiveTradeCandidate candidate in executableCandidates)
                 {
-                    RecordDecision(new PortfolioDecision
+                    PortfolioDecision decision = new()
                     {
                         Candidate = candidate,
                         Approved = false,
                         ReasonCode = "LiveSafetyPaused",
                         Explanation = "Account safety or reconciliation currently forbids new entries."
-                    });
+                    };
+                    RecordDecision(decision);
+                    await PersistAsync("portfolio-decisions", decision, cancellationToken).ConfigureAwait(false);
                 }
                 return;
             }

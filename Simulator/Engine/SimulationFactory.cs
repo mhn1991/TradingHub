@@ -60,7 +60,10 @@ public static class SimulationFactory
             var source = new EnumerableCandleSource(baseCandles);
             IMarketDataQualityGate qualityGate = dataQuality ?? new MarketDataQualityGate();
             ITradingSafetyController safetyController = safety ?? new TradingSafetyController();
-            ITradeJournal tradeJournal = journal ?? new InMemoryTradeJournal(options.LedgerCapacity);
+            // Not options.LedgerCapacity: the journal is a much higher-frequency stream (once
+            // per signal evaluation) than the financial ledger that capacity was sized for -
+            // see the matching comment in StrategySimulationSession.Create.
+            ITradeJournal tradeJournal = journal ?? new InMemoryTradeJournal(Math.Max(options.LedgerCapacity, 200_000));
             IExecutionCoordinator execution = executionCoordinator ?? new ExecutionCoordinator(
                 safety: safetyController,
                 journal: tradeJournal);
@@ -181,7 +184,7 @@ public static class SimulationFactory
         MarketDataQualityOptions resolvedDataQualityOptions = dataQualityOptions ??
             new MarketDataQualityOptions { RequireIndicatorsReady = true };
         var safety = new TradingSafetyController(resolvedSafetyOptions);
-        var journal = new InMemoryTradeJournal(resolvedSimulationOptions.LedgerCapacity);
+        var journal = new InMemoryTradeJournal(Math.Max(resolvedSimulationOptions.LedgerCapacity, 200_000));
         var dataQuality = new MarketDataQualityGate(resolvedDataQualityOptions);
         var execution = new ExecutionCoordinator(
             executionOptions,

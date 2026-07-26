@@ -406,6 +406,11 @@ public sealed record StrategySimulationResult
     public bool IsComplete { get; init; } = true;
     public long? FailedAtSequence { get; init; }
     public string? FailureMessage { get; init; }
+    /// <summary>Broker/setup context captured at the moment of failure - see
+    /// StrategySimulationSession.BuildFailureRecordSafeAsync. Persisted to failure.json
+    /// alongside the strategy's other sidecar output (see ChunkedReplayWriter) so a failed run
+    /// leaves a diagnosable record, not just "it threw".</summary>
+    public StrategyFailureRecord? FailureRecord { get; init; }
     /// <summary>Content hash of the <c>RuntimeFeaturePolicy</c> this strategy's pipeline was
     /// built from - proves the shared pipeline factory was actually exercised for this run.</summary>
     public string? FeaturePolicyHash { get; init; }

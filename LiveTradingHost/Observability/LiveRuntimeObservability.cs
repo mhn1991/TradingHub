@@ -5,6 +5,7 @@ using Agent.Models;
 using DBManager.Postgres;
 using LiveTrading.Agents;
 using LiveTrading.Configuration;
+using LiveTrading.Reconciliation;
 using Microsoft.EntityFrameworkCore;
 using TradingCore.Pipeline;
 using TradingObservability.Abstractions;
@@ -243,6 +244,71 @@ public sealed class LiveRuntimeObservability(
                 audit.EvaluationMilliseconds,
                 diagnostics = boundedDiagnostics,
                 error = Bound(audit.Error, 1_024)
+            })
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Records a reconciliation outcome. Of TradingTelemetryType's nine values, only
+    /// RuntimeLifecycle and AgentStateTransition were ever actually emitted before this -
+    /// querying ITradingReportQueryService for why a reconciliation blocked new entries, or
+    /// what an operator would have needed to review, returned nothing despite the schema having
+    /// an exact category for it.</summary>
+    public async Task RecordReconciliationAsync(
+        BrokerReconciliationReport report,
+        CancellationToken cancellationToken)
+    {
+        if (!_started)
+            return;
+        DateTimeOffset observedAt = timeProvider.GetUtcNow();
+        await telemetry.WriteAsync(new TradingTelemetryEvent
+        {
+            EventId = Guid.NewGuid(),
+            Type = TradingTelemetryType.ReconciliationStateChange,
+            Severity = report.RequiresOperatorReview
+                ? TradingTelemetrySeverity.Warning
+                : TradingTelemetrySeverity.Information,
+            OccurredAt = report.CompletedAt,
+            ObservedAt = observedAt,
+            ReasonCode = report.Trigger.ToString(),
+            Correlation = Correlation(),
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                report.ReconciliationId,
+                trigger = report.Trigger.ToString(),
+                report.CanOpenNewEntries,
+                report.RequiresOperatorReview,
+                differenceCount = report.Differences.Count,
+                differences = report.Differences.Take(32)
+            })
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Records an operational incident (a failure that isn't attributable to one
+    /// agent's evaluation - e.g. a reconciliation cycle itself throwing). See the doc comment on
+    /// RecordReconciliationAsync - this closes the same "defined but never emitted" gap for the
+    /// Incident category.</summary>
+    public async Task RecordIncidentAsync(
+        string reasonCode,
+        string message,
+        Exception? exception,
+        CancellationToken cancellationToken)
+    {
+        if (!_started)
+            return;
+        DateTimeOffset observedAt = timeProvider.GetUtcNow();
+        await telemetry.WriteAsync(new TradingTelemetryEvent
+        {
+            EventId = Guid.NewGuid(),
+            Type = TradingTelemetryType.Incident,
+            Severity = TradingTelemetrySeverity.Critical,
+            OccurredAt = observedAt,
+            ObservedAt = observedAt,
+            ReasonCode = Bound(reasonCode, 128) ?? "incident",
+            Correlation = Correlation(),
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                message = Bound(message, 2_048),
+                exception = Bound(exception?.ToString(), 4_096)
             })
         }, cancellationToken).ConfigureAwait(false);
     }

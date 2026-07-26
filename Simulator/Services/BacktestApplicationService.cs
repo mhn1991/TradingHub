@@ -14,6 +14,7 @@ using Brokers.Binance;
 using Brokers.Models;
 using Brokers.Oanda;
 using ChartAnnotator.Engine;
+using Microsoft.Extensions.Logging;
 using Simulator.Abstractions;
 using Simulator.Engine;
 using Simulator.Jobs;
@@ -52,15 +53,25 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
     private readonly CancellationTokenSource _serviceLifetime = new();
     private readonly Task _initialization;
     private readonly Task[] _workers;
+    private readonly ILogger<BacktestApplicationService>? _logger;
     private bool _disposed;
 
+    /// <summary>Logger is optional (null-safe throughout via ?.) so BacktestRunner's bare
+    /// console-app path - no ILogger provider configured at all - keeps working exactly as
+    /// before. When a caller does have a real logging pipeline (e.g. DashboardLive, which gets
+    /// a durable Serilog sink - see Program.cs), job lifecycle events actually reach it: this
+    /// project previously had zero ILogger usage across all 111 files, so even a properly
+    /// hosted backtest run left no structured trace of what happened beyond the job snapshot's
+    /// own Error field.</summary>
     public BacktestApplicationService(
         ISimulationJobRepository repository,
-        BacktestApplicationServiceOptions? options = null)
+        BacktestApplicationServiceOptions? options = null,
+        ILogger<BacktestApplicationService>? logger = null)
     {
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
         _snapshotStore = new CoalescingJobSnapshotStore(repository);
         _options = options ?? new BacktestApplicationServiceOptions();
+        _logger = logger;
         if (_options.MaxConcurrentJobs < 1)
             throw new ArgumentOutOfRangeException(nameof(options.MaxConcurrentJobs));
         if (_options.QueueCapacity < 1)
@@ -153,6 +164,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         await running.PublishInitialAsync(cancellationToken).ConfigureAwait(false);
 
         await _queue.Writer.WriteAsync(id, cancellationToken).ConfigureAwait(false);
+        _logger?.LogInformation(
+            "Backtest job {JobId} queued: {Instrument} {From:O} to {To:O}, strategies={Strategies}.",
+            id, request.Instrument.Value, request.From, request.To, string.Join(',', request.Strategies));
         return new SimulationJobHandle(id, SimulationJobStatus.Queued);
     }
 
@@ -373,6 +387,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                     }).ToArray()
                 }, terminal: true, CancellationToken.None).ConfigureAwait(false);
                 job.Completion.TrySetResult(result);
+                _logger?.LogInformation(
+                    "Backtest job {JobId} completed: {StrategyCount} strategies, {ProcessedBaseCandles} candles.",
+                    job.Id, result.Strategies.Count, result.ProcessedBaseCandles);
             }
             catch (OperationCanceledException) when (job.Cancellation.IsCancellationRequested)
             {
@@ -383,15 +400,22 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                     IsComplete = true
                 }, terminal: true, CancellationToken.None).ConfigureAwait(false);
                 job.Completion.TrySetCanceled(job.Cancellation.Token);
+                _logger?.LogInformation("Backtest job {JobId} cancelled.", job.Id);
             }
             catch (Exception exception)
             {
+                _logger?.LogError(exception, "Backtest job {JobId} failed.", job.Id);
                 SimulationJobSnapshot failed = await job.ApplyAsync(current => NextRevision(current) with
                 {
                     Status = SimulationJobStatus.Failed,
                     CompletedAt = DateTimeOffset.UtcNow,
                     IsComplete = true,
-                    Error = exception.Message
+                    // Full ToString() (type, message, stack trace, inner exceptions), not just
+                    // Message - a job-level failure isn't attributable to one strategy session
+                    // the way StrategySimulationSession.FailureMessage already is, so this is
+                    // the only record of what actually broke. Matches the existing per-strategy
+                    // precedent (StrategySimulationSession._failureMessage).
+                    Error = exception.ToString()
                 }, terminal: true, CancellationToken.None).ConfigureAwait(false);
                 job.Completion.TrySetException(exception);
             }

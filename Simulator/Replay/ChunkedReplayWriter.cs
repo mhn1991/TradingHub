@@ -9,6 +9,7 @@ using Simulator.Models;
 using RiskManager;
 using RiskManager.Safety;
 using TradeManager;
+using TradingJournal;
 
 namespace Simulator.Replay;
 
@@ -528,6 +529,15 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 Path.Combine(state.Directory, "metrics.json.gz"),
                 match.Metrics,
                 cancellationToken).ConfigureAwait(false);
+            // Small and rare (only present when the strategy actually failed) - plain JSON, not
+            // gzipped, so it is readable without tooling straight after a run breaks.
+            if (match.FailureRecord is not null)
+            {
+                await WriteJsonAsync(
+                    Path.Combine(state.Directory, "failure.json"),
+                    match.FailureRecord,
+                    cancellationToken).ConfigureAwait(false);
+            }
         }
 
         // Decision funnel + per-signal disposition, aggregated incrementally from the same
@@ -559,6 +569,40 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 await writer.WriteLineAsync(JsonSerializer.Serialize(row, JsonOptions)).ConfigureAwait(false);
         }
         File.Move(candidateOutcomesTemporary, candidateOutcomesPath, overwrite: true);
+    }
+
+    /// <summary>
+    /// Persists a strategy's full decision-audit trail (every signal evaluation, rejection
+    /// reason, data-quality rejection, calibration/meta-label rejection, safety-state change -
+    /// see ITradeJournal) to disk. Previously this was accumulated in-memory for the whole run
+    /// and then simply discarded: nothing ever called ITradeJournal.Snapshot(), so the exact
+    /// answer to "why didn't this convert to a trade" existed only transiently in the process
+    /// that had already exited by the time anyone asked.
+    ///
+    /// Called directly (not from WriteStrategySidecarsAsync's per-committed-strategy loop)
+    /// because a strategy can fail before its first frame is ever committed - it would then have
+    /// no entry in _strategyStates yet, but still have journal entries worth keeping.
+    /// </summary>
+    public async Task WriteJournalAsync(
+        string strategyId,
+        string strategyName,
+        IReadOnlyList<TradeJournalEntry> entries,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (entries.Count == 0)
+            return;
+
+        StrategyChunkState state = GetOrCreateStrategy(strategyId, strategyName);
+        string path = Path.Combine(state.Directory, "journal.ndjson");
+        string temporary = path + ".tmp";
+        await using (FileStream file = File.Create(temporary))
+        await using (var writer = new StreamWriter(file, Utf8NoBom))
+        {
+            foreach (TradeJournalEntry entry in entries)
+                await writer.WriteLineAsync(JsonSerializer.Serialize(entry, JsonOptions)).ConfigureAwait(false);
+        }
+        File.Move(temporary, path, overwrite: true);
     }
 
     private static void EnsureEventsStreamOpen(StrategyChunkState state)

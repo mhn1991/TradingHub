@@ -12,6 +12,11 @@ public sealed record SimulationJobRecoveryReport
     public int QuarantinedFiles { get; init; }
     public int TemporaryFilesRemoved { get; init; }
     public IReadOnlyList<string> WarningCodes { get; init; } = [];
+    /// <summary>Per-occurrence detail behind <see cref="WarningCodes"/> - the codes are a
+    /// deduplicated set for a stable health-check response, so a cleanup failure's actual
+    /// exception (which file, which error) would otherwise be lost entirely once the coded
+    /// warning is recorded.</summary>
+    public IReadOnlyList<string> WarningDetails { get; init; } = [];
 }
 
 /// <summary>
@@ -101,6 +106,7 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
         int removedTemporary = 0;
         int quarantinedBefore = CountQuarantinedFiles();
         var warnings = new HashSet<string>(StringComparer.Ordinal);
+        var warningDetails = new List<string>();
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -113,13 +119,12 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
                     File.Delete(temporary);
                     removedTemporary++;
                 }
-                catch (IOException)
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
                 {
                     warnings.Add("TemporaryJobCleanupFailed");
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    warnings.Add("TemporaryJobCleanupFailed");
+                    warningDetails.Add(
+                        $"TemporaryJobCleanupFailed: {Path.GetFileName(temporary)}: {exception.Message}");
                 }
             }
         }
@@ -163,7 +168,8 @@ public sealed class FileSimulationJobRepository : ISimulationJobRepository
             InterruptedJobsMarkedFailed = interrupted,
             QuarantinedFiles = quarantined,
             TemporaryFilesRemoved = removedTemporary,
-            WarningCodes = warnings.OrderBy(item => item, StringComparer.Ordinal).ToArray()
+            WarningCodes = warnings.OrderBy(item => item, StringComparer.Ordinal).ToArray(),
+            WarningDetails = warningDetails
         };
     }
 

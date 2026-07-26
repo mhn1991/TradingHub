@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.Channels;
 using Agent.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Engine;
@@ -360,19 +361,55 @@ public sealed class StreamingComparativeEngine
                     pipelines[instrument].LatestSnapshotsFor(profile);
             }
 
+            // True cross-instrument concurrency: each traded instrument gets its own
+            // dedicated task instead of being funneled one-candle-at-a-time through the
+            // single chronological merge below. Only safe when nothing needs one advancing
+            // global clock while candles are still being produced: SharedPortfolioRuntime
+            // requires strictly increasing (Sequence, AvailableAt) across the whole run
+            // (see FlushPendingCorrelation), and cross-market/currency-strength analysis
+            // assumes the same. Both are null exactly when accounts are independent and
+            // currency-strength is disabled - the common multi-instrument case, and the
+            // one this exists for.
+            bool runInstrumentsConcurrently =
+                pipelines.Count > 1 && sharedPortfolio is null && crossMarket is null;
+
+            // Priming buffer reused every merge step so a multi-instrument run doesn't
+            // allocate a new array per candle (this loop runs once per merged candle -
+            // potentially millions of times for a multi-month, multi-instrument backtest).
+            // Only used by the sequential fallback path below.
+            InstrumentPipelineState[] pipelineArray = [.. pipelines.Values];
+            Task<bool>[] primeTasks = new Task<bool>[pipelineArray.Length];
+
             // Chronological k-way merge across every traded instrument's own candle
             // stream/lookahead buffer (see InstrumentPipelineState). Ties break on
             // instrument value for determinism. For a single traded instrument this
             // degenerates to exactly the old single-stream lookahead pattern - there is
             // only ever one candidate to pick.
+            //
+            // Priming every pipeline concurrently (rather than one at a time) matters
+            // because each pipeline's first MoveNextBufferedAsync call starts that
+            // instrument's own background download (see PrefetchingCandleStream); a
+            // sequential await here would stagger every instrument's download start
+            // behind the previous instrument's first page, and would serialize any
+            // later moment where more than one instrument simultaneously needs a fresh
+            // page (e.g. every instrument starting from the same warm-up date tends to
+            // exhaust its prefetch buffer around the same simulated time).
             async Task<(InstrumentPipelineState Pipeline, MarketCandle Candle, bool IsLast)?> TakeNextMergedAsync()
             {
-                foreach (InstrumentPipelineState candidatePipeline in pipelines.Values)
-                    await candidatePipeline.MoveNextBufferedAsync().ConfigureAwait(false);
+                if (pipelineArray.Length == 1)
+                {
+                    await pipelineArray[0].MoveNextBufferedAsync().ConfigureAwait(false);
+                }
+                else
+                {
+                    for (int i = 0; i < pipelineArray.Length; i++)
+                        primeTasks[i] = pipelineArray[i].MoveNextBufferedAsync();
+                    await Task.WhenAll(primeTasks).ConfigureAwait(false);
+                }
 
                 InstrumentPipelineState? winner = null;
                 MarketCandle? winnerCandle = null;
-                foreach (InstrumentPipelineState candidatePipeline in pipelines.Values)
+                foreach (InstrumentPipelineState candidatePipeline in pipelineArray)
                 {
                     MarketCandle? candidate = candidatePipeline.PeekBuffered();
                     if (candidate is null)
@@ -539,8 +576,378 @@ public sealed class StreamingComparativeEngine
                 }
             }
 
+            // Runs every traded instrument's fetch/aggregate/annotate/evaluate pipeline on
+            // its own concurrent task instead of funneling everything through one
+            // chronological merge (see runInstrumentsConcurrently above for why this is
+            // only safe without a shared portfolio or cross-market coordinator). Only
+            // ChartAnnotationEngine's own state is genuinely per-ChartKey (instrument,
+            // interval) and documented as safe for concurrent use across different keys
+            // (ChartAnnotator/Engine/ChartAnnotationEngine.cs) - everything else touched
+            // per candle (aggregators, snapshot sets, worker hosts/sessions) already lives
+            // on InstrumentPipelineState or is 1:1 with one instrument's strategies, so
+            // nothing needs new locking there.
+            //
+            // The one thing that does need a single chronological view is the shared
+            // replay writer: ChunkedReplayWriter derives each market chunk's declared
+            // FromTime/ToTime (and FromSequence/ToSequence) from the first/last row
+            // physically written to it, so committing out of time order would produce
+            // chunks with wrong bounds. So: producers evaluate strategies fully
+            // concurrently using their own per-instrument-local frame sequence (workers/
+            // sessions only require strictly-increasing sequence within their own single
+            // instrument's stream - see StrategyWorkerHost's out-of-order check), then
+            // hand finished (frame, results) pairs to one single-threaded committer that
+            // merges them back into global chronological order - the same k-way merge
+            // TakeNextMergedAsync does above for raw candles, just merging
+            // already-evaluated results instead, and assigning the real global Sequence
+            // at that point.
+            async Task RunInstrumentsConcurrentlyAsync()
+            {
+                using CancellationTokenSource runCts =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                CancellationToken runToken = runCts.Token;
+                Exception? fatal = null;
+                var fatalLock = new object();
+                int enteredEvaluationFlag = 0;
+
+                Dictionary<InstrumentKey, Channel<(MarketFrame Frame, StrategyFrameResult[] Results)>> channels =
+                    tradedInstruments.ToDictionary(
+                        instrument => instrument,
+                        _ => Channel.CreateBounded<(MarketFrame Frame, StrategyFrameResult[] Results)>(
+                            new BoundedChannelOptions(64)
+                            {
+                                SingleReader = true,
+                                SingleWriter = true,
+                                FullMode = BoundedChannelFullMode.Wait
+                            }));
+
+                async Task ProduceAsync(InstrumentKey instrument)
+                {
+                    InstrumentPipelineState pipeline = pipelines[instrument];
+                    ChannelWriter<(MarketFrame, StrategyFrameResult[])> writer = channels[instrument].Writer;
+                    List<StrategyWorkerHost> instrumentHosts = hostsByInstrument.GetValueOrDefault(instrument, []);
+                    List<StrategySimulationSession> instrumentSessions = sessionsByInstrument.GetValueOrDefault(instrument, []);
+                    IReadOnlyList<AnalysisProfileKey> instrumentProfiles = profilesByInstrument.GetValueOrDefault(instrument, []);
+                    long localSequence = 0;
+                    var localBatch = new List<MarketFrame>();
+                    try
+                    {
+                        while (true)
+                        {
+                            runToken.ThrowIfCancellationRequested();
+                            if (options.PauseGate is not null)
+                                await options.PauseGate.WaitIfPausedAsync(runToken).ConfigureAwait(false);
+
+                            if (!await pipeline.MoveNextBufferedAsync().ConfigureAwait(false))
+                                break;
+                            (MarketCandle marketCandle, bool isLast) =
+                                await pipeline.TakeBufferedAsync().ConfigureAwait(false);
+
+                            Candle baseCandle = marketCandle.Mid;
+                            pipeline.Quality.Observe(baseCandle);
+                            IReadOnlyList<string> dataQualityIssueCodes = pipeline.Quality.DrainPendingIssueCodes();
+                            var runtimeContext = new AnalysisRuntimeContext
+                            {
+                                ExecutableSpread = baseCandle.Prices.Close *
+                                    options.SimulationOptions.SpreadBasisPoints / 10_000m,
+                                DataQualityOk = dataQualityIssueCodes.Count == 0,
+                                DataQualityIssueCodes = dataQualityIssueCodes
+                            };
+
+                            localSequence++;
+                            bool isWarmup = baseCandle.OpenTime < options.EvaluationFrom;
+
+                            if (!isWarmup && !pipeline.EnteredEvaluation)
+                            {
+                                pipeline.EnteredEvaluation = true;
+                                foreach (AnalysisProfileKey profile in instrumentProfiles)
+                                {
+                                    if (profileRegistry.EngineFor(profile) is ICalibratableChartAnnotator sharedCalibration)
+                                        sharedCalibration.FreezeCalibration(options.EvaluationFrom);
+                                }
+                                foreach (StrategySimulationSession session in instrumentSessions)
+                                {
+                                    if (session.IndependentAnnotator is ICalibratableChartAnnotator independentCalibration)
+                                        independentCalibration.FreezeCalibration(options.EvaluationFrom);
+                                }
+                                if (Interlocked.CompareExchange(ref enteredEvaluationFlag, 1, 0) == 0)
+                                    await RaiseStatusAsync(options, SimulationJobStatus.Running).ConfigureAwait(false);
+                            }
+
+                            long incompleteBefore = pipeline.AnalysisBaseAggregator.IncompleteAggregateCount;
+                            IReadOnlyList<Candle> analysisBaseClosed =
+                                pipeline.AnalysisBaseAggregator.ApplyExecutionCandle(baseCandle);
+                            pipeline.Quality.RecordIncompleteAggregate(
+                                pipeline.AnalysisBaseAggregator.IncompleteAggregateCount - incompleteBefore);
+
+                            var closed = new HashSet<BarInterval>();
+                            foreach (Candle analysisBaseCandle in analysisBaseClosed)
+                            {
+                                incompleteBefore = pipeline.MultiTimeframeAggregator.IncompleteAggregateCount;
+                                IReadOnlyList<CandleClosedEvent> closedEvents =
+                                    pipeline.MultiTimeframeAggregator.Apply(analysisBaseCandle);
+                                pipeline.Quality.RecordIncompleteAggregate(
+                                    pipeline.MultiTimeframeAggregator.IncompleteAggregateCount - incompleteBefore);
+                                foreach (CandleClosedEvent closedEvent in closedEvents)
+                                {
+                                    closed.Add(closedEvent.Interval);
+                                    foreach (AnalysisProfileKey profile in instrumentProfiles)
+                                    {
+                                        AnalysisSnapshot snapshot = await profileRegistry.EngineFor(profile)
+                                            .ProcessAsync(closedEvent, runtimeContext, runToken)
+                                            .ConfigureAwait(false);
+                                        pipeline.LatestSnapshotsFor(profile)[closedEvent.Interval] = snapshot;
+                                    }
+                                    if (options.Runtime.AnalysisSharingMode == AnalysisSharingMode.IndependentPerStrategy)
+                                    {
+                                        foreach (StrategySimulationSession session in instrumentSessions)
+                                        {
+                                            if (session.IndependentAnnotator is not null)
+                                            {
+                                                await session.IndependentAnnotator
+                                                    .ProcessAsync(closedEvent, runtimeContext, runToken)
+                                                    .ConfigureAwait(false);
+                                            }
+                                        }
+                                    }
+                                    // sharedPortfolio is always null on this path (see
+                                    // runInstrumentsConcurrently above), so there is no
+                                    // cross-instrument correlation-return bookkeeping to do.
+                                }
+                            }
+
+                            IReadOnlySet<BarInterval> closedIntervals = closed.Count == 0 ? emptyClosed : closed;
+                            if (closed.Count > 0)
+                            {
+                                foreach (AnalysisProfileKey profile in instrumentProfiles)
+                                {
+                                    AnalysisSnapshotSet previous = pipeline.SnapshotSetsByProfile[profile];
+                                    pipeline.SnapshotSetsByProfile[profile] = new AnalysisSnapshotSet
+                                    {
+                                        Version = previous.Version + 1,
+                                        Snapshots = new Dictionary<BarInterval, AnalysisSnapshot>(pipeline.LatestSnapshotsFor(profile))
+                                    };
+                                }
+                            }
+
+                            var snapshotsByProfile = new Dictionary<AnalysisProfileKey, IReadOnlyDictionary<BarInterval, AnalysisSnapshot>>();
+                            foreach (AnalysisProfileKey profile in instrumentProfiles)
+                                snapshotsByProfile[profile] = pipeline.SnapshotSetsByProfile[profile].Snapshots;
+                            IReadOnlyDictionary<BarInterval, AnalysisSnapshot> primarySnapshots = instrumentProfiles.Count > 0
+                                ? snapshotsByProfile[instrumentProfiles[0]]
+                                : new Dictionary<BarInterval, AnalysisSnapshot>();
+
+                            var frame = new MarketFrame
+                            {
+                                Sequence = localSequence,
+                                AvailableAt = marketCandle.AvailableAt,
+                                ExecutionCandle = marketCandle,
+                                AnalysisBaseCandle = analysisBaseClosed.LastOrDefault(),
+                                ClosedIntervals = closedIntervals,
+                                Snapshots = primarySnapshots,
+                                SnapshotsByProfile = snapshotsByProfile,
+                                InputStreamId = options.InputStreamId,
+                                IsWarmup = isWarmup,
+                                IsLastCandle = isLast
+                            };
+
+                            localBatch.Add(frame);
+                            if (frame.AnalysisBaseCandle is null && !frame.IsLastCandle)
+                                continue;
+
+                            MarketFrame[] executionBatch = [.. localBatch];
+                            localBatch.Clear();
+
+                            List<StrategyWorkerHost> activeHosts =
+                                instrumentHosts.Where(host => !host.Session.IsFailed).ToList();
+                            List<StrategySimulationSession> activeSessions =
+                                instrumentSessions.Where(session => !session.IsFailed).ToList();
+
+                            if (activeSessions.Count == 0)
+                            {
+                                if (sessions.All(s => s.IsFailed))
+                                    throw new InvalidOperationException("All strategies have failed; stopping comparison.");
+                                // Every strategy trading this instrument has failed, but other
+                                // instruments' strategies may still be healthy (D9) - keep
+                                // draining this instrument's own stream (matches the
+                                // sequential path's behaviour) without dispatching anything.
+                                continue;
+                            }
+
+                            StrategyFrameResult[][] batchResults;
+                            try
+                            {
+                                batchResults = options.Runtime.StrategyExecutionMode switch
+                                {
+                                    StrategyExecutionMode.ParallelWorkers =>
+                                        await ProcessParallelWorkersBatchAsync(activeHosts, executionBatch, runToken)
+                                            .ConfigureAwait(false),
+                                    _ => await ProcessSequentialBatchAsync(activeSessions, executionBatch, runToken)
+                                        .ConfigureAwait(false)
+                                };
+                            }
+                            catch (Exception) when (
+                                options.Runtime.StrategyFailurePolicy == StrategyFailurePolicy.StopFailedStrategyOnly)
+                            {
+                                StrategySimulationSession? culprit = activeSessions.FirstOrDefault(s => s.IsFailed);
+                                if (culprit is null)
+                                    throw;
+                                if (sessions.All(s => s.IsFailed))
+                                    throw;
+                                continue;
+                            }
+
+                            for (int batchIndex = 0; batchIndex < executionBatch.Length; batchIndex++)
+                            {
+                                MarketFrame committedFrame = executionBatch[batchIndex];
+                                StrategyFrameResult[] frameResults = batchResults[batchIndex];
+                                foreach (StrategyFrameResult result in frameResults)
+                                {
+                                    if (result.Sequence != committedFrame.Sequence)
+                                    {
+                                        throw new InvalidOperationException(
+                                            $"Unexpected sequence from {result.StrategyName}: " +
+                                            $"{result.Sequence} != {committedFrame.Sequence}.");
+                                    }
+                                }
+                                await writer.WriteAsync((committedFrame, frameResults), runToken).ConfigureAwait(false);
+                            }
+
+                            if (options.Runtime.StrategyFailurePolicy == StrategyFailurePolicy.StopEntireComparison &&
+                                sessions.FirstOrDefault(s => s.IsFailed) is StrategySimulationSession failedSession)
+                            {
+                                throw new InvalidOperationException(
+                                    $"Strategy '{failedSession.StrategyName}' failed at sequence " +
+                                    $"{failedSession.FailedSequence}: {failedSession.FailureMessage}");
+                            }
+                        }
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        lock (fatalLock) { fatal ??= exception; }
+                        runCts.Cancel();
+                    }
+                    finally
+                    {
+                        writer.Complete();
+                    }
+                }
+
+                async Task CommitAsync()
+                {
+                    Dictionary<InstrumentKey, ChannelReader<(MarketFrame, StrategyFrameResult[])>> readers =
+                        channels.ToDictionary(kv => kv.Key, kv => kv.Value.Reader);
+                    var buffered = new Dictionary<InstrumentKey, (MarketFrame Frame, StrategyFrameResult[] Results)?>();
+                    foreach (InstrumentKey instrument in tradedInstruments)
+                        buffered[instrument] = null;
+
+                    async Task<bool> EnsureBufferedAsync(InstrumentKey instrument)
+                    {
+                        if (buffered[instrument] is not null)
+                            return true;
+                        ChannelReader<(MarketFrame, StrategyFrameResult[])> reader = readers[instrument];
+                        if (await reader.WaitToReadAsync(runToken).ConfigureAwait(false) &&
+                            reader.TryRead(out (MarketFrame, StrategyFrameResult[]) item))
+                        {
+                            buffered[instrument] = item;
+                            return true;
+                        }
+                        return false;
+                    }
+
+                    while (true)
+                    {
+                        if (options.PauseGate is not null)
+                            await options.PauseGate.WaitIfPausedAsync(runToken).ConfigureAwait(false);
+
+                        await Task.WhenAll(tradedInstruments.Select(EnsureBufferedAsync)).ConfigureAwait(false);
+
+                        InstrumentKey? winner = null;
+                        DateTimeOffset winnerTime = default;
+                        foreach (InstrumentKey instrument in tradedInstruments)
+                        {
+                            if (buffered[instrument] is not (MarketFrame candidateFrame, _))
+                                continue;
+                            if (winner is null ||
+                                candidateFrame.AvailableAt < winnerTime ||
+                                (candidateFrame.AvailableAt == winnerTime &&
+                                 string.CompareOrdinal(instrument.Value, winner.Value.Value) < 0))
+                            {
+                                winner = instrument;
+                                winnerTime = candidateFrame.AvailableAt;
+                            }
+                        }
+
+                        if (winner is null)
+                            break;
+
+                        (MarketFrame localFrame, StrategyFrameResult[] localResults) = buffered[winner.Value]!.Value;
+                        buffered[winner.Value] = null;
+
+                        sequence++;
+                        processed++;
+                        currentMarketTime = localFrame.AvailableAt;
+                        MarketFrame committedFrame = localFrame with { Sequence = sequence };
+                        StrategyFrameResult[] committedResults =
+                            [.. localResults.Select(result => result with { Sequence = sequence })];
+
+                        await replayWriter.CommitFrameAsync(committedFrame, committedResults, runToken)
+                            .ConfigureAwait(false);
+                        if (options.TradeCompleted is not null)
+                        {
+                            foreach (StrategyFrameResult result in committedResults)
+                            {
+                                if (result.NewlyCompletedTrade is SimulatedTradeRecord trade)
+                                    await options.TradeCompleted(result.StrategyId, trade).ConfigureAwait(false);
+                            }
+                        }
+
+                        DateTimeOffset now = DateTimeOffset.UtcNow;
+                        if ((now - lastProgressPublish).TotalMilliseconds >=
+                            options.Runtime.ProgressPublishIntervalMilliseconds)
+                        {
+                            lastProgressPublish = now;
+                            PublishProgress(options, processed, currentMarketTime.Value, sessions, committedFrame.IsWarmup);
+                        }
+                    }
+                }
+
+                async Task RunCommitterAsync()
+                {
+                    try
+                    {
+                        await CommitAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        // A committer-side failure (e.g. a replay-writer I/O error) must also
+                        // stop every producer promptly - otherwise they keep fetching/annotating/
+                        // evaluating with nothing left to drain their output into.
+                        lock (fatalLock) { fatal ??= exception; }
+                        runCts.Cancel();
+                        throw;
+                    }
+                }
+
+                Task[] producers = [.. tradedInstruments.Select(ProduceAsync)];
+                Task committerTask = RunCommitterAsync();
+                try
+                {
+                    await Task.WhenAll([.. producers, committerTask]).ConfigureAwait(false);
+                }
+                catch when (fatal is not null)
+                {
+                    throw fatal;
+                }
+            }
+
             await RaiseStatusAsync(options, SimulationJobStatus.WarmingUp).ConfigureAwait(false);
 
+            if (runInstrumentsConcurrently)
+            {
+                await RunInstrumentsConcurrentlyAsync().ConfigureAwait(false);
+            }
+            else
+            {
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -756,6 +1163,7 @@ public sealed class StreamingComparativeEngine
                         $"Strategy '{failed.StrategyName}' failed at sequence {failed.FailedSequence}: {failed.FailureMessage}");
                 }
             }
+            }
 
             FlushPendingCorrelation();
 
@@ -784,8 +1192,14 @@ public sealed class StreamingComparativeEngine
                     IsComplete = !session.IsFailed,
                     FailedAtSequence = session.FailedSequence,
                     FailureMessage = session.FailureMessage,
+                    FailureRecord = session.FailureRecord is StrategyFailureRecord record
+                        ? record with { SimulationId = options.SimulationId }
+                        : null,
                     FeaturePolicyHash = session.FeaturePolicyHash
                 });
+                await replayWriter.WriteJournalAsync(
+                    session.StrategyId, session.StrategyName, session.Journal.Snapshot(), cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             MarketDataQualityReport qualityReport = CombineQualityReports(

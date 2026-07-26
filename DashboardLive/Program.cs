@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Serilog;
 using Dashboard.Live;
 using DBManager.Abstractions.Bootstrap;
 using DBManager.Abstractions.Config;
@@ -24,6 +25,21 @@ using TradingHub.Persistence.Postgres.Bootstrap;
 using TradingPolicies;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+// See the matching setup in LiveTradingHost/Program.cs for why: the default host console
+// logger doesn't survive past the console session.
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
+    .Enrich.FromLogContext()
+    .ReadFrom.Configuration(builder.Configuration)
+    .WriteTo.Console()
+    .WriteTo.File(
+        Path.Combine(".state", "dashboard-live", "logs", "dashboard-.log"),
+        rollingInterval: RollingInterval.Day,
+        retainedFileCountLimit: 30,
+        shared: true)
+    .CreateLogger();
+builder.Host.UseSerilog();
 BrokerCredentialDatabaseConfiguration? databaseConfiguration =
     BrokerCredentialDatabaseConfiguration.TryLoad(builder.Environment.ContentRootPath, out string repositoryRoot);
 if (databaseConfiguration is null)
@@ -160,7 +176,8 @@ builder.Services.AddSingleton<BacktestApplicationService>(services =>
                             credential.ApiKey,
                             credential.SecretKey);
                 }
-        });
+        },
+        services.GetRequiredService<ILogger<BacktestApplicationService>>());
     return appService;
 });
 builder.Services.AddSingleton<IBacktestApplicationService>(services =>
@@ -743,4 +760,11 @@ app.MapResearchEndpoints();
 app.MapTradingReportEndpoints();
 app.MapHub<SimulationHub>("/hubs/simulations");
 
-app.Run();
+try
+{
+    app.Run();
+}
+finally
+{
+    Log.CloseAndFlush();
+}

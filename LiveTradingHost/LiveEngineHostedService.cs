@@ -784,9 +784,11 @@ public sealed class LiveEngineHostedService(
         {
             try
             {
-                await _runtime.ReconcileAsync(ReconciliationTrigger.Periodic, cancellationToken)
+                BrokerReconciliationReport report = await _runtime
+                    .ReconcileAsync(ReconciliationTrigger.Periodic, cancellationToken)
                     .ConfigureAwait(false);
                 state.SetRestReachable(true);
+                await observability.RecordReconciliationAsync(report, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -794,6 +796,9 @@ public sealed class LiveEngineHostedService(
                 await _runtime.PauseAsync($"Periodic reconciliation failed: {ex.Message}", cancellationToken)
                     .ConfigureAwait(false);
                 _logger.LogError(ex, "Periodic broker reconciliation failed.");
+                await observability.RecordIncidentAsync(
+                    "PeriodicReconciliationFailed", "Periodic broker reconciliation failed.", ex, cancellationToken)
+                    .ConfigureAwait(false);
             }
             RefreshRuntimeStatus();
             await PublishAsync(cancellationToken).ConfigureAwait(false);

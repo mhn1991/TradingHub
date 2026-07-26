@@ -205,6 +205,7 @@ public static class SimulationApi
                 recovery.QuarantinedFiles,
                 recovery.TemporaryFilesRemoved,
                 recovery.WarningCodes,
+                recovery.WarningDetails,
                 oandaCredentialsConfigured = oandaConfigured
             });
         });

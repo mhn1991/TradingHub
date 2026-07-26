@@ -27,4 +27,10 @@
     <ProjectReference Include="../PortfolioManager/PortfolioManager.csproj" />
     <ProjectReference Include="../TradingPolicies/TradingPolicies.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- 9.0.3, not the latest 10.0.10: matches LiveTrading/QuantResearch.Training's existing
+         pin so this doesn't introduce a version-downgrade conflict for any project (like
+         DashboardLive) that references Simulator alongside one of those. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.3" />
+  </ItemGroup>
 </Project>
