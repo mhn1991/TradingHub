@@ -144,6 +144,8 @@ public sealed class SupplyDemandAnalyzer
             decimal height = upper - lower;
 
             bool touchedNow = candle.Prices.Low <= upper && candle.Prices.High >= lower;
+            bool reentered = touchedNow && !state.WasTouching;
+            state.WasTouching = touchedNow;
             if (touchedNow)
             {
                 SupplyDemandZoneState before = zone.State;
@@ -155,17 +157,20 @@ public sealed class SupplyDemandAnalyzer
                 // meaning for FreshnessScore/QualityScore elsewhere.
                 TimeSpan cooldown = TimeSpan.FromSeconds(
                     BarIntervalParser.ApproximateSeconds(zone.Interval) * _profile.MinimumDistinctTouchBars);
-                bool distinctTouch = zone.LastDistinctTouchAt is not DateTimeOffset lastDistinct ||
-                    availableAt - lastDistinct >= cooldown;
+                bool distinctTouch = reentered &&
+                    (zone.LastDistinctTouchAt is not DateTimeOffset lastDistinct ||
+                        availableAt - lastDistinct >= cooldown);
                 zone = zone with
                 {
                     TouchCount = zone.TouchCount + 1,
                     DistinctTouchCount = distinctTouch ? zone.DistinctTouchCount + 1 : zone.DistinctTouchCount,
                     LastDistinctTouchAt = distinctTouch ? availableAt : zone.LastDistinctTouchAt
                 };
-                if (before is SupplyDemandZoneState.ConfirmedFresh or SupplyDemandZoneState.Approached)
+                if (distinctTouch)
                 {
-                    zone = zone with { State = SupplyDemandZoneState.Tested };
+                    if (before is SupplyDemandZoneState.ConfirmedFresh or SupplyDemandZoneState.Approached)
+                        zone = zone with { State = SupplyDemandZoneState.Tested };
+
                     events.Add(CreateEvent(zone.ZoneId, SupplyDemandZoneEventType.Touched, before, zone.State, candle.Prices.Close, availableAt));
                 }
 
@@ -457,6 +462,11 @@ public sealed class SupplyDemandAnalyzer
                     Zone = zone,
                     ConfirmedAtSequence = sequence,
                     MaxPenetrationRatio = 0m,
+                    // Formation can occur while the final departure candle still overlaps the
+                    // base. Do not misclassify the next overlapping candle as a fresh revisit;
+                    // a distinct touch requires price to leave the zone first.
+                    WasTouching = currentCandle.Prices.Low <= Math.Max(proximal, distal) &&
+                        currentCandle.Prices.High >= Math.Min(proximal, distal),
                     Terminal = false
                 };
                 _formedZoneIds.Add(zoneId);
@@ -949,6 +959,7 @@ public sealed class SupplyDemandAnalyzer
         public required SupplyDemandZone Zone { get; set; }
         public required long ConfirmedAtSequence { get; init; }
         public decimal MaxPenetrationRatio { get; set; }
+        public bool WasTouching { get; set; }
         public bool Terminal { get; set; }
     }
 }

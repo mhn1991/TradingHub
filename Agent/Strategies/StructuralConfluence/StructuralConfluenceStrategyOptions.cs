@@ -29,6 +29,7 @@ public sealed record LiquiditySweepReversalOptions
     public decimal MinimumSweepPenetrationAtr { get; init; } = 0.05m;
     public decimal MaximumSweepPenetrationAtr { get; init; } = 1.25m;
     public bool RequireClosedBackInside { get; init; } = true;
+    /// <summary>Measured in setup-interval bars, where liquidity sweeps are detected.</summary>
     public int MaximumBarsSinceSweep { get; init; } = 12;
     public StructuralConfluenceRequirement SupplyDemandConfluence { get; init; } = StructuralConfluenceRequirement.Preferred;
     public decimal MaximumZonePoolDistanceAtr { get; init; } = 0.5m;
@@ -59,6 +60,10 @@ public sealed record SupplyDemandPullbackOptions
     public int MaximumPriorTouches { get; init; } = 1;
     public decimal MaximumPenetrationRatio { get; init; } = 0.65m;
     public bool RequireTrendAlignment { get; init; } = true;
+    /// <summary>
+    /// Retained for configuration compatibility. Range-boundary reversals are owned exclusively
+    /// by LiquiditySweepReversalPlaybook; this option no longer routes them into this playbook.
+    /// </summary>
     public bool AllowRangeBoundaryContext { get; init; }
     public bool RequirePriceActionTrigger { get; init; } = true;
     public StructuralConfirmationMode CciMode { get; init; } = StructuralConfirmationMode.Soft;
@@ -159,13 +164,13 @@ public sealed record StructuralGeometryOptions
 {
     public decimal MaximumStopDistanceAtr { get; init; } = 4m;
     public decimal MinimumObstacleDistanceAtr { get; init; } = 0.15m;
+    public decimal MinimumRiskToSpreadMultiple { get; init; } = 1m;
 }
 
 /// <summary>
-/// Configuration for the tiered target-map builder and adaptive exit routing introduced by the
-/// Structural Indicator and Adaptive Target Management Plan. Disabled by default so every
-/// existing structural-confluence-v1 profile keeps its exact nearest-obstacle bracket behavior;
-/// the v2 profile is the only caller that turns this on.
+/// Configuration for tiered structural target selection and adaptive exit routing.
+/// <see cref="Enabled"/> controls managed exit policies only; the target-quality thresholds also
+/// govern conventional fixed-bracket targets used by the level-based playbooks.
 /// </summary>
 public sealed record AdaptiveTargetManagementOptions
 {
@@ -183,12 +188,9 @@ public sealed record AdaptiveTargetManagementOptions
     /// <summary>Maximum ranked candidates retained after ranking (plan §3.3).</summary>
     public int MaximumPersistedCandidates { get; init; } = 8;
     /// <summary>
-    /// Terminal-role eligibility distance cap, in entry/trigger-timeframe ATR. Ranking prefers
-    /// coarser-timeframe candidates within the same tier (see TargetMapBuilder.ClusterAndRank),
-    /// which without this cap lets a higher-timeframe zone many ATR away win as the terminal
-    /// target for a much finer entry timeframe - a real, observed failure mode (a 2H zone ~26 ATR
-    /// away selected as the target for a 5-minute-entry trade). Candidates beyond this distance
-    /// are excluded from Terminal eligibility regardless of tier/quality.
+    /// Terminal-role eligibility distance cap, in setup-timeframe ATR. This prevents a remote
+    /// higher-timeframe zone from becoming a target for a much finer entry. Candidates beyond
+    /// this distance are excluded from terminal eligibility regardless of tier/quality.
     /// </summary>
     public decimal MaximumTerminalDistanceAtr { get; init; } = 8m;
 
@@ -255,27 +257,19 @@ public sealed record IndicatorConfluenceOptions
     public bool RequireTrendStrengthening { get; init; } = true;
 
     /// <summary>
-    /// Momentum/volatility confirmation now goes entirely through RsiBollingerSignalPolicy - the
-    /// same shared policy ProgressiveStrategyBase/RuleBasedMultiTimeframeAgent already use -
-    /// instead of a bespoke static RSI band + Bollinger squeeze/expansion re-check. That policy
-    /// reads the actual indicator SIGNALS this playbook was ignoring: freshness- and strength-
-    /// bounded RSI divergence/convergence (RsiRelationshipSnapshot.AgeCandles/Strength, not just
-    /// the type), a genuine Bollinger squeeze-RELEASE event (BollingerAnalysisSnapshot.
-    /// SqueezeReleased) rather than a "currently expanding" state that can stay true for many bars
-    /// after the actual breakout, and an explicit opposing-signal veto - not just a looser filter.
-    /// Replaces the old MinimumRsiForBuy/MaximumRsiForBuy/MinimumRsiForSell/MaximumRsiForSell/
-    /// AllowRsiDivergenceAlternative/RequireSqueezeBreakout fields entirely rather than layering
-    /// on top of them.
+    /// Supplies freshness, strength, directional position, and opposing-signal veto thresholds.
+    /// IndicatorConfluence uses hidden divergence as its continuation catalyst, with aligned RSI
+    /// momentum, directional convergence, and Bollinger position as current confirmation.
+    /// Bollinger expansion is supportive volatility evidence rather than a hard entry gate:
+    /// structural price action already proves resumption, while width expansion may lag it.
+    /// Regular divergence and a squeeze release by itself are deliberately left to reversal and
+    /// breakout playbooks.
     /// </summary>
     public RsiBollingerSignalOptions RsiBollingerSignals { get; init; } = new();
 
     /// <summary>
-    /// A second, faster entry path alongside RsiBollingerSignals' own trigger: RSI
-    /// divergence/convergence + RSI oversold/overbought zone + Bollinger still squeezed (not yet
-    /// released) + StochRSI's fast (%K) line already at this extreme. StochRSI (Stochastic applied
-    /// to the RSI series) reacts several bars before raw RSI would, so this can catch a momentum
-    /// shift while Bollinger is still compressed instead of waiting for the release event. Buy
-    /// requires Fast >= this threshold; sell mirrors it (Fast &lt;= 100 - threshold).
+    /// Retained for backward-compatible configuration and calibration artifacts. Version 1.2 no
+    /// longer uses the reversal-style StochRSI extreme entry path.
     /// </summary>
     public decimal StochRsiFastExtremeThreshold { get; init; } = 90m;
 
@@ -347,6 +341,7 @@ public sealed record StructuralConfluenceStrategyOptions
     public StructuralConfirmationOptions Confirmation { get; init; } = new();
     public StructuralArbitrationOptions Arbitration { get; init; } = new();
     public StructuralGeometryOptions Geometry { get; init; } = new();
+    public MarketRegimePolicyOptions MarketRegime { get; init; } = new();
     public AdaptiveTargetManagementOptions AdaptiveTargetManagement { get; init; } = new();
     public string StrategyVersion { get; init; } = "structural-confluence-v1";
 
@@ -373,13 +368,15 @@ public sealed record StructuralConfluenceStrategyOptions
             Confirmation.SoftAlignedAdjustment is < 0m or > 10m ||
             Confirmation.SoftConflictAdjustment is < -10m or > 0m ||
             Arbitration.SameDirectionConfluenceAdjustment is < 0m or > 8m ||
-            Geometry.MaximumStopDistanceAtr <= 0m || Geometry.MinimumObstacleDistanceAtr < 0m)
+            Geometry.MaximumStopDistanceAtr <= 0m || Geometry.MinimumObstacleDistanceAtr < 0m ||
+            Geometry.MinimumRiskToSpreadMultiple < 0m)
             throw new ArgumentException("Structural-confluence strategy options are invalid.");
 
         LiquiditySweepReversal.Validate();
         SupplyDemandPullback.Validate();
         LiquidityBreakRetest.Validate();
         IndicatorConfluence.Validate();
+        MarketRegime.Validate();
         if (!LiquiditySweepReversal.Enabled && !SupplyDemandPullback.Enabled &&
             !LiquidityBreakRetest.Enabled && !IndicatorConfluence.Enabled)
             throw new ArgumentException("At least one structural playbook must be enabled.");

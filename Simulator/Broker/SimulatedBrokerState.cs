@@ -429,6 +429,15 @@ internal sealed class SimulatedBrokerState
                 }
             }
 
+            rejectionReason = GetAttachedProtectionRejectionReason(order, price);
+            if (rejectionReason is not null)
+            {
+                order.Status = "REJECTED";
+                RejectedOrders++;
+                rejectedOrder = order.Copy();
+                return false;
+            }
+
             rejectionReason = GetMarginRejectionReasonUnsafe(order, price, quantity, commission);
             if (rejectionReason is not null)
             {
@@ -506,6 +515,27 @@ internal sealed class SimulatedBrokerState
                 quantity);
             return true;
         }
+    }
+
+    private static string? GetAttachedProtectionRejectionReason(SimulatedOrder order, decimal fillPrice)
+    {
+        if (order.Request.ReduceOnly)
+            return null;
+
+        bool buy = order.Request.Side == OrderSide.Buy;
+        if (order.Request.StopLoss?.Price is { } stopLoss &&
+            (buy ? stopLoss >= fillPrice : stopLoss <= fillPrice))
+        {
+            return $"Attached stop-loss {stopLoss} is invalid for the executable fill {fillPrice}.";
+        }
+
+        if (order.Request.TakeProfit?.Price is { } takeProfit &&
+            (buy ? takeProfit <= fillPrice : takeProfit >= fillPrice))
+        {
+            return $"Attached take-profit {takeProfit} is invalid for the executable fill {fillPrice}.";
+        }
+
+        return null;
     }
 
     public IReadOnlyList<SimulatedOrder> CancelOcoSiblings(string filledOrderId)

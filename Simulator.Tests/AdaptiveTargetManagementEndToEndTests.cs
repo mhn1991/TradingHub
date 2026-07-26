@@ -60,6 +60,8 @@ public sealed class AdaptiveTargetManagementEndToEndTests
         Assert.Multiple(() =>
         {
             Assert.That(trade.TakeProfitPrice, Is.Null, "a managed policy must never submit a hard broker target");
+            Assert.That(trade.PlaybookId, Is.EqualTo("test.adaptive-target"));
+            Assert.That(trade.EntryPlaybookId, Is.EqualTo(trade.PlaybookId));
             Assert.That(trade.ExitPolicy, Is.EqualTo(TradeExitPolicy.PartialThenRunner));
             Assert.That(trade.TargetPlan, Is.Not.Null);
             Assert.That(trade.PartialExits, Has.Count.EqualTo(1));
@@ -174,6 +176,7 @@ public sealed class AdaptiveTargetManagementEndToEndTests
             return Task.FromResult(new AgentDecision
             {
                 StrategyName = Name,
+                PlaybookId = "test.adaptive-target",
                 SetupId = "adaptive-target-e2e-buy",
                 SetupStartedAt = context.Timestamp,
                 SignalInterval = interval,

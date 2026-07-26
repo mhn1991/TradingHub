@@ -30,9 +30,8 @@ public sealed record TargetMapResult
 /// Plan §3): collects causal swing/liquidity/supply-demand candidates across every configured
 /// timeframe, clusters and ranks them, resolves reachability against the nearest significant
 /// opposing structure, and evaluates admission for a caller-selected <see cref="TradeExitPolicy"/>.
-/// Entirely additive - <see cref="StructuralGeometryBuilder"/>'s v1 nearest-obstacle path is
-/// untouched; this type is only invoked from a v2 path once <see cref="AdaptiveTargetManagementOptions.Enabled"/>
-/// is true (wiring lands in Phase 3).
+/// <see cref="StructuralGeometryBuilder"/> uses this map for both conventional fixed brackets and
+/// adaptive exit plans; enabling adaptive management changes the exit policy, not target quality.
 /// </summary>
 public sealed class TargetMapBuilder
 {
@@ -73,9 +72,18 @@ public sealed class TargetMapBuilder
 
         IReadOnlyList<TradeTargetCandidate> ranked = ClusterAndRank(raw, entry, atr, risk, evidence.ExecutableSpread);
 
-        TradeTargetCandidate? terminal = ranked.FirstOrDefault(item =>
-            item.Tier is TradeTargetSignificanceTier.TierA or TradeTargetSignificanceTier.TierB &&
-            item.DistanceAtr <= _options.MaximumTerminalDistanceAtr);
+        // The first significant opposing structure is the hard barrier. Ranking is tier-first for
+        // persistence/display, so selecting FirstOrDefault directly from it could jump over a
+        // nearer Tier-B barrier to target a farther Tier-A level.
+        TradeTargetCandidate? terminal = ranked
+            .Where(item =>
+                item.Tier is TradeTargetSignificanceTier.TierA or TradeTargetSignificanceTier.TierB &&
+                item.DistanceAtr <= _options.MaximumTerminalDistanceAtr)
+            .OrderBy(item => item.DistanceAtr)
+            .ThenBy(item => item.Tier)
+            .ThenByDescending(item => item.Quality)
+            .ThenBy(item => item.CandidateId, StringComparer.Ordinal)
+            .FirstOrDefault();
         var withRoles = AssignRoles(ranked, terminal);
 
         TradeTargetCandidate? checkpoint = withRoles

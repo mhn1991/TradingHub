@@ -870,6 +870,31 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             return;
         }
 
+        foreach (StructuralPlaybookDiagnostic diagnostic in decision.StructuralPlaybookDiagnostics)
+        {
+            AddFrameEvent(
+                StrategyReplayEventType.StructuralPlaybookEvaluated,
+                decision.CreatedAt,
+                reason: diagnostic.EvaluationReasonCode,
+                reasonCode: diagnostic.OutcomeReasonCode,
+                decisionId: decision.DecisionId,
+                optionOrModelVersion: diagnostic.PlaybookVersion,
+                evaluationSetupId: diagnostic.SetupId,
+                playbookId: diagnostic.PlaybookId,
+                structuralDirection: diagnostic.Direction,
+                structuralLifecycle: diagnostic.Lifecycle,
+                isEntryEligible: diagnostic.IsEntryEligible,
+                isReady: diagnostic.IsReady,
+                isSelected: diagnostic.IsSelected,
+                playbookOutcome: diagnostic.Outcome,
+                primaryBlockingReasonCode: diagnostic.PrimaryBlockingReasonCode,
+                failedGateReasonCodes: diagnostic.FailedGateReasonCodes,
+                supportingEvidence: diagnostic.SupportingEvidence,
+                conflictingEvidence: diagnostic.ConflictingEvidence,
+                structuralConfidence: diagnostic.Confidence,
+                mandatoryQualityFloor: diagnostic.MandatoryQualityFloor);
+        }
+
         if (result.TradingCondition is TradingConditionDecision tradingCondition)
         {
             AddFrameEvent(
@@ -1017,6 +1042,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             _activeTrade = new SimulatedTradeRecord
             {
                 StrategyId = StrategyId,
+                PlaybookId = decision.PlaybookId ?? "unknown",
                 StrategyName = decision.StrategyName ?? Strategy.Name,
                 SetupId = decision.SetupId ?? decision.DecisionId ?? $"setup:{timestamp:O}",
                 PositionId = after.PositionId,
@@ -2445,7 +2471,21 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         string? reservationId = null,
         decimal? previousValue = null,
         decimal? newValue = null,
-        string? optionOrModelVersion = null) =>
+        string? optionOrModelVersion = null,
+        string? evaluationSetupId = null,
+        string? playbookId = null,
+        PriceActionDirection? structuralDirection = null,
+        StructuralSetupLifecycle? structuralLifecycle = null,
+        bool? isEntryEligible = null,
+        bool? isReady = null,
+        bool? isSelected = null,
+        StructuralPlaybookOutcome? playbookOutcome = null,
+        string? primaryBlockingReasonCode = null,
+        IReadOnlyList<string>? failedGateReasonCodes = null,
+        IReadOnlyList<string>? supportingEvidence = null,
+        IReadOnlyList<string>? conflictingEvidence = null,
+        decimal? structuralConfidence = null,
+        decimal? mandatoryQualityFloor = null) =>
         _frameEvents.Add(new StrategyReplayEvent
         {
             Type = type,
@@ -2462,6 +2502,20 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             PreviousValue = previousValue,
             NewValue = newValue,
             OptionOrModelVersion = optionOrModelVersion,
+            EvaluationSetupId = evaluationSetupId,
+            PlaybookId = playbookId,
+            StructuralDirection = structuralDirection,
+            StructuralLifecycle = structuralLifecycle,
+            IsEntryEligible = isEntryEligible,
+            IsReady = isReady,
+            IsSelected = isSelected,
+            PlaybookOutcome = playbookOutcome,
+            PrimaryBlockingReasonCode = primaryBlockingReasonCode,
+            FailedGateReasonCodes = failedGateReasonCodes ?? [],
+            SupportingEvidence = supportingEvidence ?? [],
+            ConflictingEvidence = conflictingEvidence ?? [],
+            StructuralConfidence = structuralConfidence,
+            MandatoryQualityFloor = mandatoryQualityFloor,
             PriceActionTrigger = priceActionTrigger,
             PriceActionConfidence = priceActionConfidence,
             QuantityBefore = quantityBefore,

@@ -173,6 +173,46 @@ public sealed class ExecutionAndFinancingModelTests
         });
     }
 
+    [Test]
+    public async Task MarketEntry_WhenExecutableFillCrossesAttachedTarget_IsRejectedWithoutOpeningPosition()
+    {
+        DateTimeOffset start = new(2026, 7, 15, 10, 0, 0, TimeSpan.Zero);
+        var clock = new HistoricalSimulationClock();
+        clock.AdvanceTo(start);
+        await using var broker = new SimulatedBrokerClient(new SimulationOptions
+        {
+            CommissionRate = 0m,
+            SpreadBasisPoints = 10m,
+            SlippageBasisPoints = 0m
+        }, clock);
+
+        OrderSubmission submission = await broker.Orders.PlaceOrderAsync(new PlaceOrderRequest
+        {
+            Instrument = new InstrumentKey("FX:GBP/USD"),
+            Side = OrderSide.Buy,
+            Type = StandardOrderType.Market,
+            Quantity = new OrderQuantity(100m, QuantityUnit.Units),
+            StopLoss = new StopLossInstruction(0.99m),
+            // Valid relative to the 1.0 signal, but below the 1.0005 executable buy fill.
+            TakeProfit = new TakeProfitInstruction(1.00025m),
+            ClientOrderId = "crossed-target-entry"
+        });
+
+        DateTimeOffset close = start.AddMinutes(1);
+        clock.AdvanceTo(close);
+        await broker.Runtime.ProcessExecutionCandleAsync(CandleAt(
+            1m, 1.01m, 0.99m, 1m, start, close));
+
+        SimulationResult result = broker.State.BuildResult(start, close);
+        Assert.Multiple(() =>
+        {
+            Assert.That(submission.Status, Is.EqualTo(SubmissionStatus.Accepted));
+            Assert.That(result.OpenPositions, Is.Empty);
+            Assert.That(result.FilledOrders, Is.Zero);
+            Assert.That(result.RejectedOrders, Is.EqualTo(1));
+        });
+    }
+
     private static SimulatedOrder StopOrder(OrderSide side, decimal stop, decimal quantity) => new()
     {
         BrokerOrderId = "order",

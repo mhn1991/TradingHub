@@ -696,7 +696,15 @@ public sealed record BacktestRequest
                 throw new ArgumentException(
                     $"Strategy type '{strategyType}' conflicts with agent definition kind '{definitionOverride.Kind}'.");
             }
-            return definitionOverride;
+            return kind == TradingAgentKind.StructuralConfluence
+                ? definitionOverride with
+                {
+                    StructuralConfluence = definitionOverride.StructuralConfluence! with
+                    {
+                        MarketRegime = Runtime.MarketRegimeRouting
+                    }
+                }
+                : definitionOverride;
         }
 
         return kind switch
@@ -716,6 +724,7 @@ public sealed record BacktestRequest
                     TriggerInterval = Runtime.StructuralTriggerInterval,
                     SetupInterval = Runtime.StructuralSetupInterval,
                     ContextInterval = Runtime.StructuralContextInterval,
+                    MarketRegime = Runtime.MarketRegimeRouting,
                     Trigger = new StructuralTriggerOptions
                     {
                         MinimumPriceActionConfidence = MinimumPriceActionConfidence

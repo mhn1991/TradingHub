@@ -6,7 +6,17 @@ using ChartAnnotator.TargetManagement;
 
 namespace Agent.Strategies.StructuralConfluence.Playbooks;
 
-public sealed record MandatoryGate(string Name, bool Passed, decimal Quality, string ReasonCode);
+/// <summary>
+/// A condition retained in the common gate diagnostics. <see cref="LimitsConfidenceFloor"/> is
+/// false for optional/preferred evidence: it can still add or subtract a confidence adjustment,
+/// but its absence must not silently turn a soft confirmation into a hard requirement.
+/// </summary>
+public sealed record MandatoryGate(
+    string Name,
+    bool Passed,
+    decimal Quality,
+    string ReasonCode,
+    bool LimitsConfidenceFloor = true);
 
 public sealed record ConfidenceContribution(string Component, decimal Adjustment, string ReasonCode);
 
@@ -44,6 +54,11 @@ public sealed record PlaybookEvaluation
     public Guid? PrimarySweepId { get; init; }
     public Guid? PrimaryZoneId { get; init; }
     public DateTimeOffset? CatalystAt { get; init; }
+    /// <summary>
+    /// Stable identity of the causal catalyst, independent of the setup identity that may have
+    /// been armed before the catalyst appeared. Used to enforce terminal lifecycle semantics.
+    /// </summary>
+    public string? CatalystIdentity { get; init; }
     public IReadOnlyList<MandatoryGate> MandatoryGates { get; init; } = [];
     public IReadOnlyList<string> SupportingEvidence { get; init; } = [];
     public IReadOnlyList<string> ConflictingEvidence { get; init; } = [];
@@ -66,9 +81,11 @@ public sealed record PlaybookEvaluation
     public PriceActionSetup? TriggerSetup { get; init; }
     public string CciConfirmationState { get; init; } = "Unavailable";
 
-    public decimal MandatoryQualityFloor => MandatoryGates.Count == 0
-        ? 0m
-        : MandatoryGates.Min(item => item.Quality);
+    public decimal MandatoryQualityFloor => MandatoryGates
+        .Where(item => item.LimitsConfidenceFloor)
+        .Select(item => item.Quality)
+        .DefaultIfEmpty(0m)
+        .Min();
 }
 
 public sealed record PlaybookRuntimeState
@@ -81,7 +98,7 @@ public sealed record PlaybookRuntimeState
     public DateTimeOffset? ExpiresAt { get; init; }
     public PlaybookEvaluation? LastEvaluation { get; init; }
     /// <summary>
-    /// Sticky across non-ready frames (only overwritten when a NEW ready candidate appears) -
+    /// Sticky across non-ready frames (only overwritten when a ready candidate is selected) -
     /// unlike <see cref="SetupId"/>, which gets clobbered back to null the moment the playbook
     /// goes dormant. Lets a playbook check "have I already signaled off this exact identity"
     /// even after the position it produced has closed and evaluation resumes: while a position
@@ -91,8 +108,8 @@ public sealed record PlaybookRuntimeState
     /// </summary>
     public string? LastReadySetupId { get; init; }
     /// <summary>
-    /// Sticky in the same way as <see cref="LastReadySetupId"/> (only overwritten by a new ready
-    /// evaluation) - unlike <see cref="LastEvaluation"/>'s own <c>CatalystAt</c>, which gets
+    /// Sticky in the same way as <see cref="LastReadySetupId"/> (only overwritten by a selected
+    /// ready evaluation) - unlike <see cref="LastEvaluation"/>'s own <c>CatalystAt</c>, which gets
     /// overwritten on every bar regardless of readiness. <see cref="IndicatorConfluencePlaybook"/>'s
     /// cooldown needs the timestamp of the last bar that actually went ready, not the last bar
     /// evaluated - reading <c>LastEvaluation.CatalystAt</c> directly let a non-ready bar's freshly
@@ -100,4 +117,14 @@ public sealed record PlaybookRuntimeState
     /// locking the playbook out after its first trade.
     /// </summary>
     public DateTimeOffset? LastReadyCatalystAt { get; init; }
+    /// <summary>
+    /// Catalyst attached to the last selected candidate. This closes the same-catalyst re-entry
+    /// path even when a pre-catalyst trend hypothesis gave the traded setup a different ID.
+    /// </summary>
+    public string? LastReadyCatalystIdentity { get; init; }
+    /// <summary>
+    /// Bounded history of catalyst identities that reached a terminal lifecycle. A later snapshot
+    /// may still expose the same relationship, but it must not revive it as a new setup.
+    /// </summary>
+    public IReadOnlyList<string> TerminalCatalystIdentities { get; init; } = [];
 }

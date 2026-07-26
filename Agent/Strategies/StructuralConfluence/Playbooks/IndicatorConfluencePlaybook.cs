@@ -7,13 +7,15 @@ using ChartAnnotator.Regime;
 namespace Agent.Strategies.StructuralConfluence.Playbooks;
 
 /// <summary>
-/// Entry driven purely by indicator confluence rather than structure: ADX/DMI establishes trend
-/// presence and direction, RsiBollingerSignalPolicy confirms momentum/volatility are actually
-/// signaling (not just sitting at some static level), and ADX supplies the trend-regime filter.
-/// Each indicator answers a different question - deliberately not stacking two indicators that
-/// measure the same thing (e.g. RSI and CCI would both just be momentum oscillators agreeing with
-/// themselves). Has no zone/pool/level to anchor risk to, so unlike the other three playbooks its
-/// stop/target is a plain ATR multiple.
+/// Trend-continuation entry driven by indicator confluence: ADX/DMI establishes trend presence
+/// and direction, hidden RSI divergence identifies a pullback inside that trend, fresh structural
+/// price action proves resumption, and Bollinger position/expansion describes volatility context.
+/// Expansion strengthens confidence when it is already present, but must not delay a structurally
+/// confirmed entry until after the resumption has moved and trend strength has started to decay.
+/// Directional RSI convergence may confirm current momentum, but cannot arm the hypothesis because
+/// it normally describes a move already in progress. Each input answers a different question -
+/// deliberately not stacking two indicators that measure the same thing. Has no zone/pool/level
+/// to anchor risk to, so unlike the other three playbooks its stop/target is a plain ATR multiple.
 /// </summary>
 public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
 {
@@ -28,7 +30,7 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
     }
 
     public string PlaybookId => StableId;
-    public string Version => "1.1";
+    public string Version => "2.0";
 
     public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
     {
@@ -52,39 +54,24 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         bool trendPasses = adx.Adx is decimal adxValue && adxValue >= _options.MinimumAdx &&
             (!_options.RequireTrendStrengthening || adx.IsTrendStrengthening);
 
-        // The actual momentum/volatility SIGNALS, not static levels: RsiBollingerSignalPolicy reads
-        // RSI relationship freshness/strength (RsiRelationshipSnapshot.AgeCandles/Strength - a stale
-        // divergence from many bars ago no longer counts) and a genuine Bollinger squeeze-RELEASE
-        // event (SqueezeReleased), not just "currently not squeezed." HasEntryTrigger is true when
-        // either a fresh, strong-enough RSI relationship or a directional squeeze release actually
-        // fired; IsVetoed is a hard block on a strong opposing RSI relationship or opposing
-        // Bollinger expansion, independent of everything else passing.
+        // The shared policy supplies causal freshness/strength checks, current momentum/
+        // volatility confirmation, and opposing-signal vetoes. This playbook then applies its own
+        // hypothesis semantics: only hidden divergence identifies a pullback continuation
+        // catalyst. Convergence confirms a move already in progress; regular divergence belongs
+        // to reversal; a squeeze release by itself belongs to breakout.
         RsiBollingerSignalAssessment signal = RsiBollingerSignalPolicy.Evaluate(
             evidence.Trigger, direction, _options.RsiBollingerSignals);
-
-        // A second, faster entry path alongside RsiBollingerSignalPolicy's own trigger: RSI
-        // divergence/convergence already confirmed (signal.AlignedRsiRelationship, same freshness/
-        // strength bar as the policy's other checks) AND RSI sitting in the oversold/overbought
-        // zone (the reversal setup) AND Bollinger still compressed (energy building, not yet
-        // released) AND StochRSI's fast line already snapping to an extreme - StochRSI reacts to a
-        // momentum shift several bars before raw RSI would, so this can confirm the move is
-        // actually underway before RsiBollingerSignalPolicy's own release/position trigger would
-        // fire. Mirrored for sell: overbought RSI, fast line <= (100 - threshold).
-        RsiAnalysisSnapshot rsi = indicators.RsiAnalysis;
-        BollingerAnalysisSnapshot bollinger = indicators.BollingerAnalysis;
-        StochRsiSnapshot stochRsi = indicators.StochRsi;
-        bool rsiExtremeZone = buy ? rsi.Zone == RsiZone.Oversold : rsi.Zone == RsiZone.Overbought;
-        bool stochRsiExtreme = stochRsi.Fast is decimal stochFast &&
-            (buy
-                ? stochFast >= _options.StochRsiFastExtremeThreshold
-                : stochFast <= 100m - _options.StochRsiFastExtremeThreshold);
-        bool stochRsiEarlyTrigger = signal.AlignedRsiRelationship is not null &&
-            rsiExtremeZone && bollinger.IsSqueeze && stochRsiExtreme;
-
+        RsiRelationshipSnapshot? observedHiddenCatalyst =
+            signal.AlignedRsiRelationship is { } relationship &&
+            IsAlignedHiddenDivergence(relationship.Type, direction)
+                ? relationship
+                : null;
         bool signalNotVetoed = !signal.IsVetoed;
-        bool signalTriggered = signal.HasEntryTrigger || stochRsiEarlyTrigger;
+        bool confirmedExpansion = signal.BollingerPositionAligned &&
+            evidence.Trigger.Indicators.BollingerAnalysis.IsExpansion;
 
         bool contextPasses = !_options.RequireContextAlignment || IsContextAligned(evidence, direction);
+        bool setupStructurePasses = IsSetupStructureCompatible(evidence, direction);
         bool cooldownPasses = IsCooldownElapsed(evidence, state);
 
         decimal adxQuality = adx.Adx is decimal adxForQuality
@@ -94,8 +81,8 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         // default) range - keeps this in the same 0-100 scale every other gate's quality uses
         // without letting a merely-adequate signal silently sit below MinimumConfidence the way a
         // raw indicator value used directly as quality did before.
-        decimal signalQuality = Math.Clamp(
-            50m + signal.ConfidenceAdjustment * 5m + (stochRsiEarlyTrigger ? 10m : 0m), 0m, 100m);
+        decimal signalAdjustment = ContinuationSignalAdjustment(signal, observedHiddenCatalyst);
+        decimal signalQuality = Math.Clamp(50m + signalAdjustment * 5m, 0m, 100m);
         decimal contextQuality = buy
             ? evidence.ContextEvidence.BullishQuality
             : evidence.ContextEvidence.BearishQuality;
@@ -103,89 +90,204 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         string vetoReasonCode = signal.VetoReasonCode is { } veto
             ? $"StructuralIndicator{veto}"
             : "StructuralIndicatorSignalVetoed";
+
+        StructuralGeometry geometry = BuildAtrGeometry(direction, price, atr, evidence.ExecutableSpread);
+
+        string? observedCatalystIdentity = observedHiddenCatalyst is null
+            ? null
+            : RelationshipIdentity(observedHiddenCatalyst);
+        bool continuedWithoutGap = state.LastAvailableAt != DateTimeOffset.MinValue &&
+            evidence.AvailableAt - state.LastAvailableAt <= StructuralPlaybookRules.Bars(evidence.Trigger.Interval, 2);
+        PlaybookEvaluation? previous = state.LastEvaluation;
+        bool previousIsActive = continuedWithoutGap &&
+            previous is { SetupId: not null } &&
+            previous.Direction == direction &&
+            previous.Lifecycle is StructuralSetupLifecycle.Armed or
+                StructuralSetupLifecycle.CatalystObserved or
+                StructuralSetupLifecycle.AwaitingTrigger or
+                StructuralSetupLifecycle.CandidateProduced;
+        bool sameCatalyst = previous?.CatalystIdentity is null ||
+            observedCatalystIdentity is null ||
+            string.Equals(
+                previous.CatalystIdentity, observedCatalystIdentity, StringComparison.Ordinal);
+        bool continuingHypothesis = previousIsActive && sameCatalyst;
+
+        string? catalystIdentity = observedCatalystIdentity ??
+            (continuingHypothesis ? previous!.CatalystIdentity : null);
+        DateTimeOffset? catalystAt = observedHiddenCatalyst?.ConfirmedAt ??
+            (continuingHypothesis ? previous!.CatalystAt : null);
+        bool hasActiveCatalyst = catalystIdentity is not null && catalystAt is not null;
+        bool continuationCatalyst = hasActiveCatalyst &&
+            signal.RsiMomentumAligned && signal.BollingerPositionAligned;
+
+        // A hypothesis does not exist until its baseline trend/context/geometry is valid. This
+        // prevents a relationship seen before ADX establishes a trend from being "invalidated
+        // before birth", while still making later failure terminal once the hypothesis was armed.
+        bool baselinePasses = trendPasses && signalNotVetoed && contextPasses &&
+            setupStructurePasses && geometry.IsValid;
+        string? setupId = null;
+        if (continuingHypothesis)
+        {
+            setupId = previous!.SetupId;
+        }
+        else if (baselinePasses)
+        {
+            string setupCatalystIdentity = catalystIdentity is null
+                ? $"trend-{direction}"
+                : catalystIdentity;
+            setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
+                null, null, setupCatalystIdentity,
+                observedHiddenCatalyst?.ConfirmedAt ?? evidence.AvailableAt, direction);
+        }
+
+        bool terminalCatalyst = catalystIdentity is not null &&
+            state.TerminalCatalystIdentities.Contains(catalystIdentity, StringComparer.Ordinal);
+        DateTimeOffset? catalystExpiresAt = catalystAt is DateTimeOffset expiryStart
+            ? StructuralPlaybookRules.TriggerWindowExpiresAt(
+                expiryStart,
+                evidence.Trigger.Interval,
+                _root.MaximumTriggerBars,
+                _root.MaximumArmedSetupBars)
+            : null;
+        bool catalystExpired = hasActiveCatalyst &&
+            catalystExpiresAt is DateTimeOffset expiresAt &&
+            evidence.AvailableAt > expiresAt;
+
+        // RSI is the catalyst, not the entry. The actual entry trigger must be a fresh,
+        // directionally aligned price-action resumption confirmed after that catalyst.
+        (PriceActionEvent? Event, PriceActionSetup? Setup, decimal Quality) resumption =
+            catalystAt is DateTimeOffset observedAt
+                ? StructuralPlaybookRules.Trigger(
+                    evidence, direction, StructuralTriggerProfile.IndicatorTrendContinuation,
+                    _root.Trigger.MinimumPriceActionConfidence,
+                    StructuralPlaybookRules.TriggerResponseBars(
+                        _root.MaximumTriggerBars, _root.MaximumArmedSetupBars),
+                    observedAt)
+                : (null, null, 0m);
+        bool priceActionTriggered = resumption.Event is not null || resumption.Setup is not null;
+
+        PriceActionDirection opposingDirection = buy
+            ? PriceActionDirection.Bearish
+            : PriceActionDirection.Bullish;
+        (PriceActionEvent? Event, PriceActionSetup? Setup, decimal Quality) structuralInvalidation =
+            catalystAt is DateTimeOffset invalidationWindowStart
+                ? StructuralPlaybookRules.Trigger(
+                    evidence, opposingDirection,
+                    StructuralTriggerProfile.IndicatorStructuralInvalidation,
+                    _root.Trigger.MinimumPriceActionConfidence, _root.MaximumTriggerBars,
+                    invalidationWindowStart)
+                : (null, null, 0m);
+        DateTimeOffset? resumptionAt =
+            resumption.Event?.ConfirmedAt ?? resumption.Setup?.TriggeredAt;
+        (PriceActionEvent? Event, PriceActionSetup? Setup, decimal Quality) entryConflict =
+            resumptionAt is DateTimeOffset conflictWindowStart
+                ? StructuralPlaybookRules.Trigger(
+                    evidence, opposingDirection, StructuralTriggerProfile.IndicatorStrongOpposition,
+                    _root.Trigger.MinimumPriceActionConfidence, _root.MaximumTriggerBars,
+                    conflictWindowStart)
+                : (null, null, 0m);
+        bool structurallyInvalidated =
+            structuralInvalidation.Event is not null || structuralInvalidation.Setup is not null;
+        bool conflictingAtEntry =
+            entryConflict.Event is not null || entryConflict.Setup is not null;
+        bool strongOpposition = _root.Context.StrongOppositionVeto &&
+            (structurallyInvalidated || conflictingAtEntry);
+        (PriceActionEvent? Event, PriceActionSetup? Setup, decimal Quality) opposition =
+            structurallyInvalidated ? structuralInvalidation : entryConflict;
+        bool priceActionNotOpposed = !strongOpposition;
+
         var gates = new List<MandatoryGate>
         {
             Gate("Trend", trendPasses, adxQuality, "StructuralIndicatorTrendBelowMinimum"),
             Gate("SignalVeto", signalNotVetoed, signalNotVetoed ? 70m : 0m, vetoReasonCode),
-            Gate("SignalTrigger", signalTriggered, signalQuality, "StructuralIndicatorSignalMissing"),
-            Gate("Context", contextPasses, Math.Clamp(contextQuality, 0m, 100m), "StructuralIndicatorContextOpposed"),
-            Gate("Cooldown", cooldownPasses, cooldownPasses ? 70m : 0m, "StructuralIndicatorCooldownActive")
+            Gate("ContinuationCatalyst", continuationCatalyst, signalQuality,
+                "StructuralIndicatorContinuationSignalMissing"),
+            Gate("TerminalCatalyst", !terminalCatalyst, terminalCatalyst ? 0m : 70m,
+                "StructuralIndicatorCatalystTerminated"),
+            Gate("CatalystExpiry", !catalystExpired, catalystExpired ? 0m : 70m,
+                "StructuralIndicatorCatalystExpired"),
+            Gate("PriceActionOpposition", priceActionNotOpposed, priceActionNotOpposed ? 70m : 0m,
+                "StructuralIndicatorStrongOpposingPriceAction"),
+            Gate("PriceActionTrigger", priceActionTriggered, resumption.Quality,
+                "StructuralIndicatorPriceActionTriggerMissing"),
+            Gate("Context", contextPasses, Math.Clamp(contextQuality, 0m, 100m),
+                "StructuralIndicatorContextOpposed"),
+            Gate("SetupStructure", setupStructurePasses, setupStructurePasses ? 70m : 0m,
+                "StructuralIndicatorSetupStructureOpposed"),
+            Gate("Cooldown", cooldownPasses, cooldownPasses ? 70m : 0m,
+                "StructuralIndicatorCooldownActive"),
+            Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode)
         };
 
-        StructuralGeometry geometry = BuildAtrGeometry(direction, price, atr, evidence.ExecutableSpread);
-        gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
-
-        // Unlike the other three playbooks, there is no persistent zone/pool/break event to anchor
-        // identity to - confluence is recomputed fresh from indicator state every bar. Without this,
-        // a fresh SetupId (and CatalystAt) was minted every single bar confluence held, breaking any
-        // consumer that dedupes or tracks a setup by SetupId across bars and re-arming a "new" setup
-        // every evaluation even while the same trade opportunity was still live. Carry the prior
-        // bar's identity forward for as long as the same direction stays ready; only mint a new one
-        // when this is a fresh (or re-armed, or direction-flipped) candidate.
-        //
-        // continuedWithoutGap guards against a second failure mode: StructuralConfluenceAgent skips
-        // Evaluate entirely for the whole time a position is open, so state.LastEvaluation stays
-        // frozen at whatever it was when that position was entered. If indicators are STILL
-        // confluent the instant that position closes, the carry-forward above would otherwise reuse
-        // the exact same SetupId for what is functionally a brand-new entry attempt - the same
-        // re-entry-after-close bug found and fixed (via a discrete NotAlreadySignaled gate) in the
-        // other three playbooks. A gap larger than about one evaluation cycle means evaluation was
-        // suspended (position open), so carry-forward is skipped and a fresh identity is minted.
-        bool provisionalReady = gates.All(item => item.Passed);
-        bool continuedWithoutGap = state.LastAvailableAt != DateTimeOffset.MinValue &&
-            evidence.AvailableAt - state.LastAvailableAt <= StructuralPlaybookRules.Bars(evidence.Trigger.Interval, 2);
-        DateTimeOffset catalystAt;
-        string setupId;
-        if (provisionalReady && continuedWithoutGap &&
-            state.LastEvaluation is { IsReady: true, SetupId: not null } lastReady &&
-            lastReady.Direction == direction)
-        {
-            setupId = lastReady.SetupId;
-            catalystAt = lastReady.CatalystAt ?? evidence.AvailableAt;
-        }
-        else
-        {
-            catalystAt = evidence.AvailableAt;
-            string catalystIdentity = $"{catalystAt:O}-{price}";
-            setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
-                null, null, catalystIdentity, catalystAt, direction);
-        }
-
-        // Sticky LastReadySetupId: refuse to re-signal the exact identity already traded.
-        bool notAlreadySignaled = setupId != state.LastReadySetupId;
+        // Sticky setup and catalyst identities prevent a selected signal from firing twice, even
+        // when an evaluation gap causes the deterministic setup identity to be minted differently.
+        bool setupAlreadySignaled = setupId is not null &&
+            string.Equals(setupId, state.LastReadySetupId, StringComparison.Ordinal);
+        bool catalystAlreadySignaled = catalystIdentity is not null &&
+            string.Equals(
+                catalystIdentity, state.LastReadyCatalystIdentity, StringComparison.Ordinal);
+        bool notAlreadySignaled = !setupAlreadySignaled && !catalystAlreadySignaled;
         gates.Add(Gate("NotAlreadySignaled", notAlreadySignaled, notAlreadySignaled ? 70m : 0m,
             "StructuralIndicatorAlreadySignaled"));
 
-        decimal confidence = StructuralPlaybookRules.Confidence(gates, 0m, signal.ConfidenceAdjustment, 0m);
+        decimal confidence = StructuralPlaybookRules.Confidence(gates, 0m, signalAdjustment, 0m);
         bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
+        StructuralSetupLifecycle lifecycle = ready
+            ? StructuralSetupLifecycle.CandidateProduced :
+            terminalCatalyst || strongOpposition
+                ? StructuralSetupLifecycle.Invalidated :
+            !baselinePasses
+                ? continuingHypothesis
+                    ? StructuralSetupLifecycle.Invalidated
+                    : StructuralSetupLifecycle.Dormant :
+            catalystExpired ? StructuralSetupLifecycle.Expired :
+            !hasActiveCatalyst ? StructuralSetupLifecycle.Armed :
+            !continuationCatalyst || !priceActionTriggered
+                ? StructuralSetupLifecycle.CatalystObserved :
+            StructuralSetupLifecycle.AwaitingTrigger;
 
         return new PlaybookEvaluation
         {
             PlaybookId = PlaybookId,
             Version = Version,
             Direction = direction,
-            Lifecycle = ready ? StructuralSetupLifecycle.CandidateProduced : StructuralSetupLifecycle.Dormant,
+            Lifecycle = lifecycle,
             SetupId = setupId,
             CatalystAt = catalystAt,
+            CatalystIdentity = catalystIdentity,
             MandatoryGates = gates.AsReadOnly(),
-            SupportingEvidence = BuildSupport(trendPasses, signal, contextPasses, stochRsiEarlyTrigger),
-            ConflictingEvidence = signal.IsVetoed ? [vetoReasonCode] : [],
+            SupportingEvidence = BuildSupport(
+                trendPasses, signal, observedHiddenCatalyst, hasActiveCatalyst,
+                resumption.Event, resumption.Setup, confirmedExpansion, contextPasses,
+                setupStructurePasses),
+            ConflictingEvidence = BuildConflicts(
+                signal, vetoReasonCode, terminalCatalyst, opposition.Event, opposition.Setup,
+                strongOpposition),
             ConfidenceContributions =
             [
                 new("Trend", 0m, trendPasses ? "StructuralIndicatorTrendAligned" : "StructuralIndicatorTrendMissing"),
-                new("IndicatorSignal", signal.ConfidenceAdjustment, signal.Explanation)
+                new("IndicatorSignal", signalAdjustment,
+                    !hasActiveCatalyst
+                        ? "No hidden-divergence continuation catalyst."
+                        : signal.Explanation)
             ],
             ContextQuality = Math.Max(adxQuality, contextQuality),
             LocationQuality = 0m,
-            CatalystQuality = signalQuality,
-            TriggerQuality = signalQuality,
-            ConfirmationQuality = signalQuality,
+            CatalystQuality = hasActiveCatalyst
+                ? observedHiddenCatalyst is not null
+                    ? signalQuality
+                    : previous?.CatalystQuality ?? signalQuality
+                : 0m,
+            TriggerQuality = priceActionTriggered ? resumption.Quality : 0m,
+            ConfirmationQuality = confirmedExpansion ? signalQuality : 0m,
             GeometryQuality = geometry.Quality,
             Confidence = confidence,
-            ExpiresAt = catalystAt + StructuralPlaybookRules.Bars(evidence.Trigger.Interval, _root.MaximumArmedSetupBars),
+            ExpiresAt = catalystExpiresAt,
             ReasonCode = ready ? "StructuralIndicatorConfluenceCandidate" : FirstFailure(gates, confidence, _options.MinimumConfidence),
             IsReady = ready,
-            Geometry = geometry
+            Geometry = geometry,
+            TriggerEvent = resumption.Event,
+            TriggerSetup = resumption.Setup
         };
     }
 
@@ -205,6 +307,48 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
             return true;
         TimeSpan cooldown = StructuralPlaybookRules.Bars(evidence.Trigger.Interval, _options.MinimumBarsBetweenEntries);
         return evidence.AvailableAt >= lastSignalAt.Value + cooldown;
+    }
+
+    private static decimal ContinuationSignalAdjustment(
+        RsiBollingerSignalAssessment signal,
+        RsiRelationshipSnapshot? relationship)
+    {
+        decimal adjustment = 0m;
+        if (relationship is not null)
+            adjustment += Math.Min(4m, relationship.Strength / 20m);
+        if (signal.RsiMomentumAligned)
+            adjustment += 1m;
+        else if (signal.RsiMomentumOpposes)
+            adjustment -= 2m;
+        if (signal.BollingerExpansionAligned)
+            adjustment += 2m;
+        else if (signal.BollingerPositionAligned)
+            adjustment += 0.5m;
+        if (signal.BollingerExpansionOpposes)
+            adjustment -= 4m;
+        if (signal.OpposingRsiRelationship is not null)
+            adjustment -= Math.Min(5m, signal.OpposingRsiRelationship.Strength / 15m);
+        return Math.Clamp(adjustment, -8m, 8m);
+    }
+
+    private static bool IsAlignedHiddenDivergence(
+        RsiRelationshipType type,
+        PriceActionDirection direction) =>
+        direction == PriceActionDirection.Bullish
+            ? type == RsiRelationshipType.HiddenBullishDivergence
+            : type == RsiRelationshipType.HiddenBearishDivergence;
+
+    private static bool IsSetupStructureCompatible(
+        StructuralEvidencePacket evidence,
+        PriceActionDirection direction)
+    {
+        MarketStructureDirection structure = evidence.Setup.MarketStructure.Direction;
+        MarketRegime regime = evidence.Setup.MarketRegime.Regime;
+        return direction == PriceActionDirection.Bullish
+            ? structure != MarketStructureDirection.Falling &&
+                regime is not (MarketRegime.TrendingDown or MarketRegime.BreakoutExpansionDown)
+            : structure != MarketStructureDirection.Rising &&
+                regime is not (MarketRegime.TrendingUp or MarketRegime.BreakoutExpansionUp);
     }
 
     private static bool IsContextAligned(StructuralEvidencePacket evidence, PriceActionDirection direction)
@@ -248,6 +392,9 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         decimal reward = buy ? target - entry : entry - target;
         if (risk <= 0m || reward <= 0m)
             return Invalid(entry, "StructuralIndicatorGeometryInvalid");
+        if (executableSpread > 0m &&
+            risk < executableSpread * _root.Geometry.MinimumRiskToSpreadMultiple)
+            return Invalid(entry, "StructuralStopDistanceBelowExecutionCostFloor");
         if (executableSpread > 0m && reward < executableSpread * _options.MinimumRewardToSpreadMultiple)
             return Invalid(entry, "StructuralIndicatorRewardBelowCostFloor");
 
@@ -289,18 +436,59 @@ public sealed class IndicatorConfluencePlaybook : IStructuralPlaybook
         ReasonCode = reasonCode
     };
 
+    private static string RelationshipIdentity(RsiRelationshipSnapshot relationship) =>
+        $"{relationship.Type}:{relationship.ConfirmedAt:O}:{relationship.SecondPivotTime:O}";
+
     private static IReadOnlyList<string> BuildSupport(
-        bool trend, RsiBollingerSignalAssessment signal, bool context, bool stochRsiEarlyTrigger)
+        bool trend,
+        RsiBollingerSignalAssessment signal,
+        RsiRelationshipSnapshot? observedHiddenCatalyst,
+        bool hasActiveCatalyst,
+        PriceActionEvent? triggerEvent,
+        PriceActionSetup? triggerSetup,
+        bool confirmedExpansion,
+        bool context,
+        bool setupStructure)
     {
         var result = new List<string>();
         if (trend) result.Add("StructuralIndicatorTrendAligned");
         if (signal.RsiMomentumAligned) result.Add("StructuralIndicatorMomentumAligned");
-        if (signal.AlignedRsiRelationship is not null)
-            result.Add($"StructuralIndicatorRsi{signal.AlignedRsiRelationship.Type}");
-        if (signal.BollingerReleaseTrigger) result.Add("StructuralIndicatorBollingerSqueezeRelease");
-        else if (signal.BollingerExpansionAligned) result.Add("StructuralIndicatorBollingerExpansionAligned");
-        if (stochRsiEarlyTrigger) result.Add("StructuralIndicatorStochRsiEarlyTrigger");
+        if (observedHiddenCatalyst is not null)
+            result.Add($"StructuralIndicatorRsi{observedHiddenCatalyst.Type}");
+        else if (hasActiveCatalyst)
+            result.Add("StructuralIndicatorHiddenDivergenceCatalystActive");
+        if (triggerEvent is not null)
+            result.Add($"StructuralIndicatorPriceAction{triggerEvent.Type}");
+        if (triggerSetup is not null)
+            result.Add($"StructuralIndicatorPriceAction{triggerSetup.Type}");
+        if (confirmedExpansion)
+            result.Add("StructuralIndicatorBollingerConfirmedExpansionAligned");
+        else if (signal.BollingerExpansionAligned)
+            result.Add("StructuralIndicatorBollingerWidthExpanding");
+        else if (signal.BollingerPositionAligned)
+            result.Add("StructuralIndicatorBollingerPositionAligned");
         if (context) result.Add("StructuralIndicatorContextAligned");
+        if (setupStructure) result.Add("StructuralIndicatorSetupStructureCompatible");
+        return result.AsReadOnly();
+    }
+
+    private static IReadOnlyList<string> BuildConflicts(
+        RsiBollingerSignalAssessment signal,
+        string vetoReasonCode,
+        bool terminalCatalyst,
+        PriceActionEvent? opposingEvent,
+        PriceActionSetup? opposingSetup,
+        bool strongOpposition)
+    {
+        var result = new List<string>();
+        if (signal.IsVetoed)
+            result.Add(vetoReasonCode);
+        if (terminalCatalyst)
+            result.Add("StructuralIndicatorCatalystTerminated");
+        if (strongOpposition && opposingEvent is not null)
+            result.Add($"StructuralIndicatorOpposingPriceAction{opposingEvent.Type}");
+        if (strongOpposition && opposingSetup is not null)
+            result.Add($"StructuralIndicatorOpposingPriceAction{opposingSetup.Type}");
         return result.AsReadOnly();
     }
 

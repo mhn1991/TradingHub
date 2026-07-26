@@ -57,25 +57,34 @@ internal static class Program
         Console.WriteLine($"Built {contexts.Count:N0} trigger-close evaluation contexts in {sw.Elapsed.TotalSeconds:F1}s " +
             "(analysis computed once, shared by every variant below)");
 
-        // --- Investigating the reason-code collapse seen in the real backtest: matches the real
-        // production profile exactly (adaptive=true, minRR=1.2). One variant, run with per-day
-        // reason-code tracking so a decay/collapse pattern is directly visible if it reproduces
-        // in this isolated harness too.
-        var variant = new Variant(
-            "adaptive=True  minRR=1.2 (repro)",
-            Options => Options with
-            {
-                MinimumRewardRisk = 1.2m,
-                AdaptiveTargetManagement = Options.AdaptiveTargetManagement with { Enabled = true },
-                StrategyVersion = "structural-confluence-v2"
-            });
+        Variant[] variants =
+        [
+            new("adaptive=False minRR=1.5",
+                options => options),
+            new("adaptive=True  minRR=1.5",
+                options => options with
+                {
+                    AdaptiveTargetManagement = options.AdaptiveTargetManagement with { Enabled = true },
+                    StrategyVersion = "structural-confluence-v2"
+                }),
+            new("adaptive=True  minRR=1.2",
+                options => options with
+                {
+                    MinimumRewardRisk = 1.2m,
+                    AdaptiveTargetManagement = options.AdaptiveTargetManagement with { Enabled = true },
+                    StrategyVersion = "structural-confluence-v2"
+                })
+        ];
 
         sw.Restart();
-        VariantResult result = RunVariant(variant, contexts, context, additionalContext, setup, trigger);
-        Console.WriteLine($"Ran variant in {sw.Elapsed.TotalSeconds:F1}s");
+        VariantResult[] results = variants
+            .Select(variant => RunVariant(variant, contexts, context, additionalContext, setup, trigger))
+            .ToArray();
+        Console.WriteLine($"Ran {variants.Length} variants in {sw.Elapsed.TotalSeconds:F1}s");
 
-        PrintReport([result]);
-        PrintDailyBreakdown(result);
+        PrintReport(results);
+        foreach (VariantResult result in results)
+            PrintDailyBreakdown(result);
         return 0;
     }
 
@@ -111,10 +120,12 @@ internal static class Program
             SetupInterval = setupInterval,
             TriggerInterval = triggerInterval,
             // Only one playbook enabled at a time so the reason-code funnel isn't a blend of
-            // multiple playbooks' gates. Select via SWEEP_PLAYBOOK=sweep|sd|breakretest.
+            // multiple playbooks' gates. Select via
+            // SWEEP_PLAYBOOK=sweep|sd|breakretest|indicator.
             LiquiditySweepReversal = new() { Enabled = playbook == "sweep" },
             SupplyDemandPullback = new() { Enabled = playbook == "sd" },
             LiquidityBreakRetest = new() { Enabled = playbook == "breakretest" },
+            IndicatorConfluence = new() { Enabled = playbook == "indicator" }
         };
         StructuralConfluenceStrategyOptions options = variant.Apply(baseOptions);
         var agent = new StructuralConfluenceAgent(options);

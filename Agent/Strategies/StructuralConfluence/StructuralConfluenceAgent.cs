@@ -5,6 +5,7 @@ using Agent.Strategies.StructuralConfluence.Evidence;
 using Agent.Strategies.StructuralConfluence.Playbooks;
 using Brokers.Models;
 using ChartAnnotator.Models;
+using ChartAnnotator.Regime;
 using ChartAnnotator.TargetManagement;
 
 namespace Agent.Strategies.StructuralConfluence;
@@ -20,10 +21,27 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
     private readonly object _gate = new();
 
     public StructuralConfluenceAgent(StructuralConfluenceStrategyOptions options)
+        : this(options, CreatePlaybooks(options))
+    {
+    }
+
+    internal StructuralConfluenceAgent(
+        StructuralConfluenceStrategyOptions options,
+        IEnumerable<IStructuralPlaybook> playbooks)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(playbooks);
         options.Validate();
         _options = options;
+        _playbooks = playbooks.OrderBy(item => item.PlaybookId, StringComparer.Ordinal).ToArray();
+        _arbitrator = new StructuralCandidateArbitrator(options.Arbitration);
+        RequiredIntervals = options.RequiredIntervals;
+    }
+
+    private static IReadOnlyList<IStructuralPlaybook> CreatePlaybooks(
+        StructuralConfluenceStrategyOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
         var playbooks = new List<IStructuralPlaybook>();
         if (options.LiquidityBreakRetest.Enabled)
             playbooks.Add(new LiquidityBreakRetestPlaybook(options));
@@ -33,9 +51,7 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
             playbooks.Add(new SupplyDemandPullbackPlaybook(options));
         if (options.IndicatorConfluence.Enabled)
             playbooks.Add(new IndicatorConfluencePlaybook(options));
-        _playbooks = playbooks.OrderBy(item => item.PlaybookId, StringComparer.Ordinal).ToArray();
-        _arbitrator = new StructuralCandidateArbitrator(options.Arbitration);
-        RequiredIntervals = options.RequiredIntervals;
+        return playbooks;
     }
 
     public string Name => "Structural Confluence";
@@ -93,24 +109,147 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
                 return Task.FromResult(notReady);
             }
 
+            MarketRegimeSnapshot regime = evidence!.Context.MarketRegime;
+            RegimeGateResult regimeGate = RegimeRoutingPolicy.Evaluate(regime, _options.MarketRegime);
+
             var evaluations = new List<PlaybookEvaluation>(_playbooks.Count);
             foreach (IStructuralPlaybook playbook in _playbooks)
             {
                 PlaybookRuntimeState state = _stateStore.Get(context.Instrument, playbook.PlaybookId);
                 PlaybookEvaluation evaluation = playbook.Evaluate(evidence!, state);
-                _stateStore.TryAdvance(context.Instrument, playbook.PlaybookId, evidence!.AvailableAt,
-                    snapshotVersion, evaluation);
                 evaluations.Add(evaluation);
             }
 
-            StructuralArbitrationResult arbitration = _arbitrator.Select(evaluations);
-            AgentDecision decision = arbitration.Selected is { } selected
-                ? Trade(context, evidence!, selected, snapshotVersion, effectiveStrategyId)
-                : Observe(context, arbitration.ReasonCode, snapshotVersion, MostRelevant(evaluations));
+            PlaybookEvaluation[] entryEligible = evaluations
+                .Where(evaluation => StructuralEntryProfileRouting.AllowsEntry(
+                    evaluation, regimeGate))
+                .ToArray();
+            StructuralArbitrationResult arbitration = regimeGate.RoutingEnabled && !regimeGate.AllowNewEntries
+                ? new StructuralArbitrationResult(null, regimeGate.ReasonCode)
+                : _arbitrator.Select(entryEligible);
+
+            AgentDecision decision;
+            if (regimeGate.RoutingEnabled && !regimeGate.AllowNewEntries)
+            {
+                decision = Observe(context, regimeGate.Explanation, snapshotVersion, MostRelevant(evaluations)) with
+                {
+                    ReasonCode = regimeGate.ReasonCode
+                };
+            }
+            else
+            {
+                decision = arbitration.Selected is { } selected
+                    ? Trade(context, evidence!, selected, snapshotVersion, effectiveStrategyId)
+                    : Observe(context, arbitration.ReasonCode, snapshotVersion, MostRelevant(entryEligible));
+            }
+
+            bool candidateSelected = decision.Action is AgentAction.Buy or AgentAction.Sell;
+            foreach (PlaybookEvaluation evaluation in evaluations)
+            {
+                _stateStore.TryAdvance(
+                    context.Instrument,
+                    evaluation.PlaybookId,
+                    evidence.AvailableAt,
+                    snapshotVersion,
+                    evaluation,
+                    candidateSelected && IsSameCandidate(evaluation, arbitration.Selected));
+            }
+
+            decision = decision with
+            {
+                StructuralPlaybookDiagnostics = BuildDiagnostics(evaluations, regimeGate, arbitration)
+            };
+            if (regimeGate.RoutingEnabled && decision.Action is AgentAction.Buy or AgentAction.Sell)
+            {
+                decision = decision with
+                {
+                    Confidence = Math.Clamp(
+                        decision.Confidence + regimeGate.Policy.MinimumConfidenceAdjustment,
+                        0m,
+                        100m)
+                };
+            }
+            decision = ApplyRegimeRouting(decision, evidence, regimeGate);
             Remember(context.Instrument, context.Timestamp, snapshotVersion, decision);
             return Task.FromResult(decision);
         }
     }
+
+    private IReadOnlyList<StructuralPlaybookDiagnostic> BuildDiagnostics(
+        IReadOnlyList<PlaybookEvaluation> evaluations,
+        RegimeGateResult gate,
+        StructuralArbitrationResult arbitration) =>
+        evaluations.Select(evaluation =>
+        {
+            bool eligible = StructuralEntryProfileRouting.AllowsEntry(
+                evaluation, gate);
+            bool selected = IsSameCandidate(evaluation, arbitration.Selected);
+            (StructuralPlaybookOutcome Outcome, string ReasonCode) outcome = selected
+                ? (StructuralPlaybookOutcome.Selected, arbitration.ReasonCode)
+                : gate.RoutingEnabled && !gate.AllowNewEntries
+                    ? (StructuralPlaybookOutcome.EntryBlocked, gate.ReasonCode)
+                    : !eligible
+                        ? (StructuralPlaybookOutcome.RoutedOut, "StructuralEntryProfileRoutedOut")
+                        : !evaluation.IsReady || evaluation.Geometry?.IsValid != true
+                            ? (StructuralPlaybookOutcome.NotReady, evaluation.ReasonCode)
+                            : string.Equals(arbitration.ReasonCode, "StructuralPlaybookConflict", StringComparison.Ordinal)
+                                ? (StructuralPlaybookOutcome.ArbitrationConflict, arbitration.ReasonCode)
+                                : (StructuralPlaybookOutcome.ArbitrationLost, "StructuralPlaybookArbitrationLost");
+
+            return new StructuralPlaybookDiagnostic
+            {
+                PlaybookId = evaluation.PlaybookId,
+                PlaybookVersion = evaluation.Version,
+                Direction = evaluation.Direction,
+                SetupId = evaluation.SetupId,
+                Lifecycle = evaluation.Lifecycle,
+                IsEntryEligible = eligible,
+                IsReady = evaluation.IsReady,
+                IsSelected = selected,
+                Outcome = outcome.Outcome,
+                EvaluationReasonCode = evaluation.ReasonCode,
+                OutcomeReasonCode = outcome.ReasonCode,
+                PrimaryBlockingReasonCode = evaluation.IsReady
+                    ? null
+                    : evaluation.MandatoryGates
+                        .FirstOrDefault(item => !item.Passed)?.ReasonCode
+                        ?? evaluation.ReasonCode,
+                FailedGateReasonCodes = evaluation.MandatoryGates
+                    .Where(item => !item.Passed && !string.IsNullOrWhiteSpace(item.ReasonCode))
+                    .Select(item => item.ReasonCode)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                SupportingEvidence = evaluation.SupportingEvidence,
+                ConflictingEvidence = evaluation.ConflictingEvidence,
+                Confidence = evaluation.Confidence,
+                MandatoryQualityFloor = evaluation.MandatoryQualityFloor
+            };
+        }).ToArray();
+
+    private static bool IsSameCandidate(
+        PlaybookEvaluation evaluation,
+        PlaybookEvaluation? selected) =>
+        selected is not null &&
+        string.Equals(evaluation.PlaybookId, selected.PlaybookId, StringComparison.Ordinal) &&
+        string.Equals(evaluation.SetupId, selected.SetupId, StringComparison.Ordinal);
+
+    private static AgentDecision ApplyRegimeRouting(
+        AgentDecision decision,
+        StructuralEvidencePacket evidence,
+        RegimeGateResult gate) =>
+        !gate.RoutingEnabled
+            ? decision
+            : decision with
+            {
+                RegimeLabel = evidence.Context.MarketRegime.Regime,
+                RegimeConfidence = evidence.Context.MarketRegime.Confidence,
+                RegimePolicyId = gate.Policy.Regime.ToString(),
+                RegimeEntryProfileId = gate.Policy.EntryProfileId,
+                RegimeManagementProfileId = gate.Policy.ManagementProfileId,
+                RegimeRiskMultiplier = gate.Policy.RiskMultiplier,
+                AtrPercentile = evidence.Trigger.Indicators.AtrAnalysis.Percentile,
+                ReasonCode = decision.ReasonCode ?? gate.ReasonCode
+            };
 
     private AgentDecision Trade(
         AgentMarketContext context,

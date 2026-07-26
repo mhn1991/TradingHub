@@ -81,6 +81,39 @@ public sealed class StructuralTargetMapBuilderTests
     }
 
     [Test]
+    public void NearerTierBBarrier_IsSelectedBeforeFartherTierATarget()
+    {
+        // The setup pool is a Tier B hard barrier at sub-minimum R. A farther context Tier A pool
+        // must not be selected through it merely because its tier is stronger.
+        LiquidityPool nearBarrier = Pool(
+            LiquiditySide.BuySide, lower: 102.8m, upper: 103.0m, quality: 0.50m, prominence: 0.40m);
+        LiquidityPool farTarget = Pool(
+            LiquiditySide.BuySide, lower: 106.0m, upper: 106.4m, quality: 0.90m, prominence: 0.90m);
+        StructuralEvidencePacket evidence = Packet(
+            buy: true,
+            atr: 1m,
+            context: Snapshot(Context, pools: [farTarget]),
+            setup: Snapshot(Setup, pools: [nearBarrier]),
+            trigger: Snapshot(Trigger));
+
+        var builder = new TargetMapBuilder(Options());
+        TargetMapResult result = builder.Build(
+            evidence, PriceActionDirection.Bullish, entry: 100m, stop: 98m, TradeExitPolicy.FixedStructuralTarget);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Candidates.Single(item =>
+                    item.SourceId == $"LiquidityPool:{nearBarrier.PoolId:N}").Role,
+                Is.EqualTo(TradeTargetRole.Terminal));
+            Assert.That(result.Candidates.Single(item =>
+                    item.SourceId == $"LiquidityPool:{farTarget.PoolId:N}").Role,
+                Is.EqualTo(TradeTargetRole.HardBarrier));
+            Assert.That(result.IsAdmissible, Is.False);
+            Assert.That(result.ReasonCode, Is.EqualTo("StructuralRewardRiskBelowMinimum"));
+        });
+    }
+
+    [Test]
     public void ExcludedLifecycleStates_AreNeverCandidates()
     {
         LiquidityPool consumed = Pool(LiquiditySide.BuySide, lower: 106m, upper: 106.4m, quality: 0.9m, prominence: 0.9m)

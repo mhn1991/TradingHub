@@ -28,6 +28,37 @@ public enum StructuralSetupLifecycle
     Expired
 }
 
+public enum StructuralPlaybookOutcome
+{
+    NotReady,
+    EntryBlocked,
+    RoutedOut,
+    ArbitrationConflict,
+    ArbitrationLost,
+    Selected
+}
+
+public sealed record StructuralPlaybookDiagnostic
+{
+    public required string PlaybookId { get; init; }
+    public required string PlaybookVersion { get; init; }
+    public required PriceActionDirection Direction { get; init; }
+    public string? SetupId { get; init; }
+    public required StructuralSetupLifecycle Lifecycle { get; init; }
+    public required bool IsEntryEligible { get; init; }
+    public required bool IsReady { get; init; }
+    public required bool IsSelected { get; init; }
+    public required StructuralPlaybookOutcome Outcome { get; init; }
+    public required string EvaluationReasonCode { get; init; }
+    public required string OutcomeReasonCode { get; init; }
+    public string? PrimaryBlockingReasonCode { get; init; }
+    public IReadOnlyList<string> FailedGateReasonCodes { get; init; } = [];
+    public IReadOnlyList<string> SupportingEvidence { get; init; } = [];
+    public IReadOnlyList<string> ConflictingEvidence { get; init; } = [];
+    public decimal Confidence { get; init; }
+    public decimal MandatoryQualityFloor { get; init; }
+}
+
 public sealed record AgentDecision
 {
     public string? DecisionId { get; init; }
@@ -97,6 +128,7 @@ public sealed record AgentDecision
     public decimal? DistanceToNearestTargetAtr { get; init; }
     public decimal? DistanceToInvalidationAtr { get; init; }
     public IReadOnlyList<string> StructuralSetupReasonCodes { get; init; } = [];
+    public IReadOnlyList<StructuralPlaybookDiagnostic> StructuralPlaybookDiagnostics { get; init; } = [];
 
     /// <summary>
     /// Regime-routing diagnostics (spec §9.3). All null when regime routing is

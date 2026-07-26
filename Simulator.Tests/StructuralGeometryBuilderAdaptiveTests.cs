@@ -53,6 +53,41 @@ public sealed class StructuralGeometryBuilderAdaptiveTests
     }
 
     [Test]
+    public void BuildTieredFixed_UsesMeaningfulStructuralTarget_ButKeepsLegacyBracketMetadata()
+    {
+        StructuralConfluenceStrategyOptions options = new()
+        {
+            ContextInterval = Context,
+            SetupInterval = Setup,
+            TriggerInterval = Trigger
+        };
+        LiquidityPool pool = Pool(LiquiditySide.BuySide, lower: 106m, upper: 106.4m, quality: 0.9m, prominence: 0.9m);
+        SwingPoint nearSwing = new()
+        {
+            PivotTime = At.AddMinutes(-35),
+            ConfirmedAt = At.AddMinutes(-30),
+            Price = 103.0m,
+            Type = SwingType.High,
+            Strength = 3
+        };
+        StructuralEvidencePacket evidence = Packet(atr: 1m,
+            context: Snapshot(Context, pools: [pool]), setup: Snapshot(Setup, swings: [nearSwing]), trigger: Snapshot(Trigger));
+        var builder = new StructuralGeometryBuilder(options);
+
+        StructuralGeometry geometry = builder.BuildTieredFixed(
+            evidence, PriceActionDirection.Bullish, rawStop: 98m, stopSource: "test-stop");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(geometry.IsValid, Is.True, geometry.ReasonCode);
+            Assert.That(geometry.TargetSource, Does.Contain("LiquidityPool"));
+            Assert.That(geometry.RewardRisk, Is.GreaterThanOrEqualTo(options.MinimumRewardRisk));
+            Assert.That(geometry.ExitPolicy, Is.Null);
+            Assert.That(geometry.TargetPlan, Is.Null);
+        });
+    }
+
+    [Test]
     public void Build_LegacyNearestObstaclePath_RejectsOnTheWeakNearbySwing_ThatBuildAdaptiveTreatsAsAJustCheckpoint()
     {
         // This is the exact problem the plan (§1) describes: v1's Build() only ever sees the
@@ -93,15 +128,50 @@ public sealed class StructuralGeometryBuilderAdaptiveTests
         });
     }
 
+    [Test]
+    public void Build_RejectsWhenStopRiskIsSmallerThanExecutableSpread()
+    {
+        StructuralConfluenceStrategyOptions options = new()
+        {
+            ContextInterval = Context,
+            SetupInterval = Setup,
+            TriggerInterval = Trigger,
+            Geometry = new StructuralGeometryOptions
+            {
+                MinimumRiskToSpreadMultiple = 1m
+            }
+        };
+        StructuralEvidencePacket evidence = Packet(
+            atr: 1m,
+            context: Snapshot(Context),
+            setup: Snapshot(Setup),
+            trigger: Snapshot(Trigger),
+            executableSpread: 1m);
+        var builder = new StructuralGeometryBuilder(options);
+
+        StructuralGeometry geometry = builder.Build(
+            evidence,
+            PriceActionDirection.Bullish,
+            rawStop: 100.2m,
+            stopSource: "test-stop");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(geometry.IsValid, Is.False);
+            Assert.That(geometry.ReasonCode, Is.EqualTo("StructuralStopDistanceBelowExecutionCostFloor"));
+        });
+    }
+
     private static StructuralEvidencePacket Packet(
         decimal atr,
         AnalysisSnapshot context,
         AnalysisSnapshot setup,
-        AnalysisSnapshot trigger) => new()
+        AnalysisSnapshot trigger,
+        decimal executableSpread = 0m) => new()
     {
         Instrument = Instrument,
         AvailableAt = At,
-        ExecutableSpread = 0m,
+        ExecutableSpread = executableSpread,
         Context = context,
         Setup = setup,
         Trigger = trigger,

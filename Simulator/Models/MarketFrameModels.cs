@@ -1,3 +1,4 @@
+using Agent.Models;
 using Brokers.Models;
 using ChartAnnotator.Models;
 using Simulator.MarketData;
@@ -63,6 +64,7 @@ public enum StrategyReplayEventType
     SetupAdvanced,
     SetupExpired,
     SetupInvalidated,
+    StructuralPlaybookEvaluated,
     PriceActionEvaluated,
     PriceActionConfirmed,
     SignalCreated,
@@ -148,6 +150,20 @@ public sealed record StrategyReplayEvent
     public decimal? PreviousValue { get; init; }
     public decimal? NewValue { get; init; }
     public string? OptionOrModelVersion { get; init; }
+    public string? EvaluationSetupId { get; init; }
+    public string? PlaybookId { get; init; }
+    public PriceActionDirection? StructuralDirection { get; init; }
+    public StructuralSetupLifecycle? StructuralLifecycle { get; init; }
+    public bool? IsEntryEligible { get; init; }
+    public bool? IsReady { get; init; }
+    public bool? IsSelected { get; init; }
+    public StructuralPlaybookOutcome? PlaybookOutcome { get; init; }
+    public string? PrimaryBlockingReasonCode { get; init; }
+    public IReadOnlyList<string> FailedGateReasonCodes { get; init; } = [];
+    public IReadOnlyList<string> SupportingEvidence { get; init; } = [];
+    public IReadOnlyList<string> ConflictingEvidence { get; init; } = [];
+    public decimal? StructuralConfidence { get; init; }
+    public decimal? MandatoryQualityFloor { get; init; }
     public PriceActionEventType? PriceActionTrigger { get; init; }
     public decimal? PriceActionConfidence { get; init; }
     public decimal? QuantityBefore { get; init; }

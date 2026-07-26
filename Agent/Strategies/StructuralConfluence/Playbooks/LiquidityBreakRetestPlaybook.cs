@@ -22,7 +22,7 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
     }
 
     public string PlaybookId => StableId;
-    public string Version => "1.0";
+    public string Version => "1.9";
 
     public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
     {
@@ -42,19 +42,19 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
             .OrderByDescending(item => item.AvailableAt).ThenBy(item => item.EventId)
             .ToArray();
         if (candidates.Length == 0)
-            return Dormant("StructuralAcceptedBreakUnavailable");
+            return ArmedPool(evidence) ?? Dormant("StructuralAcceptedBreakUnavailable");
 
-        PlaybookEvaluation? best = null;
+        var evaluations = new List<PlaybookEvaluation>(candidates.Length);
         foreach (LiquidityEvent candidate in candidates)
         {
             PlaybookEvaluation evaluation = EvaluateCandidate(candidate, pools[candidate.PoolId], evidence, state);
-            if (evaluation.IsReady && (best is null || evaluation.Confidence > best.Confidence))
-                best = evaluation;
+            evaluations.Add(evaluation);
         }
 
-        // Nothing ready this bar - report on the freshest candidate, matching the previous
-        // single-candidate telemetry/lifecycle for the common (non-ready) case.
-        return best ?? EvaluateCandidate(candidates[0], pools[candidates[0].PoolId], evidence, state);
+        // A newer untouched break must not supersede a still-viable pool that has already retested.
+        // This selection only chooses the lifecycle represented in state/diagnostics; every
+        // candidate still has to pass the same gates before IsReady can become true.
+        return StructuralPlaybookRules.SelectRepresentativeCandidate(evaluations);
     }
 
     private PlaybookEvaluation EvaluateCandidate(
@@ -76,24 +76,42 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
         decimal currentPrice = evidence.Trigger.LatestCandle.Prices.Close;
         bool acceptedSide = buy ? currentPrice >= pool.LowerPrice : currentPrice <= pool.UpperPrice;
         DateTimeOffset catalystAt = retest?.AvailableAt ?? acceptedBreak.AvailableAt;
+        int triggerResponseBars = StructuralPlaybookRules.TriggerResponseBars(
+            _root.MaximumTriggerBars, _root.MaximumArmedSetupBars);
+        DateTimeOffset acceptedBreakExpiresAt = acceptedBreak.AvailableAt +
+            StructuralPlaybookRules.Bars(
+                evidence.Setup.Interval, _options.MaximumBarsSinceAcceptedBreak);
+        DateTimeOffset? triggerExpiresAt = retest is null
+            ? null
+            : StructuralPlaybookRules.TriggerWindowExpiresAt(
+                retest.AvailableAt,
+                evidence.Trigger.Interval,
+                _root.MaximumTriggerBars,
+                _root.MaximumArmedSetupBars);
+        bool triggerWindowExpired = triggerExpiresAt is DateTimeOffset expiredTriggerAt &&
+            evidence.AvailableAt > expiredTriggerAt;
+        // The setup-timeframe liquidity retest already proves the exact location and that price
+        // closed on the accepted side of this pool. Trigger-timeframe price action is a separate
+        // structural model: its retest reference is a local 5m swing and will not
+        // normally equal the narrow 30m liquidity band. Require aligned evidence published after
+        // the pool retest; displacement or a local retest-hold confirms continuation, while an
+        // unanchored generic rejection does not. Retain the pool as location provenance and stop.
         (PriceActionEvent? triggerEvent, PriceActionSetup? triggerSetup, decimal triggerQuality) =
-            StructuralPlaybookRules.Trigger(evidence, direction, _root.Trigger.MinimumPriceActionConfidence,
-                _root.MaximumTriggerBars, catalystAt);
+            StructuralPlaybookRules.Trigger(evidence, direction,
+                StructuralTriggerProfile.BreakRetestContinuation,
+                _root.Trigger.MinimumPriceActionConfidence, triggerResponseBars, catalystAt);
         bool triggerPresent = triggerEvent is not null || triggerSetup is not null || !_options.RequirePriceActionTrigger;
         CciAssessment cci = StructuralPlaybookRules.AssessCci(evidence, direction, continuation: true);
         bool cciPasses = StructuralPlaybookRules.ConfirmationPasses(_options.CciMode, cci);
         bool expansion = ExpansionAligned(evidence, direction);
         bool expansionPasses = _options.ExpansionMode != StructuralConfirmationMode.Required || expansion;
 
-        // Identity is tied to the accepted-break event, not to whether it already produced a
-        // trade - see LiquiditySweepReversalPlaybook's identical guard for the observed bug this
-        // prevents (same identity re-arming and re-entering immediately after a prior attempt on
-        // it already closed). state.LastReadySetupId is sticky across non-ready frames and frozen
-        // for the whole holding period (StructuralConfluenceAgent skips Evaluate entirely while a
-        // position is open), so this only blocks a genuine repeat, never a setup that's simply
-        // still armed across consecutive pre-entry frames.
+        // Keep one identity from the visible pool through accepted break, retest and trigger. The
+        // state store can now represent one coherent hypothesis instead of minting a new setup at
+        // the catalyst. A pool is terminal after this interpretation, so this still prevents a
+        // second entry from the same structural thesis.
         string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
-            pool.PoolId, null, acceptedBreak.EventId.ToString("N"), acceptedBreak.AvailableAt, direction);
+            pool.PoolId, null, $"pool-{pool.PoolId:N}", pool.AvailableAt, direction);
         bool notAlreadySignaled = setupId != state.LastReadySetupId;
 
         var gates = new List<MandatoryGate>
@@ -112,12 +130,21 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
             Gate("AcceptedBreakFresh", StructuralPlaybookRules.IsFresh(acceptedBreak.AvailableAt, evidence.AvailableAt, evidence.Setup.Interval, _options.MaximumBarsSinceAcceptedBreak), pool.QualityScore * 100m, "StructuralAcceptedBreakExpired"),
             Gate("Displacement", displacementAtr >= _options.MinimumDisplacementAtr, Math.Clamp(displacementAtr / Math.Max(_options.MinimumDisplacementAtr, 0.01m) * 60m, 0m, 100m), "StructuralBreakDisplacementLow"),
             Gate("NoFailure", !failure, pool.QualityScore * 100m, "StructuralAcceptedBreakFailed"),
-            Gate("Retest", !_options.RequireRetestEvent || retest is not null, retest is null ? 0m : 65m, "StructuralRetestMissing"),
-            Gate("RetestDistance", retest is null || retestDistanceAtr <= _options.MaximumRetestDistanceAtr, retest is null ? 0m : Math.Clamp(100m - retestDistanceAtr * 100m, 0m, 100m), "StructuralRetestTooFar"),
+            Gate("Retest", !_options.RequireRetestEvent || retest is not null, retest is null ? 0m : 65m,
+                "StructuralRetestMissing", _options.RequireRetestEvent),
+            Gate("RetestDistance", retest is null || retestDistanceAtr <= _options.MaximumRetestDistanceAtr,
+                retest is null ? 0m : Math.Clamp(100m - retestDistanceAtr * 100m, 0m, 100m),
+                "StructuralRetestTooFar", retest is not null),
             Gate("AcceptedSide", acceptedSide, 60m, "StructuralRetestDidNotHold"),
-            Gate("Trigger", triggerPresent, triggerPresent ? Math.Max(triggerQuality, 50m) : 0m, "StructuralTriggerMissing"),
-            Gate("Cci", cciPasses, cci.Quality, "StructuralCciConfirmationMissing"),
-            Gate("Expansion", expansionPasses, expansion ? 65m : 40m, "StructuralExpansionConfirmationMissing")
+            Gate("TriggerWindow", !triggerWindowExpired, triggerWindowExpired ? 0m : 60m,
+                "StructuralTriggerWindowExpired"),
+            Gate("Trigger", triggerPresent, triggerPresent ? Math.Max(triggerQuality, 50m) : 0m,
+                "StructuralTriggerMissing", _options.RequirePriceActionTrigger),
+            Gate("Cci", cciPasses, cci.Quality, "StructuralCciConfirmationMissing",
+                _options.CciMode == StructuralConfirmationMode.Required),
+            Gate("Expansion", expansionPasses, expansion ? 65m : 40m,
+                "StructuralExpansionConfirmationMissing",
+                _options.ExpansionMode == StructuralConfirmationMode.Required)
         };
 
         decimal rawStop = buy ? pool.LowerPrice : pool.UpperPrice;
@@ -129,7 +156,7 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
         StructuralGeometry geometry;
         if (!_root.AdaptiveTargetManagement.Enabled)
         {
-            geometry = _geometry.Build(evidence, direction, rawStop, stopSource);
+            geometry = _geometry.BuildTieredFixed(evidence, direction, rawStop, stopSource, [stopSource]);
         }
         else if (!IsContextAligned(evidence, direction))
         {
@@ -151,10 +178,6 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
         decimal confidence = StructuralPlaybookRules.Confidence(gates, (contextQuality - 50m) / 6.25m,
             confirmationAdjustment, 0m);
         bool ready = gates.All(item => item.Passed) && confidence >= _options.MinimumConfidence;
-        // Name-based, not positional (gates.Take(N)) - a magic-number slice silently misclassifies
-        // lifecycle the moment a gate gets reordered or inserted without updating the count.
-        bool catalystPassed = gates.Where(item => item.Name is not ("Trigger" or "Cci" or "Expansion" or "Geometry")).All(item => item.Passed);
-
         return new PlaybookEvaluation
         {
             PlaybookId = PlaybookId,
@@ -164,7 +187,9 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
                 failure ? StructuralSetupLifecycle.Invalidated :
                 gates.Any(item => item.ReasonCode == "StructuralAcceptedBreakExpired" && !item.Passed)
                     ? StructuralSetupLifecycle.Expired :
-                catalystPassed ? StructuralSetupLifecycle.AwaitingTrigger : StructuralSetupLifecycle.CatalystObserved,
+                triggerWindowExpired ? StructuralSetupLifecycle.Expired :
+                retest is null ? StructuralSetupLifecycle.CatalystObserved :
+                StructuralSetupLifecycle.AwaitingTrigger,
             SetupId = setupId,
             PrimaryPoolId = pool.PoolId,
             CatalystAt = catalystAt,
@@ -183,7 +208,10 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
             ConfirmationQuality = Math.Max(cci.Quality, expansion ? 65m : 0m),
             GeometryQuality = geometry.Quality,
             Confidence = confidence,
-            ExpiresAt = acceptedBreak.AvailableAt + StructuralPlaybookRules.Bars(evidence.Setup.Interval, _options.MaximumBarsSinceAcceptedBreak),
+            ExpiresAt = triggerExpiresAt is DateTimeOffset responseDeadline
+                ? StructuralPlaybookRules.Earlier(
+                    acceptedBreakExpiresAt, responseDeadline)
+                : acceptedBreakExpiresAt,
             ReasonCode = ready ? "StructuralLiquidityBreakRetestCandidate" : FirstFailure(gates, confidence, _options.MinimumConfidence),
             IsReady = ready,
             Geometry = geometry,
@@ -191,6 +219,38 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
             TriggerEvent = triggerEvent,
             TriggerSetup = triggerSetup,
             CciConfirmationState = cci.State
+        };
+    }
+
+    private PlaybookEvaluation? ArmedPool(StructuralEvidencePacket evidence)
+    {
+        LiquidityPool? pool = evidence.Liquidity.Pools
+            .Where(item => item.State is LiquidityPoolState.Active or
+                LiquidityPoolState.Approached or LiquidityPoolState.Touched)
+            .Where(item => item.QualityScore >= _options.MinimumPoolQuality ||
+                item.DistinctTouchCount >= _options.MinimumDistinctTouchesForQualityExemption)
+            .OrderByDescending(item => item.QualityScore)
+            .ThenBy(item => item.PoolId)
+            .FirstOrDefault();
+        if (pool is null)
+            return null;
+
+        PriceActionDirection direction = pool.Side == LiquiditySide.BuySide
+            ? PriceActionDirection.Bullish
+            : PriceActionDirection.Bearish;
+        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
+            pool.PoolId, null, $"pool-{pool.PoolId:N}", pool.AvailableAt, direction);
+        return new PlaybookEvaluation
+        {
+            PlaybookId = PlaybookId,
+            Version = Version,
+            Direction = direction,
+            Lifecycle = StructuralSetupLifecycle.Armed,
+            SetupId = setupId,
+            PrimaryPoolId = pool.PoolId,
+            LocationQuality = pool.QualityScore * 100m,
+            ReasonCode = "StructuralAwaitingAcceptedBreak",
+            Pool = pool
         };
     }
 
@@ -208,11 +268,24 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
         AdxAnalysisSnapshot adx = evidence.Indicators.AdxAnalysis;
         bool dmi = adx.Adx >= _options.MinimumAdx && adx.DirectionalBias == direction;
         bool efficiency = evidence.Indicators.EfficiencyRatio >= _options.MinimumEfficiencyRatio;
-        bool volatility = evidence.Indicators.BollingerAnalysis.IsExpansion;
-        bool regime = direction == PriceActionDirection.Bullish
+        BollingerAnalysisSnapshot bollinger = evidence.Indicators.BollingerAnalysis;
+        bool directionalVolatility = bollinger.PercentB is decimal percentB &&
+            (bollinger.IsExpansion || bollinger.WidthDirection == VolatilityDirection.Expanding) &&
+            (direction == PriceActionDirection.Bullish ? percentB >= 55m : percentB <= 45m);
+        bool squeezeRelease = bollinger.SqueezeReleased && bollinger.PercentB is decimal releasePercentB &&
+            (direction == PriceActionDirection.Bullish ? releasePercentB >= 70m : releasePercentB <= 30m);
+        DonchianSnapshot donchian = evidence.Trigger.Indicators.Donchian;
+        bool channelBreak = direction == PriceActionDirection.Bullish
+            ? donchian.ClosedAbovePreviousUpper
+            : donchian.ClosedBelowPreviousLower;
+        bool breakoutRegime = direction == PriceActionDirection.Bullish
+            ? evidence.Context.MarketRegime.Regime == MarketRegime.BreakoutExpansionUp
+            : evidence.Context.MarketRegime.Regime == MarketRegime.BreakoutExpansionDown;
+        bool trendRegime = direction == PriceActionDirection.Bullish
             ? evidence.Context.MarketRegime.Regime is MarketRegime.TrendingUp or MarketRegime.BreakoutExpansionUp
             : evidence.Context.MarketRegime.Regime is MarketRegime.TrendingDown or MarketRegime.BreakoutExpansionDown;
-        return dmi || efficiency && (volatility || regime);
+        bool expansionCatalyst = squeezeRelease || channelBreak || breakoutRegime || directionalVolatility;
+        return expansionCatalyst && (dmi || efficiency || trendRegime);
     }
 
     private static bool IsContextAligned(StructuralEvidencePacket evidence, PriceActionDirection direction)
@@ -227,14 +300,21 @@ public sealed class LiquidityBreakRetestPlaybook : IStructuralPlaybook
     private static decimal ContextQuality(StructuralEvidencePacket evidence, PriceActionDirection direction) =>
         direction == PriceActionDirection.Bullish ? evidence.ContextEvidence.BullishQuality : evidence.ContextEvidence.BearishQuality;
 
-    private static MandatoryGate Gate(string name, bool passed, decimal quality, string failure) =>
-        new(name, passed, Math.Clamp(quality, 0m, 100m), passed ? $"{name}Passed" : failure);
+    private static MandatoryGate Gate(
+        string name,
+        bool passed,
+        decimal quality,
+        string failure,
+        bool limitsConfidenceFloor = true) =>
+        new(name, passed, Math.Clamp(quality, 0m, 100m),
+            passed ? $"{name}Passed" : failure, limitsConfidenceFloor);
 
     private static IReadOnlyList<string> BuildSupport(bool retest, bool expansion, CciAssessment cci)
     {
-        var result = new List<string> { "AcceptedLiquidityBreak", cci.State };
+        var result = new List<string> { "AcceptedLiquidityBreak" };
         if (retest) result.Add("LiquidityRetestHeld");
         if (expansion) result.Add("ExpansionAligned");
+        if (cci.Alignment == EvidenceAlignment.Aligned) result.Add(cci.State);
         return result.AsReadOnly();
     }
 

@@ -392,6 +392,44 @@ public sealed class SupplyDemandAnalyzerTests
     }
 
     [Test]
+    public void Lifecycle_DwellEmitsOneTouch_ButExitAndRevisitEmitsAnother()
+    {
+        var analyzer = new SupplyDemandAnalyzer(EnabledProfile(
+            builder => builder.With(profile => profile with { MinimumDistinctTouchBars = 2 })));
+        var candles = new List<Candle>
+        {
+            Doji(0, 100m),
+            Marubozu(1, 100m, 101m),
+            Marubozu(2, 101m, 102m)
+        };
+        List<SupplyDemandAnalysisSnapshot> formed = Replay(analyzer, candles);
+        Guid zoneId = formed[^1].ActiveZones.Single().ZoneId;
+        var history = new List<Candle>(candles);
+
+        SupplyDemandAnalysisSnapshot Update(Candle candle, long sequence)
+        {
+            history.Add(candle);
+            return analyzer.Update(candle, history, [], 1.0m, sequence);
+        }
+
+        Update(C(3, 100.10m, 100.10m, 100.03m, 100.04m), 3);
+        SupplyDemandAnalysisSnapshot dwell =
+            Update(C(4, 100.04m, 100.05m, 100.02m, 100.03m), 4);
+        Update(C(5, 100.40m, 100.60m, 100.30m, 100.50m), 5);
+        SupplyDemandAnalysisSnapshot revisit =
+            Update(C(6, 100.10m, 100.10m, 100.03m, 100.04m), 6);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(dwell.RecentEvents.Count(item =>
+                item.ZoneId == zoneId && item.EventType == SupplyDemandZoneEventType.Touched), Is.EqualTo(1));
+            Assert.That(revisit.RecentEvents.Count(item =>
+                item.ZoneId == zoneId && item.EventType == SupplyDemandZoneEventType.Touched), Is.EqualTo(2));
+            Assert.That(revisit.ActiveZones.Single(item => item.ZoneId == zoneId).DistinctTouchCount, Is.EqualTo(2));
+        });
+    }
+
+    [Test]
     public void Lifecycle_WickReachesDistalWithoutClosingBeyond_BecomesMitigatedNotInvalidated()
     {
         var analyzer = new SupplyDemandAnalyzer(EnabledProfile());

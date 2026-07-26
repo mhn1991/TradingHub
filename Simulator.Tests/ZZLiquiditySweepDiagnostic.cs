@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text.Json;
 using Brokers.Models;
+using ChartAnnotator.Engine;
 using ChartAnnotator.Indicators;
 using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
@@ -25,7 +26,9 @@ public sealed class ZZLiquiditySweepDiagnostic
 
     private static List<Candle> LoadRealCandles(DateTimeOffset from, DateTimeOffset to)
     {
-        const string path = "/home/mhn70/RiderProjects/TradingHub/.cache/historical/FX_EUR_USD_1m_20251218_20260701_20ec7255a5a18b1ba208738d.jsonl.gz";
+        string path = Path.GetFullPath(Path.Combine(
+            TestContext.CurrentContext.TestDirectory,
+            "../../../../.cache/historical/FX_EUR_USD_1m_20251218_20260701_20ec7255a5a18b1ba208738d.jsonl.gz"));
         var instrument = new InstrumentKey("FX:EUR/USD");
         var interval = BarInterval.Minutes(1);
         var result = new List<Candle>();
@@ -79,12 +82,11 @@ public sealed class ZZLiquiditySweepDiagnostic
         return result.OrderBy(c => c.OpenTime).ToList();
     }
 
-    [TestCase(1)]
     [TestCase(30)]
     public void CountSweepsOnRealData(int intervalMinutes)
     {
-        DateTimeOffset from = DateTimeOffset.Parse("2026-05-11T00:00:00Z");
-        DateTimeOffset to = DateTimeOffset.Parse("2026-06-09T00:00:00Z");
+        DateTimeOffset from = DateTimeOffset.Parse("2026-05-01T00:00:00Z");
+        DateTimeOffset to = DateTimeOffset.Parse("2026-05-09T00:00:00Z");
         List<Candle> candles = LoadRealCandles(from, to);
         if (intervalMinutes > 1) candles = Aggregate(candles, intervalMinutes);
         TestContext.WriteLine($"interval={intervalMinutes}m candles={candles.Count}");
@@ -96,10 +98,13 @@ public sealed class ZZLiquiditySweepDiagnostic
         var swings = new List<SwingPoint>();
         var history = new List<Candle>();
 
-        int sweepEvents = 0, poolFormed = 0;
+        int sweepEvents = 0, acceptedBreakEvents = 0, retestEvents = 0, poolFormed = 0;
         long penetratedOnly = 0, closeBackFail = 0, penetrationTooSmall = 0,
              penetrationTooBig = 0, fullPass = 0, activePoolCandles = 0;
         var seenSweepIds = new HashSet<Guid>();
+        var seenLiquidityEventIds = new HashSet<Guid>();
+        var acceptedBreakPools = new HashSet<Guid>();
+        var retestedPools = new HashSet<Guid>();
         var seenPoolIds = new HashSet<Guid>();
         IReadOnlyList<LiquidityPool> previousActive = [];
         decimal lastAtr = 0m;
@@ -152,12 +157,29 @@ public sealed class ZZLiquiditySweepDiagnostic
 
             foreach (LiquiditySweepEvent sweep in snapshot.RecentSweeps)
                 if (seenSweepIds.Add(sweep.SweepId)) sweepEvents++;
+            foreach (LiquidityEvent liquidityEvent in snapshot.RecentEvents)
+            {
+                if (!seenLiquidityEventIds.Add(liquidityEvent.EventId)) continue;
+                if (liquidityEvent.EventType == LiquidityEventType.AcceptedBreak)
+                {
+                    acceptedBreakEvents++;
+                    acceptedBreakPools.Add(liquidityEvent.PoolId);
+                }
+                else if (liquidityEvent.EventType == LiquidityEventType.Retest)
+                {
+                    retestEvents++;
+                    retestedPools.Add(liquidityEvent.PoolId);
+                }
+            }
             foreach (LiquidityPool pool in snapshot.Pools)
                 if (seenPoolIds.Add(pool.PoolId)) poolFormed++;
         }
 
         TestContext.WriteLine($"pools formed (unique): {poolFormed}");
         TestContext.WriteLine($"sweep events (unique): {sweepEvents}");
+        TestContext.WriteLine($"accepted breaks (unique): {acceptedBreakEvents}");
+        TestContext.WriteLine($"retests (unique): {retestEvents}");
+        TestContext.WriteLine($"accepted-break pools later retested: {acceptedBreakPools.Intersect(retestedPools).Count()}/{acceptedBreakPools.Count}");
         TestContext.WriteLine($"pool-candle checks: {activePoolCandles}");
         TestContext.WriteLine($"  penetrated:          {penetratedOnly}");
         TestContext.WriteLine($"  -> close-back fail:  {closeBackFail}");
@@ -165,6 +187,127 @@ public sealed class ZZLiquiditySweepDiagnostic
         TestContext.WriteLine($"  -> pen > max (1.0):  {penetrationTooBig}");
         TestContext.WriteLine($"  -> full pass:        {fullPass}");
     }
+
+    [Test]
+    public async Task MeasureBreakRetestTriggerCoverage()
+    {
+        DateTimeOffset from = DateTimeOffset.Parse("2026-05-01T00:00:00Z");
+        DateTimeOffset to = DateTimeOffset.Parse("2026-05-09T00:00:00Z");
+        List<Candle> oneMinute = LoadRealCandles(from, to);
+        List<Candle> triggerCandles = Aggregate(oneMinute, 5);
+        List<Candle> setupCandles = Aggregate(oneMinute, 30);
+        var engine = new ChartAnnotationEngine();
+        var triggerEvents = new Dictionary<string, PriceActionEvent>(StringComparer.Ordinal);
+        var triggerSetups = new Dictionary<string, PriceActionSetup>(StringComparer.Ordinal);
+        var pools = new Dictionary<Guid, LiquidityPool>();
+        var liquidityEvents = new Dictionary<Guid, LiquidityEvent>();
+
+        for (int index = 0; index < triggerCandles.Count; index++)
+        {
+            Candle candle = triggerCandles[index];
+            AnalysisSnapshot snapshot = await engine.ProcessAsync(
+                new CandleClosedEvent(candle.Instrument, candle.Interval, candle, index + 1), null);
+            foreach (PriceActionEvent item in snapshot.PriceAction.Events)
+                triggerEvents[item.EventId] = item;
+            foreach (PriceActionSetup item in snapshot.PriceAction.Setups)
+                if (item.Phase == PriceActionSetupPhase.Triggered)
+                    triggerSetups[item.SetupId] = item;
+        }
+
+        var profile = new LiquidityCalculationProfile { Enabled = true };
+        var liquidityAnalyzer = new LiquidityAnalyzer(profile);
+        var swingDetector = new SwingDetector(2, 2);
+        var atrState = new AtrState(profile.AtrPeriod);
+        var setupSwings = new List<SwingPoint>();
+        var setupHistory = new List<Candle>();
+        for (int index = 0; index < setupCandles.Count; index++)
+        {
+            Candle candle = setupCandles[index];
+            setupHistory.Add(candle);
+            atrState.Update(candle);
+            IReadOnlyList<SwingPoint> confirmed = swingDetector.Update(candle);
+            if (confirmed.Count > 0)
+                setupSwings.AddRange(confirmed);
+            LiquidityAnalysisSnapshot snapshot = liquidityAnalyzer.Update(
+                candle,
+                setupHistory,
+                setupSwings,
+                atrState.IsReady ? atrState.Current : null,
+                MarketStructureSnapshot.Empty,
+                PriceActionSnapshot.Empty,
+                index);
+            foreach (LiquidityPool pool in snapshot.Pools)
+                pools[pool.PoolId] = pool;
+            foreach (LiquidityEvent item in snapshot.RecentEvents)
+                liquidityEvents[item.EventId] = item;
+        }
+
+        LiquidityEvent[] acceptedBreaks = liquidityEvents.Values
+            .Where(item => item.EventType == LiquidityEventType.AcceptedBreak)
+            .ToArray();
+        LiquidityEvent[] retests = liquidityEvents.Values
+            .Where(item => item.EventType == LiquidityEventType.Retest &&
+                acceptedBreaks.Any(accepted => accepted.PoolId == item.PoolId &&
+                    accepted.AvailableAt <= item.AvailableAt))
+            .ToArray();
+        PriceActionEvent[] priceEvents = triggerEvents.Values.ToArray();
+        TimeSpan triggerWindow = TimeSpan.FromMinutes(60);
+        int anyDirectional = 0, strictRetest = 0, anchoredRetest = 0,
+            rejection = 0, displacement = 0, continuationFamily = 0, triggeredSetup = 0;
+
+        foreach (LiquidityEvent retest in retests)
+        {
+            if (!pools.TryGetValue(retest.PoolId, out LiquidityPool? pool))
+                continue;
+            PriceActionDirection direction = pool.Side == LiquiditySide.BuySide
+                ? PriceActionDirection.Bullish
+                : PriceActionDirection.Bearish;
+            PriceActionEvent[] matches = priceEvents.Where(item =>
+                item.Direction == direction &&
+                item.Confidence >= 50m &&
+                item.ConfirmedAt >= retest.AvailableAt &&
+                item.ConfirmedAt <= retest.AvailableAt + triggerWindow).ToArray();
+            bool IsRetest(PriceActionEvent item) => item.Type is
+                PriceActionEventType.BullishRetestHeld or PriceActionEventType.BearishRetestHeld;
+            bool IsRejection(PriceActionEvent item) => item.Type is
+                PriceActionEventType.BullishRejection or PriceActionEventType.BearishRejection;
+            bool IsDisplacement(PriceActionEvent item) => item.Type is
+                PriceActionEventType.BullishDisplacement or PriceActionEventType.BearishDisplacement;
+            bool IsAnchored(PriceActionEvent item) =>
+                InPool(item.RetestLevel, pool) ||
+                InPool(item.BrokenLevel, pool) ||
+                InPool(item.ReferenceLevel, pool);
+
+            if (matches.Length > 0) anyDirectional++;
+            if (matches.Any(IsRetest)) strictRetest++;
+            if (matches.Any(item => IsRetest(item) && IsAnchored(item))) anchoredRetest++;
+            if (matches.Any(IsRejection)) rejection++;
+            if (matches.Any(IsDisplacement)) displacement++;
+            if (matches.Any(item => IsRetest(item) || IsRejection(item) || IsDisplacement(item)))
+                continuationFamily++;
+            if (triggerSetups.Values.Any(item =>
+                item.Direction == direction &&
+                item.Confidence >= 50m &&
+                item.TriggeredAt >= retest.AvailableAt &&
+                item.TriggeredAt <= retest.AvailableAt + triggerWindow &&
+                (item.Type is PriceActionSetupType.BullishBreakRetestHold or
+                    PriceActionSetupType.BearishBreakRetestHold) &&
+                InPool(item.ReferenceLevel, pool)))
+                triggeredSetup++;
+        }
+
+        TestContext.WriteLine($"5m events: {priceEvents.Length}");
+        foreach (var group in priceEvents.GroupBy(item => item.Type).OrderBy(item => item.Key))
+            TestContext.WriteLine($"  {group.Key}: {group.Count()}");
+        TestContext.WriteLine($"30m accepted breaks: {acceptedBreaks.Length}; accepted-break retests: {retests.Length}");
+        TestContext.WriteLine($"within 12x5m after retest: any directional={anyDirectional}/{retests.Length}");
+        TestContext.WriteLine($"  retest-held unanchored={strictRetest}; exact-pool anchored={anchoredRetest}");
+        TestContext.WriteLine($"  rejection={rejection}; displacement={displacement}; continuation family={continuationFamily}");
+        TestContext.WriteLine($"  triggered break-retest setup exact-pool anchored={triggeredSetup}");
+    }
+
+    private static bool InPool(decimal? level, LiquidityPool pool) =>
+        level is decimal value && value >= pool.LowerPrice && value <= pool.UpperPrice;
 
     /// <summary>
     /// For every real sweep the 30m analyzer produces, compute what the v1 fixed-target geometry

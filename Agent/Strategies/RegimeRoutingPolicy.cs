@@ -3,10 +3,8 @@ using ChartAnnotator.Regime;
 namespace Agent.Strategies;
 
 /// <summary>
-/// Per-regime entry/risk policy. Phase 1 enforces only allow/block new entries and
-/// risk-multiplier sizing; EntryProfileId/ManagementProfileId are recorded for
-/// downstream visibility but not yet used to filter setup families or alter
-/// trade-management behaviour.
+/// Per-regime entry/risk policy. Structural strategies use EntryProfileId to route
+/// setup families; ManagementProfileId remains available to trade management.
 /// </summary>
 public sealed record RegimeStrategyPolicy
 {

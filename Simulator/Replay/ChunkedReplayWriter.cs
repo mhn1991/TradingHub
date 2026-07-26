@@ -150,6 +150,11 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
         foreach (StrategyFrameResult result in results)
         {
             StrategyChunkState state = GetOrCreateStrategy(result.StrategyId, result.StrategyName);
+            state.CandidateOutcomes.Advance(
+                frame.AvailableAt,
+                frame.ExecutionCandle.Mid.Prices.High,
+                frame.ExecutionCandle.Mid.Prices.Low,
+                frame.ExecutionCandle.Mid.Prices.Close);
             string[] lifecycleEvents = result.Events.Select(item => item.Type.ToString()).ToArray();
             if (result.Events.Count > 0)
             {
@@ -157,6 +162,9 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 foreach (StrategyReplayEvent evt in result.Events)
                 {
                     state.Funnel.Record(evt);
+                    state.CandidateOutcomes.Record(
+                        evt,
+                        frame.ExecutionCandle.Mid.Prices.Close);
                     state.EventsStreamWriter!.WriteLine(JsonSerializer.Serialize(evt, JsonOptions));
                 }
             }
@@ -541,6 +549,16 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 await writer.WriteLineAsync(JsonSerializer.Serialize(row, JsonOptions)).ConfigureAwait(false);
         }
         File.Move(signalsTemporary, signalsPath, overwrite: true);
+
+        string candidateOutcomesPath = Path.Combine(state.Directory, "candidate-outcomes.ndjson");
+        string candidateOutcomesTemporary = candidateOutcomesPath + ".tmp";
+        await using (FileStream candidateOutcomesFile = File.Create(candidateOutcomesTemporary))
+        await using (var writer = new StreamWriter(candidateOutcomesFile, Utf8NoBom))
+        {
+            foreach (StructuralCandidateOutcome row in state.CandidateOutcomes.BuildOutcomes())
+                await writer.WriteLineAsync(JsonSerializer.Serialize(row, JsonOptions)).ConfigureAwait(false);
+        }
+        File.Move(candidateOutcomesTemporary, candidateOutcomesPath, overwrite: true);
     }
 
     private static void EnsureEventsStreamOpen(StrategyChunkState state)
@@ -621,6 +639,7 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
         public List<SimulatedTradeRecord> Trades { get; } = [];
         public List<TradeIndexEntry> TradeIndex { get; } = [];
         public SignalFunnelAggregator Funnel { get; } = new();
+        public StructuralCandidateOutcomeTracker CandidateOutcomes { get; } = new();
         public GZipStream? EventsStreamGzip { get; set; }
         public StreamWriter? EventsStreamWriter { get; set; }
     }
@@ -638,6 +657,9 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
     {
         private readonly Dictionary<string, int> _eventTypeCounts = new(StringComparer.Ordinal);
         private readonly Dictionary<string, Dictionary<string, int>> _reasonCodesByType = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Dictionary<string, int>> _playbookOutcomes = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Dictionary<string, int>> _playbookPrimaryBlockers = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Dictionary<string, int>> _playbookGateFailures = new(StringComparer.Ordinal);
         private readonly Dictionary<string, SignalLifecycleTracker> _signals = new(StringComparer.Ordinal);
         private readonly List<string> _signalOrder = [];
 
@@ -655,6 +677,42 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                     _reasonCodesByType[typeKey] = byReason;
                 }
                 byReason[reasonCode] = byReason.GetValueOrDefault(reasonCode) + 1;
+            }
+
+            if (evt.Type == StrategyReplayEventType.StructuralPlaybookEvaluated &&
+                !string.IsNullOrWhiteSpace(evt.PlaybookId))
+            {
+                if (!_playbookOutcomes.TryGetValue(evt.PlaybookId, out Dictionary<string, int>? byOutcome))
+                {
+                    byOutcome = new Dictionary<string, int>(StringComparer.Ordinal);
+                    _playbookOutcomes[evt.PlaybookId] = byOutcome;
+                }
+                string outcome = evt.PlaybookOutcome?.ToString() ?? "Unknown";
+                byOutcome[outcome] = byOutcome.GetValueOrDefault(outcome) + 1;
+
+                if (!string.IsNullOrWhiteSpace(evt.PrimaryBlockingReasonCode))
+                {
+                    if (!_playbookPrimaryBlockers.TryGetValue(
+                            evt.PlaybookId,
+                            out Dictionary<string, int>? byPrimaryBlocker))
+                    {
+                        byPrimaryBlocker = new Dictionary<string, int>(StringComparer.Ordinal);
+                        _playbookPrimaryBlockers[evt.PlaybookId] = byPrimaryBlocker;
+                    }
+                    string primaryBlocker = evt.PrimaryBlockingReasonCode;
+                    byPrimaryBlocker[primaryBlocker] =
+                        byPrimaryBlocker.GetValueOrDefault(primaryBlocker) + 1;
+                }
+
+                if (!_playbookGateFailures.TryGetValue(
+                        evt.PlaybookId,
+                        out Dictionary<string, int>? byFailure))
+                {
+                    byFailure = new Dictionary<string, int>(StringComparer.Ordinal);
+                    _playbookGateFailures[evt.PlaybookId] = byFailure;
+                }
+                foreach (string failedGate in evt.FailedGateReasonCodes.Distinct(StringComparer.Ordinal))
+                    byFailure[failedGate] = byFailure.GetValueOrDefault(failedGate) + 1;
             }
 
             if (string.IsNullOrWhiteSpace(evt.SetupId))
@@ -697,12 +755,21 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
                 : Math.Round(100m * executed / distinctSignals, 2);
 
             return new SignalFunnelSummary(
-                1,
+                3,
                 strategyId,
                 strategyName,
                 DateTimeOffset.UtcNow,
                 _eventTypeCounts,
                 _reasonCodesByType.ToDictionary(
+                    kv => kv.Key,
+                    kv => (IReadOnlyDictionary<string, int>)kv.Value),
+                _playbookOutcomes.ToDictionary(
+                    kv => kv.Key,
+                    kv => (IReadOnlyDictionary<string, int>)kv.Value),
+                _playbookPrimaryBlockers.ToDictionary(
+                    kv => kv.Key,
+                    kv => (IReadOnlyDictionary<string, int>)kv.Value),
+                _playbookGateFailures.ToDictionary(
                     kv => kv.Key,
                     kv => (IReadOnlyDictionary<string, int>)kv.Value),
                 new SignalConversionSummary(
@@ -811,6 +878,9 @@ public sealed class ChunkedReplayWriter : IAsyncDisposable
         DateTimeOffset GeneratedAt,
         IReadOnlyDictionary<string, int> EventTypeCounts,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, int>> ReasonCodesByEventType,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, int>> PlaybookOutcomes,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, int>> PlaybookPrimaryBlockers,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, int>> PlaybookGateFailures,
         SignalConversionSummary SignalConversion);
 
     private sealed record SignalConversionSummary(

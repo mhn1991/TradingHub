@@ -23,7 +23,7 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
     }
 
     public string PlaybookId => StableId;
-    public string Version => "1.0";
+    public string Version => "1.8";
 
     public PlaybookEvaluation Evaluate(StructuralEvidencePacket evidence, PlaybookRuntimeState state)
     {
@@ -39,19 +39,18 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
             .OrderByDescending(item => item.AvailableAt).ThenBy(item => item.SweepId)
             .ToArray();
         if (candidates.Length == 0)
-            return Dormant("StructuralSweepUnavailable");
+            return ArmedPool(evidence) ?? Dormant("StructuralSweepUnavailable");
 
-        PlaybookEvaluation? best = null;
+        var evaluations = new List<PlaybookEvaluation>(candidates.Length);
         foreach (LiquiditySweepEvent candidate in candidates)
         {
             PlaybookEvaluation evaluation = EvaluateCandidate(candidate, pools[candidate.PoolId], evidence, state);
-            if (evaluation.IsReady && (best is null || evaluation.Confidence > best.Confidence))
-                best = evaluation;
+            evaluations.Add(evaluation);
         }
 
-        // Nothing ready this bar - report on the freshest candidate, matching the previous
-        // single-candidate telemetry/lifecycle for the common (non-ready) case.
-        return best ?? EvaluateCandidate(candidates[0], pools[candidates[0].PoolId], evidence, state);
+        // Keep diagnostics/runtime state attached to the most-progressed viable hypothesis.
+        // A merely fresher sweep must not hide one that is already awaiting its reversal trigger.
+        return StructuralPlaybookRules.SelectRepresentativeCandidate(evaluations);
     }
 
     private PlaybookEvaluation EvaluateCandidate(
@@ -74,26 +73,41 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
                 .ThenBy(item => item.Zone.ZoneId).Select(item => item.Zone).FirstOrDefault()
             : null;
         bool confluencePasses = _options.SupplyDemandConfluence != StructuralConfluenceRequirement.Required || zone is not null;
+        int triggerResponseBars = StructuralPlaybookRules.TriggerResponseBars(
+            _root.MaximumTriggerBars, _root.MaximumArmedSetupBars);
+        DateTimeOffset sweepExpiresAt = sweep.AvailableAt +
+            StructuralPlaybookRules.Bars(
+                evidence.Setup.Interval, _options.MaximumBarsSinceSweep);
+        DateTimeOffset triggerExpiresAt =
+            StructuralPlaybookRules.TriggerWindowExpiresAt(
+                sweep.AvailableAt,
+                evidence.Trigger.Interval,
+                _root.MaximumTriggerBars,
+                _root.MaximumArmedSetupBars);
+        bool triggerWindowExpired = evidence.AvailableAt > triggerExpiresAt;
         (PriceActionEvent? triggerEvent, PriceActionSetup? triggerSetup, decimal triggerQuality) =
-            StructuralPlaybookRules.Trigger(evidence, direction, _root.Trigger.MinimumPriceActionConfidence,
-                _root.MaximumTriggerBars, sweep.AvailableAt);
+            StructuralPlaybookRules.Trigger(evidence, direction, StructuralTriggerProfile.SweepReversal,
+                _root.Trigger.MinimumPriceActionConfidence, triggerResponseBars, sweep.AvailableAt,
+                new StructuralTriggerAnchor(pool.LowerPrice, pool.UpperPrice));
         bool triggerPresent = triggerEvent is not null || triggerSetup is not null || !_options.RequirePriceActionTrigger;
+        bool triggerShowsShift = triggerEvent?.Type is
+                PriceActionEventType.BullishChangeOfCharacter or
+                PriceActionEventType.BearishChangeOfCharacter ||
+            triggerSetup?.Type is
+                PriceActionSetupType.BullishSweepChoCh or
+                PriceActionSetupType.BearishSweepChoCh or
+                PriceActionSetupType.BullishChoChRetestHold or
+                PriceActionSetupType.BearishChoChRetestHold;
+        bool reversalShift = sweep.StructureShiftConfirmed || triggerShowsShift;
         bool microBreak = !_options.RequireMicroStructureBreak ||
             evidence.Trigger.MarketStructure.Break == (buy ? MarketStructureBreak.Bullish : MarketStructureBreak.Bearish);
         CciAssessment cci = StructuralPlaybookRules.AssessCci(evidence, direction, continuation: false);
         bool cciPasses = StructuralPlaybookRules.ConfirmationPasses(_options.CciMode, cci);
 
-        // Identity is tied to the sweep event itself (PoolId/ZoneId/SweepId/AvailableAt), not to
-        // whether it already produced a trade - a later candle's confirmation trigger firing off
-        // the SAME still-fresh sweep after an earlier attempt on it already closed would
-        // otherwise re-arm and re-enter on a thesis the market just invalidated at that exact
-        // level (observed 2026-07-20: same setupId, two entries 25 minutes apart, second one
-        // stopped out in 1 minute). state.LastReadySetupId is sticky across non-ready frames and
-        // frozen for the whole holding period (StructuralConfluenceAgent skips Evaluate entirely
-        // while a position is open), so this only blocks a genuine repeat of the same identity,
-        // never a setup that's simply still armed across consecutive frames pre-entry.
+        // Keep one identity from the visible pool through sweep, structure shift and trigger. A
+        // later confirmation therefore advances the existing hypothesis instead of replacing it.
         string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
-            pool.PoolId, zone?.ZoneId, sweep.SweepId.ToString("N"), sweep.AvailableAt, direction);
+            pool.PoolId, null, $"pool-{pool.PoolId:N}", pool.AvailableAt, direction);
         bool notAlreadySignaled = setupId != state.LastReadySetupId;
 
         var gates = new List<MandatoryGate>
@@ -102,14 +116,24 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
             Gate("PoolPreExisting", pool.AvailableAt <= sweep.SweepStartedAt, pool.QualityScore * 100m, "StructuralPoolNotPreExisting"),
             Gate("PoolQuality", pool.QualityScore >= _options.MinimumPoolQuality, pool.QualityScore * 100m, "StructuralPoolQualityLow"),
             Gate("PoolType", _options.AllowedPoolTypes.Contains(pool.Type), pool.QualityScore * 100m, "StructuralPoolTypeRejected"),
-            Gate("ClosedBackInside", !_options.RequireClosedBackInside || sweep.ClosedBackInside, sweep.RejectionStrength * 100m, "StructuralSweepNotReclaimed"),
+            Gate("ClosedBackInside", !_options.RequireClosedBackInside || sweep.ClosedBackInside,
+                sweep.RejectionStrength * 100m, "StructuralSweepNotReclaimed",
+                _options.RequireClosedBackInside),
             Gate("ReclaimStrength", sweep.RejectionStrength >= _options.MinimumReclaimBodyRatio, sweep.RejectionStrength * 100m, "StructuralReclaimBodyTooWeak"),
             Gate("Penetration", sweep.PenetrationAtr >= _options.MinimumSweepPenetrationAtr && sweep.PenetrationAtr <= _options.MaximumSweepPenetrationAtr, sweep.QualityScore * 100m, "StructuralSweepPenetrationInvalid"),
-            Gate("SweepFresh", StructuralPlaybookRules.IsFresh(sweep.AvailableAt, evidence.AvailableAt, evidence.Trigger.Interval, _options.MaximumBarsSinceSweep), sweep.QualityScore * 100m, "StructuralSweepExpired"),
+            Gate("SweepFresh", StructuralPlaybookRules.IsFresh(sweep.AvailableAt, evidence.AvailableAt, evidence.Setup.Interval, _options.MaximumBarsSinceSweep), sweep.QualityScore * 100m, "StructuralSweepExpired"),
             Gate("NotSuperseded", !superseded, sweep.QualityScore * 100m, "StructuralSweepSupersededByAcceptedBreak"),
-            Gate("SupplyDemandConfluence", confluencePasses, zone?.QualityScore * 100m ?? 50m, "StructuralZoneConfluenceMissing"),
-            Gate("Trigger", triggerPresent && microBreak, triggerPresent ? Math.Max(triggerQuality, 50m) : 0m, "StructuralTriggerMissing"),
-            Gate("Cci", cciPasses, cci.Quality, "StructuralCciConfirmationMissing")
+            Gate("SupplyDemandConfluence", confluencePasses, zone?.QualityScore * 100m ?? 50m,
+                "StructuralZoneConfluenceMissing",
+                _options.SupplyDemandConfluence == StructuralConfluenceRequirement.Required),
+            Gate("TriggerWindow", !triggerWindowExpired, triggerWindowExpired ? 0m : 60m,
+                "StructuralTriggerWindowExpired"),
+            Gate("StructureShift", reversalShift, reversalShift ? Math.Max(triggerQuality, 65m) : 0m, "StructuralReversalShiftMissing"),
+            Gate("Trigger", triggerPresent && microBreak,
+                triggerPresent ? Math.Max(triggerQuality, 50m) : 0m,
+                "StructuralTriggerMissing", _options.RequirePriceActionTrigger),
+            Gate("Cci", cciPasses, cci.Quality, "StructuralCciConfirmationMissing",
+                _options.CciMode == StructuralConfirmationMode.Required)
         };
 
         decimal rawStop = sweep.ExtremePrice;
@@ -126,10 +150,10 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
             ? _geometry.BuildAdaptive(evidence, direction, rawStop, stopSource,
                 alignedContinuation ? TradeExitPolicy.PartialThenRunner : TradeExitPolicy.FixedStructuralTarget,
                 [$"LiquidityPool:{pool.PoolId:N}"])
-            : _geometry.Build(evidence, direction, rawStop, stopSource);
+            : _geometry.BuildTieredFixed(evidence, direction, rawStop, stopSource,
+                [$"LiquidityPool:{pool.PoolId:N}"]);
         gates.Add(Gate("Geometry", geometry.IsValid, geometry.Quality, geometry.ReasonCode));
 
-        bool structuralPassed = gates.Where(item => item.Name is not ("Trigger" or "Cci" or "Geometry")).All(item => item.Passed);
         bool ready = gates.All(item => item.Passed);
         decimal contextQuality = DirectionContextQuality(evidence, direction);
         decimal confirmationAdjustment = StructuralPlaybookRules.ConfirmationAdjustment(_options.CciMode, cci, _root.Confirmation);
@@ -137,11 +161,17 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
         decimal confidence = StructuralPlaybookRules.Confidence(gates, (contextQuality - 50m) / 6.25m,
             confirmationAdjustment, confluenceAdjustment);
         ready &= confidence >= _options.MinimumConfidence;
+        bool coreValid = gates.Where(item => item.Name is not
+            ("TriggerWindow" or "StructureShift" or "Trigger" or "Cci" or "Geometry"))
+            .All(item => item.Passed);
         StructuralSetupLifecycle lifecycle = ready
             ? StructuralSetupLifecycle.CandidateProduced
-            : structuralPassed ? StructuralSetupLifecycle.AwaitingTrigger :
-                gates.Any(item => item.ReasonCode == "StructuralSweepExpired" && !item.Passed)
-                    ? StructuralSetupLifecycle.Expired : StructuralSetupLifecycle.Invalidated;
+            : gates.Any(item => item.ReasonCode == "StructuralSweepExpired" && !item.Passed)
+                ? StructuralSetupLifecycle.Expired :
+                triggerWindowExpired ? StructuralSetupLifecycle.Expired :
+                !coreValid ? StructuralSetupLifecycle.Invalidated :
+                !reversalShift ? StructuralSetupLifecycle.CatalystObserved :
+                StructuralSetupLifecycle.AwaitingTrigger;
 
         return new PlaybookEvaluation
         {
@@ -170,7 +200,8 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
             ConfirmationQuality = cci.Quality,
             GeometryQuality = geometry.Quality,
             Confidence = confidence,
-            ExpiresAt = sweep.AvailableAt + StructuralPlaybookRules.Bars(evidence.Trigger.Interval, _options.MaximumBarsSinceSweep),
+            ExpiresAt = StructuralPlaybookRules.Earlier(
+                sweepExpiresAt, triggerExpiresAt),
             ReasonCode = ready ? "StructuralSweepReversalCandidate" : FirstFailure(gates, confidence, _options.MinimumConfidence),
             IsReady = ready,
             Geometry = geometry,
@@ -180,6 +211,38 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
             TriggerEvent = triggerEvent,
             TriggerSetup = triggerSetup,
             CciConfirmationState = cci.State
+        };
+    }
+
+    private PlaybookEvaluation? ArmedPool(StructuralEvidencePacket evidence)
+    {
+        LiquidityPool? pool = evidence.Liquidity.Pools
+            .Where(item => item.State is LiquidityPoolState.Active or
+                LiquidityPoolState.Approached or LiquidityPoolState.Touched)
+            .Where(item => item.QualityScore >= _options.MinimumPoolQuality &&
+                _options.AllowedPoolTypes.Contains(item.Type))
+            .OrderByDescending(item => item.QualityScore)
+            .ThenBy(item => item.PoolId)
+            .FirstOrDefault();
+        if (pool is null)
+            return null;
+
+        PriceActionDirection direction = pool.Side == LiquiditySide.SellSide
+            ? PriceActionDirection.Bullish
+            : PriceActionDirection.Bearish;
+        string setupId = StructuralIdentity.Create(_root.StrategyVersion, evidence.Instrument, PlaybookId,
+            pool.PoolId, null, $"pool-{pool.PoolId:N}", pool.AvailableAt, direction);
+        return new PlaybookEvaluation
+        {
+            PlaybookId = PlaybookId,
+            Version = Version,
+            Direction = direction,
+            Lifecycle = StructuralSetupLifecycle.Armed,
+            SetupId = setupId,
+            PrimaryPoolId = pool.PoolId,
+            LocationQuality = pool.QualityScore * 100m,
+            ReasonCode = "StructuralAwaitingLiquiditySweep",
+            Pool = pool
         };
     }
 
@@ -211,8 +274,14 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
         return price < lower ? lower - price : price > upper ? price - upper : 0m;
     }
 
-    private static MandatoryGate Gate(string name, bool passed, decimal quality, string failure) =>
-        new(name, passed, Math.Clamp(quality, 0m, 100m), passed ? $"{name}Passed" : failure);
+    private static MandatoryGate Gate(
+        string name,
+        bool passed,
+        decimal quality,
+        string failure,
+        bool limitsConfidenceFloor = true) =>
+        new(name, passed, Math.Clamp(quality, 0m, 100m),
+            passed ? $"{name}Passed" : failure, limitsConfidenceFloor);
 
     private static decimal DirectionContextQuality(StructuralEvidencePacket evidence, PriceActionDirection direction) =>
         direction == PriceActionDirection.Bullish ? evidence.ContextEvidence.BullishQuality : evidence.ContextEvidence.BearishQuality;
@@ -223,11 +292,13 @@ public sealed class LiquiditySweepReversalPlaybook : IStructuralPlaybook
         SupplyDemandZone? zone,
         CciAssessment cci)
     {
-        var reasons = new List<string> { $"LiquidityPool:{pool.Type}", "LiquiditySweepReclaimed", cci.State };
+        var reasons = new List<string> { $"LiquidityPool:{pool.Type}", "LiquiditySweepReclaimed" };
         if (zone is not null)
             reasons.Add($"SupplyDemandConfluence:{zone.Type}");
         if (sweep.StructureShiftConfirmed)
             reasons.Add("SweepStructureShift");
+        if (cci.Alignment == EvidenceAlignment.Aligned)
+            reasons.Add(cci.State);
         return reasons.AsReadOnly();
     }
 

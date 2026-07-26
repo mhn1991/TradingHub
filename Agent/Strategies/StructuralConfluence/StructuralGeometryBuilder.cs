@@ -32,6 +32,9 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
         decimal risk = buy ? entry - stop : stop - entry;
         if (risk <= 0m || risk > options.Geometry.MaximumStopDistanceAtr * atr)
             return Invalid(entry, "StructuralStopInvalid");
+        if (evidence.ExecutableSpread > 0m &&
+            risk < evidence.ExecutableSpread * options.Geometry.MinimumRiskToSpreadMultiple)
+            return Invalid(entry, "StructuralStopDistanceBelowExecutionCostFloor");
 
         var obstacles = new List<(decimal Price, string Source, LiquidityPool? Pool)>();
         foreach (SwingPoint swing in evidence.Setup.Swings.Where(item => item.ConfirmedAt <= evidence.AvailableAt))
@@ -98,9 +101,9 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
     /// v2 tiered target-map path (Structural Indicator and Adaptive Target Management Plan §3-§4).
     /// Reuses <see cref="Build"/>'s exact stop-geometry/risk computation and validity gates
     /// unchanged, then replaces nearest-obstacle target selection with <see cref="TargetMapBuilder"/>.
-    /// Only called once a playbook has already decided <paramref name="exitPolicy"/> (Phase 3);
-    /// <see cref="Build"/> itself is never modified or called from here, so v1 behavior is exactly
-    /// preserved regardless of how this method evolves.
+    /// Adaptive callers use the selected <paramref name="exitPolicy"/>; the conventional fixed
+    /// bracket wrapper below reuses the same target quality logic and strips management metadata.
+    /// <see cref="Build"/> remains available as the original nearest-obstacle implementation.
     /// </summary>
     public StructuralGeometry BuildAdaptive(
         StructuralEvidencePacket evidence,
@@ -121,6 +124,9 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
         decimal risk = buy ? entry - stop : stop - entry;
         if (risk <= 0m || risk > options.Geometry.MaximumStopDistanceAtr * atr)
             return Invalid(entry, "StructuralStopInvalid");
+        if (evidence.ExecutableSpread > 0m &&
+            risk < evidence.ExecutableSpread * options.Geometry.MinimumRiskToSpreadMultiple)
+            return Invalid(entry, "StructuralStopDistanceBelowExecutionCostFloor");
 
         TargetMapResult map = _targetMap.Build(evidence, direction, entry, stop, exitPolicy, excludedSourceIds);
         if (!map.IsAdmissible || map.Plan is null)
@@ -150,6 +156,34 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
             ReasonCode = "StructuralGeometryValid",
             ExitPolicy = exitPolicy,
             TargetPlan = map.Plan
+        };
+    }
+
+    /// <summary>
+    /// Uses the tiered structural target map for a conventional one-stop/one-target bracket.
+    /// Minor Tier-C swings may act as checkpoints, but the nearest significant Tier-A/B opposing
+    /// structure remains the hard target. Adaptive exit metadata is deliberately removed so this
+    /// path cannot require partial-exit or runner management.
+    /// </summary>
+    public StructuralGeometry BuildTieredFixed(
+        StructuralEvidencePacket evidence,
+        PriceActionDirection direction,
+        decimal rawStop,
+        string stopSource,
+        IReadOnlyCollection<string>? excludedSourceIds = null)
+    {
+        StructuralGeometry geometry = BuildAdaptive(
+            evidence,
+            direction,
+            rawStop,
+            stopSource,
+            TradeExitPolicy.FixedStructuralTarget,
+            excludedSourceIds);
+
+        return geometry with
+        {
+            ExitPolicy = null,
+            TargetPlan = null
         };
     }
 
