@@ -269,6 +269,8 @@ export interface EquityProtectionStatusSnapshot {
 export interface StrategyProgressSnapshot {
   strategyName: string
   strategyId: string
+  /** Canonical instrument key string (e.g. FX:GBP/JPY) this strategy trades. */
+  instrument?: string | null
   balance: number
   equity: number
   unrealizedProfitLoss: number
@@ -416,15 +418,19 @@ export interface SimulationJobSnapshot {
   simulationConfigurationId?: string | null
   inputHash?: string | null
   dataSourceStatus?: string | null
-  sourceProgress?: {
-    phase: string
-    fromCache: boolean
-    candlesRead: number
-    pagesRead: number
-    latestCandle?: string | null
-    estimatedCandles?: number | null
-    percent?: number | null
-  } | null
+  sourceProgress?: HistoricalSourceProgress | null
+  /** Per-instrument download/cache status, keyed by canonical instrument key string (e.g. FX:EUR/USD). */
+  sourceProgressByInstrument?: Record<string, HistoricalSourceProgress>
+}
+
+export interface HistoricalSourceProgress {
+  phase: string
+  fromCache: boolean
+  candlesRead: number
+  pagesRead: number
+  latestCandle?: string | null
+  estimatedCandles?: number | null
+  percent?: number | null
 }
 
 export type CalibrationArtifactType = 'Setup' | 'Management' | 'MetaModel'

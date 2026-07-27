@@ -20,6 +20,32 @@ const averageProgress = computed(() => {
   return props.snapshot.profiles.reduce((sum, profile) => sum + profile.progressPercent, 0) /
     props.snapshot.profiles.length
 })
+
+const stageLabels: Record<string, string> = {
+  Queued: 'Queued',
+  ResolvingProfiles: 'Resolving profiles',
+  PreparingDatasets: 'Preparing datasets',
+  TrainingWarmup: 'Warming up (training)',
+  Learning: 'Running (learning)',
+  FreezingArtifacts: 'Freezing artifacts',
+  EmbargoReady: 'Embargo ready',
+  EvaluationWarmup: 'Warming up (evaluation)',
+  Evaluating: 'Running (evaluation)',
+  Aggregating: 'Aggregating results',
+  Completed: 'Completed',
+  Failed: 'Failed',
+  Cancelled: 'Cancelled',
+}
+function stageLabel(stage: string): string {
+  return stageLabels[stage] ?? stage
+}
+
+/** wget-style ascii bar: `[###########-----------]`. */
+function asciiBar(percent: number, width = 22): string {
+  const clamped = Math.max(0, Math.min(100, percent))
+  const filled = Math.round((clamped / 100) * width)
+  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
+}
 const canPause = computed(() => ['Queued', 'Running'].includes(props.snapshot.state))
 const canResume = computed(() => ['Paused', 'Interrupted'].includes(props.snapshot.state))
 const canCancel = computed(() => !['Completed', 'Failed', 'Cancelled'].includes(props.snapshot.state))
@@ -87,7 +113,7 @@ onUnmounted(() => {
       </div>
     </div>
     <div class="ex-parent-status">
-      <div><strong>{{ snapshot.name }}</strong><span>{{ snapshot.state }} · {{ snapshot.stage }} · rev {{ snapshot.revision }}</span></div>
+      <div><strong>{{ snapshot.name }}</strong><span>{{ snapshot.state }} · {{ stageLabel(snapshot.stage) }} · rev {{ snapshot.revision }}</span></div>
       <strong>{{ averageProgress.toFixed(0) }}%</strong>
     </div>
     <div class="ex-id-row">
@@ -96,7 +122,7 @@ onUnmounted(() => {
       <button type="button" class="secondary" @click="copyExperimentId">{{ copied ? 'Copied' : 'Copy' }}</button>
       <button type="button" @click="emit('open-report', snapshot.id)">Open report</button>
     </div>
-    <div class="ex-progress"><span :style="{ width: `${averageProgress}%` }"></span></div>
+    <div class="ex-ascii-bar mono">[{{ asciiBar(averageProgress) }}] {{ averageProgress.toFixed(0) }}%</div>
     <p class="ex-muted">Updated {{ time(snapshot.updatedAt) }} · Dataset {{ snapshot.manifest.datasetStatus }}</p>
     <p v-if="snapshot.failureReason" class="ex-alert danger">{{ snapshot.failureReason }}</p>
     <p v-for="warning in snapshot.warnings" :key="warning" class="ex-alert warning">{{ warning }}</p>
@@ -104,8 +130,9 @@ onUnmounted(() => {
     <div class="ex-child-grid">
       <article v-for="profile in snapshot.profiles" :key="profile.profileRunId">
         <header><strong>{{ profile.profileName }}</strong><span>{{ profile.progressPercent.toFixed(0) }}%</span></header>
-        <div class="ex-progress small"><span :style="{ width: `${profile.progressPercent}%` }"></span></div>
-        <p>{{ profile.stage }}<span v-if="profile.statusDetail"> · {{ profile.statusDetail }}</span></p>
+        <span class="ex-badge">{{ stageLabel(profile.stage) }}</span>
+        <div class="ex-ascii-bar small mono">[{{ asciiBar(profile.progressPercent) }}]</div>
+        <p v-if="profile.statusDetail">{{ profile.statusDetail }}</p>
         <small v-if="profile.learningJobId">Learning UUID: <code>{{ profile.learningJobId }}</code></small>
         <small v-if="profile.evaluationJobId">Evaluation UUID: <code>{{ profile.evaluationJobId }}</code></small>
         <template v-if="evaluationJob(profile)">

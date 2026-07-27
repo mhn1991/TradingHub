@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Agent.Configuration;
@@ -9,6 +10,7 @@ using Dashboard.Contracts;
 using DBManager.Abstractions.Credentials;
 using DBManager.Postgres.Security;
 using QuantResearch.Training.Pipeline;
+using RiskManager.Conditions;
 using Simulator.Calibration;
 using Simulator.Experiments.IndicatorCalibration;
 using Simulator.Experiments.IndicatorCalibration.Strategies;
@@ -82,6 +84,15 @@ internal static class Program
                     "RequireTrendAlignment=false (step A).");
             }
 
+            if (args.Any(item => string.Equals(item, "--candidate-fixes", StringComparison.OrdinalIgnoreCase)))
+            {
+                request = WithCandidateFixes(request);
+                Console.WriteLine(
+                    "Candidate fixes applied (2026-07-27 review): strict break/retest routing " +
+                    "(AllowBreakRetestAfterBreakoutTransition=false, now the default), " +
+                    "IndicatorConfluence disabled, soft spread/ATR limit rejects entries instead of half-sizing.");
+            }
+
             if (options.AutoApplyIndicatorCalibration)
             {
                 request = await ApplyAutoCalibrationPinsAsync(
@@ -126,13 +137,35 @@ internal static class Program
                         }
                 });
 
+            int progressLinesDrawn = 0;
+            bool progressInteractive = !Console.IsOutputRedirected;
             var progress = new Progress<BacktestProgress>(update =>
             {
-                Console.WriteLine(
-                    $"[{update.Status}] {update.CurrentMarketTime:u} · " +
-                    $"{update.ProcessedBaseCandles:N0} candles · " +
-                    $"{update.ProgressPercent:F1}% · " +
-                    $"{update.CandlesPerSecond:F0} c/s");
+                var block = new StringBuilder();
+                block.AppendLine(
+                    $"[{JobStatusLabel(update.Status)}] {update.CurrentMarketTime:u} · " +
+                    $"[{AsciiBar(update.ProgressPercent)}] {update.ProgressPercent,5:F1}% · " +
+                    $"{update.ProcessedBaseCandles:N0} candles · {update.CandlesPerSecond:F0} c/s");
+                foreach (StrategyProgressSnapshot strategy in update.Strategies)
+                {
+                    string label = strategy.Instrument ?? strategy.StrategyName;
+                    string line =
+                        $"  {label,-16} {(strategy.Status ?? "Running"),-10} " +
+                        $"bal {strategy.Balance,10:N2}  net {strategy.NetProfit,10:N2}  " +
+                        $"trades {strategy.CompletedTrades,4}  open {strategy.OpenPositions}";
+                    if (strategy.Instrument is not null &&
+                        update.SourceProgressByInstrument.TryGetValue(strategy.Instrument, out HistoricalSourceProgress? download))
+                    {
+                        line += $"  [{download.Phase}{(download.FromCache ? ", cache" : "")} " +
+                            $"{download.CandlesRead:N0} candles, {download.PagesRead} pages]";
+                    }
+                    block.AppendLine(line);
+                }
+                string text = block.ToString();
+                if (progressInteractive && progressLinesDrawn > 0)
+                    Console.Write($"\x1b[{progressLinesDrawn}F\x1b[0J");
+                Console.Write(text);
+                progressLinesDrawn = text.Count(c => c == '\n');
             });
 
             if (options.AutoTrainCalibration)
@@ -224,6 +257,38 @@ internal static class Program
             Console.Error.WriteLine(exception.Message);
             return 1;
         }
+    }
+
+    private static readonly Dictionary<SimulationJobStatus, string> JobStatusLabels = new()
+    {
+        [SimulationJobStatus.Queued] = "Queued",
+        [SimulationJobStatus.PreparingData] = "Preparing data",
+        [SimulationJobStatus.DownloadingData] = "Downloading data",
+        [SimulationJobStatus.LoadingCache] = "Loading cache",
+        [SimulationJobStatus.WarmingUp] = "Warming up",
+        [SimulationJobStatus.Running] = "Running",
+        [SimulationJobStatus.Paused] = "Paused",
+        [SimulationJobStatus.Cancelling] = "Cancelling",
+        [SimulationJobStatus.Cancelled] = "Cancelled",
+        [SimulationJobStatus.Exporting] = "Exporting",
+        [SimulationJobStatus.Completed] = "Completed",
+        [SimulationJobStatus.Failed] = "Failed",
+    };
+
+    private static string JobStatusLabel(SimulationJobStatus status) =>
+        JobStatusLabels.TryGetValue(status, out string? label) ? label : status.ToString();
+
+    /// <summary>wget-style ascii bar: <c>[=========&gt;          ]</c>.</summary>
+    private static string AsciiBar(decimal percent, int width = 24)
+    {
+        decimal clamped = Math.Max(0m, Math.Min(100m, percent));
+        int filled = Math.Clamp((int)Math.Round(clamped / 100m * width), 0, width);
+        Span<char> bar = stackalloc char[width];
+        for (int i = 0; i < width; i++)
+            bar[i] = i < filled ? '=' : ' ';
+        if (filled > 0 && filled < width)
+            bar[filled - 1] = '>';
+        return new string(bar);
     }
 
     private static async Task ExportDashboardCompatibleAsync(
@@ -642,6 +707,73 @@ internal static class Program
                 }
             ],
             Runtime = request.Runtime with { AnnotationOptions = annotation }
+        };
+    }
+
+    /// <summary>
+    /// 2026-07-27 trade-log review candidate (Dashboard/public/data/backtests/simulations/
+    /// 8b1435996f4a4b64bf23218d8e1ccef2/AGENT_IMPROVEMENT_RECOMMENDATIONS.md, the "A+B+C"
+    /// combined run): strict break/retest routing is already the code default, so only
+    /// IndicatorConfluence and the soft-spread action need overriding here. Rebuilds each
+    /// structural-confluence assignment's options via the exact same fields
+    /// BacktestRequest.ResolveAgentDefinition's default path would use (Quantity,
+    /// MinimumRewardRisk, the three structural intervals, MinimumPriceActionConfidence) so the
+    /// only difference from the original run is the three documented fixes - not an incidental
+    /// reversion to some other default.
+    /// </summary>
+    private static BacktestRequest WithCandidateFixes(BacktestRequest request)
+    {
+        if (request.StrategyAssignments is not { Count: > 0 } existingAssignments)
+        {
+            throw new ArgumentException(
+                "--candidate-fixes requires --strategy-assignment/--instruments-file StrategyAssignments; " +
+                "the single-instrument Strategies path is not covered by this candidate transform.");
+        }
+
+        StrategyInstrumentAssignment[] assignments = existingAssignments
+            .Select(assignment => !string.Equals(
+                assignment.StrategyType, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase)
+                ? assignment
+                : assignment with
+                {
+                    AgentDefinitionOverride = new TradingAgentDefinition
+                    {
+                        Kind = TradingAgentKind.StructuralConfluence,
+                        StructuralConfluence = new StructuralConfluenceStrategyOptions
+                        {
+                            Quantity = request.Quantity,
+                            MinimumRewardRisk = request.MinimumRewardRisk,
+                            TriggerInterval = request.Runtime.StructuralTriggerInterval,
+                            SetupInterval = request.Runtime.StructuralSetupInterval,
+                            ContextInterval = request.Runtime.StructuralContextInterval,
+                            MarketRegime = request.Runtime.MarketRegimeRouting,
+                            Trigger = new StructuralTriggerOptions
+                            {
+                                MinimumPriceActionConfidence = request.MinimumPriceActionConfidence
+                            },
+                            LiquiditySweepReversal = new LiquiditySweepReversalOptions { Enabled = true },
+                            SupplyDemandPullback = new SupplyDemandPullbackOptions { Enabled = true },
+                            LiquidityBreakRetest = new LiquidityBreakRetestOptions { Enabled = true },
+                            // Fix 2: disabled for the candidate (was Enabled = true).
+                            IndicatorConfluence = new IndicatorConfluenceOptions { Enabled = false }
+                            // Fix 1 (AllowBreakRetestAfterBreakoutTransition) left at its record
+                            // default of false - strict routing is now the baseline behavior.
+                        }
+                    }
+                })
+            .ToArray();
+
+        return request with
+        {
+            StrategyAssignments = assignments,
+            Runtime = request.Runtime with
+            {
+                // Fix 3: reject at the soft spread/ATR limit instead of merely halving risk.
+                TradingConditions = request.Runtime.TradingConditions with
+                {
+                    SoftSpreadLimitAction = SoftSpreadLimitAction.RejectEntry
+                }
+            }
         };
     }
 

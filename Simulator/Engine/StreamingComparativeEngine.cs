@@ -64,6 +64,7 @@ public sealed class StreamingComparativeEngine
 {
     private readonly IHistoricalCandleStream _stream;
     private readonly IReadOnlyList<StrategyFactoryEntry> _strategies;
+    private readonly IReadOnlyDictionary<string, string> _instrumentByStrategyId;
 
     public StreamingComparativeEngine(
         IHistoricalCandleStream stream,
@@ -73,6 +74,7 @@ public sealed class StreamingComparativeEngine
         _strategies = strategies ?? throw new ArgumentNullException(nameof(strategies));
         if (_strategies.Count == 0)
             throw new ArgumentException("At least one strategy is required.", nameof(strategies));
+        _instrumentByStrategyId = _strategies.ToDictionary(entry => entry.Id, entry => entry.Instrument.Value);
     }
 
     public async Task<ComparativeSimulationResult> RunAsync(
@@ -1451,7 +1453,7 @@ public sealed class StreamingComparativeEngine
         return results;
     }
 
-    private static void PublishProgress(
+    private void PublishProgress(
         StreamingComparativeEngineOptions options,
         long processed,
         DateTimeOffset marketTime,
@@ -1471,6 +1473,10 @@ public sealed class StreamingComparativeEngine
         decimal cps = 0m;
         // Rough candles/sec from processed and wall time is computed by the service layer.
 
+        // EstimateCandleCount is a rough weekday heuristic, not the true candle total, so
+        // `processed` can reach or pass it well before the stream actually finishes. Cap the
+        // in-flight estimate below 100 so a still-running job can never display "100%" - the
+        // real 100% is reported once by the caller when the run actually completes.
         options.Progress.Report(new BacktestProgress
         {
             SimulationId = options.SimulationId,
@@ -1480,9 +1486,12 @@ public sealed class StreamingComparativeEngine
             EvaluationEnd = options.EvaluationTo,
             ProcessedBaseCandles = processed,
             EstimatedTotalBaseCandles = estimated,
-            ProgressPercent = Math.Min(100m, percent),
+            ProgressPercent = Math.Min(99m, percent),
             CandlesPerSecond = cps,
-            Strategies = sessions.Select(session => session.ToProgressSnapshot()).ToArray()
+            Strategies = sessions.Select(session => session.ToProgressSnapshot() with
+            {
+                Instrument = _instrumentByStrategyId.GetValueOrDefault(session.StrategyId)
+            }).ToArray()
         });
     }
 

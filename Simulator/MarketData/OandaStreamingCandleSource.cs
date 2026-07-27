@@ -57,7 +57,7 @@ public sealed class OandaStreamingCandleSource :
             await StreamingCandleCacheWriter.TryValidateManifestAsync(cachePath, request, cancellationToken)
                 .ConfigureAwait(false))
         {
-            RaiseProgress(0, null, "ReadingCache", fromCache: true, pages: 0);
+            RaiseProgress(request.Instrument, 0, null, "ReadingCache", fromCache: true, pages: 0);
             long count = 0;
             await foreach (MarketCandle candle in StreamingCandleCache.ReadStreamAsync(
                                cachePath,
@@ -67,15 +67,15 @@ public sealed class OandaStreamingCandleSource :
             {
                 count++;
                 if (count % 2_000 == 0)
-                    RaiseProgress(count, candle.OpenTime, "ReadingCache", fromCache: true, pages: 0);
+                    RaiseProgress(request.Instrument, count, candle.OpenTime, "ReadingCache", fromCache: true, pages: 0);
                 yield return candle;
             }
 
-            RaiseProgress(count, null, "CacheLoaded", fromCache: true, pages: 0);
+            RaiseProgress(request.Instrument, count, null, "CacheLoaded", fromCache: true, pages: 0);
             yield break;
         }
 
-        RaiseProgress(0, null, "DownloadingData", fromCache: false, pages: 0);
+        RaiseProgress(request.Instrument, 0, null, "DownloadingData", fromCache: false, pages: 0);
 
         StreamingCandleCacheWriter? cacheWriter = request.NoCache
             ? null
@@ -101,7 +101,7 @@ public sealed class OandaStreamingCandleSource :
                     await cacheWriter.AppendAsync(candle, cancellationToken).ConfigureAwait(false);
 
                 if (downloaded % 500 == 0)
-                    RaiseProgress(downloaded, candle.OpenTime, "DownloadingData", fromCache: false, pages);
+                    RaiseProgress(request.Instrument, downloaded, candle.OpenTime, "DownloadingData", fromCache: false, pages);
 
                 // Yield immediately — do not wait for the complete requested range.
                 yield return candle;
@@ -119,7 +119,7 @@ public sealed class OandaStreamingCandleSource :
                     cancellationToken).ConfigureAwait(false);
             }
 
-            RaiseProgress(downloaded, last, "DownloadComplete", fromCache: false, pages);
+            RaiseProgress(request.Instrument, downloaded, last, "DownloadComplete", fromCache: false, pages);
         }
         finally
         {
@@ -274,8 +274,9 @@ public sealed class OandaStreamingCandleSource :
             throw new ArgumentException("From must be earlier than To.", nameof(request));
     }
 
-    private void RaiseProgress(long count, DateTimeOffset? latest, string status, bool fromCache, int pages) =>
-        ProgressChanged?.Invoke(new CandleDownloadProgress(count, latest, status, fromCache, pages));
+    private void RaiseProgress(
+        InstrumentKey instrument, long count, DateTimeOffset? latest, string status, bool fromCache, int pages) =>
+        ProgressChanged?.Invoke(new CandleDownloadProgress(instrument, count, latest, status, fromCache, pages));
 
     public ValueTask DisposeAsync() => _owner?.DisposeAsync() ?? ValueTask.CompletedTask;
 }

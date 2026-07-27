@@ -38,6 +38,18 @@ public enum EconomicEventImportance
     High
 }
 
+/// <summary>
+/// What to do once spread/ATR reaches <see cref="TradingConditionOptions.SoftMaximumSpreadAtr"/>,
+/// short of the hard limit that always rejects.
+/// </summary>
+public enum SoftSpreadLimitAction
+{
+    /// <summary>Allow the entry with risk reduced by <see cref="TradingConditionOptions.SoftSpreadRiskMultiplier"/>.</summary>
+    ReduceRisk,
+    /// <summary>Reject the entry outright rather than merely sizing it down.</summary>
+    RejectEntry
+}
+
 public sealed record EconomicEvent
 {
     public required string EventId { get; init; }
@@ -82,6 +94,16 @@ public sealed record TradingConditionOptions
     public decimal SoftMaximumSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.SoftMaximum;
     public decimal HardMaximumSpreadAtr { get; init; } = SpreadAtrSafetyDefaults.HardMaximum;
     public decimal SoftSpreadRiskMultiplier { get; init; } = 0.50m;
+    /// <summary>
+    /// Defaults to <see cref="Conditions.SoftSpreadLimitAction.ReduceRisk"/> so existing callers
+    /// keep today's behavior. The 2026-07-27 trade-log review found soft-limit trades were
+    /// persistently negative-expectancy even at half risk (see
+    /// Dashboard/public/data/backtests/simulations/8b1435996f4a4b64bf23218d8e1ccef2/
+    /// AGENT_IMPROVEMENT_RECOMMENDATIONS.md section 5) - configure
+    /// <see cref="Conditions.SoftSpreadLimitAction.RejectEntry"/> for strategies that should
+    /// skip these entries entirely rather than merely size them down.
+    /// </summary>
+    public SoftSpreadLimitAction SoftSpreadLimitAction { get; init; } = SoftSpreadLimitAction.ReduceRisk;
     public TimeSpan MaximumDataAge { get; init; } = TimeSpan.FromMinutes(2);
     public bool RejectWhenAtrUnavailable { get; init; } = true;
     public bool ReduceRiskWhenSpreadUnavailable { get; init; } = true;
@@ -114,6 +136,7 @@ public sealed record TradingConditionOptions
             MissingSpreadRiskMultiplier is < 0m or > 1m ||
             EventBlackoutMinutesBefore < 0 || EventBlackoutMinutesAfter < 0 ||
             !Enum.IsDefined(MinimumBlockedEventImportance) ||
+            !Enum.IsDefined(SoftSpreadLimitAction) ||
             (Enabled && AllowedSessions.Count == 0) ||
             AllowedSessions.Any(session => !Enum.IsDefined(session)) ||
             InstrumentAllowedSessions.Any(pair => string.IsNullOrWhiteSpace(pair.Key) ||

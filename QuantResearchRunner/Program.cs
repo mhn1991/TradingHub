@@ -467,16 +467,45 @@ public static class Program
             Console.WriteLine($"Accepted experiment {experimentId:N}.");
         }
 
-        int lastRevision = -1;
+        var childSnapshots = new Dictionary<Guid, SimulationJobSnapshot>();
+        var lastStageByProfile = new Dictionary<Guid, SimulationExperimentStage>();
+        DateTimeOffset lastRender = DateTimeOffset.MinValue;
+        int linesDrawn = 0;
+        bool interactive = !Console.IsOutputRedirected;
         SimulationExperimentSnapshot final;
         while (true)
         {
             final = await experiments.GetAsync(experimentId).ConfigureAwait(false)
                 ?? throw new InvalidOperationException($"Experiment '{experimentId:N}' disappeared.");
-            if (final.Revision != lastRevision)
+
+            foreach (SimulationProfileRunProgress profile in final.Profiles)
             {
-                Console.WriteLine($"[{final.Revision}] {final.State}/{final.Stage}");
-                lastRevision = final.Revision;
+                Guid? childId = profile.EvaluationJobId ?? profile.LearningJobId;
+                if (childId is Guid id)
+                {
+                    SimulationJobSnapshot? snapshot = await backtests.GetAsync(id, cancellationToken: default).ConfigureAwait(false);
+                    if (snapshot is not null)
+                        childSnapshots[id] = snapshot;
+                }
+            }
+
+            bool stageChanged = false;
+            foreach (SimulationProfileRunProgress profile in final.Profiles)
+            {
+                if (!lastStageByProfile.TryGetValue(profile.ProfileRunId, out SimulationExperimentStage seen) ||
+                    seen != profile.Stage)
+                {
+                    lastStageByProfile[profile.ProfileRunId] = profile.Stage;
+                    stageChanged = true;
+                }
+            }
+
+            bool dueForRender = final.IsTerminal || stageChanged ||
+                (DateTimeOffset.UtcNow - lastRender).TotalMilliseconds >= 1000;
+            if (dueForRender)
+            {
+                RenderExperimentProgress(final, childSnapshots, interactive, ref linesDrawn);
+                lastRender = DateTimeOffset.UtcNow;
             }
             if (final.IsTerminal)
                 break;
@@ -495,6 +524,84 @@ public static class Program
         return 1;
     }
 
+    private static readonly Dictionary<SimulationExperimentStage, string> ExperimentStageLabels = new()
+    {
+        [SimulationExperimentStage.Queued] = "Queued",
+        [SimulationExperimentStage.ResolvingProfiles] = "Resolving profiles",
+        [SimulationExperimentStage.PreparingDatasets] = "Preparing datasets",
+        [SimulationExperimentStage.TrainingWarmup] = "Warming up (training)",
+        [SimulationExperimentStage.Learning] = "Running (learning)",
+        [SimulationExperimentStage.FreezingArtifacts] = "Freezing artifacts",
+        [SimulationExperimentStage.EmbargoReady] = "Embargo ready",
+        [SimulationExperimentStage.EvaluationWarmup] = "Warming up (evaluation)",
+        [SimulationExperimentStage.Evaluating] = "Running (evaluation)",
+        [SimulationExperimentStage.Aggregating] = "Aggregating results",
+        [SimulationExperimentStage.Completed] = "Completed",
+        [SimulationExperimentStage.Failed] = "Failed",
+        [SimulationExperimentStage.Cancelled] = "Cancelled",
+    };
+
+    private static string StageLabel(SimulationExperimentStage stage) =>
+        ExperimentStageLabels.TryGetValue(stage, out string? label) ? label : stage.ToString();
+
+    /// <summary>wget-style ascii bar: <c>[=========&gt;          ]</c>.</summary>
+    private static string AsciiBar(decimal percent, int width = 24)
+    {
+        decimal clamped = Math.Max(0m, Math.Min(100m, percent));
+        int filled = Math.Clamp((int)Math.Round(clamped / 100m * width), 0, width);
+        Span<char> bar = stackalloc char[width];
+        for (int i = 0; i < width; i++)
+            bar[i] = i < filled ? '=' : ' ';
+        if (filled > 0 && filled < width)
+            bar[filled - 1] = '>';
+        return new string(bar);
+    }
+
+    /// <summary>
+    /// Renders one line per profile (instrument): stage, ascii progress bar, and - once its
+    /// learning/evaluation child job has produced a snapshot - live balance/net P&amp;L/trade
+    /// count. Redraws in place over the previous block on an interactive terminal; appends a
+    /// fresh block when output is redirected so logs stay append-only.
+    /// </summary>
+    private static void RenderExperimentProgress(
+        SimulationExperimentSnapshot snapshot,
+        IReadOnlyDictionary<Guid, SimulationJobSnapshot> childSnapshots,
+        bool interactive,
+        ref int linesDrawn)
+    {
+        decimal overallPercent = snapshot.Profiles.Count == 0
+            ? 0m
+            : snapshot.Profiles.Average(profile => profile.ProgressPercent);
+
+        var block = new StringBuilder();
+        block.AppendLine(
+            $"[{snapshot.Revision}] {snapshot.State}/{StageLabel(snapshot.Stage)} " +
+            $"overall [{AsciiBar(overallPercent)}] {overallPercent,3:F0}%");
+        foreach (SimulationProfileRunProgress profile in snapshot.Profiles)
+        {
+            string line =
+                $"  {profile.ProfileName,-24} {StageLabel(profile.Stage),-24} " +
+                $"[{AsciiBar(profile.ProgressPercent)}] {profile.ProgressPercent,5:F1}%";
+            Guid? childId = profile.EvaluationJobId ?? profile.LearningJobId;
+            if (childId is Guid id &&
+                childSnapshots.TryGetValue(id, out SimulationJobSnapshot? child) &&
+                child.Strategies.Count > 0)
+            {
+                StrategyProgressSnapshot strategy = child.Strategies[0];
+                line += $"  bal {strategy.Balance,10:N2}  net {strategy.NetProfit,10:N2}  " +
+                    $"trades {strategy.CompletedTrades,4}  open {strategy.OpenPositions}";
+            }
+            if (profile.FailureReason is not null)
+                line += $"  FAILED: {profile.FailureReason}";
+            block.AppendLine(line);
+        }
+
+        string text = block.ToString();
+        if (interactive && linesDrawn > 0)
+            Console.Write($"\x1b[{linesDrawn}F\x1b[0J");
+        Console.Write(text);
+        linesDrawn = text.Count(c => c == '\n');
+    }
 
     private static async Task<(QuantResearchPlan Plan, string ExperimentDirectory)> LoadScopedPlanAsync(string planPath)
     {

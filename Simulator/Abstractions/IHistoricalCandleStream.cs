@@ -18,6 +18,7 @@ public interface IHistoricalCandleStreamWithProgress : IHistoricalCandleStream
 }
 
 public sealed record CandleDownloadProgress(
+    InstrumentKey Instrument,
     long DownloadedCandles,
     DateTimeOffset? LatestCandleOpenTime,
     string Status,

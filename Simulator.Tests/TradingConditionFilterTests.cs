@@ -42,6 +42,88 @@ public sealed class TradingConditionFilterTests
     }
 
     [Test]
+    public void SpreadAtr_BelowSoftThreshold_RemainsAllowed()
+    {
+        var filter = new TradingConditionFilter(new TradingConditionOptions { Enabled = true });
+        DateTimeOffset timestamp = new(2026, 7, 15, 10, 0, 0, TimeSpan.Zero);
+
+        // spread/atr = 0.24, just under the 0.25 default soft limit.
+        TradingConditionDecision result = filter.Evaluate(Context(timestamp, spread: 0.0024m, atr: 0.01m));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Action, Is.EqualTo(TradingConditionAction.Allow));
+            Assert.That(result.RiskMultiplier, Is.EqualTo(1m));
+        });
+    }
+
+    [Test]
+    public void SpreadAtr_AtSoftThresholdExactly_IsInclusive()
+    {
+        var filter = new TradingConditionFilter(new TradingConditionOptions { Enabled = true });
+        DateTimeOffset timestamp = new(2026, 7, 15, 10, 0, 0, TimeSpan.Zero);
+
+        // spread/atr = 0.25 exactly, matching the default soft limit - the comparison is >=,
+        // so the threshold value itself must already trigger the soft-limit action.
+        TradingConditionDecision result = filter.Evaluate(Context(timestamp, spread: 0.0025m, atr: 0.01m));
+
+        Assert.That(result.ReasonCode, Is.EqualTo("SpreadAtrSoftLimit"));
+    }
+
+    [Test]
+    public void SpreadAtr_SoftLimit_ConfiguredToReject_RejectsEntry()
+    {
+        var filter = new TradingConditionFilter(new TradingConditionOptions
+        {
+            Enabled = true,
+            SoftSpreadLimitAction = SoftSpreadLimitAction.RejectEntry
+        });
+        DateTimeOffset timestamp = new(2026, 7, 15, 10, 0, 0, TimeSpan.Zero);
+
+        TradingConditionDecision soft = filter.Evaluate(Context(timestamp, spread: 0.003m, atr: 0.01m));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(soft.Action, Is.EqualTo(TradingConditionAction.RejectEntry));
+            Assert.That(soft.RiskMultiplier, Is.Zero);
+            Assert.That(soft.ReasonCode, Is.EqualTo("SpreadAtrSoftRejected"));
+        });
+    }
+
+    [Test]
+    public void SpreadAtr_HardLimit_RejectsRegardlessOfSoftLimitAction()
+    {
+        var filter = new TradingConditionFilter(new TradingConditionOptions
+        {
+            Enabled = true,
+            SoftSpreadLimitAction = SoftSpreadLimitAction.RejectEntry
+        });
+        DateTimeOffset timestamp = new(2026, 7, 15, 10, 0, 0, TimeSpan.Zero);
+
+        TradingConditionDecision hard = filter.Evaluate(Context(timestamp, spread: 0.005m, atr: 0.01m));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(hard.Action, Is.EqualTo(TradingConditionAction.RejectEntry));
+            // Telemetry must still distinguish a hard rejection from a soft-limit rejection
+            // even when both configurations reject the entry.
+            Assert.That(hard.ReasonCode, Is.EqualTo("SpreadAtrHardLimit"));
+            Assert.That(hard.ReasonCode, Is.Not.EqualTo("SpreadAtrSoftRejected"));
+        });
+    }
+
+    [Test]
+    public void Validate_RequiresHardLimitAboveSoftLimit()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TradingConditionOptions
+        {
+            Enabled = true,
+            SoftMaximumSpreadAtr = 0.5m,
+            HardMaximumSpreadAtr = 0.5m
+        }.Validate());
+    }
+
+    [Test]
     public void BrokerRollover_UsesIanaDstRules()
     {
         var filter = new TradingConditionFilter(new TradingConditionOptions { Enabled = true });

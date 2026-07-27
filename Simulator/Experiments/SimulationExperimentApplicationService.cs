@@ -470,6 +470,7 @@ public sealed class SimulationExperimentApplicationService :
             Profiles = item.Profiles.Select(profile => profile with
             {
                 Stage = stage,
+                ProgressPercent = 0m,
                 CompletedStages = AddStage(profile.CompletedStages, stage)
             }).ToArray()
         }, cancellationToken).ConfigureAwait(false);
@@ -488,7 +489,11 @@ public sealed class SimulationExperimentApplicationService :
             StartedAt = item.StartedAt ?? DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow,
             ResourceUsage = _governor.GetUsage(),
-            Profiles = item.Profiles.Select(profile => profile with { Stage = stage }).ToArray()
+            Profiles = item.Profiles.Select(profile => profile with
+            {
+                Stage = stage,
+                ProgressPercent = 0m
+            }).ToArray()
         }, cancellationToken).ConfigureAwait(false);
     }
 

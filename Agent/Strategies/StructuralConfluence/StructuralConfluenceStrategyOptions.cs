@@ -345,6 +345,18 @@ public sealed record StructuralConfluenceStrategyOptions
     public AdaptiveTargetManagementOptions AdaptiveTargetManagement { get; init; } = new();
     public string StrategyVersion { get; init; } = "structural-confluence-v1";
 
+    /// <summary>
+    /// When true, a mature liquidity break/retest candidate survives the profile transition from
+    /// a breakout regime into ordinary trend-pullback routing (see
+    /// <c>StructuralEntryProfileRouting.IsMatureBreakRetestTransition</c>). Defaults to false:
+    /// the 2026-07-27 trade-log review found this exception was admitting the single largest
+    /// losing trade group, not preserving a real edge - see
+    /// Dashboard/public/data/backtests/simulations/8b1435996f4a4b64bf23218d8e1ccef2/
+    /// AGENT_IMPROVEMENT_RECOMMENDATIONS.md section 3. Kept as an explicit opt-in for
+    /// controlled research rather than removed outright.
+    /// </summary>
+    public bool AllowBreakRetestAfterBreakoutTransition { get; init; }
+
     public IReadOnlySet<BarInterval> RequiredIntervals => new HashSet<BarInterval>(
         [TriggerInterval, SetupInterval, ContextInterval, .. AdditionalContextIntervals]);
 

@@ -58,7 +58,7 @@ public sealed class BinanceStreamingCandleSource :
             await StreamingCandleCacheWriter.TryValidateManifestAsync(cachePath, request, cancellationToken)
                 .ConfigureAwait(false))
         {
-            RaiseProgress(0, null, "ReadingCache", fromCache: true, pages: 0);
+            RaiseProgress(request.Instrument, 0, null, "ReadingCache", fromCache: true, pages: 0);
             long count = 0;
             await foreach (MarketCandle candle in StreamingCandleCache.ReadStreamAsync(
                                cachePath,
@@ -68,15 +68,15 @@ public sealed class BinanceStreamingCandleSource :
             {
                 count++;
                 if (count % 2_000 == 0)
-                    RaiseProgress(count, candle.OpenTime, "ReadingCache", fromCache: true, pages: 0);
+                    RaiseProgress(request.Instrument, count, candle.OpenTime, "ReadingCache", fromCache: true, pages: 0);
                 yield return candle;
             }
 
-            RaiseProgress(count, null, "CacheLoaded", fromCache: true, pages: 0);
+            RaiseProgress(request.Instrument, count, null, "CacheLoaded", fromCache: true, pages: 0);
             yield break;
         }
 
-        RaiseProgress(0, null, "DownloadingData", fromCache: false, pages: 0);
+        RaiseProgress(request.Instrument, 0, null, "DownloadingData", fromCache: false, pages: 0);
         StreamingCandleCacheWriter? cacheWriter = request.NoCache
             ? null
             : new StreamingCandleCacheWriter(cachePath, request, "binance", _environment);
@@ -101,7 +101,7 @@ public sealed class BinanceStreamingCandleSource :
                     await cacheWriter.AppendAsync(candle, cancellationToken).ConfigureAwait(false);
 
                 if (downloaded % 500 == 0)
-                    RaiseProgress(downloaded, candle.OpenTime, "DownloadingData", fromCache: false, pages);
+                    RaiseProgress(request.Instrument, downloaded, candle.OpenTime, "DownloadingData", fromCache: false, pages);
 
                 yield return candle;
             }
@@ -118,7 +118,7 @@ public sealed class BinanceStreamingCandleSource :
                     cancellationToken).ConfigureAwait(false);
             }
 
-            RaiseProgress(downloaded, last, "DownloadComplete", fromCache: false, pages);
+            RaiseProgress(request.Instrument, downloaded, last, "DownloadComplete", fromCache: false, pages);
         }
         finally
         {
@@ -273,8 +273,9 @@ public sealed class BinanceStreamingCandleSource :
             throw new ArgumentException("From must be earlier than To.", nameof(request));
     }
 
-    private void RaiseProgress(long count, DateTimeOffset? latest, string status, bool fromCache, int pages) =>
-        ProgressChanged?.Invoke(new CandleDownloadProgress(count, latest, status, fromCache, pages));
+    private void RaiseProgress(
+        InstrumentKey instrument, long count, DateTimeOffset? latest, string status, bool fromCache, int pages) =>
+        ProgressChanged?.Invoke(new CandleDownloadProgress(instrument, count, latest, status, fromCache, pages));
 
     public ValueTask DisposeAsync() => _owner?.DisposeAsync() ?? ValueTask.CompletedTask;
 }

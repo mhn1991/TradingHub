@@ -1860,6 +1860,39 @@ function performanceMetric(
     : '—'
 }
 
+/** wget-style ascii bar: `[###########-----------]`. */
+function asciiBar(percent: number, width = 22): string {
+  const clamped = Math.max(0, Math.min(100, percent))
+  const filled = Math.round((clamped / 100) * width)
+  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
+}
+
+/**
+ * All instruments in one job share a single canonical clock, so there is no per-instrument
+ * progress percent - only the job-wide phase (preparing/warming up/running/etc) combined with
+ * each strategy's own trading status (which can independently fail while others keep running).
+ */
+function instrumentStatus(strategy: StrategyProgressSnapshot): string {
+  const jobStatus = displayJobStatus.value
+  if (jobStatus === 'Failed' || strategy.status === 'Failed') return 'Failed'
+  if (['Queued', 'PreparingData', 'DownloadingData', 'LoadingCache'].includes(jobStatus)) return 'Preparing'
+  if (jobStatus === 'WarmingUp') return 'Warming up'
+  if (jobStatus === 'Paused') return 'Paused'
+  if (['Cancelling', 'Cancelled'].includes(jobStatus)) return 'Cancelled'
+  if (jobStatus === 'Completed') return strategy.status ?? 'Completed'
+  return strategy.status ?? 'Running'
+}
+
+/**
+ * Each instrument in a multi-instrument run downloads independently, but the job snapshot
+ * used to collapse all of them onto one shared status slot (whichever fired last). This
+ * looks up the download/cache state for this specific instrument instead.
+ */
+function downloadStatus(strategy: StrategyProgressSnapshot) {
+  if (!strategy.instrument) return null
+  return job.value?.sourceProgressByInstrument?.[strategy.instrument] ?? null
+}
+
 function togglePlayback() {
   if (playbackPaused.value) play()
   else pause()
@@ -2772,6 +2805,38 @@ onMounted(() => {
         </template>
         <p v-else class="muted">Start a simulation to stream progress. Refresh reconnects via SignalR or polling.</p>
 
+        <template v-if="activeStrategies.length">
+          <h3>Per-instrument progress</h3>
+          <p class="muted">
+            All instruments run on one canonical clock, so the bar advances together; each
+            instrument's fund and trades still progress independently.
+          </p>
+          <div class="instrument-grid">
+            <article v-for="strategy in activeStrategies" :key="strategy.strategyId" class="instrument-card">
+              <header>
+                <strong>{{ strategy.instrument ?? strategy.strategyName }}</strong>
+                <span class="status-chip" :class="instrumentStatus(strategy).toLowerCase().replace(' ', '-')">
+                  {{ instrumentStatus(strategy) }}
+                </span>
+              </header>
+              <div class="ascii-bar mono">[{{ asciiBar(job?.progressPercent ?? 0) }}] {{ (job?.progressPercent ?? 0).toFixed(0) }}%</div>
+              <p v-if="downloadStatus(strategy)" class="muted download-line">
+                {{ downloadStatus(strategy)?.phase }}{{ downloadStatus(strategy)?.fromCache ? ' (cache)' : '' }}
+                · {{ downloadStatus(strategy)?.candlesRead.toLocaleString() }} candles
+                · {{ downloadStatus(strategy)?.pagesRead }} pages
+              </p>
+              <dl class="metrics compact-metrics">
+                <div><dt>Balance</dt><dd>{{ metric(strategy, 'balance') }}</dd></div>
+                <div><dt>Equity</dt><dd>{{ metric(strategy, 'equity') }}</dd></div>
+                <div><dt>Net P/L</dt><dd>{{ metric(strategy, 'netProfit') }}</dd></div>
+                <div><dt>Trades</dt><dd>{{ metric(strategy, 'completedTrades') }}</dd></div>
+                <div><dt>Open positions</dt><dd>{{ metric(strategy, 'openPositions') }}</dd></div>
+              </dl>
+              <p v-if="strategy.lastError" class="error">{{ strategy.lastError }}</p>
+            </article>
+          </div>
+        </template>
+
         <h3>Strategy comparison</h3>
         <table v-if="activeStrategies.length" class="compare-table">
           <thead>
@@ -3226,6 +3291,17 @@ button.secondary {
   padding: 0.35rem 0.4rem;
   text-align: left;
 }
+.instrument-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 0.6rem; }
+.instrument-card { display: grid; gap: 0.4rem; padding: 0.65rem; border: 1px solid rgba(255, 255, 255, 0.085); border-radius: 0.52rem; background: rgba(0, 0, 0, 0.12); }
+.instrument-card header { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.download-line { margin: 0; font-size: 0.72rem; }
+.ascii-bar { padding: 0.3rem 0.5rem; overflow-x: auto; border-radius: 0.4rem; color: #7ee2b8; background: rgba(0, 0, 0, 0.35); font-size: 0.75rem; letter-spacing: -0.02em; white-space: pre; }
+.status-chip { padding: 0.16rem 0.44rem; border-radius: 999px; color: #9fb0c3; background: rgba(255, 255, 255, 0.06); font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+.status-chip.running { color: #75e6c1; background: rgba(71, 215, 172, 0.1); }
+.status-chip.warming-up, .status-chip.preparing { color: #93c5fd; background: rgba(96, 165, 250, 0.1); }
+.status-chip.completed { color: #a7f3d0; background: rgba(71, 215, 172, 0.08); }
+.status-chip.failed { color: #fca5a5; background: rgba(248, 113, 113, 0.1); }
+.status-chip.paused, .status-chip.cancelled, .status-chip.incomplete { color: #fde68a; background: rgba(245, 158, 11, 0.08); }
 .job-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
 .linkish {
   background: transparent;

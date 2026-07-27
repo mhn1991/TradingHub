@@ -272,7 +272,7 @@ internal sealed record BacktestCommandOptions
                 "adaptive-risk" or "no-adaptive-risk" or "financing" or
                 "neo-wave" or "auto-train-calibration" or
                 "capture-market-replay" or "no-capture-market-replay" or
-                "pullback-only")
+                "pullback-only" or "candidate-fixes")
             {
                 values[key] = "true";
                 continue;

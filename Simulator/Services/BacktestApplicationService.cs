@@ -360,6 +360,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             {
                 ComparativeSimulationResult result = await ExecuteJobAsync(job, serviceToken)
                     .ConfigureAwait(false);
+                IReadOnlyDictionary<string, string> instrumentByStrategyId =
+                    (_options.StrategyFactory ?? CreateDefaultStrategies)(job.Request)
+                        .ToDictionary(entry => entry.Id, entry => entry.Instrument.Value);
                 SimulationJobSnapshot completed = await job.ApplyAsync(current => NextRevision(current) with
                 {
                     Status = SimulationJobStatus.Completed,
@@ -375,6 +378,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                     {
                         StrategyId = item.StrategyId,
                         StrategyName = item.StrategyName,
+                        Instrument = instrumentByStrategyId.GetValueOrDefault(item.StrategyId),
                         Balance = item.Result.FinalBalance,
                         Equity = item.Result.FinalEquity,
                         UnrealizedProfitLoss = item.Result.UnrealizedProfitLoss,
@@ -508,6 +512,11 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                             ? Math.Round(100m * download.DownloadedCandles / current.EstimatedBaseCandleCount.Value, 2)
                             : null
                     };
+                    var byInstrument = new Dictionary<string, HistoricalSourceProgress>(
+                        current.SourceProgressByInstrument)
+                    {
+                        [download.Instrument.Value] = sourceProgress
+                    };
                     SimulationJobStatus mapped = download.Status switch
                     {
                         "DownloadingData" => SimulationJobStatus.DownloadingData,
@@ -523,10 +532,25 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                             ? current.Status
                             : mapped,
                         SourceProgress = sourceProgress,
+                        SourceProgressByInstrument = byInstrument,
                         DataSourceStatus = download.Status,
                         StartedAt = current.StartedAt ?? DateTimeOffset.UtcNow
                     };
-                });
+                }, next => job.ExternalProgress?.Report(new BacktestProgress
+                {
+                    SimulationId = next.Id,
+                    Status = next.Status,
+                    CurrentMarketTime = next.CurrentMarketTime ?? next.RequestedFrom,
+                    EvaluationStart = next.RequestedFrom,
+                    EvaluationEnd = next.RequestedTo,
+                    ProcessedBaseCandles = next.ProcessedBaseCandles,
+                    EstimatedTotalBaseCandles = next.EstimatedBaseCandleCount,
+                    ProgressPercent = next.ProgressPercent,
+                    CandlesPerSecond = next.CandlesPerSecond,
+                    Strategies = next.Strategies,
+                    DataSourceStatus = next.DataSourceStatus,
+                    SourceProgressByInstrument = next.SourceProgressByInstrument
+                }));
             };
         }
 
@@ -552,7 +576,11 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                     DataSourceStatus = update.DataSourceStatus ?? current.DataSourceStatus
                 };
             }, next => job.ExternalProgress?.Report(
-                update with { CandlesPerSecond = next.CandlesPerSecond }));
+                update with
+                {
+                    CandlesPerSecond = next.CandlesPerSecond,
+                    SourceProgressByInstrument = next.SourceProgressByInstrument
+                }));
         });
 
         var engineOptions = new StreamingComparativeEngineOptions

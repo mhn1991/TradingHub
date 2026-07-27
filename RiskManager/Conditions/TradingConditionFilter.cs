@@ -85,7 +85,11 @@ public sealed class TradingConditionFilter : ITradingConditionFilter
         if (spreadAtr >= _options.HardMaximumSpreadAtr)
             return Decision(TradingConditionAction.RejectEntry, 0m, "SpreadAtrHardLimit", $"Spread/ATR {spreadAtr:F4} reached hard limit {_options.HardMaximumSpreadAtr:F4}.", session, spreadAtr, eventState);
         if (spreadAtr >= _options.SoftMaximumSpreadAtr)
-            return Decision(TradingConditionAction.AllowWithReducedRisk, _options.SoftSpreadRiskMultiplier, "SpreadAtrSoftLimit", $"Spread/ATR {spreadAtr:F4} reached the soft limit; risk was reduced.", session, spreadAtr, eventState);
+        {
+            return _options.SoftSpreadLimitAction == SoftSpreadLimitAction.RejectEntry
+                ? Decision(TradingConditionAction.RejectEntry, 0m, "SpreadAtrSoftRejected", $"Spread/ATR {spreadAtr:F4} reached the soft limit; entry was rejected.", session, spreadAtr, eventState)
+                : Decision(TradingConditionAction.AllowWithReducedRisk, _options.SoftSpreadRiskMultiplier, "SpreadAtrSoftLimit", $"Spread/ATR {spreadAtr:F4} reached the soft limit; risk was reduced.", session, spreadAtr, eventState);
+        }
 
         return Decision(TradingConditionAction.Allow, 1m, "TradingConditionsAllowed", $"{session} conditions and spread/ATR {spreadAtr:F4} are acceptable.", session, spreadAtr, eventState);
     }

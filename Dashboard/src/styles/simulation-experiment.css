@@ -71,9 +71,8 @@
 .ex-id-row { display: grid; grid-template-columns: auto minmax(12rem, 1fr) auto auto; align-items: center; gap: .5rem; }
 .ex-id-row > span { color: #8c99aa; font-size: .72rem; }
 .ex-id-row code { overflow: hidden; color: #c7d2e0; font-size: .76rem; text-overflow: ellipsis; }
-.ex-progress { height: .5rem; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.07); }
-.ex-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #47d7ac, #60a5fa); transition: width .35s ease; }
-.ex-progress.small { height: .28rem; }
+.ex-ascii-bar { padding: .32rem .55rem; overflow-x: auto; border-radius: .4rem; color: #7ee2b8; background: rgba(0,0,0,.35); font-size: .8rem; letter-spacing: -.02em; white-space: pre; }
+.ex-ascii-bar.small { padding: .2rem .45rem; color: #9fd8c4; font-size: .68rem; }
 .ex-child-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .6rem; }
 .ex-child-grid article { display: grid; gap: .4rem; padding: .65rem; border: 1px solid rgba(255,255,255,.085); border-radius: .52rem; background: rgba(0,0,0,.12); }
 .ex-child-grid article header { display: flex; justify-content: space-between; gap: .5rem; }

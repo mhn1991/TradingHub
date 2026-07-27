@@ -59,6 +59,7 @@ public sealed class StructuralConfluenceRegimeRoutingTests
     [TestCase(MarketRegime.TrendingUp, IndicatorConfluencePlaybook.StableId, 2)]
     [TestCase(MarketRegime.Range, LiquiditySweepReversalPlaybook.StableId, 1)]
     [TestCase(MarketRegime.BreakoutExpansionUp, LiquidityBreakRetestPlaybook.StableId, 1)]
+    [TestCase(MarketRegime.BreakoutExpansionDown, LiquidityBreakRetestPlaybook.StableId, 1)]
     public async Task RoutingEnabled_EntryProfileSelectsOnlyEligiblePlaybooks(
         MarketRegime regime,
         string expectedPlaybookId,
@@ -124,8 +125,11 @@ public sealed class StructuralConfluenceRegimeRoutingTests
         });
     }
 
-    [Test]
-    public async Task RoutingEnabled_MatureBreakRetestSurvivesAlignedBreakoutToTrendTransition()
+    [TestCase(MarketRegime.TrendingUp, PriceActionDirection.Bullish)]
+    [TestCase(MarketRegime.TrendingDown, PriceActionDirection.Bearish)]
+    public async Task RoutingEnabled_MatureBreakRetestIsRoutedOutOfTrendTransitionByDefault(
+        MarketRegime trendRegime,
+        PriceActionDirection alignedDirection)
     {
         StructuralConfluenceStrategyOptions options = new()
         {
@@ -133,6 +137,50 @@ public sealed class StructuralConfluenceRegimeRoutingTests
             SetupInterval = Setup,
             ContextInterval = Context,
             MarketRegime = new MarketRegimePolicyOptions { Enabled = true }
+        };
+        PlaybookEvaluation matureBreakRetest = ReadyEvaluation(
+            LiquidityBreakRetestPlaybook.StableId,
+            95m) with
+        {
+            Direction = alignedDirection,
+            PrimaryPoolId = Guid.Parse("8ec80e4b-221b-4afe-a6d2-7d0b06b2115f"),
+            SupportingEvidence = ["AcceptedLiquidityBreak", "LiquidityRetestHeld"]
+        };
+        RecordingPlaybook[] playbooks =
+        [
+            new(matureBreakRetest.PlaybookId, matureBreakRetest),
+            new(SupplyDemandPullbackPlaybook.StableId,
+                ReadyEvaluation(SupplyDemandPullbackPlaybook.StableId, 70m)),
+            new(IndicatorConfluencePlaybook.StableId,
+                ReadyEvaluation(IndicatorConfluencePlaybook.StableId, 90m))
+        ];
+        var agent = new StructuralConfluenceAgent(options, playbooks);
+
+        AgentDecision decision = await agent.EvaluateAsync(MarketContext(
+            Snapshot(Trigger),
+            Snapshot(Setup),
+            Snapshot(Context, Regime(trendRegime))));
+
+        StructuralPlaybookDiagnostic diagnostic = decision.StructuralPlaybookDiagnostics
+            .Single(item => item.PlaybookId == LiquidityBreakRetestPlaybook.StableId);
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.PlaybookId, Is.Not.EqualTo(LiquidityBreakRetestPlaybook.StableId));
+            Assert.That(diagnostic.IsEntryEligible, Is.False);
+            Assert.That(diagnostic.Outcome, Is.EqualTo(StructuralPlaybookOutcome.RoutedOut));
+        });
+    }
+
+    [Test]
+    public async Task RoutingEnabled_MatureBreakRetestSurvivesTrendTransitionWhenExplicitlyAllowed()
+    {
+        StructuralConfluenceStrategyOptions options = new()
+        {
+            TriggerInterval = Trigger,
+            SetupInterval = Setup,
+            ContextInterval = Context,
+            MarketRegime = new MarketRegimePolicyOptions { Enabled = true },
+            AllowBreakRetestAfterBreakoutTransition = true
         };
         PlaybookEvaluation matureBreakRetest = ReadyEvaluation(
             LiquidityBreakRetestPlaybook.StableId,
@@ -230,6 +278,39 @@ public sealed class StructuralConfluenceRegimeRoutingTests
             Assert.That(decision.StructuralPlaybookDiagnostics,
                 Has.All.Property(nameof(StructuralPlaybookDiagnostic.IsEntryEligible)).EqualTo(true));
             Assert.That(decision.RegimeEntryProfileId, Is.Null);
+        });
+    }
+
+    [TestCase(true, 4)]
+    [TestCase(false, 3)]
+    public async Task ConstructedPlaybooks_RespectIndicatorConfluenceEnabledOption(
+        bool indicatorConfluenceEnabled,
+        int expectedPlaybookCount)
+    {
+        StructuralConfluenceStrategyOptions options = new()
+        {
+            TriggerInterval = Trigger,
+            SetupInterval = Setup,
+            ContextInterval = Context,
+            IndicatorConfluence = new IndicatorConfluenceOptions { Enabled = indicatorConfluenceEnabled }
+        };
+        // Single-arg constructor: exercises the real CreatePlaybooks factory instead of the
+        // RecordingPlaybook fixtures used elsewhere in this file, so the assertion actually
+        // proves the disabled playbook is absent from the constructed collection - not just
+        // routed out afterward.
+        var agent = new StructuralConfluenceAgent(options);
+
+        AgentDecision decision = await agent.EvaluateAsync(MarketContext(
+            Snapshot(Trigger),
+            Snapshot(Setup),
+            Snapshot(Context)));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decision.StructuralPlaybookDiagnostics, Has.Count.EqualTo(expectedPlaybookCount));
+            Assert.That(
+                decision.StructuralPlaybookDiagnostics.Any(item => item.PlaybookId == IndicatorConfluencePlaybook.StableId),
+                Is.EqualTo(indicatorConfluenceEnabled));
         });
     }
 

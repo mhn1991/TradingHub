@@ -122,7 +122,7 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
 
             PlaybookEvaluation[] entryEligible = evaluations
                 .Where(evaluation => StructuralEntryProfileRouting.AllowsEntry(
-                    evaluation, regimeGate))
+                    evaluation, regimeGate, _options.AllowBreakRetestAfterBreakoutTransition))
                 .ToArray();
             StructuralArbitrationResult arbitration = regimeGate.RoutingEnabled && !regimeGate.AllowNewEntries
                 ? new StructuralArbitrationResult(null, regimeGate.ReasonCode)
@@ -182,7 +182,7 @@ public sealed class StructuralConfluenceAgent : ITradingAgent
         evaluations.Select(evaluation =>
         {
             bool eligible = StructuralEntryProfileRouting.AllowsEntry(
-                evaluation, gate);
+                evaluation, gate, _options.AllowBreakRetestAfterBreakoutTransition);
             bool selected = IsSameCandidate(evaluation, arbitration.Selected);
             (StructuralPlaybookOutcome Outcome, string ReasonCode) outcome = selected
                 ? (StructuralPlaybookOutcome.Selected, arbitration.ReasonCode)

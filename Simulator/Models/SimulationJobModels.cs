@@ -11,6 +11,8 @@ public sealed record StrategyProgressSnapshot
 {
     public required string StrategyName { get; init; }
     public required string StrategyId { get; init; }
+    /// <summary>Canonical instrument key string (e.g. FX:GBP/JPY) this strategy trades.</summary>
+    public string? Instrument { get; init; }
     public required decimal Balance { get; init; }
     public required decimal Equity { get; init; }
     public required decimal UnrealizedProfitLoss { get; init; }
@@ -327,6 +329,12 @@ public sealed record SimulationJobSnapshot
     public string? InputHash { get; init; }
     public string? DataSourceStatus { get; init; }
     public HistoricalSourceProgress? SourceProgress { get; init; }
+    /// <summary>Per-instrument download/cache status, keyed by canonical instrument key string.
+    /// A multi-instrument run has one independent download pipeline per instrument; this map
+    /// lets each be inspected separately instead of collapsing to whichever fired last onto
+    /// the single <see cref="SourceProgress"/> slot above.</summary>
+    public IReadOnlyDictionary<string, HistoricalSourceProgress> SourceProgressByInstrument { get; init; } =
+        new Dictionary<string, HistoricalSourceProgress>();
     public BacktestRequest? Request { get; init; }
     public MarketDataQualityReport? DataQuality { get; init; }
     public IReadOnlyList<StrategyWorkerMetrics>? WorkerMetrics { get; init; }
@@ -346,6 +354,11 @@ public sealed record BacktestProgress
     public required decimal CandlesPerSecond { get; init; }
     public required IReadOnlyList<StrategyProgressSnapshot> Strategies { get; init; }
     public string? DataSourceStatus { get; init; }
+    /// <summary>Per-instrument download/cache status, keyed by canonical instrument key string.
+    /// See <see cref="SimulationJobSnapshot.SourceProgressByInstrument"/> for why this exists
+    /// as a map rather than a single slot.</summary>
+    public IReadOnlyDictionary<string, HistoricalSourceProgress> SourceProgressByInstrument { get; init; } =
+        new Dictionary<string, HistoricalSourceProgress>();
 }
 
 public sealed record StrategyWorkerMetrics
