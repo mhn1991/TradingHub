@@ -32,10 +32,14 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
         decimal risk = buy ? entry - stop : stop - entry;
         if (risk <= 0m || risk > options.Geometry.MaximumStopDistanceAtr * atr)
             return Invalid(entry, "StructuralStopInvalid");
-        if (evidence.ExecutableSpread > 0m &&
-            risk < evidence.ExecutableSpread * options.Geometry.MinimumRiskToSpreadMultiple)
+        // Gate against the full round-trip cost (spread + slippage + commission on both legs),
+        // not spread alone: a stop that's merely wider than the spread can still lose a large
+        // fraction of its planned R once slippage and commission are added on top - a market-
+        // agnostic effect, since it scales with each market's own trading costs rather than a
+        // single flat multiple. See AGENT_IMPROVEMENT_RECOMMENDATIONS.md follow-up (2026-07-27).
+        decimal costFloor = Math.Max(evidence.ExecutableSpread, evidence.RoundTripCostEstimate);
+        if (costFloor > 0m && risk < costFloor * options.Geometry.MinimumRiskToSpreadMultiple)
             return Invalid(entry, "StructuralStopDistanceBelowExecutionCostFloor");
-
         var obstacles = new List<(decimal Price, string Source, LiquidityPool? Pool)>();
         foreach (SwingPoint swing in evidence.Setup.Swings.Where(item => item.ConfirmedAt <= evidence.AvailableAt))
         {
@@ -124,10 +128,11 @@ public sealed class StructuralGeometryBuilder(StructuralConfluenceStrategyOption
         decimal risk = buy ? entry - stop : stop - entry;
         if (risk <= 0m || risk > options.Geometry.MaximumStopDistanceAtr * atr)
             return Invalid(entry, "StructuralStopInvalid");
-        if (evidence.ExecutableSpread > 0m &&
-            risk < evidence.ExecutableSpread * options.Geometry.MinimumRiskToSpreadMultiple)
+        // See the twin gate in Build() above: cost floor now uses the full round-trip cost
+        // estimate, not spread alone.
+        decimal costFloor = Math.Max(evidence.ExecutableSpread, evidence.RoundTripCostEstimate);
+        if (costFloor > 0m && risk < costFloor * options.Geometry.MinimumRiskToSpreadMultiple)
             return Invalid(entry, "StructuralStopDistanceBelowExecutionCostFloor");
-
         TargetMapResult map = _targetMap.Build(evidence, direction, entry, stop, exitPolicy, excludedSourceIds);
         if (!map.IsAdmissible || map.Plan is null)
             return Invalid(entry, map.ReasonCode);

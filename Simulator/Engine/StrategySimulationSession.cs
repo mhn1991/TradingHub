@@ -41,6 +41,7 @@ public sealed class StrategySimulationSession : IAsyncDisposable
     private readonly HashSet<string> _completedReductionStages = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<SimulatedTradeRecord> _trades = [];
     private readonly PositionManagementOptions _positionManagementOptions;
+    private readonly decimal _estimatedRoundTripCostBasisPoints;
     private readonly IStructureBasedTradeManager _tradeManager;
     private readonly BarInterval _managementInterval;
     private readonly BarInterval _fastStructureInterval;
@@ -114,8 +115,15 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         PortfolioManager.CrossMarket.CrossMarketAnalysisCoordinator? crossMarket = null,
         bool detailedExcursionTracking = false,
         string? featurePolicyHash = null,
-        AnalysisProfileKey? analysisProfile = null)
+        AnalysisProfileKey? analysisProfile = null,
+        PositionSizingOptions? positionSizingOptions = null)
     {
+        // Position sizing already shrinks quantity for this same estimate (see PositionSizer's
+        // risk-based branch), so a stop-out that also pays typical costs stays within the
+        // intended risk budget. The planned-risk figure recorded on the trade must use the same
+        // cost-inclusive distance, or R-multiple reporting keeps showing the pre-fix overshoot
+        // even though the real dollar risk is already correctly bounded.
+        _estimatedRoundTripCostBasisPoints = positionSizingOptions?.EstimatedRoundTripCostBasisPoints ?? 0m;
         FeaturePolicyHash = featurePolicyHash;
         AnalysisProfile = analysisProfile;
         _crossMarket = crossMarket;
@@ -378,7 +386,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             crossMarket: crossMarket,
             detailedExcursionTracking: detailedExcursionTracking,
             featurePolicyHash: decisionRuntime.FeaturePolicyHash,
-            analysisProfile: analysisProfile);
+            analysisProfile: analysisProfile,
+            positionSizingOptions: positionSizingOptions);
     }
 
     public async Task<StrategyFrameResult> ProcessFrameAsync(
@@ -528,6 +537,13 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                     Positions = positions,
                     OpenOrders = openOrders,
                     ExecutableSpread = executionCandle.Prices.Close * Broker.Options.SpreadBasisPoints / 10_000m,
+                    // Full round trip: one spread (paid via half-spread on each leg, same as
+                    // ExecutableSpread above) plus slippage and commission on both the entry and
+                    // exit fill.
+                    RoundTripCostEstimate =
+                        executionCandle.Prices.Close * Broker.Options.SpreadBasisPoints / 10_000m +
+                        executionCandle.Prices.Close * 2m * Broker.Options.SlippageBasisPoints / 10_000m +
+                        executionCandle.Prices.Close * 2m * Broker.Options.CommissionRate,
                     MarketDataAvailableAt = frame.AvailableAt,
                     StrategyId = StrategyId,
                     CurrencyStrength = _crossMarket?.GetSnapshot(executionCandle.Instrument)
@@ -1093,9 +1109,14 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 out decimal resolvedConversion)
                 ? resolvedConversion
                 : 0m;
+            // Cost-inclusive, matching the distance PositionSizer already sized this quantity
+            // against (see _estimatedRoundTripCostBasisPoints above) - otherwise a clean stop
+            // fill that costs exactly what sizing already budgeted for still reports as worse
+            // than -1.0R, even though the real dollar risk was never exceeded.
             decimal? plannedStopRisk = after.AveragePrice is decimal filledEntry &&
                 decision.StopLossPrice is decimal plannedStop && conversion > 0m
-                ? Math.Abs(filledEntry - plannedStop) * after.Quantity * conversion
+                ? (Math.Abs(filledEntry - plannedStop) +
+                    filledEntry * _estimatedRoundTripCostBasisPoints / 10_000m) * after.Quantity * conversion
                 : null;
             decimal finalRiskMultiplier = CombinedRiskMultiplier(decision);
             decimal entryCommission = -Broker.State.GetLedger()
@@ -1273,8 +1294,12 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             decimal grossTotal = _activeTrade.RealizedPartialGrossProfitLoss + finalGross;
             decimal totalCommission = _activeTrade.Commission + exitCommission;
             decimal netTotal = grossTotal - totalCommission + _activeTrade.TotalFinancing;
+            // Cost-inclusive: matches what PositionSizer already sized this quantity against (see
+            // _estimatedRoundTripCostBasisPoints), so RMultiple/RealizedR reflect the risk this
+            // trade was actually planned against, not just the raw stop distance.
             decimal? initialRisk = (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice) is decimal stop
-                ? Math.Abs(entryPrice - stop) * initialQuantity * quoteToBaseRate
+                ? (Math.Abs(entryPrice - stop) + entryPrice * _estimatedRoundTripCostBasisPoints / 10_000m) *
+                    initialQuantity * quoteToBaseRate
                 : null;
             decimal exitedNotionalPrice = _activeTrade.PartialExits.Sum(partial =>
                 partial.ExitPrice * partial.QuantityClosed) + exitPrice * finalQuantity;
@@ -1568,8 +1593,12 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             (favourablePrice - entry) * direction * _activeTrade.Quantity * quoteToBase;
         decimal adverseAmount =
             (adversePrice - entry) * direction * _activeTrade.Quantity * quoteToBase;
+        // Same cost-inclusive risk unit as the final RMultiple calculation, so MFE_R/MAE_R stay
+        // consistent with it rather than reporting excursions in a different "R" than the trade's
+        // own realized R-multiple.
         decimal? initialRisk = (_activeTrade.InitialStopLossPrice ?? _activeTrade.StopLossPrice) is decimal stop
-            ? Math.Abs(entry - stop) * _activeTrade.Quantity * quoteToBase
+            ? (Math.Abs(entry - stop) + entry * _estimatedRoundTripCostBasisPoints / 10_000m) *
+                _activeTrade.Quantity * quoteToBase
             : null;
         DateTimeOffset timestamp = executable.CloseTime ?? executable.Interval.AddTo(executable.OpenTime);
 

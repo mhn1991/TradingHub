@@ -272,6 +272,15 @@ public sealed record AgentMarketContext
     public required IReadOnlyList<BrokerPosition> Positions { get; init; }
     public required IReadOnlyList<BrokerOrder> OpenOrders { get; init; }
     public decimal? ExecutableSpread { get; init; }
+    /// <summary>
+    /// Estimated full round-trip transaction cost (spread + slippage + commission, both entry
+    /// and exit legs) in the instrument's own price units. Unlike <see cref="ExecutableSpread"/>
+    /// (spread only, used for entry-price modelling), this is meant for cost-aware risk gates -
+    /// a stop this tight would already lose a large fraction of its planned R to costs alone,
+    /// regardless of which market it's trading, since it scales with that market's own spread/
+    /// slippage/commission rather than a single flat multiple.
+    /// </summary>
+    public decimal? RoundTripCostEstimate { get; init; }
     public DateTimeOffset? MarketDataAvailableAt { get; init; }
     public string? StrategyId { get; init; }
     public CurrencyStrengthSnapshot? CurrencyStrength { get; init; }
