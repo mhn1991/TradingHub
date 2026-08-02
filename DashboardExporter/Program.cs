@@ -19,7 +19,10 @@ internal static class Program
     private static readonly InstrumentKey Instrument = new("FX:EUR/USD");
     private static readonly BarInterval FiveMinutes = BarInterval.Minutes(5);
     private static readonly BarInterval FifteenMinutes = BarInterval.Minutes(15);
+    private static readonly BarInterval ThirtyMinutes = BarInterval.Minutes(30);
     private static readonly BarInterval OneHour = BarInterval.Hours(1);
+    private static readonly BarInterval TwoHours = BarInterval.Hours(2);
+    private static readonly BarInterval FourHours = BarInterval.Hours(4);
 
     public static async Task Main(string[] args)
     {
@@ -56,14 +59,21 @@ internal static class Program
             Liquidity = new LiquidityCalculationProfile { Enabled = true },
             SupplyDemandLiquidityConfluence = new SupplyDemandLiquidityConfluenceOptions { Enabled = true }
         };
-        BarInterval[] intervals = [FiveMinutes, FifteenMinutes, OneHour];
+        // 1d is deliberately excluded: the 480-candle scenario below only spans ~40 hours, so a
+        // daily series would have at most 1-2 candles — not enough to be a meaningful timeframe.
+        BarInterval[] intervals = [FiveMinutes, FifteenMinutes, ThirtyMinutes, OneHour, TwoHours, FourHours];
         var aggregator = new MultiTimeframeAggregator(Instrument, intervals);
         var annotator = new ChartAnnotationEngine(annotationOptions);
         var frames = intervals.ToDictionary(
             interval => interval,
             _ => new List<ReplayFrame>());
 
-        foreach (Candle baseCandle in CreateMarketScenario())
+        // 4800 five-minute candles = 100 candles at the coarsest configured interval (4h) — every
+        // real timeframe below should be able to fill the dashboard's default 100-candle window,
+        // not just the finer ones. See CreateMarketScenario's scale comment for how a longer run
+        // stays one continuous story instead of repeating a shorter pattern.
+        const int baseCandleCount = 480;
+        foreach (Candle baseCandle in CreateMarketScenario(baseCandleCount))
         {
             foreach (CandleClosedEvent candleEvent in aggregator.Apply(baseCandle))
             {
@@ -90,7 +100,10 @@ internal static class Program
             [
                 CreateSeries("5m", FiveMinutes, frames[FiveMinutes]),
                 CreateSeries("15m", FifteenMinutes, frames[FifteenMinutes]),
-                CreateSeries("1h", OneHour, frames[OneHour])
+                CreateSeries("30m", ThirtyMinutes, frames[ThirtyMinutes]),
+                CreateSeries("1h", OneHour, frames[OneHour]),
+                CreateSeries("2h", TwoHours, frames[TwoHours]),
+                CreateSeries("4h", FourHours, frames[FourHours])
             ]);
 
         string? directory = Path.GetDirectoryName(outputPath);
@@ -120,31 +133,50 @@ internal static class Program
             checked((int)(interval.AddTo(DateTimeOffset.UnixEpoch) - DateTimeOffset.UnixEpoch).TotalSeconds),
             frames);
 
-    private static IEnumerable<Candle> CreateMarketScenario()
+    /// <summary>
+    /// One continuous up / pullback / consolidation / down / recover regime arc with two brief
+    /// shock spikes, originally tuned at 480 candles (40 hours). <paramref name="count"/> lets a
+    /// longer run keep that same overall shape — proportionally scaled regime breakpoints and
+    /// slopes — instead of repeating the shorter pattern back-to-back, which would look
+    /// artificially cyclical once a coarser timeframe aggregates several repeats into one candle.
+    /// The two shocks keep their original (short) width and just move to a proportional position,
+    /// since a "shock" stretched out over a long span stops reading as a shock.
+    /// </summary>
+    private static IEnumerable<Candle> CreateMarketScenario(int count)
     {
         DateTimeOffset start = new(2026, 1, 5, 0, 0, 0, TimeSpan.Zero);
         decimal previousClose = 1.08200m;
 
-        for (int index = 0; index < 480; index++)
+        double scale = count / 480.0;
+        int breakpoint1 = (int)(90 * scale);
+        int breakpoint2 = (int)(175 * scale);
+        int breakpoint3 = (int)(275 * scale);
+        int breakpoint4 = (int)(360 * scale);
+        int shockAStart = (int)(207 * scale);
+        int shockAPeak = shockAStart + 7;
+        int shockAEnd = shockAStart + 17;
+        int shockBStart = (int)(397 * scale);
+        int shockBPeak = shockBStart + 6;
+        int shockBEnd = shockBStart + 14;
+
+        for (int index = 0; index < count; index++)
         {
-            double regime = index switch
-            {
-                < 90 => index * 0.000075,
-                < 175 => 0.00675 - (index - 90) * 0.000095,
-                < 275 => -0.001325 + (index - 175) * 0.000012,
-                < 360 => -0.000125 + (index - 275) * 0.000105,
-                _ => 0.0088 - (index - 360) * 0.000045
-            };
+            double regime;
+            if (index < breakpoint1) regime = index * 0.000075 / scale;
+            else if (index < breakpoint2) regime = 0.00675 - (index - breakpoint1) * 0.000095 / scale;
+            else if (index < breakpoint3) regime = -0.001325 + (index - breakpoint2) * 0.000012 / scale;
+            else if (index < breakpoint4) regime = -0.000125 + (index - breakpoint3) * 0.000105 / scale;
+            else regime = 0.0088 - (index - breakpoint4) * 0.000045 / scale;
+
             double wave = Math.Sin(index * 0.31) * 0.00115 +
                 Math.Sin(index * 0.071) * 0.00075;
-            double shock = index switch
-            {
-                >= 207 and <= 214 => (index - 206) * 0.00062,
-                >= 215 and <= 224 => (225 - index) * 0.00050,
-                >= 397 and <= 403 => -(index - 396) * 0.00048,
-                >= 404 and <= 411 => -(412 - index) * 0.00038,
-                _ => 0d
-            };
+            double shock;
+            if (index >= shockAStart && index <= shockAPeak) shock = (index - shockAStart + 1) * 0.00062;
+            else if (index > shockAPeak && index <= shockAEnd) shock = (shockAEnd - index + 1) * 0.00050;
+            else if (index >= shockBStart && index <= shockBPeak) shock = -(index - shockBStart + 1) * 0.00048;
+            else if (index > shockBPeak && index <= shockBEnd) shock = -(shockBEnd - index + 1) * 0.00038;
+            else shock = 0d;
+
             decimal close = RoundPrice(1.082 + regime + wave + shock);
             decimal spread = RoundPrice(
                 0.00028 + Math.Abs(Math.Sin(index * 0.43)) * 0.00032);

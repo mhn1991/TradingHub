@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, shallowRef, watch } from 'vue'
 import AnalysisChart from './components/AnalysisChart.vue'
+import { useMultiTimeframeSelection } from './composables/useMultiTimeframeSelection'
+import { findAnchorIndex, parseIntervalSeconds } from './utils/timeframeSeries'
 import SimulatorPanel from './components/SimulatorPanel.vue'
 import LiveDemoPanel from './components/LiveDemoPanel.vue'
 import ResearchPanel from './components/ResearchPanel.vue'
@@ -78,8 +80,11 @@ const mode = ref<'replay' | 'live'>('replay')
 const uiView = ref<'workspaces' | 'simulator' | 'research' | 'live-demo' | 'reports'>('workspaces')
 const reportTarget = reactive({ kind: 'live-session' as 'live-session' | 'experiment', identifier: '', autoLoad: false })
 const liveStatus = ref<LiveFeedStatus | null>(null)
-const activeSeriesIndex = ref(0)
 const selectedIndex = ref(0)
+// True right after drilling into a candle: the chart centers on selectedIndex (candles both
+// before and after) instead of treating it as the rightmost/latest point. Cleared on a plain
+// timeframe switch; restored on "back" only if that still leaves an earlier drill active.
+const centeredView = ref(false)
 const windowSize = ref(100)
 const playbackSpeed = ref(4)
 const isPlaying = ref(false)
@@ -156,9 +161,66 @@ const availableTimeframes = computed(() => {
   }
   return activeAsset.value?.timeframes ?? []
 })
-const activeSeries = computed<ReplaySeries | null>(() =>
-  dataset.value?.series[activeSeriesIndex.value] ?? null,
+// The finest real series is the resampling base — every coarser timeframe (real or synthetic)
+// can be derived from it, but nothing finer than it is available.
+const mtfBaseInterval = computed(() => {
+  const seriesList = dataset.value?.series ?? []
+  if (seriesList.length === 0) return '5m'
+  return [...seriesList].sort((a, b) => a.intervalSeconds - b.intervalSeconds)[0]!.interval
+})
+const mtfBaseFrames = computed(() =>
+  dataset.value?.series.find((series) => series.interval === mtfBaseInterval.value)?.frames ?? [],
 )
+const mtfSeries = computed(() => dataset.value?.series)
+const {
+  activeInterval,
+  availableIntervals,
+  activeFrames,
+  canGoBack,
+  switchInterval,
+  drillInto,
+  goBack,
+} = useMultiTimeframeSelection(mtfBaseInterval, mtfBaseFrames, mtfSeries)
+
+const activeSeries = computed<ReplaySeries | null>(() => {
+  if (!dataset.value) return null
+  return dataset.value.series.find((series) => series.interval === activeInterval.value) ?? {
+    interval: activeInterval.value,
+    intervalSeconds: parseIntervalSeconds(activeInterval.value),
+    frames: activeFrames.value,
+  }
+})
+
+function onSwitchInterval(interval: string) {
+  const workspace = activeWorkspace.value
+  if (workspace) workspace.interval = interval
+  const anchorAt = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
+  switchInterval(interval)
+  selectedIndex.value = findAnchorIndex(activeFrames.value, anchorAt)
+  centeredView.value = false
+  isPlaying.value = false
+}
+
+function onDrillCandle(availableAt: string) {
+  const anchorAt = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
+  const resolvedAnchor = drillInto(availableAt, anchorAt)
+  if (resolvedAnchor === null) return
+  const workspace = activeWorkspace.value
+  if (workspace) workspace.interval = activeInterval.value
+  selectedIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
+  centeredView.value = true
+  isPlaying.value = false
+}
+
+function onDrillBack() {
+  const resolvedAnchor = goBack()
+  if (resolvedAnchor === null) return
+  const workspace = activeWorkspace.value
+  if (workspace) workspace.interval = activeInterval.value
+  selectedIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
+  centeredView.value = canGoBack.value
+  isPlaying.value = false
+}
 const selectedBacktestRun = computed(() =>
   backtestManifest.value?.runs.find((run) => run.id === selectedBacktestId.value) ?? null,
 )
@@ -671,19 +733,25 @@ function persistWorkspaces() {
 }
 
 async function loadSampleReplay() {
-  const manifestResponse = await fetch(`${import.meta.env.BASE_URL}data/backtests/manifest.json`, { cache: 'no-store' })
+  // A dev server (and some static hosts) return a 200 SPA-shell fallback for any unmatched path
+  // rather than a real 404, so a missing/deleted manifest can still come back `ok` as HTML. Treat
+  // any failure here — network, non-JSON body, bad schema — as "no manifest available" and fall
+  // through to the bundled sample replay, instead of letting it abort the whole load.
+  const manifest = await fetch(`${import.meta.env.BASE_URL}data/backtests/manifest.json`, { cache: 'no-store' })
+    .then((response) => {
+      if (!response.ok) return null
+      if (!(response.headers.get('content-type') ?? '').includes('json')) return null
+      return response.json() as Promise<BacktestManifest>
+    })
     .catch(() => null)
-  if (manifestResponse?.ok) {
-    const manifest = await manifestResponse.json() as BacktestManifest
-    if (manifest.schemaVersion === 1 && Array.isArray(manifest.runs) && manifest.runs.length > 0) {
-      backtestManifest.value = manifest
-      const queryStrategy = new URLSearchParams(window.location.search).get('strategy')
-      selectedBacktestId.value = manifest.runs.some((run) => run.id === queryStrategy)
-        ? queryStrategy!
-        : (manifest.runs.find((run) => run.id.includes('improved'))?.id ?? manifest.runs[0].id)
-      await loadBacktestRun(selectedBacktestId.value)
-      return
-    }
+  if (manifest && manifest.schemaVersion === 1 && Array.isArray(manifest.runs) && manifest.runs.length > 0) {
+    backtestManifest.value = manifest
+    const queryStrategy = new URLSearchParams(window.location.search).get('strategy')
+    selectedBacktestId.value = manifest.runs.some((run) => run.id === queryStrategy)
+      ? queryStrategy!
+      : (manifest.runs.find((run) => run.id.includes('improved'))?.id ?? manifest.runs[0].id)
+    await loadBacktestRun(selectedBacktestId.value)
+    return
   }
 
   const response = await fetch(`${import.meta.env.BASE_URL}data/sample-replay.json`)
@@ -746,8 +814,10 @@ async function selectBacktest(id: string) {
     if (activeBroker.value?.id === 'simulator' && replayDataset.value) {
       setDataset(replayDataset.value)
       const workspace = activeWorkspace.value
-      const index = replayDataset.value.series.findIndex((series) => series.interval === workspace?.interval)
-      selectSeries(index < 0 ? 0 : index)
+      const preferred = replayDataset.value.series.some((series) => series.interval === workspace?.interval)
+        ? workspace!.interval
+        : replayDataset.value.series[0]!.interval
+      onSwitchInterval(preferred)
     }
   } catch (error) {
     loadError.value = messageFrom(error, 'The selected backtest could not be loaded.')
@@ -816,7 +886,6 @@ function setDataset(value: ReplayDataset, preservePosition = false) {
       frames: shallowReactive(series.frames),
     })),
   })
-  activeSeriesIndex.value = 0
   if (!preservePosition || mode.value === 'live') selectedIndex.value = Math.max(0, value.series[0].frames.length - 1)
   isPlaying.value = false
   loadError.value = null
@@ -861,8 +930,10 @@ async function loadActiveWorkspace() {
     mode.value = 'replay'
     if (replayDataset.value) {
       setDataset(replayDataset.value)
-      const seriesIndex = replayDataset.value.series.findIndex((series) => series.interval === workspace.interval)
-      selectSeries(seriesIndex < 0 ? 0 : seriesIndex)
+      const preferred = replayDataset.value.series.some((series) => series.interval === workspace.interval)
+        ? workspace.interval
+        : replayDataset.value.series[0]!.interval
+      onSwitchInterval(preferred)
     }
     loading.value = false
     return
@@ -918,15 +989,13 @@ async function changeAsset(event: Event) {
   await loadActiveWorkspace()
 }
 
+// Live mode only — replay's timeframe switching lives in AnalysisChart's own toolbar now
+// (onSwitchInterval), since it needs the anchor-preserving/resample/drill machinery that live
+// mode's single always-current interval doesn't.
 async function changeTimeframe(interval: string) {
   const workspace = activeWorkspace.value
   if (!workspace || workspace.interval === interval) return
   workspace.interval = interval
-  if (mode.value === 'replay' && dataset.value) {
-    const index = dataset.value.series.findIndex((series) => series.interval === interval)
-    if (index >= 0) selectSeries(index)
-    return
-  }
   await loadActiveWorkspace()
 }
 
@@ -955,12 +1024,6 @@ async function removeWorkspace(id: string) {
   const wasActive = activeWorkspaceId.value === id
   workspaces.value.splice(index, 1)
   if (wasActive) await activateWorkspace(workspaces.value[Math.max(0, index - 1)].id)
-}
-
-function selectSeries(index: number) {
-  activeSeriesIndex.value = index
-  selectedIndex.value = Math.max(0, (dataset.value?.series[index].frames.length ?? 1) - 1)
-  isPlaying.value = false
 }
 
 function togglePlayback() {
@@ -1340,11 +1403,10 @@ function signedAmount(value: number, currency?: string | null) {
 function jumpToTrade(trade: ReplayTrade) {
   const value = dataset.value
   if (!value) return
-  const detailedIndex = value.series.findIndex((series) => series.interval === '5m')
-  const seriesIndex = detailedIndex >= 0 ? detailedIndex : activeSeriesIndex.value
-  const series = value.series[seriesIndex]
+  const detailed = value.series.find((series) => series.interval === '5m')
+  const series = detailed ?? value.series.find((item) => item.interval === activeInterval.value)
   if (!series?.frames.length) return
-  if (seriesIndex !== activeSeriesIndex.value) selectSeries(seriesIndex)
+  if (series.interval !== activeInterval.value) switchInterval(series.interval)
 
   const target = new Date(trade.openedAt ?? trade.signalCreatedAt).getTime()
   let bestIndex = 0
@@ -1554,7 +1616,7 @@ function isAbortError(error: unknown) {
           </div>
           <p>{{ dataset.title }}</p>
         </div>
-        <div class="timeframe-selector" aria-label="Analysis timeframe">
+        <div v-if="mode === 'live'" class="timeframe-selector" aria-label="Analysis timeframe">
           <button
             v-for="interval in availableTimeframes"
             :key="interval"
@@ -1672,6 +1734,13 @@ function isAbortError(error: unknown) {
               :window-size="windowSize"
               :layers="layers"
               :trades="dataset?.trades ?? []"
+              :available-intervals="mode === 'replay' ? availableIntervals : undefined"
+              :active-interval="activeInterval"
+              :can-go-back="canGoBack"
+              :centered="centeredView"
+              @switch-interval="onSwitchInterval"
+              @drill-candle="onDrillCandle"
+              @drill-back="onDrillBack"
             />
 
             <div v-if="mode === 'replay'" class="replay-controls">

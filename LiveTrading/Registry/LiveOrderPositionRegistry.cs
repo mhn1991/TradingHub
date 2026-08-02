@@ -1,6 +1,7 @@
 using Brokers.Models;
 using LiveTrading.Portfolio;
 using ChartAnnotator.SupplyDemand;
+using TradeManager;
 
 namespace LiveTrading.Registry;
 
@@ -43,6 +44,13 @@ public sealed record LiveOrderRecord
     public string EntryRegime { get; init; } = "Unknown";
     public string EntrySession { get; init; } = "Unknown";
     public string EntrySetupType { get; init; } = "Unknown";
+    /// <summary>CAL-01 fix: computed via <c>TradeManager.VolatilityBucketClassifier.Classify</c>
+    /// from the entry decision's <c>AtrPercentile</c>, exactly matching how
+    /// <c>Simulator.Engine.StrategySimulationSession</c> computes the same field - previously
+    /// hardcoded to the literal string "Live", which can never match a calibration cohort key
+    /// like "Low"/"Normal"/"High", silently and permanently defeating live calibrated position
+    /// management whenever it was enabled.</summary>
+    public string EntryVolatilityBucket { get; init; } = "Unknown";
     public string? EntryNeoWaveHypothesisId { get; init; }
     public decimal? EntryNeoWaveInvalidationPrice { get; init; }
     public Guid? EntrySupplyDemandZoneId { get; init; }
@@ -93,6 +101,8 @@ public sealed record LivePositionRecord
     public string EntryRegime { get; init; } = "Unknown";
     public string EntrySession { get; init; } = "Unknown";
     public string EntrySetupType { get; init; } = "Unknown";
+    /// <summary>CAL-01 fix: carried unchanged from <see cref="LiveOrderRecord.EntryVolatilityBucket"/>, never re-derived after entry - see that field's doc comment.</summary>
+    public string EntryVolatilityBucket { get; init; } = "Unknown";
     public string? EntryNeoWaveHypothesisId { get; init; }
     public decimal? EntryNeoWaveInvalidationPrice { get; init; }
     public Guid? EntrySupplyDemandZoneId { get; init; }
@@ -211,6 +221,7 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
             EntrySession = decision.Candidate.TradingCondition?.Session.ToString() ?? "Unknown",
             EntrySetupType = decision.Decision.PriceActionSetupType?.ToString() ??
                 decision.Candidate.SetupId ?? "Unknown",
+            EntryVolatilityBucket = VolatilityBucketClassifier.Classify(decision.Decision.AtrPercentile),
             EntryNeoWaveHypothesisId = decision.Decision.NeoWaveHypothesisId,
             EntryNeoWaveInvalidationPrice = decision.Decision.NeoWaveInvalidationPrice,
             EntrySupplyDemandZoneId = decision.Decision.EntrySupplyDemandZoneId,
@@ -373,6 +384,7 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                         EntryRegime = existing?.EntryRegime ?? updatedOrder.EntryRegime,
                         EntrySession = existing?.EntrySession ?? updatedOrder.EntrySession,
                         EntrySetupType = existing?.EntrySetupType ?? updatedOrder.EntrySetupType,
+                        EntryVolatilityBucket = existing?.EntryVolatilityBucket ?? updatedOrder.EntryVolatilityBucket,
                         EntryNeoWaveHypothesisId = existing?.EntryNeoWaveHypothesisId ??
                             updatedOrder.EntryNeoWaveHypothesisId,
                         EntryNeoWaveInvalidationPrice = existing?.EntryNeoWaveInvalidationPrice ??
@@ -624,6 +636,7 @@ public sealed class LiveOrderPositionRegistry : ILiveOrderPositionRegistry
                     EntryRegime = existing?.EntryRegime ?? ownershipOrder?.EntryRegime ?? "Unknown",
                     EntrySession = existing?.EntrySession ?? ownershipOrder?.EntrySession ?? "Unknown",
                     EntrySetupType = existing?.EntrySetupType ?? ownershipOrder?.EntrySetupType ?? "Unknown",
+                    EntryVolatilityBucket = existing?.EntryVolatilityBucket ?? ownershipOrder?.EntryVolatilityBucket ?? "Unknown",
                     EntryNeoWaveHypothesisId = existing?.EntryNeoWaveHypothesisId ??
                         ownershipOrder?.EntryNeoWaveHypothesisId,
                     EntryNeoWaveInvalidationPrice = existing?.EntryNeoWaveInvalidationPrice ??

@@ -16,6 +16,8 @@ import type {
 } from '../types'
 import { RESEARCH_ARTIFACT_SELECTION_KEY } from '../types'
 import AnalysisChart from './AnalysisChart.vue'
+import { useMultiTimeframeSelection } from '../composables/useMultiTimeframeSelection'
+import { findAnchorIndex } from '../utils/timeframeSeries'
 import SimulationExperimentPanel from './SimulationExperimentPanel.vue'
 import ProfileBuilderWizard from './simulator/ProfileBuilderWizard.vue'
 import { useSimulationRealtime } from '../composables/useSimulationRealtime'
@@ -905,6 +907,58 @@ const replayFrames = computed<ReplayFrame[]>(() => filteredReplayRows.value.map(
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
+
+// Multi-timeframe wiring for the "Visual playback" chart. Only the execution interval streams
+// live over SignalR, so every other timeframe here is resampled (no `series` argument) — real
+// per-interval data is only available in the static replay view (App.vue). `replayIndex` keeps
+// driving live playback and the metrics panel below at the execution interval; `chartIndex` is
+// the chart's own position — mirrors `replayIndex` while on that interval, detaches (anchor
+// mechanic takes over) once the user switches away or drills, and reattaches when they switch back.
+const mtfBaseInterval = computed(() => form.executionInterval)
+const {
+  activeInterval,
+  availableIntervals,
+  activeFrames,
+  canGoBack,
+  switchInterval,
+  drillInto,
+  goBack,
+} = useMultiTimeframeSelection(mtfBaseInterval, replayFrames, computed(() => undefined))
+
+const chartIndex = ref(replayIndex.value)
+// True right after drilling: the chart centers on chartIndex (candles both before and after)
+// instead of treating it as the live/latest point. See AnalysisChart's `centered` prop.
+const centeredView = ref(false)
+watch(replayIndex, (next) => {
+  if (activeInterval.value === mtfBaseInterval.value) chartIndex.value = next
+})
+
+function onSwitchInterval(interval: string) {
+  const anchorAt = activeFrames.value[chartIndex.value]?.availableAt ?? null
+  switchInterval(interval)
+  chartIndex.value = interval === mtfBaseInterval.value
+    ? replayIndex.value
+    : findAnchorIndex(activeFrames.value, anchorAt)
+  centeredView.value = false
+}
+
+function onDrillCandle(availableAt: string) {
+  const anchorAt = activeFrames.value[chartIndex.value]?.availableAt ?? null
+  const resolvedAnchor = drillInto(availableAt, anchorAt)
+  if (resolvedAnchor === null) return
+  chartIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
+  centeredView.value = true
+}
+
+function onDrillBack() {
+  const resolvedAnchor = goBack()
+  if (resolvedAnchor === null) return
+  chartIndex.value = activeInterval.value === mtfBaseInterval.value
+    ? replayIndex.value
+    : findAnchorIndex(activeFrames.value, resolvedAnchor)
+  centeredView.value = canGoBack.value
+}
+
 const executionDetailFrames = computed<ReplayFrame[]>(() => executionDetailRows.value.map((row, index) => ({
   index,
   availableAt: row.availableAt,
@@ -3021,12 +3075,20 @@ onMounted(() => {
         </p>
         <AnalysisChart
           v-if="replayFrames.length"
-          :frames="replayFrames"
-          :selected-index="replayIndex"
-          :window-size="180"
+          :frames="activeFrames"
+          :selected-index="chartIndex"
+          :window-size="100"
           :layers="replayLayers"
           :trades="flatTrades"
+          :available-intervals="availableIntervals"
+          :active-interval="activeInterval"
+          :can-go-back="canGoBack"
+          :centered="centeredView"
+          @switch-interval="onSwitchInterval"
+          @drill-candle="onDrillCandle"
+          @drill-back="onDrillBack"
         />
+
         <dl v-if="currentReplayRow" class="metrics">
           <div><dt>Index</dt><dd>{{ replayIndex + 1 }} / {{ filteredReplayRows.length }}</dd></div>
           <div><dt>Sequence</dt><dd>{{ currentReplayRow.sequence }}</dd></div>

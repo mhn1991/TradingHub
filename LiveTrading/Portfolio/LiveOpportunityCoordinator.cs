@@ -186,6 +186,26 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
                 continue;
             }
 
+            // FixedQuantity sizing approves without computing real risk/margin data whenever
+            // reference price, stop-loss, a positive FX conversion rate, or a positive account
+            // balance aren't all simultaneously available (see PositionSizing.cs's own comment:
+            // "fail closed later at live portfolio admission" - this is that admission point).
+            // Left unchecked, EstimatedMargin/EstimatedLossAtStop below default to 0m via `??`,
+            // which trivially clears every downstream margin/heat cap - a live-safety fail-open
+            // that a momentary FX-rate-feed gap (line ~165's GetValueOrDefault(..., 0m)) can
+            // trigger without any active misconfiguration. Reject instead of admitting blind.
+            if (policy.PositionSizing.Mode == PositionSizingMode.FixedQuantity &&
+                (sizing.EstimatedMargin is null || sizing.EstimatedLossAtStop is null))
+            {
+                rejected.Add(Reject(
+                    candidate,
+                    "FixedQuantityRiskDataUnavailable",
+                    "Fixed-quantity sizing could not compute real risk/margin data (missing " +
+                    "reference price, stop-loss, FX conversion rate, or account balance); " +
+                    "refusing to admit with unknown risk rather than defaulting to zero."));
+                continue;
+            }
+
             if (policy.PositionSizing.Mode == PositionSizingMode.FixedQuantity &&
                 sizing.EstimatedLossAtStop is decimal fixedEstimatedRisk)
             {

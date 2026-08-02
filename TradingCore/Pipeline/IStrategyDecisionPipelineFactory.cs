@@ -1,5 +1,6 @@
 using Agent.Abstractions;
 using RiskManager.Calibration;
+using RiskManager.Conditions;
 using RiskManager.Safety;
 
 namespace TradingCore.Pipeline;
@@ -12,12 +13,22 @@ namespace TradingCore.Pipeline;
 /// </summary>
 public interface IStrategyDecisionPipelineFactory
 {
+    /// <summary>
+    /// <paramref name="tradingConditionsOverride"/> lets a caller supply a per-strategy trading-
+    /// condition filter (e.g. from that strategy's own promoted <c>LiveTradingPolicyBundle</c>)
+    /// without needing a separate factory instance per strategy. Falls back to whatever the
+    /// concrete factory was constructed with (see <see cref="StrategyDecisionPipelineFactory"/>'s
+    /// constructor) when null - a single shared/default filter is still the common case for
+    /// callers that construct one factory per session (the simulator) rather than one shared
+    /// factory across many strategies (live hosts).
+    /// </summary>
     StrategyDecisionRuntime Create(
         StrategyRuntimeDefinition strategy,
         RuntimeFeaturePolicy featurePolicy,
         SetupCalibrationArtifact? setupCalibration,
         ISetupMetaModel? metaModel,
-        TradingSafetyOptions safetyOptions);
+        TradingSafetyOptions safetyOptions,
+        ITradingConditionFilter? tradingConditionsOverride = null);
 }
 
 /// <summary>Everything constructing a strategy's pipeline produces, plus the provenance needed

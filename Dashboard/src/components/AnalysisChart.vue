@@ -17,6 +17,22 @@ const props = defineProps<{
   windowSize: number
   layers: ChartLayers
   trades?: ReplayTrade[]
+  /** Optional: renders a timeframe switcher in the toolbar and enables double-click-to-drill.
+   * Omit entirely for chart instances that only ever show one fixed interval (e.g. a single
+   * trade's execution-detail replay) — everything below is inert unless this is provided. */
+  availableIntervals?: { interval: string; real: boolean }[]
+  activeInterval?: string
+  canGoBack?: boolean
+  /** Centers the viewport on selectedIndex (candles both before and after) instead of the normal
+   * "selectedIndex is the latest visible point" behavior — used after drilling into a specific
+   * historical candle, where seeing what came after it matters as much as what came before. */
+  centered?: boolean
+}>()
+
+const emit = defineEmits<{
+  'switch-interval': [interval: string]
+  'drill-candle': [availableAt: string]
+  'drill-back': []
 }>()
 
 const width = 1240
@@ -63,7 +79,23 @@ let pendingSliderOffset: number | null = null
 let sliderAnimationFrame: number | null = null
 let resizeObserver: ResizeObserver | null = null
 
-const availableFrameCount = computed(() => Math.max(0, Math.min(props.frames.length, props.selectedIndex + 1)))
+// Normal mode treats selectedIndex as "the latest known point" — nothing after it is viewable,
+// matching progressive replay/live semantics. Centered mode (drilling into a specific historical
+// candle) needs the opposite: candles both before AND after selectedIndex. baseEndIndex is the
+// "no pan" reference boundary either way — selectedIndex itself normally, or selectedIndex plus
+// half the window when centered — so panOffset/maximumPanOffset/availableFrameCount stay exactly
+// the same shape in both modes, just measured from a different reference point.
+const centeredAfter = computed(() => {
+  if (!props.centered) return 0
+  const windowCount = localWindowSize.value > 0 ? localWindowSize.value : props.frames.length
+  return windowCount - 1 - Math.floor((windowCount - 1) / 2)
+})
+const baseEndIndex = computed(() =>
+  props.centered
+    ? Math.min(props.frames.length - 1, props.selectedIndex + centeredAfter.value)
+    : props.selectedIndex,
+)
+const availableFrameCount = computed(() => Math.max(0, Math.min(props.frames.length, baseEndIndex.value + 1)))
 const requestedWindowCount = computed(() => {
   const available = availableFrameCount.value
   if (available === 0) return 0
@@ -71,10 +103,10 @@ const requestedWindowCount = computed(() => {
   return Math.max(1, Math.min(localWindowSize.value, available))
 })
 const maximumPanOffset = computed(() =>
-  Math.max(0, props.selectedIndex - requestedWindowCount.value + 1),
+  Math.max(0, baseEndIndex.value - requestedWindowCount.value + 1),
 )
 const viewportEndIndex = computed(() =>
-  Math.max(0, props.selectedIndex - Math.min(panOffset.value, maximumPanOffset.value)),
+  Math.max(0, baseEndIndex.value - Math.min(panOffset.value, maximumPanOffset.value)),
 )
 const viewportStartIndex = computed(() =>
   Math.max(0, viewportEndIndex.value - requestedWindowCount.value + 1),
@@ -712,9 +744,22 @@ const tradeVisuals = computed(() => (props.trades ?? [])
   })))
 
 const isHovering = computed(() => hoveredIndex.value != null)
-const focusIndex = computed(() =>
-  hoveredIndex.value ?? Math.max(0, visibleFrames.value.length - 1),
+// Normal mode's default focus (nothing hovered) is the rightmost candle — the latest one.
+// Centered mode's default is the drilled candle itself, not whichever candle happens to land at
+// the right edge of its "before/after" padding.
+const defaultFocusIndex = computed(() =>
+  props.centered
+    ? Math.max(0, Math.min(visibleFrames.value.length - 1, props.selectedIndex - viewportStartIndex.value))
+    : Math.max(0, visibleFrames.value.length - 1),
 )
+const focusIndex = computed(() => hoveredIndex.value ?? defaultFocusIndex.value)
+// Persistent marker for the drilled candle — stays visible even while hovering elsewhere, unlike
+// the hover indicator, so "which candle did I drill into" is never ambiguous.
+const centeredMarkerX = computed(() => {
+  if (!props.centered) return null
+  const localIndex = props.selectedIndex - viewportStartIndex.value
+  return localIndex >= 0 && localIndex < visibleFrames.value.length ? xAt(localIndex) : null
+})
 const focusFrame = computed(() => visibleFrames.value[focusIndex.value] ?? null)
 const hoverX = computed(() => xAt(focusIndex.value))
 const lastPrice = computed(() => analysisFrame.value?.candle.close ?? null)
@@ -959,6 +1004,41 @@ function handlePointerUp(event: PointerEvent) {
   dragging.value = false
   const target = event.currentTarget as SVGSVGElement
   if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId)
+}
+
+function handleDoubleClick(event: MouseEvent) {
+  if (!props.availableIntervals?.length || visibleFrames.value.length === 0) return
+  const target = event.currentTarget as SVGSVGElement
+  refreshSvgBounds(target)
+  const relativeX = ((event.clientX - svgBoundsLeft) / svgBoundsWidth) * width
+  const index = Math.max(
+    0,
+    Math.min(
+      visibleFrames.value.length - 1,
+      Math.floor((relativeX - plotLeft) / Math.max(step.value, 0.0001)),
+    ),
+  )
+  const frame = visibleFrames.value[index]
+  if (frame) emit('drill-candle', frame.availableAt)
+}
+
+/** Keyboard equivalent of double-click: Enter drills into the focused (hovered, or default)
+ * candle; Backspace returns to the timeframe drilled from. Requires the chart to have focus —
+ * click it or tab to it first. */
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Enter') {
+    if (!props.availableIntervals?.length) return
+    const frame = focusFrame.value
+    if (frame) {
+      event.preventDefault()
+      emit('drill-candle', frame.availableAt)
+    }
+    return
+  }
+  if (event.key === 'Backspace' && props.canGoBack) {
+    event.preventDefault()
+    emit('drill-back')
+  }
 }
 
 onMounted(() => {
@@ -1250,6 +1330,25 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
 
 <template>
   <div ref="chartShell" class="chart-shell">
+    <div v-if="availableIntervals?.length" class="chart-interval-switcher" aria-label="Timeframe">
+      <button
+        v-for="option in availableIntervals" :key="option.interval"
+        type="button" class="chart-interval-pill"
+        :class="{ active: option.interval === activeInterval }"
+        :title="option.real ? undefined : 'Resampled from the base interval — indicators unavailable'"
+        @click="emit('switch-interval', option.interval)"
+      >
+        {{ option.interval }}
+        <span v-if="!option.real" class="chart-interval-synthetic-dot">•</span>
+      </button>
+      <button
+        v-if="canGoBack" type="button" class="chart-interval-back"
+        title="Return to the timeframe you drilled from"
+        @click="emit('drill-back')"
+      >← Back</button>
+      <small class="chart-interval-hint">Double-click, or hover a candle and press Enter, to drill · Backspace to go back</small>
+    </div>
+
     <div class="chart-navigation" aria-label="Chart navigation">
       <div class="chart-navigation-buttons">
         <button type="button" title="Older candles" :disabled="maximumPanOffset === 0 || panOffset >= maximumPanOffset" @click="panPage('older')">‹ Older</button>
@@ -1274,7 +1373,7 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       aria-live="polite"
     >
       <div class="chart-readout-primary">
-        <span class="chart-readout-mode">{{ isHovering ? 'Hover' : 'Latest' }}</span>
+        <span class="chart-readout-mode">{{ isHovering ? 'Hover' : centered ? 'Drilled' : 'Latest' }}</span>
         <time class="chart-readout-time">{{ focusIndicators.time }} UTC</time>
         <dl class="chart-ohlc">
           <div><dt>O</dt><dd>{{ price(focusCandle.open) }}</dd></div>
@@ -1334,6 +1433,7 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       :viewBox="`0 0 ${width} ${height}`"
       preserveAspectRatio="xMidYMid meet"
       role="img"
+      :tabindex="availableIntervals?.length ? 0 : undefined"
       aria-label="Interactive candlestick chart with Bollinger and Donchian regimes, RSI relationships, ATR and Efficiency Ratio context, price action, market structure and market regime annotations"
       @pointerdown="handlePointerDown"
       @pointerenter="handlePointerEnter"
@@ -1341,6 +1441,8 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       @pointerup="handlePointerUp"
       @pointercancel="handlePointerUp"
       @pointerleave="handlePointerLeave"
+      @dblclick="handleDoubleClick"
+      @keydown="handleKeydown"
     >
       <defs>
         <linearGradient id="band-fill" x1="0" y1="0" x2="0" y2="1">
@@ -1817,6 +1919,12 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <circle :cx="hoverX" :cy="yPrice(focusFrame.candle.high)" r="2.5" class="hover-extreme" />
         <circle :cx="hoverX" :cy="yPrice(focusFrame.candle.low)" r="2.5" class="hover-extreme" />
       </g>
+
+      <line
+        v-if="centeredMarkerX != null"
+        :x1="centeredMarkerX" :x2="centeredMarkerX" :y1="priceTop" :y2="erTop + erHeight"
+        class="chart-centered-marker" pointer-events="none"
+      />
 
       <g class="trade-overlays" clip-path="url(#price-clip)">
         <g v-for="item in tradeVisuals" :key="item.trade.setupId">

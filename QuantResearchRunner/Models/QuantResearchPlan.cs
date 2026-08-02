@@ -32,6 +32,19 @@ public sealed record QuantResearchPlan
     public decimal StartingBalance { get; init; } = 100_000m;
     public decimal Quantity { get; init; } = 1_000m;
     /// <summary>
+    /// Round-trip execution cost assumptions applied to every fold/candidate request. Defaults
+    /// match <see cref="BacktestRequest"/>'s own defaults (unchanged behavior for existing plans),
+    /// but previously <see cref="QuantResearchPlan"/> had no way to override them at all -
+    /// <c>WalkForwardExperimentRunner.BuildRequest</c> never set these fields on the requests it
+    /// built, so every walk-forward run silently used <see cref="BacktestRequest.CommissionRate"/>'s
+    /// record default (0.00002, i.e. ~0.2bps/side) regardless of what a caller might reasonably
+    /// expect to configure for a given instrument/broker. A plan intending to stress-test a
+    /// strategy's edge against realistic retail-FX costs had no field to do that with.
+    /// </summary>
+    public decimal CommissionRate { get; init; } = 0.00002m;
+    public decimal SpreadBasisPoints { get; init; } = 1m;
+    public decimal SlippageBasisPoints { get; init; } = 0.5m;
+    /// <summary>
     /// Optional master candle series covering the full [<see cref="From"/>, <see cref="To"/>)
     /// range, sliced per fold/window via <c>CandlePrefetchPlanner.SliceForWindow</c>. Used by
     /// tests and offline data; null lets each request fetch normally via

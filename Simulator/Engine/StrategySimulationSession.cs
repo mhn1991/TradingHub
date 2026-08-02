@@ -2504,15 +2504,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         _ => "Asia"
     };
 
-    private static string VolatilityBucket(decimal? percentile) => percentile switch
-    {
-        null => "Unknown",
-        < 20m => "VeryLow",
-        < 40m => "Low",
-        < 70m => "Normal",
-        < 90m => "High",
-        _ => "VeryHigh"
-    };
+    private static string VolatilityBucket(decimal? percentile) =>
+        VolatilityBucketClassifier.Classify(percentile);
 
     private void AddAmendmentEvent(
         StrategyReplayEventType type,

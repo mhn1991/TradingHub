@@ -1226,6 +1226,13 @@ input:focus-visible {
   opacity: 0.75;
 }
 
+.chart-centered-marker {
+  stroke: var(--amber);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.9;
+}
+
 .replay-controls {
   gap: 14px;
   padding: 12px 15px;
@@ -2159,6 +2166,69 @@ input:focus-visible {
 .layer-rsiRelationships { background: var(--violet); }
 .layer-atr { background: #63c7ff; }
 .layer-volume { background: #65727c; }
+
+.chart-interval-switcher {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 38px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--ink-1);
+}
+
+.chart-interval-pill {
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--ink-2);
+  color: #aeb8bd;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-interval-pill:hover {
+  border-color: #3b4a56;
+  background: #172029;
+  color: var(--text);
+}
+
+.chart-interval-pill.active {
+  border-color: var(--mint);
+  color: var(--mint);
+  background: var(--mint-soft);
+}
+
+.chart-interval-synthetic-dot {
+  color: var(--amber);
+  margin-left: 2px;
+}
+
+.chart-interval-back {
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--line));
+  border-radius: 5px;
+  background: var(--ink-2);
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.chart-interval-back:hover {
+  background: color-mix(in srgb, var(--blue) 16%, var(--ink-2));
+}
+
+.chart-interval-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted-2);
+}
 
 .chart-navigation {
   display: flex;
