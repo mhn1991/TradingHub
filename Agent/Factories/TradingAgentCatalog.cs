@@ -1,6 +1,7 @@
 using Agent.Abstractions;
 using Agent.Configuration;
 using Agent.Strategies;
+using Agent.Strategies.DivergenceReversal;
 using Agent.Strategies.StructuralConfluence;
 using Brokers.Models;
 
@@ -71,7 +72,8 @@ public sealed class TradingAgentCatalog : ITradingAgentCatalog
         [
             new ProgressiveTradingAgentBuilder(ProgressiveAgentKind.Legacy),
             new ProgressiveTradingAgentBuilder(ProgressiveAgentKind.Improved),
-            new StructuralConfluenceTradingAgentBuilder()
+            new StructuralConfluenceTradingAgentBuilder(),
+            new DivergenceReversalTradingAgentBuilder()
         ]);
 
     public IReadOnlyList<AgentDescriptor> List() => _descriptors;
@@ -172,5 +174,45 @@ public sealed class StructuralConfluenceTradingAgentBuilder : ITradingAgentBuild
         if (!string.Equals(definition.AgentTypeId, AgentTypeId, StringComparison.Ordinal))
             throw new ArgumentException("Agent definition was routed to the wrong builder.", nameof(definition));
         return new StructuralConfluenceAgent(definition.ReadStructuralOptions());
+    }
+}
+
+public sealed class DivergenceReversalTradingAgentBuilder : ITradingAgentBuilder
+{
+    public string AgentTypeId => TradingAgentTypeIds.DivergenceReversal;
+
+    public AgentDescriptor Describe()
+    {
+        DivergenceReversalStrategyOptions defaults = new()
+        {
+            MonitoredIntervals = [BarInterval.Minutes(30), BarInterval.Minutes(15)],
+            ConfirmationIntervals = [BarInterval.Minutes(5), BarInterval.Minutes(1)]
+        };
+        return new AgentDescriptor
+        {
+            AgentTypeId = AgentTypeId,
+            DisplayName = "Divergence Reversal",
+            Description = "Bollinger/RSI/StochRSI extreme readings, classified as reversal or breakout " +
+                "via StochRSI-fast divergence, with lower-timeframe confirmation of partial readings.",
+            DefinitionSchemaVersion = AgentDefinition.CurrentSchemaVersion,
+            RequiredFeatureCapabilities = new HashSet<string>(["completed-candles", "chart-annotations"]),
+            ExitManagementMode = AgentExitManagementMode.ProtectiveStopAndStrategyExit,
+            SupportedDeploymentModes = new HashSet<AgentDeploymentMode>(
+                [AgentDeploymentMode.ObserveOnly, AgentDeploymentMode.Shadow]),
+            SupportsSetupCalibration = false,
+            SupportsMetaModel = false,
+            SupportsManagementCalibration = false,
+            DefaultIntervals = new HashSet<BarInterval>(
+                [.. defaults.MonitoredIntervals, .. defaults.ConfirmationIntervals]),
+            AutomaticDemoCertified = false,
+            AutomaticLiveCertified = false
+        };
+    }
+
+    public ITradingAgent Build(AgentDefinition definition)
+    {
+        if (!string.Equals(definition.AgentTypeId, AgentTypeId, StringComparison.Ordinal))
+            throw new ArgumentException("Agent definition was routed to the wrong builder.", nameof(definition));
+        return new DivergenceReversalAgent(definition.ReadDivergenceReversalOptions());
     }
 }

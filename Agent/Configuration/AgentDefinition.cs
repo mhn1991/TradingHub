@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Agent.Strategies;
+using Agent.Strategies.DivergenceReversal;
 using Agent.Strategies.StructuralConfluence;
 
 namespace Agent.Configuration;
@@ -49,6 +50,20 @@ public sealed record AgentDefinition
         };
     }
 
+    public static AgentDefinition FromDivergenceReversal(DivergenceReversalStrategyOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        return new AgentDefinition
+        {
+            AgentTypeId = TradingAgentTypeIds.DivergenceReversal,
+            SchemaVersion = CurrentSchemaVersion,
+            Options = JsonSerializer.SerializeToElement(
+                options,
+                AgentDefinitionJsonContext.Default.DivergenceReversalStrategyOptions)
+        };
+    }
+
     public ProgressiveStrategyOptions ReadProgressiveOptions()
     {
         EnsureSchemaAndType(
@@ -67,6 +82,16 @@ public sealed record AgentDefinition
         StructuralConfluenceStrategyOptions result = Options.Deserialize(
             AgentDefinitionJsonContext.Default.StructuralConfluenceStrategyOptions)
             ?? throw new ArgumentException("Structural-confluence Agent options were empty.", nameof(Options));
+        result.Validate();
+        return result;
+    }
+
+    public DivergenceReversalStrategyOptions ReadDivergenceReversalOptions()
+    {
+        EnsureSchemaAndType(TradingAgentTypeIds.DivergenceReversal);
+        DivergenceReversalStrategyOptions result = Options.Deserialize(
+            AgentDefinitionJsonContext.Default.DivergenceReversalStrategyOptions)
+            ?? throw new ArgumentException("Divergence-reversal Agent options were empty.", nameof(Options));
         result.Validate();
         return result;
     }
@@ -100,4 +125,5 @@ public sealed record AgentDefinition
     UseStringEnumConverter = true)]
 [JsonSerializable(typeof(ProgressiveStrategyOptions))]
 [JsonSerializable(typeof(StructuralConfluenceStrategyOptions))]
+[JsonSerializable(typeof(DivergenceReversalStrategyOptions))]
 internal partial class AgentDefinitionJsonContext : JsonSerializerContext;

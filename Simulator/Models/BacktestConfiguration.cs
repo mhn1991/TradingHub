@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Strategies;
+using Agent.Strategies.DivergenceReversal;
 using Agent.Strategies.StructuralConfluence;
 using Agent.Strategies.StructuralConfluence.Playbooks;
 using Brokers.Abstractions;
@@ -740,6 +741,14 @@ public sealed record BacktestRequest
                 };
                 ValidateStructuralAnnotationRequirements(structural);
                 return new TradingAgentDefinition { Kind = kind, StructuralConfluence = structural };
+            case TradingAgentKind.DivergenceReversal:
+                var divergenceReversal = new DivergenceReversalStrategyOptions
+                {
+                    MonitoredIntervals = [BarInterval.Minutes(30), BarInterval.Minutes(15)],
+                    ConfirmationIntervals = [BarInterval.Minutes(5), BarInterval.Minutes(1)],
+                    Quantity = Quantity
+                };
+                return new TradingAgentDefinition { Kind = kind, DivergenceReversal = divergenceReversal };
             default:
                 throw new ArgumentOutOfRangeException(nameof(strategyType));
         }

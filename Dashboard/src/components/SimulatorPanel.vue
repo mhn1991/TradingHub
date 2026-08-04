@@ -78,6 +78,12 @@ function createBaseSimulationForm() {
     minimumSetupAlignments: 1,
     minimumConfirmationAlignments: 1,
     strongOppositionVeto: true,
+    // Opt-in unified surface (PROJECT_STATE.md §4b, Phase 2): role=interval[:influence[:priority]]
+    // spec, same DSL as BacktestRunner's --timeframes CLI flag. Blank (the default) leaves every
+    // field above in full control, exactly as before this field existed. When non-blank, applies
+    // role-by-role on top of the fields above - a role the spec doesn't mention stays on its own
+    // field's value.
+    timeframesOverride: '',
     strategies: 'legacy,improved',
     // §7 multi-instrument portfolio clock: when enabled, strategyAssignments replaces
     // `strategies` + the single top-level `instrument` entirely - each row trades its
@@ -1141,6 +1147,7 @@ async function startSimulation() {
       minimumSetupAlignments: form.minimumSetupAlignments,
       minimumConfirmationAlignments: form.minimumConfirmationAlignments,
       strongOppositionVeto: form.strongOppositionVeto,
+      timeframes: form.timeframesOverride.trim() || null,
       strategies: form.strategies.split(',').map((item) => item.trim()).filter(Boolean),
       strategyAssignments: form.strategyAssignmentsEnabled
         ? form.strategyAssignments
@@ -2270,6 +2277,18 @@ onMounted(() => {
             <label class="inline-check"><input v-model="form.strongOppositionVeto" type="checkbox" /> Strong opposing structure veto</label>
           </div>
           <small class="muted">The primary trend is the hard directional gate. Secondary trend is soft context, setup intervals locate the opportunity, confirmations validate it, and the entry chart supplies the trigger.</small>
+          <label>Unified timeframe override (optional)
+            <input
+              v-model="form.timeframesOverride"
+              placeholder="e.g. trigger=5m,context=1h:gate:0,context=4h:vote:1"
+            />
+          </label>
+          <small class="muted">
+            When set, overrides the fields above role by role - a role you don't mention here
+            keeps its value from the fields above. Roles: trigger, setup, context, confirmation,
+            regime, neowave. Influences: gate (must agree), veto, vote (N-of-M), advisory,
+            fallback. Format: <code>role=interval[:influence[:priority]]</code>, comma-separated.
+          </small>
         </fieldset>
         <label>Strategies <input v-model="form.strategies" :disabled="form.strategyAssignmentsEnabled" /></label>
         <fieldset class="management-config">

@@ -1394,6 +1394,14 @@ public sealed record CreateSimulationRequest
     public int MinimumSecondaryTrendAlignments { get; init; }
     public int MinimumSetupAlignments { get; init; } = 1;
     public int MinimumConfirmationAlignments { get; init; } = 1;
+    /// <summary>
+    /// Opt-in unified timeframe surface (PROJECT_STATE.md §4b, Phase 2): same
+    /// <c>role=interval[:influence[:priority]],...</c> DSL as BacktestRunner's <c>--timeframes</c>
+    /// flag (<see cref="TimeframePlanTextFormat"/>), applied role-by-role on top of the discrete
+    /// fields above - a role absent from this spec leaves the matching field(s) above untouched.
+    /// Null/blank (the default) preserves today's behavior exactly.
+    /// </summary>
+    public string? Timeframes { get; init; }
     public bool StrongOppositionVeto { get; init; } = true;
     public string[] Strategies { get; init; } = ["legacy", "improved"];
     /// <summary>
@@ -1633,6 +1641,44 @@ public sealed record CreateSimulationRequest
 
         BrokerEnvironment environment = ResolveEnvironment(selectedBroker);
 
+        BarInterval progressiveTrend = BarIntervalParser.Parse(TrendInterval);
+        IReadOnlyList<BarInterval> progressiveSecondaryTrend = SecondaryTrendIntervals.Select(BarIntervalParser.Parse).ToArray();
+        IReadOnlyList<BarInterval> progressiveSetup = SetupIntervals.Select(BarIntervalParser.Parse).ToArray();
+        BarInterval progressiveConfirmation = BarIntervalParser.Parse(ConfirmationInterval);
+        IReadOnlyList<BarInterval> progressiveAdditionalConfirmation = AdditionalConfirmationIntervals.Select(BarIntervalParser.Parse).ToArray();
+        BarInterval progressiveEntry = BarIntervalParser.Parse(EntryInterval);
+
+        // Opt-in unified surface (PROJECT_STATE.md §4b, Phase 2): Timeframes overrides only the
+        // Progressive roles it specifies, per-role, leaving every role it omits on the discrete
+        // fields above untouched - same semantics as BacktestRunner's --timeframes CLI flag.
+        if (!string.IsNullOrWhiteSpace(Timeframes))
+        {
+            TimeframePlan overridePlan = TimeframePlanTextFormat.Parse(Timeframes);
+
+            IReadOnlyList<TimeframeAssignment> contextGates = overridePlan.For(TimeframeRole.Context, TimeframeInfluence.Gate);
+            if (contextGates.Count > 0)
+                progressiveTrend = contextGates[0].Interval;
+
+            IReadOnlyList<TimeframeAssignment> contextVotes = overridePlan.For(TimeframeRole.Context, TimeframeInfluence.Vote);
+            if (contextVotes.Count > 0)
+                progressiveSecondaryTrend = [.. contextVotes.Select(a => a.Interval)];
+
+            IReadOnlyList<TimeframeAssignment> setupVotes = overridePlan.For(TimeframeRole.Setup, TimeframeInfluence.Vote);
+            if (setupVotes.Count > 0)
+                progressiveSetup = [.. setupVotes.Select(a => a.Interval)];
+
+            IReadOnlyList<TimeframeAssignment> confirmationVotes = overridePlan.For(TimeframeRole.Confirmation, TimeframeInfluence.Vote);
+            if (confirmationVotes.Count > 0)
+            {
+                progressiveConfirmation = confirmationVotes[0].Interval;
+                progressiveAdditionalConfirmation = [.. confirmationVotes.Skip(1).Select(a => a.Interval)];
+            }
+
+            IReadOnlyList<TimeframeAssignment> triggerGates = overridePlan.For(TimeframeRole.Trigger, TimeframeInfluence.Gate);
+            if (triggerGates.Count > 0)
+                progressiveEntry = triggerGates[0].Interval;
+        }
+
         return new BacktestRequest
         {
             Instrument = new InstrumentKey(Instrument),
@@ -1673,18 +1719,12 @@ public sealed record CreateSimulationRequest
                 ImportedCandlePath = importedCandlePath,
                 StrategyTimeframes = new ProgressiveStrategyTimeframes
                 {
-                    TrendInterval = BarIntervalParser.Parse(TrendInterval),
-                    SecondaryTrendIntervals = SecondaryTrendIntervals
-                        .Select(BarIntervalParser.Parse)
-                        .ToArray(),
-                    SetupIntervals = SetupIntervals
-                        .Select(BarIntervalParser.Parse)
-                        .ToArray(),
-                    ConfirmationInterval = BarIntervalParser.Parse(ConfirmationInterval),
-                    AdditionalConfirmationIntervals = AdditionalConfirmationIntervals
-                        .Select(BarIntervalParser.Parse)
-                        .ToArray(),
-                    EntryInterval = BarIntervalParser.Parse(EntryInterval),
+                    TrendInterval = progressiveTrend,
+                    SecondaryTrendIntervals = progressiveSecondaryTrend,
+                    SetupIntervals = progressiveSetup,
+                    ConfirmationInterval = progressiveConfirmation,
+                    AdditionalConfirmationIntervals = progressiveAdditionalConfirmation,
+                    EntryInterval = progressiveEntry,
                     MinimumSecondaryTrendAlignments = MinimumSecondaryTrendAlignments,
                     MinimumSetupAlignments = MinimumSetupAlignments,
                     MinimumConfirmationAlignments = MinimumConfirmationAlignments,

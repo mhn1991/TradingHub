@@ -230,6 +230,7 @@ builder.Services.AddSingleton(services => new CalibrationBundleWorkflow(
     services.GetRequiredService<CalibrationTrainingPipeline>(),
     services.GetRequiredService<ICalibrationArtifactRepository>(),
     services.GetRequiredService<ICalibrationBundleApprovalStore>()));
+builder.Services.AddSingleton<AgentDebugJobRegistry>();
 builder.Services.AddSingleton<SimulationRealtimePublisher>();
 builder.Services.AddHostedService<SimulationRealtimeBridge>();
 builder.Services.AddSignalR().AddJsonProtocol(options =>
@@ -758,6 +759,7 @@ app.MapCalibrationEndpoints();
 app.MapCalibrationBundleEndpoints();
 app.MapResearchEndpoints();
 app.MapTradingReportEndpoints();
+app.MapAgentDebugEndpoints();
 app.MapHub<SimulationHub>("/hubs/simulations");
 
 try
