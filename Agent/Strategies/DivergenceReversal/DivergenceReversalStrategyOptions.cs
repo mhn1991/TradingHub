@@ -61,6 +61,23 @@ public sealed record DivergenceReversalStrategyOptions
     public decimal ProtectiveStopAtrMultiple { get; init; } = 3.0m;
 
     /// <summary>
+    /// How many candles after a StochRSI-fast relationship is confirmed it can still supply a
+    /// signal, measured in candles of the timeframe that produced it. 0 means the relationship must
+    /// have confirmed on the *same* candle as the extreme reading.
+    /// <para>
+    /// This exists because 0 is close to unreachable in practice: <c>SwingDetector</c> needs the
+    /// right-hand candles to close before it confirms a pivot, so the relationship lands ~2 candles
+    /// *after* the price extreme that produced it - by which time price has usually pulled back
+    /// inside the Bollinger band and <c>ClassifyExtreme</c> no longer reads Full. The original
+    /// same-candle requirement made the two halves of the entry condition nearly mutually exclusive
+    /// by construction: 36 trades across 9 instruments over 7 months (see PROJECT_STATE.md §3.9).
+    /// A relationship is still consumed at most once, so widening this window does not let one
+    /// relationship fire repeatedly.
+    /// </para>
+    /// </summary>
+    public int SignalFreshnessCandles { get; init; } = 3;
+
+    /// <summary>
     /// Per-timeframe StochRSI divergence tracking parameters, passed through to each interval's
     /// <c>StochRsiAnalysisState</c> instance.
     /// </summary>
@@ -111,6 +128,12 @@ public sealed record DivergenceReversalStrategyOptions
             throw new ArgumentOutOfRangeException(nameof(ProtectiveStopAtrMultiple));
         if (RelationshipSignalLifetimeCandles < 1)
             throw new ArgumentOutOfRangeException(nameof(RelationshipSignalLifetimeCandles));
+        if (SignalFreshnessCandles < 0 || SignalFreshnessCandles > RelationshipSignalLifetimeCandles)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(SignalFreshnessCandles),
+                "Signal freshness must be non-negative and no longer than the relationship's own signal lifetime.");
+        }
         if (MinimumStochRsiFastDifference < 0m)
             throw new ArgumentOutOfRangeException(nameof(MinimumStochRsiFastDifference));
         if (MinimumPriceDifferenceAtr < 0m)

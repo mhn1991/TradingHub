@@ -37,6 +37,12 @@ public sealed class DivergenceReversalAgent : ITradingAgent
     private readonly IReadOnlyList<BarInterval> _triggerIntervals;
     private readonly Dictionary<BarInterval, TimeframeState> _timeframeStates;
     private readonly Dictionary<InstrumentKey, OrderSide> _pendingEntry = [];
+    private long _evaluations;
+    private long _entries;
+    private long _closes;
+    private long _flips;
+    private long _suppressedAlreadyPositioned;
+    private long _breakoutHeldAgainstPosition;
 
     public DivergenceReversalAgent(DivergenceReversalStrategyOptions options)
     {
@@ -46,12 +52,15 @@ public sealed class DivergenceReversalAgent : ITradingAgent
         _triggerIntervals = options.MonitoredIntervals;
 
         IReadOnlyList<BarInterval> allIntervals = [.. options.MonitoredIntervals, .. options.ConfirmationIntervals];
+        var monitoredSet = new HashSet<BarInterval>(options.MonitoredIntervals);
         _timeframeStates = allIntervals.ToDictionary(
             interval => interval,
-            _ => new TimeframeState(new StochRsiAnalysisState(
-                minimumStochRsiDifference: options.MinimumStochRsiFastDifference,
-                minimumPriceDifferenceAtr: options.MinimumPriceDifferenceAtr,
-                signalLifetimeCandles: options.RelationshipSignalLifetimeCandles)));
+            interval => new TimeframeState(
+                new StochRsiAnalysisState(
+                    minimumStochRsiDifference: options.MinimumStochRsiFastDifference,
+                    minimumPriceDifferenceAtr: options.MinimumPriceDifferenceAtr,
+                    signalLifetimeCandles: options.RelationshipSignalLifetimeCandles),
+                monitoredSet.Contains(interval) ? "trigger" : "confirmation"));
 
         RequiredIntervals = new HashSet<BarInterval>(allIntervals);
         TriggerInterval = allIntervals
@@ -64,12 +73,43 @@ public sealed class DivergenceReversalAgent : ITradingAgent
     public BarInterval TriggerInterval { get; }
     public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.ProtectiveStopAndStrategyExit;
 
+    /// <summary>
+    /// Diagnostics-only view of how far each candle got through the entry condition over this
+    /// agent instance's lifetime. Nothing here feeds a decision - it exists so "why did this agent
+    /// only trade N times?" can be answered from counts rather than inference.
+    /// </summary>
+    public DivergenceReversalFunnelSnapshot GetFunnelSnapshot() => new()
+    {
+        Stages = [.. _timeframeStates
+            .OrderBy(pair => pair.Key, Comparer<BarInterval>.Create(BarIntervalParser.CompareDuration))
+            .Select(pair => new DivergenceReversalFunnelStage
+            {
+                Interval = BarIntervalParser.Format(pair.Key),
+                Role = pair.Value.Role,
+                CandlesProcessed = pair.Value.Funnel.CandlesProcessed,
+                PartialExtremes = pair.Value.Funnel.PartialExtremes,
+                FullExtremes = pair.Value.Funnel.FullExtremes,
+                NoRelationship = pair.Value.Funnel.NoRelationship,
+                StaleRelationship = pair.Value.Funnel.StaleRelationship,
+                AlreadyConsumed = pair.Value.Funnel.AlreadyConsumed,
+                DirectionMismatch = pair.Value.Funnel.DirectionMismatch,
+                SignalsBuilt = pair.Value.Funnel.SignalsBuilt
+            })],
+        Evaluations = _evaluations,
+        Entries = _entries,
+        Closes = _closes,
+        Flips = _flips,
+        SuppressedAlreadyPositioned = _suppressedAlreadyPositioned,
+        BreakoutHeldAgainstPosition = _breakoutHeldAgainstPosition
+    };
+
     public Task<AgentDecision> EvaluateAsync(
         AgentMarketContext context,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
+        _evaluations++;
 
         BrokerPosition? currentPosition = context.Positions
             .FirstOrDefault(position => position.Instrument == context.Instrument && position.Quantity > 0m);
@@ -82,6 +122,7 @@ public sealed class DivergenceReversalAgent : ITradingAgent
             _pendingEntry.TryGetValue(context.Instrument, out OrderSide pendingSide))
         {
             _pendingEntry.Remove(context.Instrument);
+            _flips++;
             return Task.FromResult(EnterTrade(context, pendingSide, TriggerInterval,
                 "Opening the flip side after closing the prior opposing position."));
         }
@@ -95,9 +136,17 @@ public sealed class DivergenceReversalAgent : ITradingAgent
             SignalMatch match = signal.Value;
             OrderSide signalSide = match.Direction == ExtremeDirection.Bullish ? OrderSide.Buy : OrderSide.Sell;
 
+            // Whatever this signal leads to - an entry, a close, or nothing because the position is
+            // already right - the relationship behind it has now had its say. Marking it consumed
+            // stops the freshness window from letting the same relationship fire again a candle or
+            // two later (for instance re-entering immediately after the protective stop fires).
+            _timeframeStates[match.SignalInterval].ConsumedRelationship =
+                (match.Relationship.ConfirmedAt, match.Relationship.Type);
+
             if (currentSide == signalSide)
             {
                 // Already positioned correctly for this read; nothing to do.
+                _suppressedAlreadyPositioned++;
                 continue;
             }
 
@@ -106,9 +155,13 @@ public sealed class DivergenceReversalAgent : ITradingAgent
                 // Currently holding the opposite side. A breakout classification only ever opens or
                 // holds a position - it never triggers a close. Only a genuine reversal does.
                 if (!match.IsReversal)
+                {
+                    _breakoutHeldAgainstPosition++;
                     continue;
+                }
 
                 _pendingEntry[context.Instrument] = signalSide;
+                _closes++;
                 return Task.FromResult(new AgentDecision
                 {
                     Action = AgentAction.Close,
@@ -188,6 +241,9 @@ public sealed class DivergenceReversalAgent : ITradingAgent
         TimeframeState state = _timeframeStates[interval];
         Candle candle = snapshot.LatestCandle;
         bool isNewCandle = state.LastProcessedCandleOpenTime != candle.OpenTime;
+        // Re-classifying an already-seen candle (a coarse interval revisited on a later
+        // finer-interval evaluation) must not count towards the funnel a second time.
+        state.IsFirstEvaluationOfCandle = isNewCandle;
         if (isNewCandle)
         {
             // snapshot.Swings is the engine's full accumulated swing window (up to
@@ -206,22 +262,56 @@ public sealed class DivergenceReversalAgent : ITradingAgent
 
             state.StochRsi.Update(candle, snapshot.Indicators.StochRsi.Fast, newSwings, snapshot.Indicators.Atr);
             state.LastProcessedCandleOpenTime = candle.OpenTime;
+            state.Funnel.CandlesProcessed++;
         }
 
-        return ClassifyExtreme(snapshot, _options, expectedDirection);
+        (ExtremeCertainty Certainty, ExtremeDirection Direction)? reading =
+            ClassifyExtreme(snapshot, _options, expectedDirection);
+        if (state.IsFirstEvaluationOfCandle)
+        {
+            if (reading is { Certainty: ExtremeCertainty.Partial })
+                state.Funnel.PartialExtremes++;
+            else if (reading is { Certainty: ExtremeCertainty.Full })
+                state.Funnel.FullExtremes++;
+        }
+
+        return reading;
     }
 
     /// <summary>
-    /// Builds a signal from <paramref name="interval"/>'s own just-updated StochRSI-fast relationship,
-    /// requiring it to be freshly confirmed at this exact pivot (an older, aging relationship says
-    /// nothing about whether *this* extreme is exhausted or confirmed) and directionally consistent
-    /// with the extreme.
+    /// Builds a signal from <paramref name="interval"/>'s own StochRSI-fast relationship, requiring
+    /// it to be recent (confirmed within <see cref="DivergenceReversalStrategyOptions.SignalFreshnessCandles"/>
+    /// candles - an older, aging relationship says nothing about whether *this* extreme is exhausted
+    /// or confirmed), not already acted on, and directionally consistent with the extreme.
     /// </summary>
     private SignalMatch? TryBuildSignal(BarInterval interval, ExtremeDirection direction)
     {
-        StochRsiAnalysisSnapshot analysis = _timeframeStates[interval].StochRsi.Current;
-        if (!analysis.IsNewRelationship || analysis.LatestRelationship is not { } relationship)
+        TimeframeState state = _timeframeStates[interval];
+        bool count = state.IsFirstEvaluationOfCandle;
+        StochRsiAnalysisSnapshot analysis = state.StochRsi.Current;
+        if (analysis.LatestRelationship is not { } relationship)
+        {
+            if (count)
+                state.Funnel.NoRelationship++;
             return null;
+        }
+
+        // The relationship confirms only once the swing's right-hand candles have closed, so it
+        // lands a couple of candles after the price extreme that produced it. Requiring both on the
+        // same candle made the entry condition nearly unsatisfiable - see SignalFreshnessCandles.
+        if (!analysis.IsNewRelationship && relationship.AgeCandles > _options.SignalFreshnessCandles)
+        {
+            if (count)
+                state.Funnel.StaleRelationship++;
+            return null;
+        }
+
+        if (state.ConsumedRelationship == (relationship.ConfirmedAt, relationship.Type))
+        {
+            if (count)
+                state.Funnel.AlreadyConsumed++;
+            return null;
+        }
 
         bool isReversal = relationship.Type is
             StochRsiRelationshipType.RegularBullishDivergence or
@@ -232,7 +322,14 @@ public sealed class DivergenceReversalAgent : ITradingAgent
             : relationship.Type is StochRsiRelationshipType.RegularBearishDivergence
                 or StochRsiRelationshipType.HiddenBearishDivergence or StochRsiRelationshipType.BearishConvergence;
         if (!relationshipMatchesDirection)
+        {
+            if (count)
+                state.Funnel.DirectionMismatch++;
             return null;
+        }
+
+        if (count)
+            state.Funnel.SignalsBuilt++;
 
         string classification = isReversal
             ? "reversal (regular divergence)"
@@ -255,6 +352,7 @@ public sealed class DivergenceReversalAgent : ITradingAgent
         decimal atr = snapshot.Indicators.Atr is > 0m ? snapshot.Indicators.Atr.Value : close * 0.002m;
         decimal stopDistance = atr * _options.ProtectiveStopAtrMultiple;
         bool buy = side == OrderSide.Buy;
+        _entries++;
 
         return new AgentDecision
         {
@@ -337,10 +435,35 @@ public sealed class DivergenceReversalAgent : ITradingAgent
         StochRsiRelationshipSnapshot Relationship,
         string Reason);
 
-    private sealed class TimeframeState(StochRsiAnalysisState stochRsi)
+    private sealed class TimeframeState(StochRsiAnalysisState stochRsi, string role)
     {
         public StochRsiAnalysisState StochRsi { get; } = stochRsi;
+        public string Role { get; } = role;
         public DateTimeOffset? LastProcessedCandleOpenTime { get; set; }
         public DateTimeOffset? LastProcessedSwingConfirmedAt { get; set; }
+
+        /// <summary>The relationship a decision has already been taken on, so a relationship still
+        /// inside the freshness window can't fire a second time (identified by its confirmation
+        /// time plus type - one candle can confirm a high-pivot and a low-pivot relationship).</summary>
+        public (DateTimeOffset ConfirmedAt, StochRsiRelationshipType Type)? ConsumedRelationship { get; set; }
+
+        /// <summary>True while the current evaluation is the first one to see this interval's
+        /// latest candle. Funnel counters are gated on it so a coarse interval re-classified across
+        /// several finer-interval evaluations is counted once per candle, not once per evaluation.</summary>
+        public bool IsFirstEvaluationOfCandle { get; set; }
+
+        public FunnelCounters Funnel { get; } = new();
+    }
+
+    private sealed class FunnelCounters
+    {
+        public long CandlesProcessed;
+        public long PartialExtremes;
+        public long FullExtremes;
+        public long NoRelationship;
+        public long StaleRelationship;
+        public long AlreadyConsumed;
+        public long DirectionMismatch;
+        public long SignalsBuilt;
     }
 }
