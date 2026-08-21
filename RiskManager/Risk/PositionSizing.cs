@@ -290,7 +290,7 @@ public sealed class PositionSizer : IPositionSizer
         }
 
         decimal quantity;
-        decimal? riskBudget = null;
+        decimal riskBudget;
         decimal? perUnitLoss = null;
 
         {
@@ -323,7 +323,19 @@ public sealed class PositionSizer : IPositionSizer
                 return Reject("InvalidPerUnitRisk", "Calculated per-unit account risk is not positive.");
             }
 
-            quantity = riskBudget.Value / perUnitLoss.Value;
+            // Every other failure in this method returns a rejection. A per-unit risk small enough
+            // to push the quotient past decimal's range would instead throw out of the sizer, so
+            // guard it and fail closed like the rest.
+            try
+            {
+                quantity = riskBudget / perUnitLoss.Value;
+            }
+            catch (OverflowException)
+            {
+                return Reject(
+                    "UnboundedQuantity",
+                    "The risk budget divided by per-unit risk exceeds the representable quantity range.");
+            }
         }
 
         if (reference <= 0m)
@@ -430,7 +442,16 @@ public sealed class PositionSizer : IPositionSizer
     {
         if (value <= 0m)
             return 0m;
-        return decimal.Floor(value / step) * step;
+        try
+        {
+            return decimal.Floor(value / step) * step;
+        }
+        catch (OverflowException)
+        {
+            // Fail closed: an un-representable quantity is rejected by the MinimumQuantity check
+            // rather than crashing the sizer.
+            return 0m;
+        }
     }
 
     private static PositionSizingResult Reject(string code, string reason) => new()

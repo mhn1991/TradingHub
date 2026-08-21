@@ -2,12 +2,19 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Agent.Models;
 using Agent.Strategies.DivergenceReversal;
+using Brokers;
+using Brokers.Abstractions;
+using Brokers.Binance;
 using Brokers.Models;
+using Brokers.Oanda;
 using ChartAnnotator.Engine;
 using ChartAnnotator.Indicators;
 using ChartAnnotator.MarketData;
 using ChartAnnotator.Models;
+using Microsoft.Extensions.Options;
+using Simulator.Abstractions;
 using Simulator.MarketData;
+using Simulator.Models;
 
 namespace Dashboard.Live;
 
@@ -36,6 +43,12 @@ public sealed class AgentDebugJobRegistry
 {
     private readonly Dictionary<Guid, AgentDebugJob> _jobs = [];
     private readonly Lock _lock = new();
+    private readonly IOptions<OandaWorkspaceOptions> _oandaOptions;
+
+    public AgentDebugJobRegistry(IOptions<OandaWorkspaceOptions> oandaOptions)
+    {
+        _oandaOptions = oandaOptions ?? throw new ArgumentNullException(nameof(oandaOptions));
+    }
 
     public AgentDebugJob Start(AgentDebugRunRequest request, string cacheDirectory)
     {
@@ -45,7 +58,8 @@ public sealed class AgentDebugJobRegistry
             _jobs[job.Id] = job;
         }
 
-        _ = Task.Run(() => AgentDebugRunner.RunAsync(request, job.Writer, cacheDirectory, CancellationToken.None));
+        _ = Task.Run(() => AgentDebugRunner.RunAsync(
+            request, job.Writer, cacheDirectory, _oandaOptions.Value, CancellationToken.None));
         return job;
     }
 
@@ -73,11 +87,12 @@ public static class AgentDebugRunner
         AgentDebugRunRequest request,
         ChannelWriter<AgentDebugEvent> writer,
         string cacheDirectory,
+        OandaWorkspaceOptions oandaOptions,
         CancellationToken cancellationToken)
     {
         try
         {
-            await RunCoreAsync(request, writer, cacheDirectory, cancellationToken);
+            await RunCoreAsync(request, writer, cacheDirectory, oandaOptions, cancellationToken);
             await writer.WriteAsync(new AgentDebugEvent
             {
                 Type = AgentDebugEventType.Complete,
@@ -103,6 +118,7 @@ public static class AgentDebugRunner
         AgentDebugRunRequest request,
         ChannelWriter<AgentDebugEvent> writer,
         string cacheDirectory,
+        OandaWorkspaceOptions oandaOptions,
         CancellationToken cancellationToken)
     {
         var instrument = new InstrumentKey(request.Instrument);
@@ -110,14 +126,6 @@ public static class AgentDebugRunner
         BarInterval[] confirmation = request.ConfirmationTimeframes.Select(BarIntervalParser.Parse).ToArray();
         BarInterval[] allTargets = [.. monitored, .. confirmation];
         BarInterval baseInterval = BarInterval.Minutes(1);
-
-        string? cachePath = ResolveCacheFile(cacheDirectory, request.Instrument, "1m", request.WarmupStart, request.RunEnd);
-        if (cachePath is null)
-        {
-            throw new InvalidOperationException(
-                $"No cached 1m data covers {request.WarmupStart:yyyy-MM-dd} .. {request.RunEnd:yyyy-MM-dd} for {request.Instrument}. " +
-                "Pick a range inside the cached data (see GET /api/agent-debug/instruments).");
-        }
 
         var options = new DivergenceReversalStrategyOptions
         {
@@ -130,7 +138,8 @@ public static class AgentDebugRunner
             StochRsiFastOversold = request.StochRsiFastOversold,
             PartialStochRsiFastOverbought = request.PartialStochRsiFastOverbought,
             PartialStochRsiFastOversold = request.PartialStochRsiFastOversold,
-            ProtectiveStopAtrMultiple = request.ProtectiveStopAtrMultiple
+            ProtectiveStopAtrMultiple = request.ProtectiveStopAtrMultiple,
+            SignalFreshnessCandles = request.SignalFreshnessCandles
         };
         var agent = new DivergenceReversalAgent(options);
 
@@ -153,7 +162,8 @@ public static class AgentDebugRunner
         int totalTrades = 0;
         bool inRun = false;
 
-        await foreach (MarketCandle marketCandle in StreamingCandleCache.ReadStreamAsync(cachePath, instrument, baseInterval, cancellationToken))
+        await foreach (MarketCandle marketCandle in StreamBaseCandlesAsync(
+                           request, instrument, baseInterval, cacheDirectory, oandaOptions, writer, cancellationToken))
         {
             Candle baseCandle = marketCandle.Mid;
             if (baseCandle.OpenTime < request.WarmupStart)
@@ -238,13 +248,130 @@ public static class AgentDebugRunner
                 totalTrades++;
         }
 
+        DivergenceReversalFunnelSnapshot funnel = agent.GetFunnelSnapshot();
         await writer.WriteAsync(new AgentDebugEvent
         {
             Type = AgentDebugEventType.Status,
             Time = request.RunEnd,
             Message = $"Run finished. {totalTrades} completed trade(s).",
-            TotalTrades = totalTrades
+            TotalTrades = totalTrades,
+            Funnel = new AgentDebugFunnel
+            {
+                Stages = [.. funnel.Stages.Select(stage => new AgentDebugFunnelStage
+                {
+                    Interval = stage.Interval,
+                    Role = stage.Role,
+                    CandlesProcessed = stage.CandlesProcessed,
+                    PartialExtremes = stage.PartialExtremes,
+                    FullExtremes = stage.FullExtremes,
+                    NoRelationship = stage.NoRelationship,
+                    StaleRelationship = stage.StaleRelationship,
+                    AlreadyConsumed = stage.AlreadyConsumed,
+                    DirectionMismatch = stage.DirectionMismatch,
+                    SignalsBuilt = stage.SignalsBuilt
+                })],
+                Evaluations = funnel.Evaluations,
+                Entries = funnel.Entries,
+                Closes = funnel.Closes,
+                Flips = funnel.Flips,
+                SuppressedAlreadyPositioned = funnel.SuppressedAlreadyPositioned,
+                BreakoutHeldAgainstPosition = funnel.BreakoutHeldAgainstPosition
+            }
         }, cancellationToken);
+    }
+
+    /// <summary>Cache-first, fetch-on-request: reuses any already-cached file whose range covers
+    /// [WarmupStart, RunEnd] (fast - no broker call). If none covers it and the caller didn't opt
+    /// into <see cref="AgentDebugRunRequest.AllowFetch"/>, throws naming the cached range so the
+    /// caller can pick a covered range or explicitly ask for a fetch. When AllowFetch is set,
+    /// downloads via the same OandaStreamingCandleSource/BinanceStreamingCandleSource the real
+    /// backtest pipeline uses (instrument-prefix routed) - which itself caches under the exact
+    /// requested range for reuse next time.</summary>
+    private static async IAsyncEnumerable<MarketCandle> StreamBaseCandlesAsync(
+        AgentDebugRunRequest request,
+        InstrumentKey instrument,
+        BarInterval baseInterval,
+        string cacheDirectory,
+        OandaWorkspaceOptions oandaOptions,
+        ChannelWriter<AgentDebugEvent> writer,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        string? cachePath = ResolveCacheFile(
+            cacheDirectory, request.Instrument, "1m", request.WarmupStart, request.RunEnd);
+
+        if (cachePath is not null)
+        {
+            await foreach (MarketCandle candle in StreamingCandleCache.ReadStreamAsync(
+                               cachePath, instrument, baseInterval, cancellationToken))
+            {
+                yield return candle;
+            }
+
+            yield break;
+        }
+
+        if (!request.AllowFetch)
+        {
+            throw new InvalidOperationException(
+                $"No cached 1m data covers {request.WarmupStart:yyyy-MM-dd} .. {request.RunEnd:yyyy-MM-dd} for " +
+                $"{request.Instrument}. Pick a range inside the cached data (see GET /api/agent-debug/instruments), " +
+                "or re-run with \"fetch fresh data\" enabled to download the missing range from the broker.");
+        }
+
+        await writer.WriteAsync(new AgentDebugEvent
+        {
+            Type = AgentDebugEventType.Status,
+            Time = request.WarmupStart,
+            Message = $"Not in cache - fetching {request.Instrument} 1m from the broker " +
+                $"({request.WarmupStart:yyyy-MM-dd} .. {request.RunEnd:yyyy-MM-dd})..."
+        }, cancellationToken);
+
+        var historicalRequest = new HistoricalCandleRequest(
+            instrument, baseInterval, request.WarmupStart, request.RunEnd, CacheDirectory: cacheDirectory);
+
+        (IHistoricalCandleStream source, IAsyncDisposable disposable) = CreateBrokerSource(request.Instrument, oandaOptions);
+        await using var _ = disposable;
+        await foreach (MarketCandle candle in source.StreamAsync(historicalRequest, cancellationToken))
+        {
+            yield return candle;
+        }
+    }
+
+    private static (IHistoricalCandleStream Stream, IAsyncDisposable Disposable) CreateBrokerSource(
+        string instrument, OandaWorkspaceOptions oandaOptions)
+    {
+        if (instrument.StartsWith("BINANCE:", StringComparison.OrdinalIgnoreCase))
+        {
+            BinanceBrokerClient binance = BrokerClientFactory.CreateBinance(new BinanceOptions
+            {
+                Environment = BrokerEnvironment.Live,
+                BaseAddress = ResolveBinanceMarketDataBaseAddress()
+            });
+            return (new BinanceStreamingCandleSource(binance.MarketData, BrokerEnvironment.Live, owner: binance), binance);
+        }
+
+        if (!oandaOptions.IsConfigured)
+        {
+            throw new InvalidOperationException(
+                "OANDA credentials are not configured on this DashboardLive instance - cannot fetch fresh data " +
+                $"for {instrument}. Configure the Oanda section, or pick a range inside the cached data.");
+        }
+
+        OandaBrokerClient oanda = BrokerClientFactory.CreateOanda(new OandaOptions
+        {
+            Environment = oandaOptions.Environment,
+            AccountId = oandaOptions.AccountId,
+            AccessToken = oandaOptions.AccessToken
+        });
+        return (new OandaStreamingCandleSource(oanda.MarketData, oandaOptions.Environment, owner: oanda), oanda);
+    }
+
+    private static Uri ResolveBinanceMarketDataBaseAddress()
+    {
+        string? configured = Environment.GetEnvironmentVariable("BINANCE_MARKET_DATA_BASE_URL");
+        return Uri.TryCreate(configured, UriKind.Absolute, out Uri? address) && address.Scheme == Uri.UriSchemeHttps
+            ? address
+            : new Uri("https://data-api.binance.vision/");
     }
 
     /// <summary>Minimal stand-in for the real execution pipeline: tracks one synthetic open

@@ -36,6 +36,32 @@ interface DebugEvent {
   reason?: string
   message?: string
   totalTrades?: number
+  funnel?: Funnel
+}
+
+/** How far every candle got through the agent's entry condition — emitted once, on the final
+ * Status event, from the real agent's own counters. */
+interface FunnelStage {
+  interval: string
+  role: 'trigger' | 'confirmation'
+  candlesProcessed: number
+  partialExtremes: number
+  fullExtremes: number
+  noRelationship: number
+  staleRelationship: number
+  alreadyConsumed: number
+  directionMismatch: number
+  signalsBuilt: number
+}
+
+interface Funnel {
+  stages: FunnelStage[]
+  evaluations: number
+  entries: number
+  closes: number
+  flips: number
+  suppressedAlreadyPositioned: number
+  breakoutHeldAgainstPosition: number
 }
 
 // A real run can emit far more events per second than Vue/the DOM can render one-at-a-time
@@ -59,6 +85,7 @@ const form = reactive({
   warmupStart: '',
   runStart: '',
   runEnd: '',
+  allowFetch: false,
   quantity: 1000,
   rsiOverbought: 75,
   rsiOversold: 25,
@@ -67,7 +94,10 @@ const form = reactive({
   partialStochRsiFastOverbought: 85,
   partialStochRsiFastOversold: 15,
   protectiveStopAtrMultiple: 3,
+  signalFreshnessCandles: 3,
 })
+
+const funnel = ref<Funnel | null>(null)
 
 const logLines = ref<DebugEvent[]>([])
 const candlesByInterval = reactive(new Map<string, DebugCandle[]>())
@@ -194,6 +224,7 @@ function recordMarker(event: DebugEvent) {
  * never directly from eventSource.onmessage - so a fast stream never triggers more than one
  * Vue re-render per animation frame. */
 function applyEvent(event: DebugEvent) {
+  if (event.funnel) funnel.value = event.funnel
   if (event.type === 'Candle') recordCandle(event)
   if (event.type === 'Diagnostic' && event.certainty && event.certainty !== 'None') recordMarker(event)
   if (event.type === 'Decision') recordMarker(event)
@@ -233,6 +264,7 @@ async function startRun() {
   candlesByInterval.clear()
   markersByInterval.clear()
   seenIntervals.value = []
+  funnel.value = null
   pendingEvents = []
   if (flushHandle) {
     cancelAnimationFrame(flushHandle)
@@ -246,6 +278,7 @@ async function startRun() {
     warmupStart: new Date(form.warmupStart).toISOString(),
     runStart: new Date(form.runStart).toISOString(),
     runEnd: new Date(form.runEnd).toISOString(),
+    allowFetch: form.allowFetch,
     quantity: form.quantity,
     rsiOverbought: form.rsiOverbought,
     rsiOversold: form.rsiOversold,
@@ -254,6 +287,7 @@ async function startRun() {
     partialStochRsiFastOverbought: form.partialStochRsiFastOverbought,
     partialStochRsiFastOversold: form.partialStochRsiFastOversold,
     protectiveStopAtrMultiple: form.protectiveStopAtrMultiple,
+    signalFreshnessCandles: form.signalFreshnessCandles,
   }
 
   const response = await fetch('/api/agent-debug/runs', {
@@ -389,6 +423,10 @@ onBeforeUnmount(() => {
       <div v-if="instruments.find((item) => item.instrument === form.instrument)" class="cache-hint">
         Cached range: {{ formatTime(instruments.find((item) => item.instrument === form.instrument)!.cachedFrom) }}
         .. {{ formatTime(instruments.find((item) => item.instrument === form.instrument)!.cachedTo) }}
+        <label class="inline-check">
+          <input v-model="form.allowFetch" :disabled="running" type="checkbox" />
+          Fetch missing data from broker if the range above isn't fully cached
+        </label>
       </div>
 
       <button class="advanced-toggle" type="button" @click="showAdvanced = !showAdvanced">
@@ -403,6 +441,10 @@ onBeforeUnmount(() => {
         <label>Partial overbought <input v-model.number="form.partialStochRsiFastOverbought" :disabled="running" type="number" /></label>
         <label>Partial oversold <input v-model.number="form.partialStochRsiFastOversold" :disabled="running" type="number" /></label>
         <label>Protective stop (×ATR) <input v-model.number="form.protectiveStopAtrMultiple" :disabled="running" type="number" step="0.1" /></label>
+        <label title="Candles after a StochRSI-fast relationship confirms that it can still supply a signal. 0 = the original same-candle-only rule, which almost never fires because a swing pivot confirms a couple of candles after the price extreme.">
+          Signal freshness (candles)
+          <input v-model.number="form.signalFreshnessCandles" :disabled="running" type="number" min="0" step="1" />
+        </label>
       </div>
 
       <div class="actions">
@@ -447,6 +489,45 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
+    <section v-if="funnel" class="funnel-panel">
+      <div class="chart-header">
+        <span>Signal funnel</span>
+        <span class="legend">
+          {{ funnel.evaluations }} evaluations → {{ funnel.entries }} entries, {{ funnel.closes }} closes
+          ({{ funnel.flips }} flips) · {{ funnel.suppressedAlreadyPositioned }} already positioned ·
+          {{ funnel.breakoutHeldAgainstPosition }} breakouts held
+        </span>
+      </div>
+      <table class="funnel-table">
+        <thead>
+          <tr>
+            <th>Timeframe</th><th>Role</th><th>Candles</th><th>Partial</th><th>Full</th>
+            <th>No rel.</th><th>Stale</th><th>Consumed</th><th>Dir. mismatch</th><th>Signals</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="stage in funnel.stages" :key="stage.interval">
+            <td>{{ stage.interval }}</td>
+            <td>{{ stage.role }}</td>
+            <td>{{ stage.candlesProcessed }}</td>
+            <td>{{ stage.partialExtremes }}</td>
+            <td>{{ stage.fullExtremes }}</td>
+            <td>{{ stage.noRelationship }}</td>
+            <td>{{ stage.staleRelationship }}</td>
+            <td>{{ stage.alreadyConsumed }}</td>
+            <td>{{ stage.directionMismatch }}</td>
+            <td :class="{ 'funnel-zero': stage.signalsBuilt === 0 }">{{ stage.signalsBuilt }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="funnel-hint">
+        Each column is a stage a candle had to clear: a Full extreme reading, then a StochRSI-fast
+        relationship that exists, is inside the freshness window, hasn't already been acted on, and
+        points the same way as the extreme. Whichever column absorbs the Full readings is the reason
+        the agent isn't trading.
+      </p>
+    </section>
+
     <section class="log-panel">
       <div class="chart-header"><span>Log</span></div>
       <div ref="logEl" class="terminal">
@@ -477,7 +558,7 @@ onBeforeUnmount(() => {
   font-size: 13px;
   max-width: 760px;
 }
-.form-panel, .chart-panel, .log-panel {
+.form-panel, .chart-panel, .log-panel, .funnel-panel {
   border: 1px solid var(--line-soft, #2a2f3a);
   border-radius: 8px;
   padding: 14px;
@@ -512,6 +593,17 @@ onBeforeUnmount(() => {
   font-size: 11.5px;
   color: var(--muted-2, #9aa3b2);
   margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--muted-2, #9aa3b2);
+  cursor: pointer;
 }
 .advanced-toggle {
   background: none;
@@ -599,6 +691,34 @@ onBeforeUnmount(() => {
 .empty-hint {
   color: var(--muted-2, #9aa3b2);
   font-size: 12.5px;
+}
+.funnel-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.funnel-table th, .funnel-table td {
+  padding: 4px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--line-soft, #2a2f3a);
+}
+.funnel-table th:first-child, .funnel-table td:first-child,
+.funnel-table th:nth-child(2), .funnel-table td:nth-child(2) {
+  text-align: left;
+}
+.funnel-table th {
+  color: var(--muted-2, #9aa3b2);
+  font-weight: 600;
+}
+.funnel-zero {
+  color: #f87171;
+}
+.funnel-hint {
+  margin: 8px 0 0;
+  color: var(--muted-2, #9aa3b2);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 .terminal {
   height: 420px;

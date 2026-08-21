@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
 
@@ -92,26 +93,43 @@ public sealed class TradeManagementCalibrationPolicy
         ArgumentNullException.ThrowIfNull(context);
         int confidenceBucket = (int)(context.Confidence / 10m) * 10;
         TradeManagementCohort? cohort = _artifact.Cohorts
-            .Where(item => item.StrategyId == context.StrategyId && item.InstrumentGroup == context.InstrumentGroup &&
-                item.Regime == context.Regime && item.SetupType == context.SetupType && item.Direction == context.Direction &&
-                item.Session == context.Session && item.VolatilityBucket == context.VolatilityBucket &&
+            .Where(item => Matches(item.StrategyId, context.StrategyId) &&
+                Matches(item.InstrumentGroup, context.InstrumentGroup) &&
+                Matches(item.Regime, context.Regime) &&
+                Matches(item.SetupType, context.SetupType) &&
+                Matches(item.Direction, context.Direction) &&
+                Matches(item.Session, context.Session) &&
+                Matches(item.VolatilityBucket, context.VolatilityBucket) &&
                 item.ConfidenceBucket == confidenceBucket)
             .OrderByDescending(item => item.Samples)
             .FirstOrDefault();
         if (cohort is null || cohort.Samples < _minimumSamples)
             return (fallback, "StaticManagementFallback");
 
-        int stagnationBars = Math.Max(1, (int)decimal.Ceiling(cohort.MedianDurationBars));
+        // Clamp before the cast: an out-of-range median would wrap through the unchecked
+        // int conversion instead of saturating.
+        decimal medianDurationBars = Math.Clamp(cohort.MedianDurationBars, 1m, int.MaxValue);
+        int stagnationBars = Math.Max(1, (int)decimal.Ceiling(medianDurationBars));
         PositionManagementOptions calibrated = fallback with
         {
-            StagnationBars = stagnationBars,
-            // Conservative use only: calibration can review sooner or keep the static
-            // value; it never widens an existing live stop.
+            // Conservative use only, and that has to hold for both fields: calibration may review
+            // sooner or keep the static value, never later. Taking the cohort median unbounded let
+            // calibration grant MORE patience than the static policy - a loosening, not a
+            // tightening, and the opposite of what the sibling field below enforces.
+            StagnationBars = Math.Min(fallback.StagnationBars, stagnationBars),
             StagnationReductionFraction = Math.Min(fallback.StagnationReductionFraction, 0.20m)
         };
         calibrated.Validate();
         return (calibrated, $"ManagementCalibration:{_artifact.CalibrationId}:{cohort.CohortId}");
     }
+
+    /// <summary>
+    /// Cohort keys match case-insensitively, consistent with RiskManager's SetupCalibrationPolicy.
+    /// Ordinal equality meant any case drift between the training pipeline and the runtime context
+    /// degraded silently to StaticManagementFallback instead of surfacing.
+    /// </summary>
+    private static bool Matches(string cohortValue, string contextValue) =>
+        string.Equals(cohortValue, contextValue, StringComparison.OrdinalIgnoreCase);
 }
 
 public interface IManagementProfileResolver
@@ -131,7 +149,9 @@ public sealed class CalibratedStructureBasedTradeManager :
     private readonly PositionManagementOptions _fallback;
     private readonly TradeManagementCalibrationPolicy _calibration;
     private readonly RegimeManagementOptions _regimeOptions;
-    private readonly Dictionary<string, IStructureBasedTradeManager> _managers = new(StringComparer.Ordinal);
+    // Mutated from Evaluate, so it cannot be a plain Dictionary: no concurrent caller exists
+    // today, but a torn write here would corrupt management for every open position.
+    private readonly ConcurrentDictionary<string, IStructureBasedTradeManager> _managers = new(StringComparer.Ordinal);
 
     public CalibratedStructureBasedTradeManager(
         PositionManagementOptions fallback,
@@ -189,13 +209,8 @@ public sealed class CalibratedStructureBasedTradeManager :
             };
     }
 
-    private IStructureBasedTradeManager Manager(string key, PositionManagementOptions options)
-    {
-        if (_managers.TryGetValue(key, out IStructureBasedTradeManager? manager)) return manager;
-        manager = _regimeOptions.Enabled
+    private IStructureBasedTradeManager Manager(string key, PositionManagementOptions options) =>
+        _managers.GetOrAdd(key, _ => _regimeOptions.Enabled
             ? new RegimeAwareStructureBasedTradeManager(options, _regimeOptions)
-            : new StructureBasedTradeManager(options);
-        _managers[key] = manager;
-        return manager;
-    }
+            : new StructureBasedTradeManager(options));
 }

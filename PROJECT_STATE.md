@@ -96,6 +96,144 @@ Every fix below was built, then verified against the full regression suite (`Sim
   (`?? 0m`), admitting a zero-risk reservation that clears every cap. **Fix**: added a rejection in
   `LiveOpportunityCoordinator.cs` — FixedQuantity-mode candidates with `null` risk/margin data are
   now rejected (`"FixedQuantityRiskDataUnavailable"`) instead of admitted blind.
+- **RSK-02 (Medium, latent) — FIXED.** `RiskBudgetPolicy.cs` clamped the combined multiplier
+  with `Math.Clamp(raw, MinimumCombinedRiskMultiplier, Maximum…)`, so a configured floor above
+  zero silently resurrected a hard-zero band. The default drawdown schedule's terminal band is an
+  explicit stop-trading band (`Multiplier = 0m` at >= 6% drawdown, `RiskBudgetPolicy.cs:18`); with
+  a 0.25 floor, an 8% drawdown produced `combined = 0.25` and `ReasonCode = "RiskBudgetAdjusted"`
+  instead of halting. Latent only — nothing in the repo sets `MinimumCombinedRiskMultiplier`, so it
+  defaulted to 0. **Fix**: `raw <= 0m` short-circuits to zero before the clamp; the floor still
+  applies to any non-zero product.
+- **RSK-03 (Low) — FIXED.** Two `RiskBudgetPolicy` schedule gaps. (a) `ValidateSchedule` accepted an
+  open-ended band anywhere, so `[0,∞), [0,5)` validated while `Resolve`'s `FirstOrDefault` made the
+  second band unreachable — now only the final band may be open-ended. (b) `Resolve` fell back to
+  `schedule[^1]` for *any* unmatched value, giving a below-range input the most punitive multiplier
+  (for drawdown, the 0 kill band). Now below-range takes the first band, above-range keeps the last,
+  so an out-of-range input can never widen the budget. Unreachable with the shipped defaults (both
+  start at 0, inputs are clamped at `RiskBudgetPolicy.cs:114,117`); reachable with custom schedules.
+- **RSK-04 (Low) — FIXED.** Two unguarded `decimal` divisions in `PositionSizing.cs` could throw
+  `OverflowException` out of the sizer instead of returning a rejection like every other failure
+  path: `riskBudget / perUnitLoss` (only guarded for `<= 0`, not for denormally small values from a
+  misconfigured `InstrumentRiskSpec`) and `value / step` in `RoundDown`. Now they reject with
+  `"UnboundedQuantity"` and fail closed to zero respectively.
+- **RSK-05 (Low) — FIXED.** `PreTradeRiskManager.cs` substituted a `1m` FX rate when computing
+  open-book risk (`QuoteToAccountCurrencyRate > 0m ? rate : 1m`) — the same silent-FX-default
+  anti-pattern as RSK-01. `Approved` was already false via the missing-rate reason, but the
+  assessment still reported a fabricated `OpenRiskAccountCurrency` computed at the wrong rate. Now
+  the block is skipped entirely and both open-risk fields stay null.
+- **TM-01 (High) — FIXED.** `StructureBasedTradeManager.cs` silently dropped an equity-protection
+  `ReduceOpenPositions` directive whenever the position already sat at its minimum runner fraction:
+  `CreateReduction` returned null, the `if (equityReduction is not null)` block fell through, and
+  the caller saw an ordinary `Hold`/`NoValidProfitProtectionImprovement` with no trace that an
+  account-level safety escalation had gone unmet. Confirmed by probe before fixing. Very reachable —
+  `Validate()` explicitly permits a scale-out schedule that lands exactly on the runner floor.
+  **Fix**: the runner floor still bounds the directive (that behaviour is asserted by
+  `EquityProtectionDirectiveTests`), but an unsatisfiable directive now prefixes the recommendation
+  with `EquityProtectionUnsatisfiable|` so the caller can escalate. Chose the observable-signal
+  option over force-exiting the position: it preserves the tested runner-floor intent and takes no
+  irreversible action on an inference. Force-exit remains a one-line change if that is preferred.
+- **TM-02 (Medium) — FIXED.** `BuildStopCandidate` picked the most protective stop candidate and
+  *then* checked placeability, returning null if that one failed rather than falling back to the
+  next best. On a tight stop the cost-adjusted break-even can sit above the current price, which
+  discarded an available profit-floor or structural stop entirely. Confirmed by probe: a placeable
+  0.5R floor stop at 100.05 was dropped in favour of an unplaceable break-even at 100.20, yielding
+  `Hold`. Bites precisely in the tight-stop/high-cost regime already documented at §623-627.
+  **Fix**: filter candidates for placeability and minimum improvement first, then take the most
+  protective survivor. (The improvement filter alone could never cause this — the highest-price
+  candidate always has the largest improvement — so the defect was placeability-specific.)
+- **TM-03 (Medium) — FIXED.** CAL-01 survived in the shadow path:
+  `LiveShadowOutcomeService.cs:638` hardcoded `EntryVolatilityBucket = "Live"` while `:586`
+  constructs a `CalibratedStructureBasedTradeManager`. `"Live"` is not a bucket
+  `VolatilityBucketClassifier` can ever emit, so cohort lookup could never match and the shadow
+  path was pinned to `StaticManagementFallback` permanently. **Fix**: classify from the (absent)
+  ATR percentile, yielding the real `"Unknown"` key a cohort can match. `ShadowPaperPosition`
+  carries no ATR percentile, so `"Unknown"` is the honest value, not a workaround.
+- **TM-04 (Low) — FIXED.** `ManagementCalibration.cs` capped `StagnationReductionFraction` with
+  `Math.Min` against the fallback but overwrote `StagnationBars` outright from the cohort median,
+  so a median longer than the static value made calibrated management *more* patient — a loosening,
+  contradicting the adjacent "conservative use only" comment. Now `Math.Min`-bounded like its
+  sibling; calibration may only review sooner or keep the static value.
+- **TM-05 (Low) — FIXED.** Cohort matching used ordinal `==` on seven string keys while
+  RiskManager's `SetupCalibrationPolicy` uses `OrdinalIgnoreCase` for the same job, so any case
+  drift between the training pipeline and the runtime context degraded silently to static fallback.
+  Now case-insensitive and consistent.
+- **TM-06 (Low) — FIXED.** `CalibratedStructureBasedTradeManager._managers` was a plain
+  `Dictionary` mutated inside `Evaluate`. Searched for concurrent callers and **found none** (no
+  `Parallel.`/`Task.Run`/`Task.WhenAll` in `LivePositionManagementService`), so this was latent, not
+  a live race. Now a `ConcurrentDictionary` with `GetOrAdd`.
+- **TM-07 (Low) — FIXED.** `(int)decimal.Ceiling(cohort.MedianDurationBars)` was an unchecked cast
+  that would wrap on an out-of-range median; now clamped to `[1, int.MaxValue]` before the cast.
+- **EM-01 (High) — FIXED.** `ExecutionCoordinator.cs` substituted a fabricated `1m` FX rate into
+  `PreTradeRiskContext` whenever `ResolveQuoteToAccountRate` could not derive a conversion
+  (`QuoteToAccountCurrencyRate = quoteToAccountRate > 0m ? quoteToAccountRate : 1m`). The resolver
+  correctly returns `0m` for any true cross — only `quote == account` and `base == account` are
+  handled — so `MaximumLossPercentageOfBalance` and the portfolio heat cap were evaluated against a
+  made-up conversion. This is the RSK-01 anti-pattern, and it **silently defeated the RSK-05 fix
+  made earlier the same session**: that guard only engages on a non-positive rate, which this call
+  site guaranteed never happened. Confirmed by probe — `FX:EUR/JPY` on a USD account handed the risk
+  manager `1` where the true rate is ~0.0067. Direction varies by pair: conservative where the true
+  rate is below 1, **dangerously permissive above it**. Reachable through `QuantityIsPortfolioApproved`
+  (skips sizing) and `PositionSizingMode.FixedQuantity` (approves without a rate). **Fix**: pass the
+  real rate through. *Operational impact*: fixed-quantity and portfolio-approved trades on
+  unresolvable cross pairs are now rejected where they previously passed — the correct fail-closed
+  outcome, but a live behaviour change. The rejection only fires when a monetary cap is actually
+  configured; with no cap configured nothing changes.
+- **EM-02 (Medium) — FIXED.** `_amendments` was only ever added to, never removed, while the
+  sibling `_inFlight` map had a matching `TryRemove`. The amendment fingerprint includes
+  `RequestedSequence` and `EffectiveFromExecutionSequence`, so every single trailing-stop amendment
+  minted a permanent entry holding a completed task — an unbounded leak in a long-running live host.
+  **Fix**: added `AwaitAndReleaseAmendmentAsync` mirroring the order path. Payload-mismatch
+  detection becomes in-flight scoped, like orders; a stale replay is still caught by the broker-side
+  stop-order state check.
+- **EM-03 (Low-Medium) — FIXED.** A `Close` decision resolved its target with
+  `positions.FirstOrDefault(item => item.Instrument == …)` at two independent call sites. On a
+  hedging account holding both a long and a short in the same instrument, that picked whichever the
+  broker happened to list first and thereby silently chose both the close **side** and the quantity
+  cap. **Fix**: single `ResolveClosePosition` helper — same-side positions aggregate, a mixed-side
+  book throws as genuinely ambiguous rather than being guessed.
+- **EM-04 (Low) — FIXED.** `NormalizeRiskReducingPrice` computed `price / increment` unguarded;
+  `ValidateAmendmentCommand` only checks the increment is positive, so a pathologically small one
+  threw `OverflowException` out of the amendment path. Now returns `0m` on overflow, which
+  `ValidateRiskReduction` turns into a clean "normalized stop price is not positive" rejection.
+- **EM-05 (Trivial) — FIXED.** `RiskBudgetContext.AccountEquity` was `required` but never read by
+  `RiskBudgetPolicy.Evaluate`. Dropped `required` and documented it as audit-context only (kept the
+  field: removing it would ripple through four production call sites and eight test files for no
+  behavioural gain).
+- **Audit note (ExecutionManager, not defects).** Two things initially suspected and cleared by
+  checking rather than assuming: journal `Sequence = 0` is harmless because `TradeJournal.Append`
+  overwrites it with its own counter (`TradingJournal/TradeJournal.cs:93`); and `_inFlight`'s
+  `TryRemove(key, out _)` cannot cross-remove another thread's operation, because entries are only
+  ever added-if-absent or removed, never replaced. Also verified correct: stop-normalization
+  direction (floor for longs / ceiling for shorts moves the stop *away* from price, so normalization
+  can never cause an immediate stop-out); amendment-ID reuse detection via fingerprint; the
+  stale-protective-order check (instrument, status, type, quantity, opposite side, price — and
+  decimal `!=` compares by value not scale, so `1000.00` matches `1000`); exits never being blocked
+  by safety gating; protective orders deliberately not cancelled before a close fill confirms; and
+  sizing rejection failing closed without falling back to the requested quantity.
+- **Audit note (TradeManager, not defects).** Verified correct and left alone: no divide-by-zero in
+  the R math (`Validate` enforces `EntryPrice != InitialStopPrice` and correct stop side before
+  `openProfitR` is computed); the break-even cost model counts spread once and slippage per leg,
+  which is right because `CurrentPrice` is the exit-executable bid/ask and already carries the exit
+  spread; profit-floor/giveback selection and `locked = MFE - giveback`; the floor-breach ordering
+  that guarantees a floor stop is always placeable by the time `BuildStopCandidate` runs; both
+  regime presets preserving the `StructureTrailActivationR >= BreakEvenActivationR` invariant;
+  midnight-crossing risk window; stagnation interpolation; and structural scoring including
+  Buy/Sell `postEntry` symmetry. Confidence bucketing was confirmed identical across the project
+  boundary — `(int)(Confidence / 10m) * 10` in both `TradeManagementCohorts.cs:38` and
+  `ManagementCalibration.cs:93` — and `VolatilityBucketClassifier` is genuinely shared, with the
+  simulator's local `VolatilityBucket` (`StrategySimulationSession.cs:2507`) delegating to it.
+- **Audit note (not a defect).** The R:R gate is measured on **gross** price distances
+  (`PreTradeRiskManager.cs:251-252`, and `StructuralGeometryBuilder.cs:83`), while `PositionSizing`
+  sizes on **cost-inclusive** risk (`riskDistance + estimatedCostDistance`). Cost is enforced
+  system-wide as a separate minimum-stop-distance floor (`StructuralGeometryBuilder.cs:41`), not
+  folded into the ratio — a consistent design stance, not a missed spot. Consequence: a configured
+  `MinimumRewardRiskRatio = 1.5` can be materially below 1.5 net on a tight stop. Left unchanged:
+  folding cost into the ratio would tighten entry criteria for every strategy and needs sign-off.
+- **Audit note (not a defect).** Risk multipliers compound multiplicatively in two places —
+  11 factors at `RiskBudgetPolicy.cs:129-130`, and `FutureRiskMultiplier` across every latched
+  equity-protection tier at `TradingSafety.cs:479`. Nested tiers therefore double-count (a 5% and a
+  10% giveback tier both active at 10% give 0.5 x 0.5 = 0.25). May be intended; it is the first
+  place to look if sizes ever read mysteriously small.
 - **LIVE-01 (High) — FIXED.** `LiveTradingHost/Program.cs:225` still constructs the live
   `IStrategyDecisionPipelineFactory` DI singleton with no trading-condition filter. Traced the real
   gap precisely: `LiveTradingPolicyBundle.TradingConditions` is a `required` field — every
@@ -395,6 +533,48 @@ between the swing-detector's confirmation lag and the freshly-confirmed gate mak
 conditions - extreme price condition and fresh divergence pivot - rarely land on the same candle in
 practice) versus this simply being how infrequently the underlying condition genuinely occurs.
 
+**That check was done 2026-08-14 and the "overly strict" hypothesis is confirmed** - it was the
+first of the two, not the second. `SwingDetector` only confirms a pivot once its right-hand candles
+close, so the StochRSI-fast relationship lands ~2 candles *after* the price extreme that produced
+it; by then price is normally back inside the Bollinger band and `ClassifyExtreme` no longer reads
+Full. Requiring `IsNewRelationship` (true for exactly one candle) *and* a Full extreme on that same
+candle made the two halves of the entry condition close to mutually exclusive by construction. Full
+numbers and the supersession of §3.7/§3.8 are in §3.9. Three changes followed:
+
+- **Freshness window** - `DivergenceReversalStrategyOptions.SignalFreshnessCandles` (default 3,
+  validated `0 <= value <= RelationshipSignalLifetimeCandles`). `TryBuildSignal` now accepts a
+  relationship that is either new this candle or confirmed within that many candles, measured in
+  candles of the timeframe that produced it (`StochRsiRelationshipSnapshot.AgeCandles`, which the
+  state was already tracking). `0` reproduces the old same-candle-only rule exactly, so the
+  previous behaviour stays reproducible for comparison.
+- **Consume-once guard** - a relationship that has produced a decision is recorded per timeframe
+  (`ConsumedRelationship`, keyed on `ConfirmedAt` + `Type`) and cannot fire again. Without this the
+  wider window would let one relationship re-enter a position a candle or two after the protective
+  stop closed it. A signal is marked consumed even when it leads to no order (already positioned
+  that way, or a breakout held against an open position) - it has had its say either way.
+- **Signal funnel** - `DivergenceReversalAgent.GetFunnelSnapshot()` returns per-timeframe counts of
+  how far each candle got: candles processed → partial extreme → full extreme → relationship
+  exists → inside the freshness window → not already consumed → direction matches → signal built,
+  plus agent-level entries/closes/flips/suppressions
+  (`Agent/Strategies/DivergenceReversal/DivergenceReversalFunnel.cs`). Diagnostics only; nothing
+  feeds a decision. Surfaced in the Agent Debugger (final SSE Status event → funnel table on the
+  page) so "why did this only trade N times" is answered by whichever column absorbed the Full
+  readings, not by inference. **Any future re-tune of this agent's thresholds should be justified
+  from this table, not from trade count alone.**
+
+Tests added for the gap that let the original bug through (`Simulator.Tests/DivergenceReversalAgentTests.cs`,
+now 12 tests): `Update_ExpectsPerCandleDeltas_ResendingTheSameSwingsRepeatsRelationships` pins the
+`StochRsiAnalysisState` contract that made the bug possible (re-sent pivots fabricate relationships
+- callers must send deltas), and `EvaluateAsync_AccumulatedSwingWindowResentEveryCandle_SignalsOnlyOnce`
+drives the agent with the full accumulated window production actually sends, asserting one fire, no
+re-fire while it is re-sent, and a fresh fire once a genuinely new pivot confirms. Plus one test
+each for the freshness window firing and for `SignalFreshnessCandles = 0` rejecting the same setup
+as stale. Full `Simulator.Tests` suite: 1061 passed, 0 failed.
+
+**Not yet done: the post-change backtest rerun.** The freshness window is expected to raise trade
+frequency substantially, but no walk-forward or 9-instrument rerun has been done since, so §3.9's
+numbers remain the current measured state. Nothing here is evidence of edge.
+
 **Also delivered 2026-08-04: standalone "Agent Debugger" page** for visually/textually inspecting
 what the agent sees candle-by-candle, separate from the Simulator/backtest pipeline entirely, per
 explicit user request to "visually track whatever happen to the agent" and use "true
@@ -434,11 +614,12 @@ act on the latest *closed* candle):
 
 **Explicitly NOT done yet:**
 
-- Understand why post-fix trade frequency is now near-zero before drawing any conclusion about
-  whether this strategy has edge - the fix corrected a real bug, but "corrected" and "now behaving
-  as intended" aren't automatically the same thing.
-- A larger-sample validation (longer window and/or more instruments), now blocked on the point
-  above - there's nothing to validate yet if trades essentially never fire.
+- ~~Understand why post-fix trade frequency is now near-zero~~ - done 2026-08-14: the
+  swing-confirmation lag versus the same-candle freshness gate, see above and §3.9.
+- **Rerun the walk-forward and 9-instrument backtests with the freshness window in place** - the
+  fix is untested against real data; §3.9 still reflects the pre-freshness-window build.
+- A larger-sample validation (longer window and/or more instruments), still blocked on the rerun
+  above producing a trade count worth analysing.
 - `StochRsiAnalysisState` is deliberately self-contained inside this one agent, not promoted into
   the shared `IndicatorSnapshot`/`ChartAnnotationEngine` pipeline the way `RsiAnalysisState` is. If
   a second strategy later wants the same StochRSI-fast divergence tracking, promote it then rather
@@ -611,7 +792,16 @@ range -64R to -32R). This is a more decisive negative result than structural-con
 sample, universally consistent across every fold/phase rather than mixed, and no ambiguity in the
 Monte Carlo distribution at all.
 
-### 3.7 divergence-reversal walk-forward result (2026-08-04) — no edge, too little data to be confident either way
+### 3.7 divergence-reversal walk-forward result (2026-08-04) — SUPERSEDED, pre-bug-fix numbers
+
+> **Superseded by §3.9.** Everything in §3.7 and §3.8 was produced by the buggy build described in
+> §2.8 (`IsNewRelationship` stuck true, so most signals were stale re-fires). The post-fix reruns
+> completed 2026-08-04 14:53 and are recorded in §3.9; §2.8 carried them from the start but this
+> section did not, which is exactly the "one doc updated, the other not" drift this file exists to
+> prevent. Read §3.9 for the current numbers; §3.7/§3.8 are kept as the historical record of what
+> the buggy build produced.
+
+#### 3.7 (historical) — no edge, too little data to be confident either way
 
 First real validation of the user's formalized personal strategy (§2.8), beyond the 1-week pipeline
 smoke test. Same walk-forward plan, same 4 folds, same EUR/USD cached data, same current-defaults
@@ -636,7 +826,7 @@ either a longer backtest window, more instruments, or both. Not disqualifying, b
 consistent with every other idea checked this session, none has yet cleared the bar of "profitable
 out-of-sample with a large enough sample to trust the number."
 
-### 3.8 divergence-reversal, 9-instrument backtest (2026-08-04) — decisively negative at scale
+### 3.8 divergence-reversal, 9-instrument backtest (2026-08-04) — SUPERSEDED, pre-bug-fix numbers
 
 Follow-up to §3.7's "needs a bigger sample" conclusion. Single continuous backtest (no walk-forward
 folds — this agent has no fitted parameters, so a train/validation/test split doesn't guard against
@@ -664,6 +854,272 @@ implemented.** User is reviewing the agent's source (`DivergenceReversalAgent.cs
 before deciding on next steps — candidates raised so far: breakout signals never scale an
 already-open position (only open when flat), exit is purely signal-driven with no explicit
 profit-taking/exhaustion logic, and there's no regime/instrument filter.
+
+### 3.9 divergence-reversal, post-bug-fix (2026-08-04, recorded here 2026-08-14) — the agent stopped trading
+
+These are the current numbers for this agent, replacing §3.7/§3.8. Same scripts, same data, same
+cost scenario, rerun after the `LastProcessedSwingConfirmedAt` watermark fix (§2.8); binaries
+confirmed rebuilt (`Agent.dll` 12:43, run 12:45–14:53). Logs:
+`/mnt/storage/scratch/wf-divergence-reversal/run-postfix.log`,
+`/mnt/storage/scratch/dr-9instrument-test/run-postfix.log`.
+
+| Run | Pre-fix (§3.7/§3.8) | Post-fix (current) |
+|---|---|---|
+| EUR/USD walk-forward, 4 folds | 16 pooled OOS trades, avgR -0.037 | **0 pooled OOS trades** (2 trades total across all 12 fold/phase windows) |
+| 9 instruments, 2026-01-01..07-24 | 829 trades, netR -85.11, avgR -0.103, PF 0.82 | **36 trades**, netR -14.24, avgR -0.395, PF 0.42, Sharpe -0.31 |
+
+Monte Carlo on the 36 pooled trades: safety-breach probability 84.25%, finalEquityR p5/median/p95 =
+-27.04/-14.01/-2.21R. Per-instrument trade counts collapsed by one to two orders of magnitude
+across the board (USD/CHF 61 → 0, XAG/USD 203 → 11, XAU/USD 187 → 6).
+
+**The finding is the trade count, not the loss.** 36 trades over 7 months across 9 instruments is
+~4 per instrument; no verdict about edge — positive or negative — is supportable from that sample,
+and the pre-fix "decisively negative at scale" verdict in §3.8 does not survive, because ~95% of
+the trades it rested on were stale re-fires. What is established: the bug was real and large, and
+fixing it did not reveal a profitable strategy underneath (avgR got worse, on a much noisier
+sample).
+
+**Root cause of the near-zero trade count, confirmed 2026-08-14** (§2.8 flagged this as the thing
+to check; it checks out). Entry required two conditions on the *same* candle: `ClassifyExtreme`
+reading Full (close beyond the Bollinger band **and** RSI **and** StochRSI-fast at their extremes)
+and `TryBuildSignal` seeing `IsNewRelationship == true`, which `StochRsiAnalysisState` sets on
+exactly the one candle a new relationship confirms. `SwingDetector` confirms a pivot only after its
+right-hand candles close, so the relationship lands ~2 candles *after* the price extreme that
+produced it — by which point price is typically back inside the band and the extreme no longer
+reads Full. The two halves of the entry condition were close to mutually exclusive by construction.
+The pre-fix bug had masked this by holding `IsNewRelationship` true indefinitely. See §2.8 for the
+fix (a configurable freshness window) and the funnel instrumentation added to measure it rather
+than infer it.
+
+### 3.10 divergence-reversal timeframe sweep + loss decomposition (2026-08-14/15) — why it loses
+
+First real-data test of the freshness window from §2.8. 6 configs × 9 instruments = 54 single-window
+backtests (2026-01-01..07-24, same current-defaults cost scenario as §3.8/§3.9), 98.9 min wall,
+12-way parallel. Driver: `/mnt/storage/scratch/dr-timeframe-sweep/` (per-config agent options via
+`StrategyInstrumentAssignment.AgentDefinitionOverride`; warmup fixed at 20 days for every config so
+the 4h plan isn't handicapped against the 15m one).
+
+| Config | Trigger / confirmation | Freshness | Trades | netR | avgR | PF | MC breach |
+|---|---|---|---|---|---|---|---|
+| baseline-freshness0 | 30m,15m / 5m,1m | 0 | 33 | -7.61 | -0.231 | 0.58 | 52.4% |
+| baseline-30m15m | 30m,15m / 5m,1m | 3 | 203 | -43.62 | -0.215 | 0.62 | 100% |
+| baseline-freshness8 | 30m,15m / 5m,1m | 8 | 551 | -61.75 | -0.112 | 0.79 | 100% |
+| fast-15m5m | 15m,5m / 1m | 3 | 268 | -70.26 | -0.262 | 0.54 | 100% |
+| slow-1h30m | 1h,30m / 15m,5m | 3 | 130 | -26.96 | -0.207 | 0.59 | 99.3% |
+| slowest-4h1h | 4h,1h / 30m,15m | 3 | 72 | -4.65 | -0.065 | 0.87 | 60.9% |
+
+**The freshness window worked as intended** — trade count scales monotonically with it (33 → 203 →
+551) and per-trade loss *shrinks* (-0.231 → -0.215 → -0.112), so the old same-candle rule was not
+only rare but selecting badly. The `freshness0` control reproduced §3.9's per-instrument numbers
+exactly (EUR/USD 1 trade +0.305, AUD/USD 6 at -2.43, GBP/USD 1 at -0.85), confirming the new
+harness and the August 4 driver agree. **No configuration is profitable**; slower is consistently
+better than faster.
+
+**Loss decomposition** (`/mnt/storage/scratch/dr-timeframe-sweep/analyse.py`, reading the per-trade
+`trades.ndjson` the backtest already writes; numbers below are the 203-trade baseline):
+
+- **Not signal direction.** Win rate 43.8%. Winners reach **+1.95R** maximum favourable excursion on
+  average; losers only **+0.34R**. The entry genuinely separates trades that run from trades that
+  don't.
+- **Not execution cost** (this refuted the initial hypothesis, which was that cost explained the
+  whole loss). Commission 0.020R + spread/slippage 0.104R = **0.125R/trade**; avgR *gross of all
+  costs* is still **-0.090**. Cost does scale with timeframe (0.170R on 15m/5m vs 0.077R on 4h/1h),
+  which is part of why slower configs do better, but it is not the cause.
+- **It is payoff asymmetry created by the exit layer.** avgWin +0.80R vs avgLoss -1.01R = payoff
+  **0.79**; break-even at a 43.8% win rate needs **1.29**. Winners realise only **41% of their own
+  MFE**.
+- Exit mix: `InitialStopLoss` 53% (avgR -1.06), **`BreakEvenStop` 24% (avgR +0.25)**,
+  `TrailedStructureStop` 7% (+1.45), `MfeGivebackStop` 6% (+1.90), `ProfitFloorStop` 6% (+0.19).
+  The agent's own designed exit, `StructuralInvalidation`, fires on **1%** of trades — the
+  "primary exit is the next opposing reversal signal" design in §2.8 is effectively not being
+  tested.
+- Sensitivity, holding win rate and loss size fixed: capture 41% → -0.215R (today), 60% → -0.054R,
+  80% → **+0.117R**. So exit calibration alone can plausibly flip the sign; it is not a rounding
+  error.
+
+**Root cause of the exit behaviour — an accidental inheritance, not a tuning choice.**
+`BacktestConfiguration.GetPositionManagement()` (`Simulator/Models/BacktestConfiguration.cs:439-448`)
+routes structural-confluence to `StructuralPositionManagement`, anything containing `"legacy"` to
+`LegacyPositionManagement`, and **everything else to `ImprovedPositionManagement`**.
+`divergence-reversal` matches neither name, so it silently lands in the fallback and inherits the
+profile tuned for `improved-progressive`. In `PositionManagementOptions.ImprovedDefaults`
+(`TradeManager/StructureBasedTradeManager.cs:338-405`) **three mechanisms all fire at exactly 1R**:
+`BreakEvenActivationR = 1`, a `ProfitFloorRule { ActivationR = 1, LockedProfitR = 0 }`, and a 15%
+`scale-1r` scale-out. Trades routinely touch ~1R, trip all three, retrace, and exit at ~+0.25R.
+The preset's own comment concedes it is a "historical convenience default … not a guarantee for
+every agent," and the same file already documents this exact pathology being found and fixed for
+`IndicatorConfluencePlaybook` via a per-playbook override — divergence-reversal has the same
+disease and no override. **The fallback branch itself is a landmine for the next agent added.**
+
+### 3.11 divergence-reversal exit-calibration sweep (2026-08-15) — the diagnosis was right, the fix is not sufficient
+
+Direct test of §3.10's conclusion. 5 configs × 9 instruments (87.2 min,
+`/mnt/storage/scratch/dr-exit-calibration/`), timeframes pinned to the 30m/15m baseline, varying
+**only** the position-management profile via `BacktestRuntimeOptions.ImprovedPositionManagement`
+(the slot `GetPositionManagement()`'s fallback actually routes this agent to; override confirmed
+present in the persisted job JSON before launch).
+
+| Config | Trades | netR | avgR | winRate | avgWin | payoff | PF |
+|---|---|---|---|---|---|---|---|
+| *baseline (§3.10)* | 203 | -43.62 | -0.215 | 43.8% | +0.80 | 0.79 | 0.62 |
+| pm-be2r (break-even 1R→2R) | 203 | -45.16 | -0.222 | 39.9% | +0.87 | 0.92 | 0.61 |
+| pm-nofloor1r (drop 1R floor) | 203 | -39.33 | -0.194 | 44.8% | +0.85 | 0.82 | 0.66 |
+| pm-noscaleout (drop 1R partial) | 203 | -47.27 | -0.233 | 42.9% | +0.78 | 0.78 | 0.59 |
+| **pm-patient (all three → 2R)** | 201 | -34.98 | **-0.174** | 31.3% | **+1.66** | **1.64** | 0.75 |
+| *freshness8 baseline (§3.10)* | 551 | -61.75 | -0.112 | 45.6% | +0.90 | 0.94 | 0.79 |
+| **pm-patient-fresh8** | 538 | -57.51 | **-0.107** | 33.5% | +1.64 | 1.66 | 0.84 |
+
+**The mechanism behaved exactly as §3.10 predicted, and it still didn't work.** The patient profile
+more than doubled payoff (0.79 → 1.64) and avgWin (+0.80R → +1.66R) — the exit layer really was
+throwing winners away. But win rate collapsed in near-exact compensation (43.8% → 31.3%) because
+`InitialStopLoss` went from 53% to 69% of exits: the 1R mechanisms were *protecting* as many trades
+as they were cutting short. Net gain is only avgR -0.215 → -0.174. Break-even at 31.3% needs payoff
+2.19; achieved 1.64 (baseline needed 1.29, achieved 0.79 — so relatively closer, still short).
+
+**Methodological correction to §3.10.** That section's sensitivity table ("capture 80% of MFE →
++0.117R") treated MFE capture as a free dial. It isn't: MFE is a hindsight measurement, and the
+counterfactual to a +0.25R scratch is frequently a -1R loss, not a completed winner. The table was
+an arithmetic ceiling, not an achievable target, and should be read only as such. The isolated
+single-knob variants are the clearest evidence — two of the three made things *worse*; only the
+coherent combination helped.
+
+**Costs are now the binding constraint for the best config.** `pm-patient-fresh8` is
+**+0.018R gross of costs** and -0.107R after them; execution cost is 0.125R/trade. For the first
+time a configuration is (marginally) positive before costs — which is not an edge, but it does
+relocate the problem. Note §3.10's cost figures scale with timeframe (0.170R on 15m/5m, 0.077R on
+4h/1h), and the best *pre-exit-fix* config was `slowest-4h1h` (avgR -0.065). **Patient exits × slow
+timeframes is the untested combination** and the obvious next experiment.
+
+**Signal funnel** (now correct — see the defect note below; EUR/USD, pm-patient): the dominant
+rejection is still `stale`, ~67% of Full extremes (1m: 645 full → 432 stale → 192 direction
+mismatch → 18 signals; 30m: 69 full → 43 stale, 26 mismatch, 0 signals). `noRelationship` is
+~0, so a relationship almost always exists — it is simply older than the freshness window or
+pointing the other way. Consistent with freshness 8 producing ~2.6× the trades of freshness 3.
+
+**Multiple-comparison warning.** Across §3.10 and §3.11, eleven configurations have now been
+compared on one window, one cost model, and nine correlated instruments, with no correction. The
+per-config differences here (0.005-0.041R) are well inside the range selection noise can produce.
+**Nothing in either section is validated**; the only defensible claims are the negative ones (no
+configuration is profitable; all Monte Carlo safety-breach probabilities are ~100%) and the
+mechanistic ones (payoff/win-rate coupling, cost per R by timeframe). Any config that looks
+promising needs walk-forward validation before it is believed.
+
+**Known defect in the timeframe sweep's own funnel pass**: phase 2 excluded the 1m base interval
+from the aggregator's target list, so any config whose finest interval is 1m never saw its
+`TriggerInterval` close and `EvaluateAsync` was never called — the funnel rows for
+`baseline-*` and `fast-15m5m` in `output/sweep-results.json` are all zeros and must be ignored.
+Only `slow-1h30m`/`slowest-4h1h` funnels are valid there. Fixed in the exit-calibration copy
+(pass every analysis interval, matching `AgentDebugRunner`); phase 1 backtest results are
+unaffected, since they never used that code path.
+
+---
+
+### 2.9 Stored simulation profiles were unreadable — ContentHash invalidated by schema drift (2026-08-19)
+
+**Symptom.** `GET /api/simulation-profiles` returned HTTP 500 (both directly on `:5180` and through
+the Vite proxy), so the Dashboard Simulator panel had no strategy profiles. Exception:
+`ArgumentException: ContentHash does not match the resolved profile` from
+`SimulationStrategyProfile.Validate()` (`Simulator/Experiments/Models/SimulationStrategyProfile.cs:74`),
+thrown out of `PostgresSimulationStrategyProfileStore.Deserialize` → `ListAsync`.
+
+**Diagnosis (read-only).** All **44** stored profile revisions failed, not one bad row. Crucially:
+`configuration_hash` matched the `contentHash` embedded in `settings_json` on every row (0 drift),
+0 deserialization failures, and **0 stored values changed on round-trip** — so nothing was corrupt.
+Round-tripping each stored profile through the current type shape showed the current code emits
+**45 JSON paths that did not exist when these were written**, 11 of them affecting all 44 rows:
+`agent.divergenceReversal`, `analysis.stochRsi{Period,FastSmoothing,SlowSmoothing}` (and the same
+three again under `runtime.options.annotationOptions`), `runtime.options.structural{Trigger,Setup,Context}Interval`,
+and `runtime.options.tradingConditions.softSpreadLimitAction`; plus ~34 more hitting 34-35 rows
+(supply/demand origination filters, liquidity touch filters, `geometry.minimumRiskToSpreadMultiple`,
+`marketRegime`). `ComputeContentHash` serializes `Agent`/`Analysis`/`Runtime`/`Management`/`Calibration`
+(`SimulationStrategyProfile.cs:195-205`), so **any** added field — even one defaulting to `null` —
+changes the JSON and therefore the SHA-256 for every profile ever stored. This is exactly the
+persisted-hash breaking-change risk §4b flags, now realized. Note a first hypothesis (that the single
+new `TradingAgentDefinition.DivergenceReversal` property explained it) was tested and **reproduced 0 of
+44** — the drift is cumulative across several changes, not one.
+
+**Also found:** the current shape *drops* 3 paths that 6 profiles still carry —
+`agent.structuralConfluence.indicatorConfluence.{maximumRsiForBuy,minimumRsiForSell,requireSqueezeBreakout}`.
+Those values were captured to a side file before any rewrite, since re-serialization discards them.
+
+**Second, independent problem.** 11 of the 44 revisions also fail `ValidateManagementTimeframeAlignment`
+— they hardcode `Management.ThesisInterval`/`MainStructureInterval` values their agents no longer
+evaluate (e.g. `ThesisInterval 1H` against an agent whose coarsest interval is now `2H`). Re-hashing
+cannot fix these; a valid hash over invalid configuration would only mask the drift the validator
+exists to catch. **They were deliberately left untouched.** This does not block the dashboard because
+`ListAsync` selects `.MaxBy(row => row.Revision)` per profile (`PostgresSimulationStrategyProfileStore.cs:111`)
+and all 11 failures are older revisions (r1-r4) of profiles whose latest revision is valid. They will
+still throw via `ReadAsync`/`DiffAsync` if those specific old revisions are diffed — **still open**,
+fixable by clearing the hardcoded intervals (the validator's own message recommends omitting them so
+they derive automatically) or by archiving those revisions.
+
+**Fix applied.** 33 revisions re-hashed — `ContentHash` recomputed from the current shape and both
+`settings_json` and `configuration_hash` rewritten, in one transaction. Verified after: the endpoint
+returns **HTTP 200 with 11 profiles** (200 direct and through the proxy), and no new errors in the
+backend log. Backups written before any modification to
+`/mnt/storage/tradinghub-profile-revisions-backup-*.json` (all 44 revisions verbatim) and
+`/mnt/storage/tradinghub-profile-dropped-fields-*.json` (the 3 discarded fields for the 6 affected
+profiles). Migration tool retained at `/mnt/storage/tradinghub-profile-rehash/` — it is idempotent,
+backs up before writing, and refuses to write if any active profile's latest revision fails validation.
+
+**Lesson for future schema changes.** Adding *any* field to a type inside the hashed graph silently
+invalidates every persisted `SimulationStrategyProfile`, with no migration and no warning — the
+failure surfaces much later as a 500 on an unrelated endpoint. Either version the hash, exclude
+defaulted-null fields from it, or ship a re-hash migration alongside the schema change.
+
+---
+
+### 2.10 Timeframe drill-in: warmed-up, centred windows (2026-08-19, user-requested)
+
+Selecting a candle now asks which timeframe to open it at, and the chosen timeframe loads centred on
+that candle with 499 candles before and 500 after. Going back up uses the same path.
+
+**Why a backend endpoint was required.** `OandaLiveAnalysisSession.cs:95` returns exactly ONE real
+series (the selected interval). Client-side `resampleFrames` can only aggregate coarser, never
+manufacture finer, and sets `emptyIndicators` by design. So before this: drilling *down* was
+impossible (no finer series existed) and drilling *up* landed on a synthetic series with no
+indicators, i.e. an unannotatable chart. The existing `drillInto` also auto-picked a direction
+rather than asking.
+
+**Backend** — `GET /api/workspaces/oanda/window?symbol&interval&anchor&before&after`.
+`OandaWorkspaceService.GetWindowAsync` fetches by time range, analyses warm-up + window together
+through the existing `WorkspaceAnalysis.AnalyzeAsync`, then discards the warm-up frames, so every
+returned frame has settled ATR/RSI/Bollinger and confirmed swings. Verified against live OANDA:
+1,000 frames, anchorIndex 499, `warmupSatisfied: true`, **0 frames with null ATR**.
+
+Three decisions worth remembering:
+- **The 150-frame transport cap had to be bypassed.** `LiveSseFrameProjector.ProjectSeries` keeps
+  only the newest `MaxSnapshotFrames`; applied to a drill window that discards everything *before*
+  the anchor. New `ProjectWorkspaceWindow` keeps all frames and bounds size the same way instead —
+  one frame with structural overlays, and that frame is the **anchor**, not the last.
+- **Clamping never slides.** Running out of history on one side must not borrow from the other;
+  `AnchorIndex` reports where the anchor really landed.
+- **The fetch over-reaches on calendar time** (FX has no weekend candles) but the end is clamped to
+  now — see below.
+
+**Two bugs found by actually driving the UI, not by reading:**
+1. `to` could land in the future (anchor near the live edge + padded "after" span), and OANDA
+   rejects a future range end → HTTP 400 surfaced as a 502. Curl tests with older anchors never hit
+   it. Fixed by clamping `to` to `now`.
+2. Drilling wrote `workspace.interval`, which tore down and reconnected the live data source; on the
+   way *back* the chart blanked to "Connecting workspace data" and never recovered. Fixed by not
+   touching `workspace.interval` (a drill is a transient view) and by making `activeSeries` fall
+   back to the drilled window when `dataset` is momentarily null.
+
+**Frontend** — `App.vue` holds fetched windows in `drillWindows`, kept OUT of `dataset` because the
+live SSE feed rewrites `dataset` continuously and would wipe them; they are merged in through
+`mtfSeries` where they read as real series. `useMultiTimeframeSelection.drillInto` gained an optional
+explicit target (auto-pick retained for `SimulatorPanel`, which has no chooser). Drill is enabled in
+live mode for OANDA only.
+
+**Verified in the browser end-to-end**: chooser splits ↓ Lower / ↑ Higher correctly against the
+current interval; drilling 1h → 5m gives "frame 500/1000" with annotations across the whole window
+including the earliest candles; Back returns to 1h still centred on the drilled candle.
+
+**Not done**: Binance (`/api/workspaces/binance/snapshot` needs the same treatment) — deferred by
+the user. `Simulator.Tests/WorkspaceDrillWindowTests.cs` covers anchor resolution, the 499/500
+geometry, edge clamping and the projection; the future-`to` clamp is covered only by the manual
+verification above, since `GetWindowAsync` needs a live broker client.
 
 ---
 
@@ -1075,6 +1531,18 @@ not.
    mini-backtest; confluence showed a suggestive raw hit-rate (n=33, not significant) that did
    *not* survive being turned into an actual traded system (avgR=-0.331, n=22). Not worth
    implementing as a new analyzer on this evidence.
+4a. ~~Rerun `divergence-reversal` with the freshness window~~ — done 2026-08-14/15 (§3.10):
+   trade count 33 → 203 → 551 as the window widens, no config profitable, and the loss decomposed
+   to exit calibration (winners realise 41% of their MFE) rather than signal quality or cost.
+   Exit-calibration sweep in flight.
+
+4b. **Give `divergence-reversal` its own position-management profile** and fix the fallback branch
+   in `GetPositionManagement()` that silently hands any unrecognised agent
+   `ImprovedPositionManagement` (§3.10). Pending the exit-calibration sweep's result — if a
+   patient profile materially improves payoff, this stops being a scratch-experiment override and
+   becomes a real code change (a `DivergenceReversalPositionManagement` slot, or routing by agent
+   kind instead of by substring match on the strategy id).
+
 4. **Decision needed from you**: three independently-tested things now point the same direction —
    `structural-confluence` loses money at current-defaults costs (§3.2) and barely trades at
    realistic costs (§3.3); `legacy-progressive` loses money more decisively and consistently
@@ -1128,6 +1596,35 @@ into `docs/`; Docker packaging.
 verification done). Move stale/superseded entries into the relevant numbered section above instead
 of letting this grow forever; this is a changelog, not the whole story.*
 
+- **2026-08-15 (cont'd)**: Exit-calibration sweep done (§3.11). The §3.10 diagnosis was
+  mechanically correct — the patient profile doubled payoff (0.79 → 1.64) — but win rate collapsed
+  in near-exact compensation (43.8% → 31.3%, stop-outs 53% → 69%), so avgR only moved -0.215 →
+  -0.174. Corrected §3.10's MFE-capture sensitivity table, which wrongly treated a hindsight
+  measurement as an achievable dial. Best config (`pm-patient-fresh8`) is +0.018R *gross* and
+  -0.107R after costs, making execution cost the binding constraint for the first time. Added an
+  explicit multiple-comparison warning: 11 configs on one window, nothing validated.
+- **2026-08-15**: Ran the divergence-reversal timeframe sweep (54 backtests, §3.10) and decomposed
+  the loss from the per-trade records rather than aggregates. Headline: the freshness window works
+  (33 → 203 → 551 trades), nothing is profitable, and the cause is *not* signal quality (winners
+  reach +1.95R MFE vs losers' +0.34R) and *not* execution cost (0.125R/trade; gross avgR still
+  -0.090) — it is the exit layer realising only 41% of a winner's excursion, because
+  `GetPositionManagement()`'s fallback branch hands this agent `ImprovedDefaults`, where three
+  separate mechanisms all fire at exactly 1R. Launched an exit-calibration sweep to test whether
+  moving them out recovers the payoff. Also found and fixed (in the new driver) a defect in the
+  earlier sweep's funnel pass that zeroed the funnel for any config whose finest interval is 1m.
+- **2026-08-14**: Reviewed the agents' test results at the user's request. Found §3.7/§3.8 still
+  citing pre-bug-fix numbers while §2.8 already carried the post-fix reruns — reconciled by adding
+  §3.9 (post-fix: 0 pooled OOS walk-forward trades; 36 trades / 9 instruments / 7 months,
+  netR=-14.24, PF=0.42) and marking §3.7/§3.8 superseded. Confirmed §2.8's own open question about
+  whether the fix was *overly* strict: it was — `SwingDetector`'s confirmation lag puts the
+  divergence relationship ~2 candles after the price extreme, so the same-candle
+  `IsNewRelationship` + Full-extreme requirement was nearly unsatisfiable. Added
+  `SignalFreshnessCandles` (default 3, `0` = old behaviour) with a consume-once guard so widening
+  the window can't re-fire one relationship, a per-timeframe signal funnel
+  (`GetFunnelSnapshot()`, surfaced as a table in the Agent Debugger + a new form field), and the
+  regression tests that the original bug slipped through (agent driven with the accumulated swing
+  window production actually sends). 1061 `Simulator.Tests` pass, 0 fail; `vue-tsc` clean. **No
+  backtest rerun yet** — the behaviour change is unmeasured against real data (roadmap 4a).
 - **2026-08-04**: Implemented `DivergenceReversalAgent` (§2.8), formalizing the user's personal
   2-year manual/Python trading strategy (private repo, cloned for reference) after understanding
   its actual mechanics through conversation and reading the source directly. New
@@ -1257,6 +1754,44 @@ of letting this grow forever; this is a changelog, not the whole story.*
 - **2026-08-02**: Fixed structural-confluence silent-inert-playbook bug (§2.5); ran first-ever
   walk-forward validation, current-defaults scenario complete (§3.2, negative result).
 - **2026-08-02**: Produced `TradingHub_Sponsorship_Readiness_Assessment_2026-08-02.md`.
+- **2026-08-19**: Formula audit of the risk system (`PositionSizing`, `InstrumentRiskSpec`/
+  `PortfolioOpenRisk`, `RiskBudgetPolicy`, `PreTradeRiskManager`, `TradingSafety`,
+  `SetupCalibration`/`MetaLabel`). Core arithmetic verified correct; fixed RSK-02..RSK-05 above and
+  added `Simulator.Tests/RiskGuardRegressionTests.cs` (9 tests). Verified the regression tests
+  genuinely bite: 6 of 9 fail against the pre-fix code (the other 3 assert preserved behaviour).
+  Suites green: `Simulator.Tests` 1070/1070, `LiveTrading.Tests` 119/119.
+- **2026-08-19**: Formula/implementation audit of `TradeManager` (`StructureBasedTradeManager`,
+  `ManagementCalibration`, `RegimePositionManagementProfiles`, `PlaybookAwareTradeManager`,
+  `VolatilityBucketClassifier`, `PositionManagementOptionsTimeframeExtensions`). Core management
+  math verified correct; fixed TM-01..TM-07 above and added
+  `Simulator.Tests/TradeManagerGuardRegressionTests.cs` (6 tests). Both high-severity findings were
+  reproduced with a throwaway probe *before* being fixed, and the regression tests were verified to
+  bite: 4 of 6 fail against pre-fix code (the other 2 assert preserved behaviour). Suites:
+  `Simulator.Tests` 1076/1076, `LiveTrading.Tests` 119/119, `QuantResearchRunner.Tests` 71/73 —
+  the 2 failures (`Merger_CombinesBucketsAndCohortsByStrategy`,
+  `RunAndProposeAsync_DerivesAgentOptions_FromTrainingRuntime_NotBareDefaults`) were confirmed
+  byte-identical before and after the change, matching the pre-existing baseline.
+- **2026-08-19**: Formula/implementation audit of `ExecutionManager` (`ExecutionCoordinator`,
+  `PositionReconciliationGuard`, options/command records — 990 lines total). Fixed EM-01..EM-05
+  above and added `Simulator.Tests/ExecutionManagerGuardRegressionTests.cs` (7 tests). EM-01 was
+  reproduced with a throwaway probe before being fixed. The cache-eviction test was initially too
+  weak to distinguish a cached replay from a re-execution (it passed both with and without the fix)
+  and was rewritten against a capability-advertising broker that counts broker calls; 6 of 7 tests
+  now fail against pre-fix code, the 7th being a deliberate preserved-behaviour guard. Suites:
+  `Simulator.Tests` 1083/1083, `LiveTrading.Tests` 119/119, `TradingCore.Tests` 24/24,
+  `TradingHub.UnitTests` 60/60, `QuantResearchRunner.Tests` 71/73 (same two pre-existing failures,
+  names re-confirmed identical). **`DBManager.Tests` does not build** — `NU1903` treats a known
+  high-severity `SSH.NET` 2025.1.0 vulnerability as an error. Pre-existing and unrelated to this
+  work (no DBManager file was touched), but it means that suite is currently providing zero cover.
+- **2026-08-19**: Built timeframe drill-in (§2.10) — new OANDA window endpoint plus the dashboard
+  chooser/centring. Verified in a browser against live OANDA data; two bugs (future range end,
+  reconnect-on-drill) were found only by driving the real UI. `Simulator.Tests` 1092/1092,
+  `LiveTrading.Tests` 119/119, `vue-tsc` clean. Binance deferred.
+- **2026-08-19**: Diagnosed and fixed the Dashboard's HTTP 500 on `/api/simulation-profiles` — all 44
+  stored simulation-profile revisions had `ContentHash` invalidated by cumulative schema drift (§2.9).
+  Re-hashed 33; left 11 historical revisions untouched because they fail timeframe-alignment
+  validation for real reasons. Endpoint verified 200 with 11 profiles. Backups and the migration tool
+  are under `/mnt/storage/`.
 
 ---
 

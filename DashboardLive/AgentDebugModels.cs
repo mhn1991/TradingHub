@@ -24,6 +24,11 @@ public sealed record AgentDebugRunRequest
     public required DateTimeOffset RunStart { get; init; }
     public required DateTimeOffset RunEnd { get; init; }
 
+    /// <summary>Off by default - a range not already covered by cached data errors out naming the
+    /// cached range instead. Set true to download the missing range from the broker (OANDA or
+    /// Binance, by instrument prefix) and cache it for next time, same as a normal backtest run.</summary>
+    public bool AllowFetch { get; init; }
+
     public decimal Quantity { get; init; } = 1_000m;
     public decimal RsiOverbought { get; init; } = 75m;
     public decimal RsiOversold { get; init; } = 25m;
@@ -32,6 +37,11 @@ public sealed record AgentDebugRunRequest
     public decimal PartialStochRsiFastOverbought { get; init; } = 85m;
     public decimal PartialStochRsiFastOversold { get; init; } = 15m;
     public decimal ProtectiveStopAtrMultiple { get; init; } = 3.0m;
+
+    /// <summary>How many candles after confirmation a StochRSI-fast relationship can still supply a
+    /// signal. 0 reproduces the original same-candle-only behaviour; see
+    /// <c>DivergenceReversalStrategyOptions.SignalFreshnessCandles</c>.</summary>
+    public int SignalFreshnessCandles { get; init; } = 3;
 }
 
 public sealed record AgentDebugInstrumentInfo(string Instrument, DateTimeOffset CachedFrom, DateTimeOffset CachedTo);
@@ -88,4 +98,35 @@ public sealed record AgentDebugEvent
     // Status / Error / Complete
     public string? Message { get; init; }
     public int? TotalTrades { get; init; }
+
+    /// <summary>Set on the final Status event: how far every candle got through the agent's entry
+    /// condition, straight from the real agent's own counters.</summary>
+    public AgentDebugFunnel? Funnel { get; init; }
+}
+
+/// <summary>Wire shape for <c>DivergenceReversalFunnelSnapshot</c> - kept as its own DTO so the
+/// page doesn't depend on the Agent assembly's types.</summary>
+public sealed record AgentDebugFunnel
+{
+    public required IReadOnlyList<AgentDebugFunnelStage> Stages { get; init; }
+    public required long Evaluations { get; init; }
+    public required long Entries { get; init; }
+    public required long Closes { get; init; }
+    public required long Flips { get; init; }
+    public required long SuppressedAlreadyPositioned { get; init; }
+    public required long BreakoutHeldAgainstPosition { get; init; }
+}
+
+public sealed record AgentDebugFunnelStage
+{
+    public required string Interval { get; init; }
+    public required string Role { get; init; }
+    public required long CandlesProcessed { get; init; }
+    public required long PartialExtremes { get; init; }
+    public required long FullExtremes { get; init; }
+    public required long NoRelationship { get; init; }
+    public required long StaleRelationship { get; init; }
+    public required long AlreadyConsumed { get; init; }
+    public required long DirectionMismatch { get; init; }
+    public required long SignalsBuilt { get; init; }
 }

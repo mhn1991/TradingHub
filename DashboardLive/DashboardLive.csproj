@@ -7,6 +7,11 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Workspace window/projection helpers are internal on purpose; the test project needs them
+         without widening the public API surface. -->
+    <InternalsVisibleTo Include="Simulator.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../Agent/Agent.csproj" />
     <ProjectReference Include="../Brokers/Brokers.csproj" />
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />

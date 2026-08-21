@@ -156,6 +156,148 @@ internal sealed class OandaWorkspaceService : BackgroundService
         }
     }
 
+    /// <summary>Largest window a single request may ask for, before warm-up is added on top.</summary>
+    public const int MaximumWindowCandles = 2_000;
+
+    /// <summary>
+    /// OANDA's per-request candle ceiling (see OandaClients' <c>query.Validate(5000, "OANDA")</c>).
+    /// The warm-up span plus the window must fit inside one request.
+    /// </summary>
+    private const int OandaMaximumCandlesPerRequest = 5_000;
+
+    /// <summary>
+    /// Analysed candles centred on <paramref name="anchorAt"/>, for drilling into another timeframe
+    /// without losing your place.
+    ///
+    /// The analyser is fed <c>WarmupCandles</c> extra candles before the first visible one and those
+    /// frames are then dropped, so every frame returned has settled ATR/RSI/Bollinger values and
+    /// confirmed swings. Analysing only the visible span would annotate its earliest candles from
+    /// half-formed indicator state, which is worse than not annotating them at all.
+    ///
+    /// The requested span is a maximum, not a guarantee: near the start of available history or the
+    /// live edge, fewer candles exist on one side. The window is clamped and
+    /// <see cref="WorkspaceWindowSnapshot.AnchorIndex"/> reports where the anchor actually landed,
+    /// rather than padding with synthetic candles.
+    /// </summary>
+    public async Task<WorkspaceWindowSnapshot> GetWindowAsync(
+        string symbol,
+        string intervalName,
+        DateTimeOffset anchorAt,
+        int before,
+        int after,
+        CancellationToken cancellationToken)
+    {
+        if (before < 0 || after < 0)
+            throw new ArgumentOutOfRangeException(nameof(before), "Window sizes cannot be negative.");
+        if (before + after + 1 > MaximumWindowCandles)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(before),
+                $"A window of {before + after + 1} candles exceeds the {MaximumWindowCandles} maximum.");
+        }
+
+        OandaBrokerClient client = RequireClient();
+        WorkspaceAsset asset = await ResolveAssetAsync(symbol, cancellationToken).ConfigureAwait(false);
+        BarInterval interval = WorkspaceAnalysis.ParseInterval(intervalName);
+        var instrument = new InstrumentKey(asset.Instrument);
+        int intervalSeconds = WorkspaceAnalysis.IntervalSeconds(interval);
+        int warmup = _options.WarmupCandles;
+
+        // Ask by time range, not count, because OANDA returns candles ordered from `From`: a
+        // count-only query would hand back the oldest N of the range instead of the span we need.
+        // Over-reach the calendar span deliberately - FX has no weekend candles, so N candles span
+        // materially more than N intervals of wall-clock time. Without the padding the "before" leg
+        // silently comes up short across every weekend.
+        long beforeSpanSeconds = (long)(warmup + before + 1) * intervalSeconds;
+        long afterSpanSeconds = (long)(after + 1) * intervalSeconds;
+        DateTimeOffset from = anchorAt.AddSeconds(-beforeSpanSeconds * WeekendPaddingNumerator / WeekendPaddingDenominator);
+        DateTimeOffset to = anchorAt.AddSeconds(afterSpanSeconds * WeekendPaddingNumerator / WeekendPaddingDenominator);
+
+        // OANDA rejects a range whose end is in the future. Anchoring near the live edge easily
+        // produces one, because the padded "after" span reaches days past the anchor - so clamp.
+        // The window simply comes back short on the after side, which the caller already handles.
+        DateTimeOffset now = _timeProvider.GetUtcNow();
+        if (to > now) to = now;
+        if (from >= to)
+        {
+            throw new ArgumentException(
+                $"An anchor of {anchorAt:O} leaves no candles to analyse before {now:O}.",
+                nameof(anchorAt));
+        }
+
+        int limit = Math.Min(OandaMaximumCandlesPerRequest, warmup + before + 1 + after + WindowRequestSlack);
+        IReadOnlyList<Candle> candles = await client.MarketData.GetCandlesAsync(
+            new CandleQuery(instrument, interval, Limit: limit, From: from, To: to),
+            cancellationToken).ConfigureAwait(false);
+
+        // Retain every analysed frame: the anchor sits mid-span, so a capacity that keeps only the
+        // newest frames would discard the "before" half that the drill-in exists to show.
+        int capacity = Math.Max(1, candles.Count);
+        (IReadOnlyList<ReplayFrame> allFrames, long gaps) = await WorkspaceAnalysis.AnalyzeAsync(
+            instrument,
+            interval,
+            candles,
+            capacity,
+            cancellationToken).ConfigureAwait(false);
+
+        int anchorIndex = WorkspaceAnalysis.FindAnchorFrameIndex(allFrames, anchorAt);
+        if (anchorIndex < 0)
+        {
+            throw new KeyNotFoundException(
+                $"No {intervalName} candle exists at or before {anchorAt:O} for {asset.Symbol}.");
+        }
+
+        (int start, int end) = WorkspaceAnalysis.WindowBounds(anchorIndex, before, after, allFrames.Count);
+        ReplayFrame[] window = allFrames.Skip(start).Take(end - start + 1).ToArray();
+
+        // Warm-up is satisfied only when real analysed candles preceded the window, not merely when
+        // the window itself is full.
+        bool warmupSatisfied = start >= warmup;
+
+        var dataset = new ReplayDataset(
+            1,
+            $"{asset.DisplayName} OANDA {intervalName} window",
+            asset.Instrument,
+            _timeProvider.GetUtcNow(),
+            $"OANDA REST candles centred on {anchorAt:O}, analysed with {warmup} warm-up candles",
+            WorkspaceAnalysis.CreateOptions(),
+            [new ReplaySeries(intervalName, intervalSeconds, window)]);
+
+        var status = new LiveFeedStatus
+        {
+            State = LiveConnectionState.Connected,
+            Symbol = asset.Symbol,
+            Interval = intervalName,
+            Message = warmupSatisfied
+                ? $"Window of {window.Length} analysed candles."
+                : $"Window of {window.Length} analysed candles; only {start} warm-up candles were available.",
+            LastClosedCandleAt = window.Length > 0 ? window[^1].AvailableAt : null,
+            GapsDetected = gaps
+        };
+
+        return new WorkspaceWindowSnapshot(
+            status,
+            dataset,
+            intervalName,
+            anchorAt,
+            window.Length > 0 ? window[anchorIndex - start].AvailableAt : anchorAt,
+            anchorIndex - start,
+            before,
+            after,
+            warmup,
+            warmupSatisfied);
+    }
+
+    /// <summary>Extra candles requested beyond the exact need, absorbing partial/pending candles.</summary>
+    private const int WindowRequestSlack = 16;
+
+    /// <summary>
+    /// Calendar padding for the fetch range. FX trades ~5 of 7 days, so N candles span roughly 7/5
+    /// of N intervals in wall-clock time; 2/1 leaves margin for holidays on top.
+    /// </summary>
+    private const int WeekendPaddingNumerator = 2;
+    private const int WeekendPaddingDenominator = 1;
+
     public async Task<OandaWorkspaceAccount> GetAccountAsync(CancellationToken cancellationToken)
     {
         OandaBrokerClient client = RequireClient();

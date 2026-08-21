@@ -70,9 +70,27 @@ export function useMultiTimeframeSelection(
       .map((item) => ({ ...item, seconds: parseIntervalSeconds(item.interval) }))
   }
 
-  /** Returns the new anchor timestamp to resolve against activeFrames, or null if there was
-   * nowhere to drill (e.g. already at the finest available interval with no coarser option). */
-  function drillInto(candleAvailableAt: string, currentAnchorAt: string | null): string | null {
+  /**
+   * Returns the new anchor timestamp to resolve against activeFrames, or null if there was
+   * nowhere to drill (e.g. already at the finest available interval with no coarser option).
+   *
+   * `targetInterval` drills to an explicitly chosen timeframe — used when the caller asks the user
+   * which direction to go, and when a server-fetched window makes finer intervals reachable that
+   * client-side resampling could never produce. Omitting it keeps the original auto-pick (prefer
+   * finer, else the first candidate), which callers without a chooser still rely on.
+   */
+  function drillInto(
+    candleAvailableAt: string,
+    currentAnchorAt: string | null,
+    targetInterval?: string,
+  ): string | null {
+    if (targetInterval !== undefined) {
+      if (targetInterval === activeInterval.value) return null
+      history.value.push({ interval: activeInterval.value, anchorAt: currentAnchorAt })
+      activeInterval.value = targetInterval
+      return candleAvailableAt
+    }
+
     const candidates = drillCandidates(activeInterval.value)
     const originSeconds = parseIntervalSeconds(activeInterval.value)
     const preferred = candidates.find((item) => item.seconds < originSeconds) ?? candidates[0]

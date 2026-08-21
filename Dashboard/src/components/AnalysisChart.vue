@@ -31,7 +31,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'switch-interval': [interval: string]
-  'drill-candle': [availableAt: string]
+  'drill-candle': [availableAt: string, at?: { x: number; y: number }]
   'drill-back': []
 }>()
 
@@ -1019,7 +1019,7 @@ function handleDoubleClick(event: MouseEvent) {
     ),
   )
   const frame = visibleFrames.value[index]
-  if (frame) emit('drill-candle', frame.availableAt)
+  if (frame) emit('drill-candle', frame.availableAt, { x: event.clientX, y: event.clientY })
 }
 
 /** Keyboard equivalent of double-click: Enter drills into the focused (hovered, or default)
@@ -1031,7 +1031,13 @@ function handleKeydown(event: KeyboardEvent) {
     const frame = focusFrame.value
     if (frame) {
       event.preventDefault()
-      emit('drill-candle', frame.availableAt)
+      // Keyboard drill has no pointer position; anchor the chooser to the chart element instead.
+      const bounds = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+      emit(
+        'drill-candle',
+        frame.availableAt,
+        bounds ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 } : undefined,
+      )
     }
     return
   }

@@ -635,7 +635,11 @@ public sealed class LiveShadowOutcomeService : ILiveShadowOutcomeService
         InstrumentGroup = InstrumentGroupResolver.Resolve(position.Instrument),
         SetupType = position.PlaybookId ?? position.SetupId ?? "Unknown",
         EntrySession = "Unknown",
-        EntryVolatilityBucket = "Live",
+        // CAL-01: "Live" is not a bucket the cohort builder can ever emit, so cohort lookup here
+        // could never match and this path was pinned to StaticManagementFallback permanently.
+        // ShadowPaperPosition carries no ATR percentile, so classify from no data and get the real
+        // "Unknown" key, which a cohort can actually match.
+        EntryVolatilityBucket = VolatilityBucketClassifier.Classify(null),
         EntryConfidence = position.EntryConfidence,
         Instrument = position.Instrument,
         Side = position.Side == AgentAction.Buy ? OrderSide.Buy : OrderSide.Sell,

@@ -398,6 +398,53 @@ app.MapGet("/api/workspaces/oanda/snapshot", async (
     }
 });
 
+// Timeframe drill-in: a fully warmed-up window of analysed candles centred on one candle, so
+// switching timeframe keeps your place instead of jumping to the live edge. Defaults give 499
+// candles before the anchor and 500 after (1,000 including the anchor).
+app.MapGet("/api/workspaces/oanda/window", async (
+    string symbol,
+    string interval,
+    DateTimeOffset anchor,
+    OandaWorkspaceService service,
+    CancellationToken cancellationToken,
+    int before = 499,
+    int after = 500) =>
+{
+    try
+    {
+        WorkspaceWindowSnapshot window = await service.GetWindowAsync(
+            symbol,
+            interval,
+            anchor,
+            before,
+            after,
+            cancellationToken);
+        return Results.Ok(LiveSseFrameProjector.ProjectWorkspaceWindow(window));
+    }
+    catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+    {
+        return Results.BadRequest(new { error = exception.Message });
+    }
+    catch (KeyNotFoundException exception)
+    {
+        return Results.NotFound(new { error = exception.Message });
+    }
+    catch (HttpRequestException exception)
+    {
+        return Results.Problem(
+            title: "OANDA market data is unavailable",
+            detail: exception.Message,
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+    catch (Brokers.Exceptions.BrokerApiException exception)
+    {
+        return Results.Problem(
+            title: "OANDA rejected the market-data request",
+            detail: exception.Message,
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+});
+
 app.MapPost("/api/workspaces/oanda/orders", async (
     OandaWorkspaceOrderRequest order,
     HttpRequest request,

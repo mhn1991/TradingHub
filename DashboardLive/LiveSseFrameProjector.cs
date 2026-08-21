@@ -44,6 +44,47 @@ internal static class LiveSseFrameProjector
         };
     }
 
+    /// <summary>
+    /// Projects a drill-in window. Deliberately does NOT apply <see cref="MaxSnapshotFrames"/>:
+    /// the whole point of the window is that the caller asked for a specific span around an anchor,
+    /// so truncating it to the newest 150 would silently discard most of it - including everything
+    /// before the anchor, which is the half the user drilled in to see.
+    ///
+    /// Size stays bounded the same way <see cref="ProjectSeries"/> bounds it: only ONE frame keeps
+    /// structural overlays (here the anchor, not the last frame, because the anchor is what the
+    /// chart centres and annotates). Every other frame keeps just candle/indicators/regime, which is
+    /// what the chart body actually draws.
+    /// </summary>
+    public static WorkspaceWindowSnapshot ProjectWorkspaceWindow(WorkspaceWindowSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ReplaySeries[] series = snapshot.Dataset.Series
+            .Select(item => ProjectWindowSeries(item, snapshot.AnchorIndex))
+            .ToArray();
+        return snapshot with
+        {
+            Dataset = snapshot.Dataset with { Series = series }
+        };
+    }
+
+    private static ReplaySeries ProjectWindowSeries(ReplaySeries series, int structuralIndex)
+    {
+        IReadOnlyList<ReplayFrame> frames = series.Frames;
+        if (frames.Count == 0)
+        {
+            return series;
+        }
+
+        int keepAt = Math.Clamp(structuralIndex, 0, frames.Count - 1);
+        ReplayFrame[] projected = new ReplayFrame[frames.Count];
+        for (int i = 0; i < frames.Count; i++)
+        {
+            projected[i] = ProjectFrame(frames[i], keepStructure: i == keepAt);
+        }
+
+        return series with { Frames = projected };
+    }
+
     public static IReadOnlyList<ReplayFrame> ProjectUpdateFrames(IReadOnlyList<ReplayFrame> frames)
     {
         ArgumentNullException.ThrowIfNull(frames);

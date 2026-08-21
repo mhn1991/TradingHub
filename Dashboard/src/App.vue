@@ -29,6 +29,7 @@ import type {
   WorkspaceCatalog,
   WorkspaceDefinition,
   WorkspaceSnapshot,
+  WorkspaceWindowSnapshot,
 } from './types'
 
 const workspaceStorageKey = 'tradinghub.workspaces.v1'
@@ -86,6 +87,21 @@ const selectedIndex = ref(0)
 // timeframe switch; restored on "back" only if that still leaves an earlier drill active.
 const centeredView = ref(false)
 const windowSize = ref(100)
+/** Candles either side of the anchor when drilling. 499 + anchor + 500 = a 1,000-candle window. */
+const DRILL_BEFORE = 499
+const DRILL_AFTER = 500
+/**
+ * Server-fetched, fully warmed-up windows keyed by interval, from /api/workspaces/oanda/window.
+ * Held separately from `dataset` on purpose: the live SSE feed rewrites `dataset` continuously, so
+ * a window merged into it would be wiped out by the next update. Merged in through `mtfSeries`
+ * instead, where it reads as a real series and keeps its indicators.
+ */
+const drillWindows = ref<Record<string, ReplaySeries>>({})
+/** Set while a drilled window is showing, so the UI can report reduced warm-up honestly. */
+const drillWarning = ref<string | null>(null)
+const drillLoading = ref(false)
+/** Open chooser: which candle was selected, and where to anchor the popover. */
+const drillPrompt = ref<{ availableAt: string; x: number; y: number } | null>(null)
 const playbackSpeed = ref(4)
 const isPlaying = ref(false)
 const loading = ref(true)
@@ -171,7 +187,15 @@ const mtfBaseInterval = computed(() => {
 const mtfBaseFrames = computed(() =>
   dataset.value?.series.find((series) => series.interval === mtfBaseInterval.value)?.frames ?? [],
 )
-const mtfSeries = computed(() => dataset.value?.series)
+// Drilled windows take precedence over any same-interval series from the live feed: the window is
+// centred on the anchor and warmed up, whereas the feed's series is a rolling view of "now".
+const mtfSeries = computed<ReplaySeries[] | undefined>(() => {
+  const base = dataset.value?.series ?? []
+  const drilled = Object.values(drillWindows.value)
+  if (drilled.length === 0) return dataset.value?.series
+  const drilledIntervals = new Set(drilled.map((series) => series.interval))
+  return [...base.filter((series) => !drilledIntervals.has(series.interval)), ...drilled]
+})
 const {
   activeInterval,
   availableIntervals,
@@ -183,6 +207,11 @@ const {
 } = useMultiTimeframeSelection(mtfBaseInterval, mtfBaseFrames, mtfSeries)
 
 const activeSeries = computed<ReplaySeries | null>(() => {
+  // A drilled window is self-contained, so it must keep rendering even while the live feed is
+  // reconnecting and `dataset` is momentarily null - otherwise going back to a timeframe blanks
+  // the chart to "Connecting workspace data" and never recovers.
+  const drilled = drillWindows.value[activeInterval.value]
+  if (drilled) return drilled
   if (!dataset.value) return null
   return dataset.value.series.find((series) => series.interval === activeInterval.value) ?? {
     interval: activeInterval.value,
@@ -197,29 +226,142 @@ function onSwitchInterval(interval: string) {
   const anchorAt = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
   switchInterval(interval)
   selectedIndex.value = findAnchorIndex(activeFrames.value, anchorAt)
-  centeredView.value = false
+  // A plain switch means "show me this timeframe now", not "keep my drilled place", so any fetched
+  // windows are dropped — leaving them would silently pin the chart to an old anchor.
+  clearDrill()
   isPlaying.value = false
 }
 
-function onDrillCandle(availableAt: string) {
-  const anchorAt = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
-  const resolvedAnchor = drillInto(availableAt, anchorAt)
-  if (resolvedAnchor === null) return
+/** Timeframes the workspace's broker can actually serve a warmed-up window for. */
+const drillTargets = computed(() => {
+  const current = parseIntervalSeconds(activeInterval.value)
+  return availableTimeframes.value
+    .map((interval) => ({ interval, seconds: parseIntervalSeconds(interval) }))
+    .filter((item) => item.seconds !== current)
+    .sort((left, right) => left.seconds - right.seconds)
+})
+const drillLowerTargets = computed(() =>
+  drillTargets.value.filter((item) => item.seconds < parseIntervalSeconds(activeInterval.value)),
+)
+const drillHigherTargets = computed(() =>
+  drillTargets.value.filter((item) => item.seconds > parseIntervalSeconds(activeInterval.value)),
+)
+
+/**
+ * Selecting a candle opens the chooser rather than drilling immediately. Which direction to go is
+ * genuinely ambiguous — the old behaviour guessed "finer if possible", which is wrong as often as
+ * it is right, and silently landed you on a resampled timeframe with no indicators.
+ */
+function onDrillCandle(availableAt: string, at?: { x: number; y: number }) {
+  if (mode.value !== 'live' || activeBroker.value?.id !== 'oanda') {
+    // Replay datasets carry every series up front; keep the original immediate drill there.
+    applyDrill(availableAt, undefined)
+    return
+  }
+  drillPrompt.value = {
+    availableAt,
+    x: at?.x ?? window.innerWidth / 2,
+    y: at?.y ?? window.innerHeight / 2,
+  }
+}
+
+function dismissDrillPrompt() {
+  drillPrompt.value = null
+}
+
+/** Fetches a warmed-up window for `interval` centred on `anchorAt`, or null if it failed. */
+async function fetchDrillWindow(interval: string, anchorAt: string): Promise<ReplaySeries | null> {
   const workspace = activeWorkspace.value
-  if (workspace) workspace.interval = activeInterval.value
+  if (!workspace) return null
+  drillLoading.value = true
+  drillWarning.value = null
+  try {
+    const query = new URLSearchParams({
+      symbol: workspace.symbol,
+      interval,
+      anchor: anchorAt,
+      before: String(DRILL_BEFORE),
+      after: String(DRILL_AFTER),
+    })
+    const response = await fetch(
+      `${import.meta.env.BASE_URL}api/workspaces/oanda/window?${query}`,
+      { signal: sourceAbortController?.signal },
+    )
+    if (!response.ok) {
+      const problem = await readJsonSafe<{ error?: string; detail?: string; title?: string }>(response)
+      throw new Error(
+        problem?.error ?? problem?.detail ?? problem?.title ?? `Window failed with HTTP ${response.status}.`,
+      )
+    }
+    const window_ = await response.json() as WorkspaceWindowSnapshot
+    const series = window_.dataset.series[0]
+    if (!series || series.frames.length === 0) throw new Error('The window returned no candles.')
+    if (!window_.warmupSatisfied) {
+      drillWarning.value =
+        `Only partial warm-up was available at ${interval} — the earliest candles' indicators are less settled.`
+    }
+    return series
+  } catch (error) {
+    if (isAbortError(error)) return null
+    loadError.value = messageFrom(error, `Could not load the ${interval} window.`)
+    return null
+  } finally {
+    drillLoading.value = false
+  }
+}
+
+/** Shared by the chooser and by "back": both need the same fetch/centre/window-size treatment. */
+async function applyDrill(availableAt: string, targetInterval: string | undefined) {
+  const anchorAt = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
+  if (targetInterval !== undefined) {
+    const series = await fetchDrillWindow(targetInterval, availableAt)
+    if (!series) return
+    drillWindows.value = { ...drillWindows.value, [targetInterval]: series }
+  }
+
+  const resolvedAnchor = drillInto(availableAt, anchorAt, targetInterval)
+  if (resolvedAnchor === null) return
+  // Deliberately NOT writing workspace.interval: that is the workspace's live-feed setting, and
+  // changing it tears down and reconnects the data source mid-drill. A drill is a transient view.
   selectedIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
+  // Show the whole fetched window, so the 499 before and 500 after are all reachable by panning.
+  if (targetInterval !== undefined) windowSize.value = DRILL_BEFORE + DRILL_AFTER + 1
   centeredView.value = true
   isPlaying.value = false
 }
 
-function onDrillBack() {
+async function chooseDrillTarget(interval: string) {
+  const prompt = drillPrompt.value
+  if (!prompt) return
+  drillPrompt.value = null
+  await applyDrill(prompt.availableAt, interval)
+}
+
+async function onDrillBack() {
+  const anchorBeforeBack = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
   const resolvedAnchor = goBack()
   if (resolvedAnchor === null) return
-  const workspace = activeWorkspace.value
-  if (workspace) workspace.interval = activeInterval.value
+
+  // Returning to a coarser timeframe needs the same centred, warmed-up treatment as going down —
+  // otherwise "back" would drop you at the live edge and lose the place you drilled from.
+  const target = activeInterval.value
+  if (mode.value === 'live' && activeBroker.value?.id === 'oanda' && !drillWindows.value[target]) {
+    const series = await fetchDrillWindow(target, resolvedAnchor ?? anchorBeforeBack ?? '')
+    if (series) drillWindows.value = { ...drillWindows.value, [target]: series }
+  }
+
   selectedIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
-  centeredView.value = canGoBack.value
+  centeredView.value = canGoBack.value || drillWindows.value[target] !== undefined
   isPlaying.value = false
+}
+
+/** Drops every fetched window and returns the chart to the live edge. */
+function clearDrill() {
+  drillWindows.value = {}
+  drillWarning.value = null
+  drillPrompt.value = null
+  centeredView.value = false
+  windowSize.value = 100
 }
 const selectedBacktestRun = computed(() =>
   backtestManifest.value?.runs.find((run) => run.id === selectedBacktestId.value) ?? null,
@@ -1734,7 +1876,7 @@ function isAbortError(error: unknown) {
               :window-size="windowSize"
               :layers="layers"
               :trades="dataset?.trades ?? []"
-              :available-intervals="mode === 'replay' ? availableIntervals : undefined"
+              :available-intervals="mode === 'replay' || activeBroker?.id === 'oanda' ? availableIntervals : undefined"
               :active-interval="activeInterval"
               :can-go-back="canGoBack"
               :centered="centeredView"
@@ -1742,6 +1884,59 @@ function isAbortError(error: unknown) {
               @drill-candle="onDrillCandle"
               @drill-back="onDrillBack"
             />
+
+            <div v-if="drillWarning" class="drill-warning" role="status">{{ drillWarning }}</div>
+            <div v-if="drillLoading" class="drill-warning" role="status">Loading window…</div>
+            <div v-if="Object.keys(drillWindows).length" class="drill-active">
+              <span>
+                Centred on a drilled candle · {{ DRILL_BEFORE }} candles before, {{ DRILL_AFTER }} after
+              </span>
+              <button type="button" class="button" @click="clearDrill()">Return to live edge</button>
+            </div>
+
+            <!-- Timeframe chooser. Anchored at the clicked candle so the choice reads as being
+                 about that candle, not a global mode switch. -->
+            <div
+              v-if="drillPrompt"
+              class="drill-prompt-backdrop"
+              @click="dismissDrillPrompt()"
+              @keydown.esc="dismissDrillPrompt()"
+            >
+              <div
+                class="drill-prompt"
+                role="dialog"
+                aria-label="Choose a timeframe to drill into"
+                :style="{ left: `${drillPrompt.x}px`, top: `${drillPrompt.y}px` }"
+                @click.stop
+              >
+                <p class="drill-prompt-title">{{ timestamp(drillPrompt.availableAt) }} UTC</p>
+                <p class="drill-prompt-hint">Open this candle at another timeframe</p>
+
+                <div v-if="drillLowerTargets.length" class="drill-prompt-group">
+                  <span class="drill-prompt-label">↓ Lower</span>
+                  <button
+                    v-for="target in drillLowerTargets"
+                    :key="target.interval"
+                    type="button"
+                    class="button"
+                    @click="chooseDrillTarget(target.interval)"
+                  >{{ target.interval }}</button>
+                </div>
+
+                <div v-if="drillHigherTargets.length" class="drill-prompt-group">
+                  <span class="drill-prompt-label">↑ Higher</span>
+                  <button
+                    v-for="target in drillHigherTargets"
+                    :key="target.interval"
+                    type="button"
+                    class="button"
+                    @click="chooseDrillTarget(target.interval)"
+                  >{{ target.interval }}</button>
+                </div>
+
+                <button type="button" class="button drill-prompt-cancel" @click="dismissDrillPrompt()">Cancel</button>
+              </div>
+            </div>
 
             <div v-if="mode === 'replay'" class="replay-controls">
               <div class="transport-buttons">
