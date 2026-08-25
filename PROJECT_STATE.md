@@ -1603,6 +1603,18 @@ into `docs/`; Docker packaging.
 verification done). Move stale/superseded entries into the relevant numbered section above instead
 of letting this grow forever; this is a changelog, not the whole story.*
 
+- **2026-08-25 (cont'd)**: Unblocked the solution build. `dotnet build TradingHub.slnx` was
+  failing outright for every target: `DBManager.Tests` -> `Testcontainers.PostgreSql` 4.13.0 ->
+  `Testcontainers` -> `SSH.NET` 2025.1.0, and advisory GHSA-q939-rpr3-3284 (high; ScpClient
+  recursive download allows arbitrary file write via server-controlled SCP filenames, affects
+  <= 2025.1.0) turned NU1903 into a hard error via `TreatWarningsAsErrors` in
+  `Directory.Build.props:7`. Nobody broke it — NuGet audit resolves advisories at restore time, so
+  the build went red when the GHSA published. Bumped `Testcontainers.PostgreSql` to 4.14.0, whose
+  nuspec already depends on the patched `SSH.NET` 2026.0.0, so no explicit transitive pin was
+  needed. `dotnet build TradingHub.slnx -c Release` now reports 0 warnings / 0 errors and
+  `SSH.NET 2026.0.0` resolves. Caveat: Docker is not available on this machine, so `DBManager.Tests`
+  was verified to restore and compile but **not** executed — Testcontainers needs a daemon. Whether
+  those tests pass at runtime under 4.14.0 is unverified.
 - **2026-08-25**: Consolidated the local Node toolchain and patched the Dashboard advisories.
   The machine had three Node installs — nvm 22.23.1 (what the interactive shell used), an
   `n`-managed 24.13.0 in `/usr/local` (what `sudo` resolved to), and apt's 18.19.1 (pandoc's
