@@ -1603,6 +1603,20 @@ into `docs/`; Docker packaging.
 verification done). Move stale/superseded entries into the relevant numbered section above instead
 of letting this grow forever; this is a changelog, not the whole story.*
 
+- **2026-08-25 (cont'd 3)**: Gave `DBManager.Tests` a Docker-free path. `PostgresPersistenceTests`
+  hard-coded `PostgreSqlBuilder`, so the only suite in the repo that needs a database was
+  unrunnable on any machine without a Docker daemon - which is this one. The fixture now reads
+  `TRADINGHUB_TEST_CONNECTION` and only falls back to Testcontainers when that is unset, so
+  existing Docker-based runs are unaffected. **The external path is written but never executed:**
+  the `trading_migrator` password in `DBManager.Postgres/Scripts/roles.sql:5` is stale (server
+  returns `password authentication failed`), there is no `~/.pgpass`, no `TRADINGHUB_*_CONNECTION`
+  in the environment or shell profile, no connection string in either `appsettings.json`, and
+  `sudo` is password-gated so the postgres superuser is unreachable. `.env.integration` explains
+  the cause - secrets were deliberately moved into `security.broker_credentials`, which needs DB
+  access to read. So `DBManager.Tests` remains the one suite never run in this session, and whether
+  it passes under Testcontainers 4.14.0 is still unverified. Note the fixture calls
+  `MigrateAsync()` and writes rows: point `TRADINGHUB_TEST_CONNECTION` at a throwaway database,
+  never the working `tradinghub`.
 - **2026-08-25 (cont'd 2)**: Fixed the 2 long-standing `QuantResearchRunner.Tests` failures. Both
   were stale test expectations, not code defects, and both were verified pre-existing by
   reproducing them at `origin/main` in a clean worktree before any change.

@@ -15,20 +15,35 @@ namespace DBManager.Tests;
 [TestFixture]
 public sealed class PostgresPersistenceTests
 {
-    private PostgreSqlContainer _container = null!;
+    /// <summary>
+    /// Set to point the fixture at an already-running PostgreSQL instead of starting a container,
+    /// for machines with no Docker daemon. The target database is migrated and written to, so it
+    /// must be a throwaway - never the working `tradinghub` database.
+    /// </summary>
+    private const string ExternalConnectionVariable = "TRADINGHUB_TEST_CONNECTION";
+
+    private PostgreSqlContainer? _container;
     private ServiceProvider _services = null!;
 
     [OneTimeSetUp]
     public async Task OneTimeSetUpAsync()
     {
-        _container = new PostgreSqlBuilder("postgres:16-alpine")
-            .WithDatabase("tradinghub_test")
-            .WithUsername("postgres")
-            .WithPassword("postgres")
-            .Build();
-        await _container.StartAsync();
-
-        string connectionString = _container.GetConnectionString();
+        string? external = Environment.GetEnvironmentVariable(ExternalConnectionVariable);
+        string connectionString;
+        if (string.IsNullOrWhiteSpace(external))
+        {
+            _container = new PostgreSqlBuilder("postgres:16-alpine")
+                .WithDatabase("tradinghub_test")
+                .WithUsername("postgres")
+                .WithPassword("postgres")
+                .Build();
+            await _container.StartAsync();
+            connectionString = _container.GetConnectionString();
+        }
+        else
+        {
+            connectionString = external;
+        }
 
         ServiceCollection collection = new();
         collection.AddSingleton(TimeProvider.System);
@@ -52,7 +67,8 @@ public sealed class PostgresPersistenceTests
     public async Task OneTimeTearDownAsync()
     {
         await _services.DisposeAsync();
-        await _container.DisposeAsync();
+        if (_container is not null)
+            await _container.DisposeAsync();
     }
 
     [Test]
