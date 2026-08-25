@@ -1226,6 +1226,13 @@ input:focus-visible {
   opacity: 0.75;
 }
 
+.chart-centered-marker {
+  stroke: var(--amber);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.9;
+}
+
 .replay-controls {
   gap: 14px;
   padding: 12px 15px;
@@ -2160,6 +2167,69 @@ input:focus-visible {
 .layer-atr { background: #63c7ff; }
 .layer-volume { background: #65727c; }
 
+.chart-interval-switcher {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 38px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--ink-1);
+}
+
+.chart-interval-pill {
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--ink-2);
+  color: #aeb8bd;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-interval-pill:hover {
+  border-color: #3b4a56;
+  background: #172029;
+  color: var(--text);
+}
+
+.chart-interval-pill.active {
+  border-color: var(--mint);
+  color: var(--mint);
+  background: var(--mint-soft);
+}
+
+.chart-interval-synthetic-dot {
+  color: var(--amber);
+  margin-left: 2px;
+}
+
+.chart-interval-back {
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--blue) 45%, var(--line));
+  border-radius: 5px;
+  background: var(--ink-2);
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.chart-interval-back:hover {
+  background: color-mix(in srgb, var(--blue) 16%, var(--ink-2));
+}
+
+.chart-interval-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted-2);
+}
+
 .chart-navigation {
   display: flex;
   align-items: center;
@@ -2869,4 +2939,84 @@ input:focus-visible {
   paint-order: stroke;
   stroke: var(--surface);
   stroke-width: 3px;
+}
+
+/* --- Timeframe drill-in (candle -> lower/higher timeframe window) --------------------------- */
+
+.drill-warning {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  font-size: 0.85rem;
+}
+
+.drill-active {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  font-size: 0.85rem;
+}
+
+/* Full-viewport catcher so clicking anywhere outside dismisses, without trapping scroll. */
+.drill-prompt-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.drill-prompt {
+  position: fixed;
+  /* Offset from the pointer so the popover never covers the candle it refers to. */
+  transform: translate(-50%, calc(-100% - 12px));
+  min-width: 15rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--panel, #111827);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.drill-prompt-title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.drill-prompt-hint {
+  margin: 0.15rem 0 0.6rem;
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+
+.drill-prompt-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.drill-prompt-label {
+  min-width: 4.5rem;
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
+
+.drill-prompt-group .button {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+}
+
+.drill-prompt-cancel {
+  width: 100%;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
 }

@@ -823,6 +823,7 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
 
         // Account/strategy-level equity protection overrides every other rule below,
         // regardless of scope - it's a safety escalation, not a technical management rule.
+        bool equityProtectionUnsatisfiable = false;
         if (equityProtection is not null)
         {
             if (equityProtection.Action == EquityProtectionPositionAction.FlattenAllPositions)
@@ -854,6 +855,11 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                         Reason = equityReduction.Explanation
                     };
                 }
+
+                // The position already sits at its minimum runner fraction, so the directive
+                // cannot be honoured. Falling through unflagged reported this as an ordinary
+                // Hold and dropped an account-level safety escalation without a trace.
+                equityProtectionUnsatisfiable = true;
             }
         }
 
@@ -995,10 +1001,13 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
 
         if (action == TradeManagementAction.Hold)
         {
-            return Hold(
-                openProfitR,
-                ResolveHoldReasonCode(trade, analysis, openProfitR, atr),
-                ResolveHoldReason(trade, analysis, openProfitR, atr));
+            return FlagUnsatisfiedEquityProtection(
+                Hold(
+                    openProfitR,
+                    ResolveHoldReasonCode(trade, analysis, openProfitR, atr),
+                    ResolveHoldReason(trade, analysis, openProfitR, atr)),
+                equityProtectionUnsatisfiable,
+                equityProtection);
         }
 
         string reason = string.Join(" ", new[]
@@ -1007,7 +1016,7 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
             stopCandidate?.Explanation
         }.Where(value => !string.IsNullOrWhiteSpace(value)));
 
-        return new TradeManagementRecommendation
+        return FlagUnsatisfiedEquityProtection(new TradeManagementRecommendation
         {
             Action = action,
             ProposedStopPrice = stopCandidate?.Price,
@@ -1025,8 +1034,27 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
             StructureSource = stopCandidate?.Source ?? reduction?.StructureSource,
             ReasonCode = action.ToString(),
             Reason = reason
-        };
+        }, equityProtectionUnsatisfiable, equityProtection);
     }
+
+    /// <summary>
+    /// Marks a recommendation whose equity-protection directive could not be honoured because the
+    /// position already sits at its minimum runner fraction. The directive stays bounded by the
+    /// runner floor by design (see EquityProtectionDirectiveTests), but the caller must be able to
+    /// see that a safety escalation went unmet rather than reading an ordinary Hold.
+    /// </summary>
+    private static TradeManagementRecommendation FlagUnsatisfiedEquityProtection(
+        TradeManagementRecommendation recommendation,
+        bool unsatisfiable,
+        EquityProtectionDirective? directive) =>
+        unsatisfiable && directive is not null
+            ? recommendation with
+            {
+                ReasonCode = $"EquityProtectionUnsatisfiable|{recommendation.ReasonCode}",
+                Reason = $"Equity protection tier '{directive.TierId}' requested a reduction the " +
+                    $"minimum runner fraction leaves no room for. {recommendation.Reason}".TrimEnd()
+            }
+            : recommendation;
 
     private StopCandidate? BuildStopCandidate(
         ManagedTradeState trade,
@@ -1092,22 +1120,24 @@ public sealed class StructureBasedTradeManager : IStructureBasedTradeManager
                 floor.Explanation));
         }
 
-        StopCandidate? candidate = trade.Side == OrderSide.Buy
-            ? candidates.OrderByDescending(item => item.Price).FirstOrDefault()
-            : candidates.OrderBy(item => item.Price).FirstOrDefault();
-        if (candidate is null)
-            return null;
-
         decimal atrImprovement = atr is > 0m
             ? atr.Value * _options.MinimumStopImprovementAtr
             : 0m;
         decimal minimumImprovement = Math.Max(
             atrImprovement,
             trade.MinimumPriceIncrement * _options.MinimumStopImprovementTicks);
-        return ImprovesCurrentStop(trade, candidate.Price, minimumImprovement) &&
-            IsBeforeCurrentPrice(trade.Side, candidate.Price, trade.CurrentPrice)
-            ? candidate
-            : null;
+
+        // Filter first, then take the most protective survivor. Selecting the most protective
+        // candidate before validating it let an unplaceable candidate suppress a good lower one:
+        // on a tight stop the cost-adjusted break-even can sit above the current price, which
+        // discarded an available profit-floor or structural stop and returned Hold instead.
+        StopCandidate[] usable = candidates
+            .Where(item => ImprovesCurrentStop(trade, item.Price, minimumImprovement) &&
+                IsBeforeCurrentPrice(trade.Side, item.Price, trade.CurrentPrice))
+            .ToArray();
+        return trade.Side == OrderSide.Buy
+            ? usable.OrderByDescending(item => item.Price).FirstOrDefault()
+            : usable.OrderBy(item => item.Price).FirstOrDefault();
     }
 
     private PositionReductionRecommendation? FindPositionReduction(

@@ -29,7 +29,8 @@ public sealed class StrategyDecisionPipelineFactory(
         RuntimeFeaturePolicy featurePolicy,
         SetupCalibrationArtifact? setupCalibration,
         ISetupMetaModel? metaModel,
-        TradingSafetyOptions safetyOptions)
+        TradingSafetyOptions safetyOptions,
+        ITradingConditionFilter? tradingConditionsOverride = null)
     {
         ArgumentNullException.ThrowIfNull(strategy);
         ArgumentNullException.ThrowIfNull(featurePolicy);
@@ -51,6 +52,7 @@ public sealed class StrategyDecisionPipelineFactory(
             : null;
 
         ITradingSafetyController safety = sharedSafetyController ?? new TradingSafetyController(safetyOptions);
+        ITradingConditionFilter? effectiveTradingConditions = tradingConditionsOverride ?? tradingConditions;
 
         var pipeline = new SafeTradingPipeline(
             strategy.Agent,
@@ -58,7 +60,7 @@ public sealed class StrategyDecisionPipelineFactory(
             dataQuality,
             safety,
             journal,
-            tradingConditions,
+            effectiveTradingConditions,
             calibrationPolicy,
             metaModel);
 

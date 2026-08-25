@@ -48,6 +48,11 @@ public sealed record StructuralEvidencePacket
     public required InstrumentKey Instrument { get; init; }
     public required DateTimeOffset AvailableAt { get; init; }
     public decimal ExecutableSpread { get; init; }
+    /// <summary>
+    /// Estimated full round-trip transaction cost (spread + slippage + commission, both legs).
+    /// See <see cref="Agent.Models.AgentMarketContext.RoundTripCostEstimate"/>.
+    /// </summary>
+    public decimal RoundTripCostEstimate { get; init; }
     public required AnalysisSnapshot Context { get; init; }
     public required AnalysisSnapshot Setup { get; init; }
     public required AnalysisSnapshot Trigger { get; init; }

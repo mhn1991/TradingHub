@@ -1,6 +1,9 @@
 using Agent.Configuration;
 using Agent.Strategies.StructuralConfluence;
 using Brokers.Models;
+using ChartAnnotator.Engine;
+using ChartAnnotator.Liquidity;
+using ChartAnnotator.SupplyDemand;
 using Simulator.Calibration;
 using Simulator.Experiments.IndicatorCalibration;
 using Simulator.Experiments.IndicatorCalibration.Strategies;
@@ -42,7 +45,15 @@ public sealed class IndicatorConfluenceRequestOverlayResolverTests
             ExecutionInterval = BarInterval.Minutes(1),
             AnalysisBaseInterval = BarInterval.Minutes(1),
             AnalysisIntervals = [BarInterval.Minutes(15), BarInterval.Hours(1)],
-            WarmupDays = 0
+            WarmupDays = 0,
+            // StructuralConfluenceStrategyOptions defaults enable LiquiditySweepReversal/
+            // SupplyDemandPullback/LiquidityBreakRetest, so BacktestRequest.Validate() requires
+            // these two detectors on (see ValidateStructuralAnnotationRequirements).
+            AnnotationOptions = new ChartAnnotationOptions
+            {
+                Liquidity = new LiquidityCalculationProfile { Enabled = true },
+                SupplyDemand = new SupplyDemandCalculationProfile { Enabled = true }
+            }
         }
     };
 

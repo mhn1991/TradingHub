@@ -318,12 +318,16 @@ public sealed class PreTradeRiskManager : IPreTradeRiskManager
 
         decimal? openRisk = null;
         decimal? projectedOpenRisk = null;
-        if (_options.MaximumOpenRiskPercentOfEquity is decimal maximumOpenRiskPercent)
+        // A missing conversion rate is already rejected above whenever this cap is configured.
+        // Substituting a 1.0 rate here would still report a fabricated OpenRiskAccountCurrency on
+        // the assessment (the RSK-01 failure mode), so leave it null instead.
+        if (_options.MaximumOpenRiskPercentOfEquity is decimal maximumOpenRiskPercent &&
+            context.QuoteToAccountCurrencyRate > 0m)
         {
             openRisk = PortfolioOpenRisk.EstimateAccountCurrency(
                 context.Positions,
                 spec,
-                context.QuoteToAccountCurrencyRate > 0m ? context.QuoteToAccountCurrencyRate : 1m,
+                context.QuoteToAccountCurrencyRate,
                 context.KnownOpenRiskAccountCurrency,
                 _options.AssumedOpenPositionRiskDistancePercentOfPrice,
                 context.InstrumentSpecs,

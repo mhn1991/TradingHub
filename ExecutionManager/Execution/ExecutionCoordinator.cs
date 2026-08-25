@@ -125,7 +125,32 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                 "The amendment ID was already used with a different payload."));
         }
 
-        return operation.Task.Value.WaitAsync(cancellationToken);
+        return AwaitAndReleaseAmendmentAsync(clientAmendmentId, operation, cancellationToken);
+    }
+
+    /// <summary>
+    /// Mirrors <see cref="AwaitAndReleaseAsync"/>. Without this release the amendment map grew
+    /// without bound: the fingerprint includes the request and effective sequences, so every single
+    /// trailing-stop amendment minted a permanent entry holding a completed task. Payload-mismatch
+    /// detection is therefore in-flight scoped, exactly like the order path; a stale replay is still
+    /// caught by the broker-side stop-order state check in AmendProtectiveStopCoreAsync.
+    /// </summary>
+    private async Task<ProtectiveStopAmendmentResult> AwaitAndReleaseAmendmentAsync(
+        string clientAmendmentId,
+        AmendmentOperation operation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await operation.Task.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (operation.Task.IsValueCreated && operation.Task.Value.IsCompleted)
+            {
+                _amendments.TryRemove(clientAmendmentId, out _);
+            }
+        }
     }
 
     private async Task<OrderSubmission?> AwaitAndReleaseAsync(
@@ -170,9 +195,8 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             decimal? estimatedLossAtStop = null;
             if (decision.Action == AgentAction.Close)
             {
-                BrokerPosition position = positions.FirstOrDefault(item => item.Instrument == decision.Instrument)
-                    ?? throw new InvalidOperationException("A close decision requires an open position.");
-                quantity = Math.Min(quantity, position.Quantity);
+                (_, decimal closableQuantity) = ResolveClosePosition(positions, decision.Instrument);
+                quantity = Math.Min(quantity, closableQuantity);
                 // Never cancel protective orders before the close fill is confirmed. Doing so
                 // creates an unprotected interval if the close is delayed, rejected, or its
                 // result is uncertain. The broker/simulator must reconcile or cancel attached
@@ -303,7 +327,13 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                     Quantity = quantity,
                     Accounts = accounts,
                     Positions = positions,
-                    QuoteToAccountCurrencyRate = quoteToAccountRate > 0m ? quoteToAccountRate : 1m,
+                    // Pass the unresolved rate through instead of substituting 1.0. Fabricating a
+                    // rate made PreTradeRiskManager evaluate its monetary caps against a made-up
+                    // conversion (the RSK-01 anti-pattern) and defeated that class's own
+                    // missing-rate guard, which only engages on a non-positive rate. The risk
+                    // manager now rejects explicitly when a monetary cap is configured and no
+                    // conversion is available, and stays silent when none is configured.
+                    QuoteToAccountCurrencyRate = quoteToAccountRate,
                     InstrumentSpec = instrumentSpec,
                     Safety = _safety?.Snapshot
                 };
@@ -558,10 +588,10 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
         OrderSide side;
         if (decision.Action == AgentAction.Close)
         {
-            BrokerPosition position = positions.FirstOrDefault(item => item.Instrument == decision.Instrument)
-                ?? throw new InvalidOperationException("A close decision requires an open position.");
-            side = position.Side == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy;
-            quantity = Math.Min(quantity, position.Quantity);
+            (OrderSide closeSide, decimal closableQuantity) =
+                ResolveClosePosition(positions, decision.Instrument);
+            side = closeSide;
+            quantity = Math.Min(quantity, closableQuantity);
         }
         else
         {
@@ -590,6 +620,33 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             RiskClusterId = decision.RiskClusterId,
             ReduceOnly = decision.Action == AgentAction.Close
         };
+    }
+
+    /// <summary>
+    /// Resolves the position a Close decision targets. A hedging account can hold both a long and a
+    /// short in the same instrument, where FirstOrDefault picked whichever the broker happened to
+    /// list first and thereby silently chose both the close side and the quantity cap. Same-side
+    /// positions are aggregated; a mixed-side book is genuinely ambiguous and must not be guessed.
+    /// </summary>
+    private static (OrderSide CloseSide, decimal ClosableQuantity) ResolveClosePosition(
+        IReadOnlyList<BrokerPosition> positions,
+        InstrumentKey instrument)
+    {
+        BrokerPosition[] matching = positions
+            .Where(item => item.Instrument == instrument && item.Quantity > 0m)
+            .ToArray();
+        if (matching.Length == 0)
+            throw new InvalidOperationException("A close decision requires an open position.");
+        if (matching.DistinctBy(item => item.Side).Count() > 1)
+        {
+            throw new InvalidOperationException(
+                $"A close decision for {instrument} is ambiguous: the broker reports both long and " +
+                "short positions for it. Close them individually by position id.");
+        }
+
+        return (
+            matching[0].Side == OrderSide.Buy ? OrderSide.Sell : OrderSide.Buy,
+            matching.Sum(item => item.Quantity));
     }
 
     private static void ValidateDecision(AgentDecision decision)
@@ -692,10 +749,20 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
         decimal increment,
         OrderSide positionSide)
     {
-        decimal units = price / increment;
-        return positionSide == OrderSide.Buy
-            ? decimal.Floor(units) * increment
-            : decimal.Ceiling(units) * increment;
+        try
+        {
+            decimal units = price / increment;
+            return positionSide == OrderSide.Buy
+                ? decimal.Floor(units) * increment
+                : decimal.Ceiling(units) * increment;
+        }
+        catch (OverflowException)
+        {
+            // A price/increment ratio outside decimal's range cannot be normalized. Returning zero
+            // routes it into ValidateRiskReduction's non-positive rejection rather than throwing
+            // out of the amendment path.
+            return 0m;
+        }
     }
 
     private static string CreateAmendmentId(

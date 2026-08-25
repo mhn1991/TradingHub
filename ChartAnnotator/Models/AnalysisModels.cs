@@ -283,6 +283,60 @@ public sealed record RsiAnalysisSnapshot
     public int SampleCount { get; init; }
 }
 
+/// <summary>
+/// Same shape as <see cref="RsiRelationshipType"/>, tracked against StochRSI's fast line
+/// (<see cref="StochRsiSnapshot.Fast"/>) instead of raw RSI - see <c>StochRsiAnalysisState</c>.
+/// Not yet part of the shared <see cref="IndicatorSnapshot"/>/<c>ChartAnnotationEngine</c>
+/// pipeline; currently owned and driven by the agent(s) that need it (PROJECT_STATE.md, divergence
+/// reversal agent). Promote to a shared indicator snapshot if a second agent needs the same
+/// tracking, to avoid two independently-drifting copies.
+/// </summary>
+public enum StochRsiRelationshipType
+{
+    None,
+    RegularBullishDivergence,
+    RegularBearishDivergence,
+    HiddenBullishDivergence,
+    HiddenBearishDivergence,
+    BullishConvergence,
+    BearishConvergence
+}
+
+public sealed record StochRsiRelationshipSnapshot
+{
+    public required StochRsiRelationshipType Type { get; init; }
+    public required DateTimeOffset FirstPivotTime { get; init; }
+    public required DateTimeOffset SecondPivotTime { get; init; }
+    public required DateTimeOffset ConfirmedAt { get; init; }
+    public required decimal FirstPrice { get; init; }
+    public required decimal SecondPrice { get; init; }
+    public required decimal FirstStochRsiFast { get; init; }
+    public required decimal SecondStochRsiFast { get; init; }
+    public required decimal PriceChange { get; init; }
+    public required decimal StochRsiFastChange { get; init; }
+    public required decimal Strength { get; init; }
+    public required int AgeCandles { get; init; }
+
+    public bool IsDivergence => Type is
+        StochRsiRelationshipType.RegularBullishDivergence or
+        StochRsiRelationshipType.RegularBearishDivergence or
+        StochRsiRelationshipType.HiddenBullishDivergence or
+        StochRsiRelationshipType.HiddenBearishDivergence;
+
+    public bool IsConvergence => Type is
+        StochRsiRelationshipType.BullishConvergence or
+        StochRsiRelationshipType.BearishConvergence;
+}
+
+public sealed record StochRsiAnalysisSnapshot
+{
+    public static StochRsiAnalysisSnapshot Empty { get; } = new();
+
+    public StochRsiRelationshipSnapshot? LatestRelationship { get; init; }
+    public bool IsNewRelationship { get; init; }
+    public int SampleCount { get; init; }
+}
+
 public enum CciZone
 {
     Unknown,

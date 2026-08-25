@@ -35,6 +35,23 @@ public sealed class LiquidityAnalyzer
     /// everything behind it accumulate forever).
     /// </summary>
     private readonly LinkedList<Guid> _creationOrder = [];
+    /// <summary>
+    /// Reference count of active (currently in <see cref="_pools"/>) pools whose
+    /// <c>SourcePivotTimes</c> include a given (type, pivot) pair. Lets
+    /// <see cref="DetectIsolatedSwings"/> answer "does an active pool already cover this swing"
+    /// in O(1) instead of scanning every active pool's source-pivot list for every swing on every
+    /// candle (profiling showed this scan as a real, measurable cost across a long backtest).
+    /// Must be kept in sync at exactly three places: incremented per source pivot in
+    /// <see cref="AddPool"/>, incremented per newly-absorbed pivot in
+    /// <see cref="MergeOverlappingPools"/> (a survivor pool's <c>SourcePivotTimes</c> grows via a
+    /// <c>with</c> expression when it absorbs another pool - this was missed in an earlier version
+    /// of this optimization and caused real behavioral drift: after the absorbed pool was later
+    /// trimmed, its decrement made a still-covered pivot look uncovered, because the survivor's
+    /// own expanded coverage of that pivot had never been counted), and decremented per source
+    /// pivot at the single place a pool is ever removed from <see cref="_pools"/>
+    /// (<see cref="TrimStaleTerminalPools"/>).
+    /// </summary>
+    private readonly Dictionary<(LiquidityPoolType Type, DateTimeOffset PivotTime), int> _activePivotPoolCounts = [];
     private long _snapshotVersion;
 
     public LiquidityAnalyzer(LiquidityCalculationProfile? profile = null)
@@ -398,21 +415,43 @@ public sealed class LiquidityAnalyzer
         DateTimeOffset availableAt,
         ref int suppressed)
     {
-        foreach (SwingPoint swing in swings.Where(swing => swing.ConfirmedAt <= availableAt))
+        // Manual loops instead of LINQ Where/Count/OrderByDescending: this runs for every
+        // confirmed swing on every candle, and the LINQ forms each allocate an iterator/closure
+        // per call (profiling showed this as a measurable share of CPU/allocations). The opposite-
+        // swing search can't assume `swings` is ordered by PivotTime (CciAnalysisState.cs
+        // defensively re-sorts the same input before use, so no such ordering is guaranteed) - a
+        // single linear max-tracking pass finds the same "most recent opposite-type swing before
+        // this one" as OrderByDescending().FirstOrDefault() without relying on any input order:
+        // strict '>' keeps the first-encountered swing among PivotTime ties, matching a stable
+        // descending sort's tie-breaking exactly.
+        foreach (SwingPoint swing in swings)
         {
+            if (swing.ConfirmedAt > availableAt)
+                continue;
+
             LiquidityPoolType poolType = swing.Type == SwingType.High
                 ? LiquidityPoolType.SwingHigh
                 : LiquidityPoolType.SwingLow;
-            if (_pools.Values.Any(state =>
-                    state.Pool.Type == poolType &&
-                    state.Pool.SourcePivotTimes.Contains(swing.PivotTime)))
+            if (_activePivotPoolCounts.ContainsKey((poolType, swing.PivotTime)))
             {
                 continue;
             }
 
-            int age = history.Count(item => item.OpenTime > swing.PivotTime);
-            SwingPoint? opposite = swings.Where(item => item.Type != swing.Type && item.PivotTime < swing.PivotTime)
-                .OrderByDescending(item => item.PivotTime).FirstOrDefault();
+            int age = 0;
+            foreach (Candle item in history)
+            {
+                if (item.OpenTime > swing.PivotTime) age++;
+            }
+
+            SwingPoint? opposite = null;
+            foreach (SwingPoint candidate in swings)
+            {
+                if (candidate.Type == swing.Type || candidate.PivotTime >= swing.PivotTime)
+                    continue;
+                if (opposite is null || candidate.PivotTime > opposite.PivotTime)
+                    opposite = candidate;
+            }
+
             decimal prominenceAtr = Math.Abs(swing.Price - (opposite?.Price ?? candle.Prices.Close)) / atr;
             if (age < _profile.MinimumSwingAgeBars || prominenceAtr < _profile.MinimumSwingProminenceAtr)
             {
@@ -527,10 +566,21 @@ public sealed class LiquidityAnalyzer
         long sequence,
         DateTimeOffset availableAt)
     {
-        decimal high = period.Max(item => item.Prices.High);
-        decimal low = period.Min(item => item.Prices.Low);
-        DateTimeOffset startedAt = period.Min(item => item.OpenTime);
-        DateTimeOffset endedAt = period.Max(item => item.CloseTime ?? item.OpenTime);
+        // Single manual pass instead of four separate LINQ Max/Min calls over the same period.
+        Candle first = period[0];
+        decimal high = first.Prices.High;
+        decimal low = first.Prices.Low;
+        DateTimeOffset startedAt = first.OpenTime;
+        DateTimeOffset endedAt = first.CloseTime ?? first.OpenTime;
+        for (int i = 1; i < period.Count; i++)
+        {
+            Candle item = period[i];
+            if (item.Prices.High > high) high = item.Prices.High;
+            if (item.Prices.Low < low) low = item.Prices.Low;
+            if (item.OpenTime < startedAt) startedAt = item.OpenTime;
+            DateTimeOffset itemEnd = item.CloseTime ?? item.OpenTime;
+            if (itemEnd > endedAt) endedAt = itemEnd;
+        }
         decimal halfWidth = atr * Math.Min(_profile.EqualLevelToleranceAtr, _profile.MaximumPoolWidthAtr) / 2m;
         if (!HasReferencePeriodPool(highType, startedAt, endedAt))
         {
@@ -651,18 +701,36 @@ public sealed class LiquidityAnalyzer
         _pools[id] = new PoolRuntimeState { Pool = pool, ConfirmedSequence = sequence };
         _formedPoolIds.Add(id);
         _creationOrder.AddLast(id);
+        foreach (DateTimeOffset pivot in pool.SourcePivotTimes)
+        {
+            _activePivotPoolCounts.TryGetValue((type, pivot), out int count);
+            _activePivotPoolCounts[(type, pivot)] = count + 1;
+        }
     }
 
     private void MergeOverlappingPools(DateTimeOffset availableAt, List<LiquidityEvent> events)
     {
-        PoolRuntimeState[] active = _pools.Values.Where(item => !item.Terminal)
-            .OrderBy(item => item.Pool.ConfirmedAt).ThenBy(item => item.Pool.PoolId).ToArray();
-        for (int i = 0; i < active.Length; i++)
+        // Manual filter + List.Sort instead of LINQ Where/OrderBy/ThenBy/ToArray: same ordering
+        // (ConfirmedAt, then PoolId as a tiebreaker), just without the LINQ iterator/closure
+        // allocations on every candle. PoolId is a deterministic hash unique per pool's full
+        // identity, so (ConfirmedAt, PoolId) pairs are effectively always distinct - List.Sort's
+        // unstable sort produces the same result as LINQ's stable OrderBy/ThenBy here.
+        var active = new List<PoolRuntimeState>(_pools.Count);
+        foreach (PoolRuntimeState state in _pools.Values)
+        {
+            if (!state.Terminal) active.Add(state);
+        }
+        active.Sort(static (a, b) =>
+        {
+            int byConfirmedAt = a.Pool.ConfirmedAt.CompareTo(b.Pool.ConfirmedAt);
+            return byConfirmedAt != 0 ? byConfirmedAt : a.Pool.PoolId.CompareTo(b.Pool.PoolId);
+        });
+        for (int i = 0; i < active.Count; i++)
         {
             PoolRuntimeState survivor = active[i];
             if (survivor.Terminal)
                 continue;
-            for (int j = i + 1; j < active.Length; j++)
+            for (int j = i + 1; j < active.Count; j++)
             {
                 PoolRuntimeState merged = active[j];
                 if (merged.Terminal || survivor.Pool.Side != merged.Pool.Side || survivor.Pool.Type != merged.Pool.Type)
@@ -678,6 +746,23 @@ public sealed class LiquidityAnalyzer
                     : overlap / narrowest;
                 if (ratio < _profile.MergeOverlapRatio)
                     continue;
+
+                // Survivor is about to absorb merged's SourcePivotTimes. Any pivot merged already
+                // covers that survivor didn't is now ALSO covered by survivor - in addition to
+                // merged itself, which stays in _pools (Terminal but not yet trimmed) and still
+                // holds its own original, unchanged SourcePivotTimes/index entry until
+                // TrimStaleTerminalPools removes it. Missing this increment was the actual bug in
+                // an earlier version of this optimization: after merged was later trimmed and its
+                // pivots decremented, a pivot only survivor still covered looked uncovered.
+                HashSet<DateTimeOffset> survivorPivotsBeforeMerge = [.. survivor.Pool.SourcePivotTimes];
+                foreach (DateTimeOffset pivot in merged.Pool.SourcePivotTimes)
+                {
+                    if (survivorPivotsBeforeMerge.Contains(pivot))
+                        continue;
+                    var key = (survivor.Pool.Type, pivot);
+                    _activePivotPoolCounts.TryGetValue(key, out int count);
+                    _activePivotPoolCounts[key] = count + 1;
+                }
 
                 Guid[] lineage = survivor.Pool.SourcePoolIds.Append(merged.Pool.PoolId)
                     .Concat(merged.Pool.SourcePoolIds).Distinct().Order().ToArray();
@@ -774,6 +859,15 @@ public sealed class LiquidityAnalyzer
             {
                 _pools.Remove(node.Value);
                 _creationOrder.Remove(node);
+                foreach (DateTimeOffset pivot in state.Pool.SourcePivotTimes)
+                {
+                    var key = (state.Pool.Type, pivot);
+                    if (_activePivotPoolCounts.TryGetValue(key, out int count))
+                    {
+                        if (count <= 1) _activePivotPoolCounts.Remove(key);
+                        else _activePivotPoolCounts[key] = count - 1;
+                    }
+                }
                 removed++;
             }
 

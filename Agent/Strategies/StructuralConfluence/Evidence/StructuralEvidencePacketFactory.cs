@@ -67,6 +67,7 @@ public sealed class StructuralEvidencePacketFactory
             Instrument = context.Instrument,
             AvailableAt = availableAt,
             ExecutableSpread = Math.Max(0m, context.ExecutableSpread ?? 0m),
+            RoundTripCostEstimate = Math.Max(0m, context.RoundTripCostEstimate ?? context.ExecutableSpread ?? 0m),
             Context = higher,
             Setup = setup,
             Trigger = trigger,

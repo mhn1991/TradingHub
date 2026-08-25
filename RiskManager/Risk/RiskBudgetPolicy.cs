@@ -44,9 +44,14 @@ public sealed record AdaptiveRiskOptions
     {
         if (schedule.Count == 0) throw new ArgumentException("A risk schedule cannot be empty.", name);
         decimal expectedFrom = schedule[0].FromInclusive;
-        foreach (RiskMultiplierBand band in schedule)
+        for (int index = 0; index < schedule.Count; index++)
         {
+            RiskMultiplierBand band = schedule[index];
+            // Only the final band may be open-ended. An open-ended band anywhere else matches every
+            // larger value in Resolve, silently making the bands declared after it unreachable.
+            bool openEndedBeforeFinalBand = band.ToExclusive is null && index < schedule.Count - 1;
             if (band.FromInclusive != expectedFrom || band.Multiplier is < 0m or > 1m ||
+                openEndedBeforeFinalBand ||
                 band.ToExclusive is decimal to && to <= band.FromInclusive)
                 throw new ArgumentException("Risk bands must be ordered, contiguous, and capped at one.", name);
             expectedFrom = band.ToExclusive ?? expectedFrom;
@@ -56,7 +61,11 @@ public sealed record AdaptiveRiskOptions
 
 public sealed record RiskBudgetContext
 {
-    public required decimal AccountEquity { get; init; }
+    /// <summary>
+    /// Carried for audit/telemetry context only - <see cref="RiskBudgetPolicy.Evaluate"/> does not
+    /// read it, so it is deliberately not required.
+    /// </summary>
+    public decimal AccountEquity { get; init; }
     public decimal DrawdownPercent { get; init; }
     public decimal? VolatilityPercentile { get; init; }
     public decimal RegimeMultiplier { get; init; } = 1m;
@@ -123,7 +132,13 @@ public sealed class RiskBudgetPolicy : IRiskBudgetPolicy
         decimal structuralEvidence = Cap(context.StructuralEvidenceMultiplier);
         decimal raw = drawdown * volatility * regime * liquidity * correlation * allocation * equity * calibration *
             metaLabel * neoWave * structuralEvidence;
-        decimal combined = Math.Clamp(raw, _options.MinimumCombinedRiskMultiplier, _options.MaximumCombinedRiskMultiplier);
+        // A zero from any band or gate is a hard stop, not a "size down" signal: the configured
+        // floor must never resurrect it, or a terminal drawdown band (default: 0 at >= 6%) would
+        // keep trading at the floor instead of halting. Every input is capped to [0, 1], so a zero
+        // product can only come from an explicit zero.
+        decimal combined = raw <= 0m
+            ? 0m
+            : Math.Clamp(raw, _options.MinimumCombinedRiskMultiplier, _options.MaximumCombinedRiskMultiplier);
         return new RiskBudgetDecision
         {
             DrawdownMultiplier = drawdown,
@@ -147,9 +162,18 @@ public sealed class RiskBudgetPolicy : IRiskBudgetPolicy
         };
     }
 
-    private static decimal Resolve(IReadOnlyList<RiskMultiplierBand> schedule, decimal value) =>
-        schedule.FirstOrDefault(band => value >= band.FromInclusive &&
-            (band.ToExclusive is null || value < band.ToExclusive.Value))?.Multiplier ?? schedule[^1].Multiplier;
+    private static decimal Resolve(IReadOnlyList<RiskMultiplierBand> schedule, decimal value)
+    {
+        RiskMultiplierBand? band = schedule.FirstOrDefault(item => value >= item.FromInclusive &&
+            (item.ToExclusive is null || value < item.ToExclusive.Value));
+        if (band is not null)
+            return band.Multiplier;
+
+        // Out of range in either direction. Below the first band the mildest multiplier applies;
+        // above a closed final band the most punitive one does, so an unmatched input can never
+        // widen the risk budget.
+        return value < schedule[0].FromInclusive ? schedule[0].Multiplier : schedule[^1].Multiplier;
+    }
 
     private static decimal Cap(decimal value) => Math.Clamp(value, 0m, 1m);
 }

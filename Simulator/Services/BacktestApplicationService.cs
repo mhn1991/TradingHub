@@ -862,9 +862,14 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                         assignment.StrategyType,
                         assignment.AgentDefinitionOverride,
                         assignment.AgentOptionsOverride);
-                    string typeId = TradingAgentTypeIds.Format(definition.Kind);
+                    // Must match BacktestRequest.Validate()'s duplicate-id check
+                    // (BacktestConfiguration.cs), which uses the raw assignment.StrategyType, not
+                    // the canonicalized agent-kind id - using the canonical form here let a request
+                    // with two assignments for the same instrument, one via an alias ("legacy") and
+                    // one via its canonical form ("legacy-progressive"), pass validation as
+                    // "distinct ids" while actually colliding on the runtime StrategyFactoryEntry id.
                     return new StrategyFactoryEntry(
-                        assignment.Id ?? $"{typeId}:{assignment.Instrument.Value}",
+                        assignment.Id ?? $"{assignment.StrategyType}:{assignment.Instrument.Value}",
                         TradingAgentFactory.Create(definition),
                         assignment.Instrument,
                         assignment.AnalysisOptionsOverride,

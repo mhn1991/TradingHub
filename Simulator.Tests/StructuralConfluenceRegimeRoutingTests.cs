@@ -5,8 +5,11 @@ using Agent.Strategies.StructuralConfluence;
 using Agent.Strategies.StructuralConfluence.Evidence;
 using Agent.Strategies.StructuralConfluence.Playbooks;
 using Brokers.Models;
+using ChartAnnotator.Engine;
+using ChartAnnotator.Liquidity;
 using ChartAnnotator.Models;
 using ChartAnnotator.Regime;
+using ChartAnnotator.SupplyDemand;
 using Simulator.Models;
 
 namespace Simulator.Tests;
@@ -433,7 +436,15 @@ public sealed class StructuralConfluenceRegimeRoutingTests
             From = At.AddDays(-1),
             To = At,
             Strategies = [TradingAgentTypeIds.StructuralConfluence],
-            Runtime = new BacktestRuntimeOptions { MarketRegimeRouting = routing }
+            Runtime = new BacktestRuntimeOptions
+            {
+                MarketRegimeRouting = routing,
+                AnnotationOptions = new ChartAnnotationOptions
+                {
+                    Liquidity = new LiquidityCalculationProfile { Enabled = true },
+                    SupplyDemand = new SupplyDemandCalculationProfile { Enabled = true }
+                }
+            }
         };
         var definitionOverride = new TradingAgentDefinition
         {

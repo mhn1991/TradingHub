@@ -1272,6 +1272,27 @@ export interface WorkspaceSnapshot {
   dataset: ReplayDataset
 }
 
+/**
+ * A historical window of analysed candles centred on one anchor candle, from
+ * `GET /api/workspaces/oanda/window`. Every frame is fully warmed up server-side, so unlike a
+ * client-resampled series these carry real indicators and can be annotated.
+ */
+export interface WorkspaceWindowSnapshot {
+  status: LiveFeedStatus
+  dataset: ReplayDataset
+  interval: string
+  requestedAnchorAt: string
+  /** The candle the anchor actually resolved to — at or before the request, never after. */
+  resolvedAnchorAt: string
+  /** Index of the anchor inside `dataset.series[0].frames`; not always `beforeCount`. */
+  anchorIndex: number
+  beforeCount: number
+  afterCount: number
+  warmupCandles: number
+  /** False when history ran out before the full warm-up span — earliest indicators are less settled. */
+  warmupSatisfied: boolean
+}
+
 export interface BrokerPosition {
   positionId: string
   instrument: string

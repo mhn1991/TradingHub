@@ -229,7 +229,7 @@ public sealed class LivePositionManagementService(
                 InstrumentGroup = InstrumentGroupResolver.Resolve(position.Instrument),
                 SetupType = position.EntrySetupType,
                 EntrySession = position.EntrySession,
-                EntryVolatilityBucket = "Live",
+                EntryVolatilityBucket = position.EntryVolatilityBucket,
                 EntryConfidence = position.EntryConfidence,
                 Instrument = position.Instrument,
                 Side = position.Side,

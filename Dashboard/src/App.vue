@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, shallowRef, watch } from 'vue'
 import AnalysisChart from './components/AnalysisChart.vue'
+import { useMultiTimeframeSelection } from './composables/useMultiTimeframeSelection'
+import { findAnchorIndex, parseIntervalSeconds } from './utils/timeframeSeries'
 import SimulatorPanel from './components/SimulatorPanel.vue'
 import LiveDemoPanel from './components/LiveDemoPanel.vue'
 import ResearchPanel from './components/ResearchPanel.vue'
@@ -27,6 +29,7 @@ import type {
   WorkspaceCatalog,
   WorkspaceDefinition,
   WorkspaceSnapshot,
+  WorkspaceWindowSnapshot,
 } from './types'
 
 const workspaceStorageKey = 'tradinghub.workspaces.v1'
@@ -78,9 +81,27 @@ const mode = ref<'replay' | 'live'>('replay')
 const uiView = ref<'workspaces' | 'simulator' | 'research' | 'live-demo' | 'reports'>('workspaces')
 const reportTarget = reactive({ kind: 'live-session' as 'live-session' | 'experiment', identifier: '', autoLoad: false })
 const liveStatus = ref<LiveFeedStatus | null>(null)
-const activeSeriesIndex = ref(0)
 const selectedIndex = ref(0)
+// True right after drilling into a candle: the chart centers on selectedIndex (candles both
+// before and after) instead of treating it as the rightmost/latest point. Cleared on a plain
+// timeframe switch; restored on "back" only if that still leaves an earlier drill active.
+const centeredView = ref(false)
 const windowSize = ref(100)
+/** Candles either side of the anchor when drilling. 499 + anchor + 500 = a 1,000-candle window. */
+const DRILL_BEFORE = 499
+const DRILL_AFTER = 500
+/**
+ * Server-fetched, fully warmed-up windows keyed by interval, from /api/workspaces/oanda/window.
+ * Held separately from `dataset` on purpose: the live SSE feed rewrites `dataset` continuously, so
+ * a window merged into it would be wiped out by the next update. Merged in through `mtfSeries`
+ * instead, where it reads as a real series and keeps its indicators.
+ */
+const drillWindows = ref<Record<string, ReplaySeries>>({})
+/** Set while a drilled window is showing, so the UI can report reduced warm-up honestly. */
+const drillWarning = ref<string | null>(null)
+const drillLoading = ref(false)
+/** Open chooser: which candle was selected, and where to anchor the popover. */
+const drillPrompt = ref<{ availableAt: string; x: number; y: number } | null>(null)
 const playbackSpeed = ref(4)
 const isPlaying = ref(false)
 const loading = ref(true)
@@ -156,9 +177,192 @@ const availableTimeframes = computed(() => {
   }
   return activeAsset.value?.timeframes ?? []
 })
-const activeSeries = computed<ReplaySeries | null>(() =>
-  dataset.value?.series[activeSeriesIndex.value] ?? null,
+// The finest real series is the resampling base — every coarser timeframe (real or synthetic)
+// can be derived from it, but nothing finer than it is available.
+const mtfBaseInterval = computed(() => {
+  const seriesList = dataset.value?.series ?? []
+  if (seriesList.length === 0) return '5m'
+  return [...seriesList].sort((a, b) => a.intervalSeconds - b.intervalSeconds)[0]!.interval
+})
+const mtfBaseFrames = computed(() =>
+  dataset.value?.series.find((series) => series.interval === mtfBaseInterval.value)?.frames ?? [],
 )
+// Drilled windows take precedence over any same-interval series from the live feed: the window is
+// centred on the anchor and warmed up, whereas the feed's series is a rolling view of "now".
+const mtfSeries = computed<ReplaySeries[] | undefined>(() => {
+  const base = dataset.value?.series ?? []
+  const drilled = Object.values(drillWindows.value)
+  if (drilled.length === 0) return dataset.value?.series
+  const drilledIntervals = new Set(drilled.map((series) => series.interval))
+  return [...base.filter((series) => !drilledIntervals.has(series.interval)), ...drilled]
+})
+const {
+  activeInterval,
+  availableIntervals,
+  activeFrames,
+  canGoBack,
+  switchInterval,
+  drillInto,
+  goBack,
+} = useMultiTimeframeSelection(mtfBaseInterval, mtfBaseFrames, mtfSeries)
+
+const activeSeries = computed<ReplaySeries | null>(() => {
+  // A drilled window is self-contained, so it must keep rendering even while the live feed is
+  // reconnecting and `dataset` is momentarily null - otherwise going back to a timeframe blanks
+  // the chart to "Connecting workspace data" and never recovers.
+  const drilled = drillWindows.value[activeInterval.value]
+  if (drilled) return drilled
+  if (!dataset.value) return null
+  return dataset.value.series.find((series) => series.interval === activeInterval.value) ?? {
+    interval: activeInterval.value,
+    intervalSeconds: parseIntervalSeconds(activeInterval.value),
+    frames: activeFrames.value,
+  }
+})
+
+function onSwitchInterval(interval: string) {
+  const workspace = activeWorkspace.value
+  if (workspace) workspace.interval = interval
+  const anchorAt = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
+  switchInterval(interval)
+  selectedIndex.value = findAnchorIndex(activeFrames.value, anchorAt)
+  // A plain switch means "show me this timeframe now", not "keep my drilled place", so any fetched
+  // windows are dropped — leaving them would silently pin the chart to an old anchor.
+  clearDrill()
+  isPlaying.value = false
+}
+
+/** Timeframes the workspace's broker can actually serve a warmed-up window for. */
+const drillTargets = computed(() => {
+  const current = parseIntervalSeconds(activeInterval.value)
+  return availableTimeframes.value
+    .map((interval) => ({ interval, seconds: parseIntervalSeconds(interval) }))
+    .filter((item) => item.seconds !== current)
+    .sort((left, right) => left.seconds - right.seconds)
+})
+const drillLowerTargets = computed(() =>
+  drillTargets.value.filter((item) => item.seconds < parseIntervalSeconds(activeInterval.value)),
+)
+const drillHigherTargets = computed(() =>
+  drillTargets.value.filter((item) => item.seconds > parseIntervalSeconds(activeInterval.value)),
+)
+
+/**
+ * Selecting a candle opens the chooser rather than drilling immediately. Which direction to go is
+ * genuinely ambiguous — the old behaviour guessed "finer if possible", which is wrong as often as
+ * it is right, and silently landed you on a resampled timeframe with no indicators.
+ */
+function onDrillCandle(availableAt: string, at?: { x: number; y: number }) {
+  if (mode.value !== 'live' || activeBroker.value?.id !== 'oanda') {
+    // Replay datasets carry every series up front; keep the original immediate drill there.
+    applyDrill(availableAt, undefined)
+    return
+  }
+  drillPrompt.value = {
+    availableAt,
+    x: at?.x ?? window.innerWidth / 2,
+    y: at?.y ?? window.innerHeight / 2,
+  }
+}
+
+function dismissDrillPrompt() {
+  drillPrompt.value = null
+}
+
+/** Fetches a warmed-up window for `interval` centred on `anchorAt`, or null if it failed. */
+async function fetchDrillWindow(interval: string, anchorAt: string): Promise<ReplaySeries | null> {
+  const workspace = activeWorkspace.value
+  if (!workspace) return null
+  drillLoading.value = true
+  drillWarning.value = null
+  try {
+    const query = new URLSearchParams({
+      symbol: workspace.symbol,
+      interval,
+      anchor: anchorAt,
+      before: String(DRILL_BEFORE),
+      after: String(DRILL_AFTER),
+    })
+    const response = await fetch(
+      `${import.meta.env.BASE_URL}api/workspaces/oanda/window?${query}`,
+      { signal: sourceAbortController?.signal },
+    )
+    if (!response.ok) {
+      const problem = await readJsonSafe<{ error?: string; detail?: string; title?: string }>(response)
+      throw new Error(
+        problem?.error ?? problem?.detail ?? problem?.title ?? `Window failed with HTTP ${response.status}.`,
+      )
+    }
+    const window_ = await response.json() as WorkspaceWindowSnapshot
+    const series = window_.dataset.series[0]
+    if (!series || series.frames.length === 0) throw new Error('The window returned no candles.')
+    if (!window_.warmupSatisfied) {
+      drillWarning.value =
+        `Only partial warm-up was available at ${interval} — the earliest candles' indicators are less settled.`
+    }
+    return series
+  } catch (error) {
+    if (isAbortError(error)) return null
+    loadError.value = messageFrom(error, `Could not load the ${interval} window.`)
+    return null
+  } finally {
+    drillLoading.value = false
+  }
+}
+
+/** Shared by the chooser and by "back": both need the same fetch/centre/window-size treatment. */
+async function applyDrill(availableAt: string, targetInterval: string | undefined) {
+  const anchorAt = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
+  if (targetInterval !== undefined) {
+    const series = await fetchDrillWindow(targetInterval, availableAt)
+    if (!series) return
+    drillWindows.value = { ...drillWindows.value, [targetInterval]: series }
+  }
+
+  const resolvedAnchor = drillInto(availableAt, anchorAt, targetInterval)
+  if (resolvedAnchor === null) return
+  // Deliberately NOT writing workspace.interval: that is the workspace's live-feed setting, and
+  // changing it tears down and reconnects the data source mid-drill. A drill is a transient view.
+  selectedIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
+  // Show the whole fetched window, so the 499 before and 500 after are all reachable by panning.
+  if (targetInterval !== undefined) windowSize.value = DRILL_BEFORE + DRILL_AFTER + 1
+  centeredView.value = true
+  isPlaying.value = false
+}
+
+async function chooseDrillTarget(interval: string) {
+  const prompt = drillPrompt.value
+  if (!prompt) return
+  drillPrompt.value = null
+  await applyDrill(prompt.availableAt, interval)
+}
+
+async function onDrillBack() {
+  const anchorBeforeBack = activeSeries.value?.frames[selectedIndex.value]?.availableAt ?? null
+  const resolvedAnchor = goBack()
+  if (resolvedAnchor === null) return
+
+  // Returning to a coarser timeframe needs the same centred, warmed-up treatment as going down —
+  // otherwise "back" would drop you at the live edge and lose the place you drilled from.
+  const target = activeInterval.value
+  if (mode.value === 'live' && activeBroker.value?.id === 'oanda' && !drillWindows.value[target]) {
+    const series = await fetchDrillWindow(target, resolvedAnchor ?? anchorBeforeBack ?? '')
+    if (series) drillWindows.value = { ...drillWindows.value, [target]: series }
+  }
+
+  selectedIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
+  centeredView.value = canGoBack.value || drillWindows.value[target] !== undefined
+  isPlaying.value = false
+}
+
+/** Drops every fetched window and returns the chart to the live edge. */
+function clearDrill() {
+  drillWindows.value = {}
+  drillWarning.value = null
+  drillPrompt.value = null
+  centeredView.value = false
+  windowSize.value = 100
+}
 const selectedBacktestRun = computed(() =>
   backtestManifest.value?.runs.find((run) => run.id === selectedBacktestId.value) ?? null,
 )
@@ -671,19 +875,25 @@ function persistWorkspaces() {
 }
 
 async function loadSampleReplay() {
-  const manifestResponse = await fetch(`${import.meta.env.BASE_URL}data/backtests/manifest.json`, { cache: 'no-store' })
+  // A dev server (and some static hosts) return a 200 SPA-shell fallback for any unmatched path
+  // rather than a real 404, so a missing/deleted manifest can still come back `ok` as HTML. Treat
+  // any failure here — network, non-JSON body, bad schema — as "no manifest available" and fall
+  // through to the bundled sample replay, instead of letting it abort the whole load.
+  const manifest = await fetch(`${import.meta.env.BASE_URL}data/backtests/manifest.json`, { cache: 'no-store' })
+    .then((response) => {
+      if (!response.ok) return null
+      if (!(response.headers.get('content-type') ?? '').includes('json')) return null
+      return response.json() as Promise<BacktestManifest>
+    })
     .catch(() => null)
-  if (manifestResponse?.ok) {
-    const manifest = await manifestResponse.json() as BacktestManifest
-    if (manifest.schemaVersion === 1 && Array.isArray(manifest.runs) && manifest.runs.length > 0) {
-      backtestManifest.value = manifest
-      const queryStrategy = new URLSearchParams(window.location.search).get('strategy')
-      selectedBacktestId.value = manifest.runs.some((run) => run.id === queryStrategy)
-        ? queryStrategy!
-        : (manifest.runs.find((run) => run.id.includes('improved'))?.id ?? manifest.runs[0].id)
-      await loadBacktestRun(selectedBacktestId.value)
-      return
-    }
+  if (manifest && manifest.schemaVersion === 1 && Array.isArray(manifest.runs) && manifest.runs.length > 0) {
+    backtestManifest.value = manifest
+    const queryStrategy = new URLSearchParams(window.location.search).get('strategy')
+    selectedBacktestId.value = manifest.runs.some((run) => run.id === queryStrategy)
+      ? queryStrategy!
+      : (manifest.runs.find((run) => run.id.includes('improved'))?.id ?? manifest.runs[0].id)
+    await loadBacktestRun(selectedBacktestId.value)
+    return
   }
 
   const response = await fetch(`${import.meta.env.BASE_URL}data/sample-replay.json`)
@@ -746,8 +956,10 @@ async function selectBacktest(id: string) {
     if (activeBroker.value?.id === 'simulator' && replayDataset.value) {
       setDataset(replayDataset.value)
       const workspace = activeWorkspace.value
-      const index = replayDataset.value.series.findIndex((series) => series.interval === workspace?.interval)
-      selectSeries(index < 0 ? 0 : index)
+      const preferred = replayDataset.value.series.some((series) => series.interval === workspace?.interval)
+        ? workspace!.interval
+        : replayDataset.value.series[0]!.interval
+      onSwitchInterval(preferred)
     }
   } catch (error) {
     loadError.value = messageFrom(error, 'The selected backtest could not be loaded.')
@@ -816,7 +1028,6 @@ function setDataset(value: ReplayDataset, preservePosition = false) {
       frames: shallowReactive(series.frames),
     })),
   })
-  activeSeriesIndex.value = 0
   if (!preservePosition || mode.value === 'live') selectedIndex.value = Math.max(0, value.series[0].frames.length - 1)
   isPlaying.value = false
   loadError.value = null
@@ -861,8 +1072,10 @@ async function loadActiveWorkspace() {
     mode.value = 'replay'
     if (replayDataset.value) {
       setDataset(replayDataset.value)
-      const seriesIndex = replayDataset.value.series.findIndex((series) => series.interval === workspace.interval)
-      selectSeries(seriesIndex < 0 ? 0 : seriesIndex)
+      const preferred = replayDataset.value.series.some((series) => series.interval === workspace.interval)
+        ? workspace.interval
+        : replayDataset.value.series[0]!.interval
+      onSwitchInterval(preferred)
     }
     loading.value = false
     return
@@ -918,15 +1131,13 @@ async function changeAsset(event: Event) {
   await loadActiveWorkspace()
 }
 
+// Live mode only — replay's timeframe switching lives in AnalysisChart's own toolbar now
+// (onSwitchInterval), since it needs the anchor-preserving/resample/drill machinery that live
+// mode's single always-current interval doesn't.
 async function changeTimeframe(interval: string) {
   const workspace = activeWorkspace.value
   if (!workspace || workspace.interval === interval) return
   workspace.interval = interval
-  if (mode.value === 'replay' && dataset.value) {
-    const index = dataset.value.series.findIndex((series) => series.interval === interval)
-    if (index >= 0) selectSeries(index)
-    return
-  }
   await loadActiveWorkspace()
 }
 
@@ -955,12 +1166,6 @@ async function removeWorkspace(id: string) {
   const wasActive = activeWorkspaceId.value === id
   workspaces.value.splice(index, 1)
   if (wasActive) await activateWorkspace(workspaces.value[Math.max(0, index - 1)].id)
-}
-
-function selectSeries(index: number) {
-  activeSeriesIndex.value = index
-  selectedIndex.value = Math.max(0, (dataset.value?.series[index].frames.length ?? 1) - 1)
-  isPlaying.value = false
 }
 
 function togglePlayback() {
@@ -1340,11 +1545,10 @@ function signedAmount(value: number, currency?: string | null) {
 function jumpToTrade(trade: ReplayTrade) {
   const value = dataset.value
   if (!value) return
-  const detailedIndex = value.series.findIndex((series) => series.interval === '5m')
-  const seriesIndex = detailedIndex >= 0 ? detailedIndex : activeSeriesIndex.value
-  const series = value.series[seriesIndex]
+  const detailed = value.series.find((series) => series.interval === '5m')
+  const series = detailed ?? value.series.find((item) => item.interval === activeInterval.value)
   if (!series?.frames.length) return
-  if (seriesIndex !== activeSeriesIndex.value) selectSeries(seriesIndex)
+  if (series.interval !== activeInterval.value) switchInterval(series.interval)
 
   const target = new Date(trade.openedAt ?? trade.signalCreatedAt).getTime()
   let bestIndex = 0
@@ -1554,7 +1758,7 @@ function isAbortError(error: unknown) {
           </div>
           <p>{{ dataset.title }}</p>
         </div>
-        <div class="timeframe-selector" aria-label="Analysis timeframe">
+        <div v-if="mode === 'live'" class="timeframe-selector" aria-label="Analysis timeframe">
           <button
             v-for="interval in availableTimeframes"
             :key="interval"
@@ -1672,7 +1876,67 @@ function isAbortError(error: unknown) {
               :window-size="windowSize"
               :layers="layers"
               :trades="dataset?.trades ?? []"
+              :available-intervals="mode === 'replay' || activeBroker?.id === 'oanda' ? availableIntervals : undefined"
+              :active-interval="activeInterval"
+              :can-go-back="canGoBack"
+              :centered="centeredView"
+              @switch-interval="onSwitchInterval"
+              @drill-candle="onDrillCandle"
+              @drill-back="onDrillBack"
             />
+
+            <div v-if="drillWarning" class="drill-warning" role="status">{{ drillWarning }}</div>
+            <div v-if="drillLoading" class="drill-warning" role="status">Loading window…</div>
+            <div v-if="Object.keys(drillWindows).length" class="drill-active">
+              <span>
+                Centred on a drilled candle · {{ DRILL_BEFORE }} candles before, {{ DRILL_AFTER }} after
+              </span>
+              <button type="button" class="button" @click="clearDrill()">Return to live edge</button>
+            </div>
+
+            <!-- Timeframe chooser. Anchored at the clicked candle so the choice reads as being
+                 about that candle, not a global mode switch. -->
+            <div
+              v-if="drillPrompt"
+              class="drill-prompt-backdrop"
+              @click="dismissDrillPrompt()"
+              @keydown.esc="dismissDrillPrompt()"
+            >
+              <div
+                class="drill-prompt"
+                role="dialog"
+                aria-label="Choose a timeframe to drill into"
+                :style="{ left: `${drillPrompt.x}px`, top: `${drillPrompt.y}px` }"
+                @click.stop
+              >
+                <p class="drill-prompt-title">{{ timestamp(drillPrompt.availableAt) }} UTC</p>
+                <p class="drill-prompt-hint">Open this candle at another timeframe</p>
+
+                <div v-if="drillLowerTargets.length" class="drill-prompt-group">
+                  <span class="drill-prompt-label">↓ Lower</span>
+                  <button
+                    v-for="target in drillLowerTargets"
+                    :key="target.interval"
+                    type="button"
+                    class="button"
+                    @click="chooseDrillTarget(target.interval)"
+                  >{{ target.interval }}</button>
+                </div>
+
+                <div v-if="drillHigherTargets.length" class="drill-prompt-group">
+                  <span class="drill-prompt-label">↑ Higher</span>
+                  <button
+                    v-for="target in drillHigherTargets"
+                    :key="target.interval"
+                    type="button"
+                    class="button"
+                    @click="chooseDrillTarget(target.interval)"
+                  >{{ target.interval }}</button>
+                </div>
+
+                <button type="button" class="button drill-prompt-cancel" @click="dismissDrillPrompt()">Cancel</button>
+              </div>
+            </div>
 
             <div v-if="mode === 'replay'" class="replay-controls">
               <div class="transport-buttons">

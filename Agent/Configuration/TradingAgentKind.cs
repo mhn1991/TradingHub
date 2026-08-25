@@ -4,5 +4,6 @@ public enum TradingAgentKind
 {
     LegacyProgressive,
     ImprovedProgressive,
-    StructuralConfluence
+    StructuralConfluence,
+    DivergenceReversal
 }

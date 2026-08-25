@@ -5,6 +5,7 @@ public static class TradingAgentTypeIds
     public const string LegacyProgressive = "legacy-progressive";
     public const string ImprovedProgressive = "improved-progressive";
     public const string StructuralConfluence = "structural-confluence";
+    public const string DivergenceReversal = "divergence-reversal";
 
     public const string LegacyAlias = "legacy";
     public const string ImprovedAlias = "improved";
@@ -13,7 +14,8 @@ public static class TradingAgentTypeIds
     {
         if (!TryParse(value, out TradingAgentKind kind))
             throw new ArgumentException(
-                $"Unknown trading agent '{value}'. Expected legacy-progressive, improved-progressive, or structural-confluence.",
+                $"Unknown trading agent '{value}'. Expected legacy-progressive, improved-progressive, " +
+                "structural-confluence, or divergence-reversal.",
                 nameof(value));
         return kind;
     }
@@ -33,6 +35,9 @@ public static class TradingAgentTypeIds
             case StructuralConfluence:
                 kind = TradingAgentKind.StructuralConfluence;
                 return true;
+            case DivergenceReversal:
+                kind = TradingAgentKind.DivergenceReversal;
+                return true;
             default:
                 kind = default;
                 return false;
@@ -44,6 +49,7 @@ public static class TradingAgentTypeIds
         TradingAgentKind.LegacyProgressive => LegacyProgressive,
         TradingAgentKind.ImprovedProgressive => ImprovedProgressive,
         TradingAgentKind.StructuralConfluence => StructuralConfluence,
+        TradingAgentKind.DivergenceReversal => DivergenceReversal,
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     };
 

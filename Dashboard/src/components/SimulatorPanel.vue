@@ -16,6 +16,8 @@ import type {
 } from '../types'
 import { RESEARCH_ARTIFACT_SELECTION_KEY } from '../types'
 import AnalysisChart from './AnalysisChart.vue'
+import { useMultiTimeframeSelection } from '../composables/useMultiTimeframeSelection'
+import { findAnchorIndex } from '../utils/timeframeSeries'
 import SimulationExperimentPanel from './SimulationExperimentPanel.vue'
 import ProfileBuilderWizard from './simulator/ProfileBuilderWizard.vue'
 import { useSimulationRealtime } from '../composables/useSimulationRealtime'
@@ -76,6 +78,12 @@ function createBaseSimulationForm() {
     minimumSetupAlignments: 1,
     minimumConfirmationAlignments: 1,
     strongOppositionVeto: true,
+    // Opt-in unified surface (PROJECT_STATE.md §4b, Phase 2): role=interval[:influence[:priority]]
+    // spec, same DSL as BacktestRunner's --timeframes CLI flag. Blank (the default) leaves every
+    // field above in full control, exactly as before this field existed. When non-blank, applies
+    // role-by-role on top of the fields above - a role the spec doesn't mention stays on its own
+    // field's value.
+    timeframesOverride: '',
     strategies: 'legacy,improved',
     // §7 multi-instrument portfolio clock: when enabled, strategyAssignments replaces
     // `strategies` + the single top-level `instrument` entirely - each row trades its
@@ -905,6 +913,58 @@ const replayFrames = computed<ReplayFrame[]>(() => filteredReplayRows.value.map(
   confidence: row.analysis?.confidence ?? { total: 0, contributions: [] },
   analysisMicroseconds: 0,
 })))
+
+// Multi-timeframe wiring for the "Visual playback" chart. Only the execution interval streams
+// live over SignalR, so every other timeframe here is resampled (no `series` argument) — real
+// per-interval data is only available in the static replay view (App.vue). `replayIndex` keeps
+// driving live playback and the metrics panel below at the execution interval; `chartIndex` is
+// the chart's own position — mirrors `replayIndex` while on that interval, detaches (anchor
+// mechanic takes over) once the user switches away or drills, and reattaches when they switch back.
+const mtfBaseInterval = computed(() => form.executionInterval)
+const {
+  activeInterval,
+  availableIntervals,
+  activeFrames,
+  canGoBack,
+  switchInterval,
+  drillInto,
+  goBack,
+} = useMultiTimeframeSelection(mtfBaseInterval, replayFrames, computed(() => undefined))
+
+const chartIndex = ref(replayIndex.value)
+// True right after drilling: the chart centers on chartIndex (candles both before and after)
+// instead of treating it as the live/latest point. See AnalysisChart's `centered` prop.
+const centeredView = ref(false)
+watch(replayIndex, (next) => {
+  if (activeInterval.value === mtfBaseInterval.value) chartIndex.value = next
+})
+
+function onSwitchInterval(interval: string) {
+  const anchorAt = activeFrames.value[chartIndex.value]?.availableAt ?? null
+  switchInterval(interval)
+  chartIndex.value = interval === mtfBaseInterval.value
+    ? replayIndex.value
+    : findAnchorIndex(activeFrames.value, anchorAt)
+  centeredView.value = false
+}
+
+function onDrillCandle(availableAt: string) {
+  const anchorAt = activeFrames.value[chartIndex.value]?.availableAt ?? null
+  const resolvedAnchor = drillInto(availableAt, anchorAt)
+  if (resolvedAnchor === null) return
+  chartIndex.value = findAnchorIndex(activeFrames.value, resolvedAnchor)
+  centeredView.value = true
+}
+
+function onDrillBack() {
+  const resolvedAnchor = goBack()
+  if (resolvedAnchor === null) return
+  chartIndex.value = activeInterval.value === mtfBaseInterval.value
+    ? replayIndex.value
+    : findAnchorIndex(activeFrames.value, resolvedAnchor)
+  centeredView.value = canGoBack.value
+}
+
 const executionDetailFrames = computed<ReplayFrame[]>(() => executionDetailRows.value.map((row, index) => ({
   index,
   availableAt: row.availableAt,
@@ -1087,6 +1147,7 @@ async function startSimulation() {
       minimumSetupAlignments: form.minimumSetupAlignments,
       minimumConfirmationAlignments: form.minimumConfirmationAlignments,
       strongOppositionVeto: form.strongOppositionVeto,
+      timeframes: form.timeframesOverride.trim() || null,
       strategies: form.strategies.split(',').map((item) => item.trim()).filter(Boolean),
       strategyAssignments: form.strategyAssignmentsEnabled
         ? form.strategyAssignments
@@ -2216,6 +2277,18 @@ onMounted(() => {
             <label class="inline-check"><input v-model="form.strongOppositionVeto" type="checkbox" /> Strong opposing structure veto</label>
           </div>
           <small class="muted">The primary trend is the hard directional gate. Secondary trend is soft context, setup intervals locate the opportunity, confirmations validate it, and the entry chart supplies the trigger.</small>
+          <label>Unified timeframe override (optional)
+            <input
+              v-model="form.timeframesOverride"
+              placeholder="e.g. trigger=5m,context=1h:gate:0,context=4h:vote:1"
+            />
+          </label>
+          <small class="muted">
+            When set, overrides the fields above role by role - a role you don't mention here
+            keeps its value from the fields above. Roles: trigger, setup, context, confirmation,
+            regime, neowave. Influences: gate (must agree), veto, vote (N-of-M), advisory,
+            fallback. Format: <code>role=interval[:influence[:priority]]</code>, comma-separated.
+          </small>
         </fieldset>
         <label>Strategies <input v-model="form.strategies" :disabled="form.strategyAssignmentsEnabled" /></label>
         <fieldset class="management-config">
@@ -3021,12 +3094,20 @@ onMounted(() => {
         </p>
         <AnalysisChart
           v-if="replayFrames.length"
-          :frames="replayFrames"
-          :selected-index="replayIndex"
-          :window-size="180"
+          :frames="activeFrames"
+          :selected-index="chartIndex"
+          :window-size="100"
           :layers="replayLayers"
           :trades="flatTrades"
+          :available-intervals="availableIntervals"
+          :active-interval="activeInterval"
+          :can-go-back="canGoBack"
+          :centered="centeredView"
+          @switch-interval="onSwitchInterval"
+          @drill-candle="onDrillCandle"
+          @drill-back="onDrillBack"
         />
+
         <dl v-if="currentReplayRow" class="metrics">
           <div><dt>Index</dt><dd>{{ replayIndex + 1 }} / {{ filteredReplayRows.length }}</dd></div>
           <div><dt>Sequence</dt><dd>{{ currentReplayRow.sequence }}</dd></div>

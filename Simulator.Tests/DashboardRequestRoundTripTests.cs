@@ -201,6 +201,50 @@ public sealed class DashboardRequestRoundTripTests
     }
 
     [Test]
+    public void Timeframes_RoundTripsThroughJsonAndOverridesOnlySpecifiedRoles()
+    {
+        // PROJECT_STATE.md §4b Phase 2: the Dashboard's Timeframes field uses the same DSL as
+        // BacktestRunner's --timeframes CLI flag, applied role-by-role - roles absent from the
+        // spec (here, Confirmation) must fall through to the discrete fields' own values.
+        DateTimeOffset from = new(2026, 6, 1, 0, 0, 0, TimeSpan.Zero);
+        var source = new CreateSimulationRequest
+        {
+            BrokerId = "oanda",
+            Instrument = "FX:GBP/USD",
+            From = from,
+            To = from.AddDays(5),
+            TrendInterval = "3h",
+            ConfirmationInterval = "20m",
+            Timeframes = "trigger=1m,context=1h:gate:0,context=6h:vote:1"
+        };
+        string json = JsonSerializer.Serialize(source, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        CreateSimulationRequest restored = JsonSerializer.Deserialize<CreateSimulationRequest>(
+            json,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        var broker = new SimulationBrokerOption(
+            "oanda",
+            "OANDA",
+            "Demo",
+            "OandaCandles",
+            true,
+            true,
+            "test",
+            ["1m", "5m", "15m", "30m", "1h", "2h", "6h"],
+            [new SimulationInstrumentOption("GBP_USD", "GBP/USD", "FX:GBP/USD", "Forex")]);
+
+        BacktestRequest mapped = restored.ToBacktestRequest(broker);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(mapped.Runtime.StrategyTimeframes.EntryInterval, Is.EqualTo(Brokers.Models.BarInterval.Minutes(1)));
+            Assert.That(mapped.Runtime.StrategyTimeframes.TrendInterval, Is.EqualTo(Brokers.Models.BarInterval.Hours(1)));
+            Assert.That(mapped.Runtime.StrategyTimeframes.SecondaryTrendIntervals, Is.EqualTo(new[] { Brokers.Models.BarInterval.Hours(6) }));
+            // Confirmation role absent from the spec - falls through to the discrete field.
+            Assert.That(mapped.Runtime.StrategyTimeframes.ConfirmationInterval, Is.EqualTo(Brokers.Models.BarInterval.Minutes(20)));
+        });
+    }
+
+    [Test]
     public void ToBacktestRequest_WithoutResolvedArtifacts_LeavesBothPoliciesDisabled()
     {
         DateTimeOffset from = new(2026, 6, 1, 0, 0, 0, TimeSpan.Zero);

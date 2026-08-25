@@ -1,8 +1,17 @@
+import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
   plugins: [vue()],
+  build: {
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        agentDebug: resolve(__dirname, 'agent-debug.html'),
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

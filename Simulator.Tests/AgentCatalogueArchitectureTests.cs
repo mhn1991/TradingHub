@@ -4,6 +4,8 @@ using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Factories;
 using Agent.Strategies;
+using Agent.Strategies.DivergenceReversal;
+using Brokers.Models;
 using NUnit.Framework;
 using Simulator.Models;
 using TradingPolicies;
@@ -24,7 +26,12 @@ public sealed class AgentCatalogueArchitectureTests
         [
             AgentDefinition.FromProgressive(ProgressiveAgentKind.Legacy, new ProgressiveStrategyOptions()),
             AgentDefinition.FromProgressive(ProgressiveAgentKind.Improved, new ProgressiveStrategyOptions()),
-            AgentDefinition.FromStructuralConfluence(new())
+            AgentDefinition.FromStructuralConfluence(new()),
+            AgentDefinition.FromDivergenceReversal(new DivergenceReversalStrategyOptions
+            {
+                MonitoredIntervals = [BarInterval.Minutes(30), BarInterval.Minutes(15)],
+                ConfirmationIntervals = [BarInterval.Minutes(5), BarInterval.Minutes(1)]
+            })
         ];
 
         Assert.Multiple(() =>
@@ -33,7 +40,8 @@ public sealed class AgentCatalogueArchitectureTests
             {
                 TradingAgentTypeIds.LegacyProgressive,
                 TradingAgentTypeIds.ImprovedProgressive,
-                TradingAgentTypeIds.StructuralConfluence
+                TradingAgentTypeIds.StructuralConfluence,
+                TradingAgentTypeIds.DivergenceReversal
             }));
             foreach (AgentDefinition definition in definitions)
             {

@@ -367,6 +367,8 @@ internal sealed record BacktestCommandOptions
                 $"structural-setup-interval ({BarIntervalParser.Format(structuralSetupInterval)}) <= " +
                 $"structural-context-interval ({BarIntervalParser.Format(structuralContextInterval)}).");
         }
+        BarInterval trendInterval = ParseInterval(values.GetValueOrDefault("trend-interval") ?? "2h");
+        BarInterval confirmationInterval = ParseInterval(values.GetValueOrDefault("confirmation-interval") ?? "15m");
         BarInterval entryInterval = ParseInterval(values.GetValueOrDefault("entry-interval") ?? "5m");
         BarInterval[] secondaryTrendIntervals = ParseIntervalList(
             values.GetValueOrDefault("secondary-trend-intervals") ?? "1h");
@@ -374,6 +376,39 @@ internal sealed record BacktestCommandOptions
             values.GetValueOrDefault("setup-intervals") ?? "30m");
         BarInterval[] additionalConfirmationIntervals = ParseIntervalList(
             values.GetValueOrDefault("additional-confirmation-intervals"));
+
+        // Opt-in unified surface (PROJECT_STATE.md §4b, Phase 2): --timeframes overrides only the
+        // Progressive roles it specifies, per-role, leaving every role it omits on the discrete
+        // flags/defaults above untouched. Applied before the Minimum*Alignments defaults below so
+        // those defaults (which key off list length) see the overridden lists, not the stale ones.
+        if (values.GetValueOrDefault("timeframes") is string timeframesSpec && !string.IsNullOrWhiteSpace(timeframesSpec))
+        {
+            TimeframePlan overridePlan = TimeframePlanTextFormat.Parse(timeframesSpec);
+
+            IReadOnlyList<TimeframeAssignment> contextGates = overridePlan.For(TimeframeRole.Context, TimeframeInfluence.Gate);
+            if (contextGates.Count > 0)
+                trendInterval = contextGates[0].Interval;
+
+            IReadOnlyList<TimeframeAssignment> contextVotes = overridePlan.For(TimeframeRole.Context, TimeframeInfluence.Vote);
+            if (contextVotes.Count > 0)
+                secondaryTrendIntervals = [.. contextVotes.Select(a => a.Interval)];
+
+            IReadOnlyList<TimeframeAssignment> setupVotes = overridePlan.For(TimeframeRole.Setup, TimeframeInfluence.Vote);
+            if (setupVotes.Count > 0)
+                setupIntervals = [.. setupVotes.Select(a => a.Interval)];
+
+            IReadOnlyList<TimeframeAssignment> confirmationVotes = overridePlan.For(TimeframeRole.Confirmation, TimeframeInfluence.Vote);
+            if (confirmationVotes.Count > 0)
+            {
+                confirmationInterval = confirmationVotes[0].Interval;
+                additionalConfirmationIntervals = [.. confirmationVotes.Skip(1).Select(a => a.Interval)];
+            }
+
+            IReadOnlyList<TimeframeAssignment> triggerGates = overridePlan.For(TimeframeRole.Trigger, TimeframeInfluence.Gate);
+            if (triggerGates.Count > 0)
+                entryInterval = triggerGates[0].Interval;
+        }
+
         int minimumSecondaryAlignments = ParseInt(
             values.GetValueOrDefault("minimum-secondary-alignments"),
             0,
@@ -442,10 +477,10 @@ internal sealed record BacktestCommandOptions
             SourceKind = source,
             ImportedCandlePath = importedPath,
             StrategyAssignments = strategyAssignments,
-            TrendInterval = ParseInterval(values.GetValueOrDefault("trend-interval") ?? "2h"),
+            TrendInterval = trendInterval,
             SecondaryTrendIntervals = secondaryTrendIntervals,
             SetupIntervals = setupIntervals,
-            ConfirmationInterval = ParseInterval(values.GetValueOrDefault("confirmation-interval") ?? "15m"),
+            ConfirmationInterval = confirmationInterval,
             AdditionalConfirmationIntervals = additionalConfirmationIntervals,
             EntryInterval = entryInterval,
             MinimumSecondaryTrendAlignments = minimumSecondaryAlignments,

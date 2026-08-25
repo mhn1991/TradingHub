@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Strategies;
+using Agent.Strategies.DivergenceReversal;
 using Agent.Strategies.StructuralConfluence;
 using Agent.Strategies.StructuralConfluence.Playbooks;
 using Brokers.Abstractions;
@@ -696,28 +697,30 @@ public sealed record BacktestRequest
                 throw new ArgumentException(
                     $"Strategy type '{strategyType}' conflicts with agent definition kind '{definitionOverride.Kind}'.");
             }
-            return kind == TradingAgentKind.StructuralConfluence
-                ? definitionOverride with
+            if (kind != TradingAgentKind.StructuralConfluence)
+                return definitionOverride;
+
+            TradingAgentDefinition resolvedOverride = definitionOverride with
+            {
+                StructuralConfluence = definitionOverride.StructuralConfluence! with
                 {
-                    StructuralConfluence = definitionOverride.StructuralConfluence! with
-                    {
-                        MarketRegime = Runtime.MarketRegimeRouting
-                    }
+                    MarketRegime = Runtime.MarketRegimeRouting
                 }
-                : definitionOverride;
+            };
+            ValidateStructuralAnnotationRequirements(resolvedOverride.StructuralConfluence!);
+            return resolvedOverride;
         }
 
-        return kind switch
+        switch (kind)
         {
-            TradingAgentKind.LegacyProgressive or TradingAgentKind.ImprovedProgressive => new TradingAgentDefinition
-            {
-                Kind = kind,
-                Progressive = progressiveOptionsOverride ?? ResolveProgressiveStrategyOptions()
-            },
-            TradingAgentKind.StructuralConfluence => new TradingAgentDefinition
-            {
-                Kind = kind,
-                StructuralConfluence = new StructuralConfluenceStrategyOptions
+            case TradingAgentKind.LegacyProgressive or TradingAgentKind.ImprovedProgressive:
+                return new TradingAgentDefinition
+                {
+                    Kind = kind,
+                    Progressive = progressiveOptionsOverride ?? ResolveProgressiveStrategyOptions()
+                };
+            case TradingAgentKind.StructuralConfluence:
+                var structural = new StructuralConfluenceStrategyOptions
                 {
                     Quantity = Quantity,
                     MinimumRewardRisk = MinimumRewardRisk,
@@ -735,10 +738,54 @@ public sealed record BacktestRequest
                     SupplyDemandPullback = new SupplyDemandPullbackOptions { Enabled = true },
                     LiquidityBreakRetest = new LiquidityBreakRetestOptions { Enabled = true },
                     IndicatorConfluence = new IndicatorConfluenceOptions { Enabled = true }
-                }
-            },
-            _ => throw new ArgumentOutOfRangeException(nameof(strategyType))
-        };
+                };
+                ValidateStructuralAnnotationRequirements(structural);
+                return new TradingAgentDefinition { Kind = kind, StructuralConfluence = structural };
+            case TradingAgentKind.DivergenceReversal:
+                var divergenceReversal = new DivergenceReversalStrategyOptions
+                {
+                    MonitoredIntervals = [BarInterval.Minutes(30), BarInterval.Minutes(15)],
+                    ConfirmationIntervals = [BarInterval.Minutes(5), BarInterval.Minutes(1)],
+                    Quantity = Quantity
+                };
+                return new TradingAgentDefinition { Kind = kind, DivergenceReversal = divergenceReversal };
+            default:
+                throw new ArgumentOutOfRangeException(nameof(strategyType));
+        }
+    }
+
+    /// <summary>
+    /// Mirrors <c>SimulationStrategyProfile.ValidateForExecution()</c>'s identical check for the
+    /// Dashboard profile path. The plain <see cref="Strategies"/>/<see cref="StrategyAssignments"/>
+    /// path used by the CLI, walk-forward tooling, and direct API callers had no equivalent guard:
+    /// a bare request enables three playbooks that read liquidity pools/supply-demand zones, but
+    /// <see cref="ChartAnnotationOptions.Liquidity"/>/<see cref="ChartAnnotationOptions.SupplyDemand"/>
+    /// both default to disabled, so those three playbooks silently evaluated "unavailable" on every
+    /// bar - zero trades, no error - for the lifetime of a run. Confirmed empirically: a 60-day real
+    /// EUR/USD walk-forward window produced 0 trades from structural-confluence under bare defaults
+    /// while legacy/improved-progressive produced 83/16 trades on the identical candles.
+    /// </summary>
+    private void ValidateStructuralAnnotationRequirements(StructuralConfluenceStrategyOptions strategy)
+    {
+        bool requiresLiquidity = strategy.LiquiditySweepReversal.Enabled || strategy.LiquidityBreakRetest.Enabled;
+        if (requiresLiquidity && !Runtime.AnnotationOptions.Liquidity.Enabled)
+        {
+            throw new ArgumentException(
+                "Runtime.AnnotationOptions.Liquidity.Enabled must be true when the liquidity-sweep " +
+                "or accepted-break/retest playbook is enabled - otherwise those playbooks can never " +
+                "produce a candidate.");
+        }
+
+        bool requiresSupplyDemand = strategy.SupplyDemandPullback.Enabled ||
+            (strategy.LiquiditySweepReversal.Enabled &&
+             strategy.LiquiditySweepReversal.SupplyDemandConfluence != StructuralConfluenceRequirement.Disabled);
+        if (requiresSupplyDemand && !Runtime.AnnotationOptions.SupplyDemand.Enabled)
+        {
+            throw new ArgumentException(
+                "Runtime.AnnotationOptions.SupplyDemand.Enabled must be true when the supply/demand-" +
+                "pullback playbook or liquidity-sweep supply/demand confluence is enabled - otherwise " +
+                "the supply/demand-pullback playbook can never produce a candidate.");
+        }
     }
 
     public void Validate()

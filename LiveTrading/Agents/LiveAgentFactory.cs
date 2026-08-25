@@ -2,6 +2,7 @@ using Agent.Configuration;
 using Agent.Factories;
 using Agent.Strategies;
 using RiskManager.Calibration;
+using RiskManager.Conditions;
 using Simulator.Calibration;
 using TradingCore.Pipeline;
 using TradingPolicies;
@@ -66,8 +67,24 @@ public static class LiveAgentFactory
             Agent = TradingAgentFactory.Create(agentDefinition)
         };
 
+        // LIVE-01: the host's IStrategyDecisionPipelineFactory is a single DI singleton shared
+        // across every live strategy (see LiveTradingHost/Program.cs), so it can't carry a
+        // per-strategy trading-condition filter via its constructor the way the simulator (one
+        // factory per session) does. policyBundle.TradingConditions is the promoted, per-strategy
+        // config that was validated in simulation - pass it as the per-call override so live
+        // decisions apply the same session/spread/rollover gates the simulator enforced, instead
+        // of silently skipping them. No live IEconomicEventProvider exists yet, so a promoted
+        // policy with EconomicEventFilterEnabled=true correctly fails closed here (throws) rather
+        // than silently ignoring the setting - see TradingConditionFilter's constructor.
+        var tradingConditions = new TradingConditionFilter(policyBundle.TradingConditions, events: null);
+
         return pipelineFactory.Create(
-            definition, policyBundle.FeaturePolicy, setupCalibration, metaModel, policyBundle.AccountSafety);
+            definition,
+            policyBundle.FeaturePolicy,
+            setupCalibration,
+            metaModel,
+            policyBundle.AccountSafety,
+            tradingConditionsOverride: tradingConditions);
     }
 
     public static StrategyDecisionRuntime Create(
