@@ -1140,6 +1140,13 @@ still open as of this session:
 - `Dashboard/src/components/SimulatorPanel.vue` is 3,417 lines (self-flagged as a monolith in
   `TradingHub_Codebase_Audit_Further_Work_2026-07-19.md §3.1`).
 
+**Closed 2026-08-25 — Node version now pinned for `Dashboard/`.** The project had no `.nvmrc` and
+no `engines` field, so its Node version was whatever the developer's shell happened to supply;
+this session found three different Node installs on one machine (see session log). Added
+`Dashboard/.nvmrc` pinning `24`, verified against Node 24.19.0 / npm 12.0.2. Still open:
+`Dashboard/package.json` has no `engines` field, so the pin is advisory for nvm/fnm users only and
+is not enforced at install time or in CI.
+
 ---
 
 ## 4a. Argument-naming consistency audit (2026-08-02, user-requested)
@@ -1596,6 +1603,21 @@ into `docs/`; Docker packaging.
 verification done). Move stale/superseded entries into the relevant numbered section above instead
 of letting this grow forever; this is a changelog, not the whole story.*
 
+- **2026-08-25**: Consolidated the local Node toolchain and patched the Dashboard advisories.
+  The machine had three Node installs — nvm 22.23.1 (what the interactive shell used), an
+  `n`-managed 24.13.0 in `/usr/local` (what `sudo` resolved to), and apt's 18.19.1 (pandoc's
+  dependency). That split is why `sudo npm install -g npm@latest` failed `EBADENGINE`: npm 12
+  requires `^22.22.2 || ^24.15.0 || >=26.0.0` and `n` had 24.13.0, just under the 24.x bar.
+  Removed `n` and its `/usr/local` tree, standardised on nvm 24.19.0 / npm 12.0.2, and reinstalled
+  `@openai/codex` (0.149.1) user-owned so nothing needs `sudo npm` again. Verified `Dashboard`
+  builds on Node 24 twice — once from the pre-existing `node_modules`, once from a clean `npm ci`
+  against the lockfile — with byte-identical output hashes both times and `vue-tsc --noEmit` clean,
+  so npm 12 introduced no resolution drift. Then ran `npm audit fix`: `nanoid` 3.3.16 → 3.3.18
+  (high, GHSA-2v37-7h3g-55p8, infinite loop on zero-size custom generators) and `postcss` 8.5.18 →
+  8.5.26 (moderate), both transitive under Vite; `found 0 vulnerabilities` after, build re-verified
+  identical. Added `Dashboard/.nvmrc` (§4). Repo changes are limited to
+  `Dashboard/package-lock.json` (7 insertions / 7 deletions, versions only — `package.json`
+  untouched) and the new `.nvmrc`.
 - **2026-08-15 (cont'd)**: Exit-calibration sweep done (§3.11). The §3.10 diagnosis was
   mechanically correct — the patient profile doubled payoff (0.79 → 1.64) — but win rate collapsed
   in near-exact compensation (43.8% → 31.3%, stop-outs 53% → 69%), so avgR only moved -0.215 →
