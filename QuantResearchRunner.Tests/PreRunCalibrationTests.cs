@@ -1,3 +1,4 @@
+using Agent.Configuration;
 using RiskManager.Calibration;
 using Simulator.Calibration;
 using TradeManager;
@@ -165,11 +166,20 @@ public sealed class PreRunCalibrationTests
 
         Assert.Multiple(() =>
         {
-            Assert.That(mergedSetup.Buckets.Select(b => b.StrategyId), Is.EquivalentTo(new[] { "legacy", "improved" }));
+            // CalibrationArtifactMerger.NormalizeStrategyId canonicalises via TradingAgentTypeIds,
+            // so the "legacy"/"improved" aliases fed in above come back as their full ids. Asserting
+            // the canonical form is what keeps bucket lookups consistent across merged artifacts.
+            Assert.That(
+                mergedSetup.Buckets.Select(b => b.StrategyId),
+                Is.EquivalentTo(new[] { TradingAgentTypeIds.LegacyProgressive, TradingAgentTypeIds.ImprovedProgressive }));
             Assert.That(mergedSetup.TotalSamples, Is.EqualTo(22));
             Assert.That(mergedSetup.StrategyVersion, Does.Contain("legacy").And.Contain("improved"));
-            Assert.That(mergedMeta.Buckets.Select(b => b.StrategyId), Is.EquivalentTo(new[] { "legacy", "improved" }));
-            Assert.That(mergedMgmt.Cohorts.Select(c => c.StrategyId), Is.EquivalentTo(new[] { "legacy", "improved" }));
+            Assert.That(
+                mergedMeta.Buckets.Select(b => b.StrategyId),
+                Is.EquivalentTo(new[] { TradingAgentTypeIds.LegacyProgressive, TradingAgentTypeIds.ImprovedProgressive }));
+            Assert.That(
+                mergedMgmt.Cohorts.Select(c => c.StrategyId),
+                Is.EquivalentTo(new[] { TradingAgentTypeIds.LegacyProgressive, TradingAgentTypeIds.ImprovedProgressive }));
             Assert.That(() => mergedSetup.Validate(MetaLabelFeatureFactory.SchemaVersion), Throws.Nothing);
             Assert.That(() => mergedMeta.Validate(MetaLabelFeatureFactory.SchemaVersion), Throws.Nothing);
             Assert.That(() => mergedMgmt.Validate(), Throws.Nothing);

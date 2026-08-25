@@ -115,18 +115,21 @@ public sealed class CalibrationBundleWorkflowTests
             request.Training.PriceActionConfirmation,
             request.Training.MinimumPriceActionConfidence,
             request.Training.RejectStrongOpposingPriceAction);
+        // Read through EffectiveAgentDefinition() rather than the profile's AgentOptions property:
+        // AgentKind/AgentOptions are legacy compatibility fields that TradingPolicyProfile.Create
+        // only populates when includeProgressiveCompatibilityFields is set, which no caller does.
+        // Newly promoted profiles carry the options on AgentDefinition instead, so asserting on
+        // AgentOptions directly dereferences null regardless of whether the derivation is correct.
+        ProgressiveStrategyOptions actual = result.Candidate!.ProposedProfile
+            .EffectiveAgentDefinition().Progressive!;
         Assert.Multiple(() =>
         {
+            Assert.That(actual.TrendInterval, Is.EqualTo(expected.TrendInterval));
             Assert.That(
-                result.Candidate!.ProposedProfile.AgentOptions!.TrendInterval,
-                Is.EqualTo(expected.TrendInterval));
-            Assert.That(
-                result.Candidate.ProposedProfile.AgentOptions!.TrendInterval,
+                actual.TrendInterval,
                 Is.EqualTo(BarInterval.Hours(2)),
                 "RecommendedSimulationDefaults.StrategyTimeframes.TrendInterval, not ProgressiveStrategyOptions' own bare 1h default.");
-            Assert.That(
-                result.Candidate.ProposedProfile.AgentOptions!.EntryInterval,
-                Is.EqualTo(expected.EntryInterval));
+            Assert.That(actual.EntryInterval, Is.EqualTo(expected.EntryInterval));
         });
     }
 

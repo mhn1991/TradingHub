@@ -1603,6 +1603,29 @@ into `docs/`; Docker packaging.
 verification done). Move stale/superseded entries into the relevant numbered section above instead
 of letting this grow forever; this is a changelog, not the whole story.*
 
+- **2026-08-25 (cont'd 2)**: Fixed the 2 long-standing `QuantResearchRunner.Tests` failures. Both
+  were stale test expectations, not code defects, and both were verified pre-existing by
+  reproducing them at `origin/main` in a clean worktree before any change.
+  (a) `Merger_CombinesBucketsAndCohortsByStrategy` fed the `"legacy"`/`"improved"` aliases in and
+  asserted they came back unchanged, but `CalibrationArtifactMerger.NormalizeStrategyId`
+  canonicalises through `TradingAgentTypeIds.Parse`/`Format`, so they correctly return as
+  `legacy-progressive`/`improved-progressive` — that normalisation is the point, it keeps bucket
+  lookups consistent across merged artifacts. Test now asserts the canonical ids via the
+  `TradingAgentTypeIds` constants.
+  (b) `RunAndProposeAsync_DerivesAgentOptions_FromTrainingRuntime_NotBareDefaults` threw
+  `NullReferenceException` reading `ProposedProfile.AgentOptions`. That property, with `AgentKind`,
+  is a *legacy compatibility* pair that `TradingPolicyProfile.Create` only populates when
+  `includeProgressiveCompatibilityFields` is true — and no caller anywhere passes true
+  (`TradingPolicyProfile.cs:241` hard-codes false). Newly promoted profiles carry the options on
+  `AgentDefinition`; the legacy fields exist to deserialise older profiles. Confirmed no production
+  code reads `TradingPolicyProfile.AgentOptions` at all (every `.AgentOptions` hit outside tests is
+  the unrelated `AgentOptionsOverride` on assignments), so the code is right and the test was
+  reading a deliberately-null field. Test now reads `EffectiveAgentDefinition().Progressive`, which
+  resolves canonical-vs-legacy and so keeps the AGENT-01 regression guard meaningful either way.
+  Full suite now green: 1,368 passed / 0 failed across Simulator.Tests (1,092), LiveTrading.Tests
+  (119), QuantResearchRunner.Tests (73), TradingHub.UnitTests (60), TradingCore.Tests (24).
+  `dotnet build TradingHub.slnx -c Release` reports 0 errors. `DBManager.Tests` still unrun (no
+  Docker).
 - **2026-08-25 (cont'd)**: Unblocked the solution build. `dotnet build TradingHub.slnx` was
   failing outright for every target: `DBManager.Tests` -> `Testcontainers.PostgreSql` 4.13.0 ->
   `Testcontainers` -> `SSH.NET` 2025.1.0, and advisory GHSA-q939-rpr3-3284 (high; ScpClient
