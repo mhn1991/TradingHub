@@ -136,7 +136,15 @@ public sealed class ImprovedProgressiveAgent(ProgressiveStrategyOptions? options
         AnalysisSnapshot entry)
     {
         bool longPosition = position.Side == OrderSide.Buy;
-        bool invalidated = longPosition
+
+        // Invalidation asks "is the thesis that selected this setup still intact?", so it must be
+        // judged against the side the EVIDENCE supports - which under inverted polarity is the
+        // opposite of the side actually held. Testing the held side instead makes every inverted
+        // position self-invalidating on its first evaluation (a Sell taken into a Rising trend
+        // trips Opposes immediately), closing every trade one bar after entry and measuring
+        // nothing but repeated spread.
+        bool evidenceLong = Options.InvertSignalPolarity ? !longPosition : longPosition;
+        bool invalidated = evidenceLong
             ? HasOpposingBreak(SetupSide.Buy, confirmation) || Opposes(SetupSide.Buy, trend)
             : HasOpposingBreak(SetupSide.Sell, confirmation) || Opposes(SetupSide.Sell, trend);
         return invalidated

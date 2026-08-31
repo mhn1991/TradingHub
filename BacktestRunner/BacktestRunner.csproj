@@ -20,6 +20,9 @@
     <ProjectReference Include="../RiskManager/RiskManager.csproj" />
     <ProjectReference Include="../TradingCore/TradingCore.csproj" />
     <ProjectReference Include="../QuantResearch.Training/QuantResearch.Training.csproj" />
+    <!-- Needed to load a trained classifier and hand it to the ML agents. Without this the
+         agents fall back to a no-trade model and every backtest of them reports 0 trades. -->
+    <ProjectReference Include="../TradingClassifier.ML/TradingClassifier.ML.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" />

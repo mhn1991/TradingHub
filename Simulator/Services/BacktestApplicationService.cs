@@ -594,6 +594,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
                 .EffectiveAnalysisIntervals(
                     strategies.SelectMany(s => s.Agent.RequiredIntervals)),
             Runtime = runtime,
+            MinimumRewardRiskRatio = request.MinimumRewardRisk,
             AnnotationOptions = runtime.AnnotationOptions,
             // Previously never set from any Runtime field - meta-labeling was 100% dead in
             // every production run regardless of what BacktestRuntimeOptions.MetaModel asked

@@ -861,6 +861,21 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         AnalysisSnapshot confirmation,
         AnalysisSnapshot entry);
 
+    /// <summary>
+    /// Reflects a bracket through the entry price so it is valid for the opposite direction,
+    /// preserving both distances: a Buy risking R to make W becomes a Sell risking R to make W.
+    /// Keeping the distances identical is what makes the inverted arm comparable to the control -
+    /// same risk per trade, same reward:risk, only the direction differs. The structural
+    /// provenance does not survive (a stop tucked under a swing low has no meaning mirrored
+    /// above entry), which is why the sources are relabelled "Inverted:".
+    /// </summary>
+    private static (decimal? Stop, decimal? Target) MirrorBracket(
+        decimal reference,
+        decimal? stop,
+        decimal? target) => (
+            stop is null ? null : reference + (reference - stop.Value),
+            target is null ? null : reference - (target.Value - reference));
+
     protected AgentDecision Trade(
         AgentMarketContext context,
         ScopeState state,
@@ -873,6 +888,21 @@ public abstract class ProgressiveStrategyBase : ITradingAgent
         string? stopSource = null,
         string? targetSource = null)
     {
+        // Research switch. Applied HERE, at decision construction, and deliberately not at side
+        // detection: detection feeds the evidence gates (higher-timeframe structure opposition,
+        // opposing price action), and a side flipped before them is vetoed by the very evidence
+        // that selected the setup - "Primary higher-timeframe structure invalidated the setup" -
+        // producing a near-empty run that reads as "no signals" rather than a self-defeating
+        // config. Flipping at the end keeps setup SELECTION identical to the control arm and
+        // reverses only the direction traded, which is the comparison actually being made.
+        if (Options.InvertSignalPolarity && action is AgentAction.Buy or AgentAction.Sell)
+        {
+            action = action == AgentAction.Buy ? AgentAction.Sell : AgentAction.Buy;
+            (stop, target) = MirrorBracket(reference, stop, target);
+            stopSource = stopSource is null ? null : $"Inverted:{stopSource}";
+            targetSource = targetSource is null ? null : $"Inverted:{targetSource}";
+        }
+
         decimal? rr = stop is not null && target is not null && stop != reference
             ? Math.Abs(target.Value - reference) / Math.Abs(reference - stop.Value)
             : null;

@@ -426,6 +426,66 @@ public sealed class LegacyExitModeAndRiskTests
     }
 
     [Test]
+    public async Task StreamingEngine_ForwardsExplicitMinimumRewardRisk_ToBracketRiskGate()
+    {
+        InstrumentKey instrument = new("FX:EUR/USD");
+        BarInterval minute = BarInterval.Minutes(1);
+        DateTimeOffset start = new(2025, 6, 2, 8, 0, 0, TimeSpan.Zero);
+        Candle[] candles = BuildTrendingCandles(instrument, minute, start, 600);
+        string output = Path.Combine(Path.GetTempPath(), "streamed-minimum-rr", Guid.NewGuid().ToString("N"));
+        var runtime = new BacktestRuntimeOptions
+        {
+            ExecutionInterval = minute,
+            AnalysisBaseInterval = minute,
+            AnalysisIntervals = [minute, BarInterval.Minutes(5)],
+            WarmupDays = 0,
+            PrefetchCapacity = 256,
+            PrefetchLowWatermark = 32,
+            SourcePageSize = 128,
+            StrategyExecutionMode = StrategyExecutionMode.Sequential,
+            ReplayChunkSize = 100
+        };
+        var engine = new StreamingComparativeEngine(
+            new Simulator.Abstractions.EnumerableMarketCandleStream(candles),
+            [new StrategyFactoryEntry("one-r", new DeterministicOneRBracketAgent(), instrument)]);
+
+        ComparativeSimulationResult result = await engine.RunAsync(
+            new StreamingComparativeEngineOptions
+            {
+                SimulationId = Guid.NewGuid(),
+                Instrument = instrument,
+                EvaluationFrom = start,
+                EvaluationTo = start.AddMinutes(candles.Length),
+                StreamFrom = start,
+                AnalysisIntervals = runtime.AnalysisIntervals,
+                Runtime = runtime,
+                MinimumRewardRiskRatio = 1m,
+                SimulationOptions = new SimulationOptions
+                {
+                    StartingBalance = 100_000m,
+                    Leverage = 20m,
+                    CommissionRate = 0m,
+                    SpreadBasisPoints = 0m,
+                    SlippageBasisPoints = 0m,
+                    CloseOpenPositionsAtEnd = true,
+                    BaseCandleGapPolicy = ChartAnnotator.MarketData.BaseCandleGapPolicy.ResetIncompleteBuckets
+                },
+                OutputDirectory = output,
+                InputStreamId = "streamed-minimum-rr-regression"
+            },
+            new HistoricalCandleRequest(instrument, minute, start, start.AddMinutes(candles.Length)));
+
+        SimulationResult strategy = result.Strategies.Single().Result;
+        Assert.Multiple(() =>
+        {
+            Assert.That(strategy.SubmittedOrders, Is.GreaterThan(0),
+                "The 1R decision was rejected by the default 1.5R gate.");
+            Assert.That(strategy.FilledOrders, Is.GreaterThan(0));
+            Assert.That(strategy.Trades, Is.Not.Empty);
+        });
+    }
+
+    [Test]
     public async Task ProtectiveStopAgent_OpensAndClosesTradeWithoutTakeProfit_EndToEnd()
     {
         InstrumentKey instrument = new("FX:EUR/USD");
@@ -551,6 +611,55 @@ public sealed class LegacyExitModeAndRiskTests
                     Confidence = 100m,
                     CreatedAt = context.Timestamp,
                     Reason = "Deterministic entry without a fixed target"
+                };
+            _submitted = true;
+            return Task.FromResult(decision);
+        }
+    }
+
+    private sealed class DeterministicOneRBracketAgent : ITradingAgent
+    {
+        private bool _submitted;
+
+        public string Name => "Deterministic 1R bracket agent";
+        public IReadOnlySet<BarInterval> RequiredIntervals { get; } =
+            new HashSet<BarInterval> { BarInterval.Minutes(5) };
+        public BarInterval TriggerInterval => BarInterval.Minutes(5);
+        public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.Bracket;
+
+        public Task<AgentDecision> EvaluateAsync(
+            AgentMarketContext context,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            decimal price = context.Analysis.Get(BarInterval.Minutes(5)).LatestCandle.Prices.Close;
+            AgentDecision decision = _submitted
+                ? new AgentDecision
+                {
+                    Action = AgentAction.Observe,
+                    Instrument = context.Instrument,
+                    Confidence = 0m,
+                    CreatedAt = context.Timestamp,
+                    Reason = "Already submitted"
+                }
+                : new AgentDecision
+                {
+                    StrategyName = Name,
+                    SetupId = "one-r-bracket-test",
+                    SetupStartedAt = context.Timestamp,
+                    SignalInterval = BarInterval.Minutes(5),
+                    Action = AgentAction.Buy,
+                    Instrument = context.Instrument,
+                    SuggestedQuantity = 1_000m,
+                    QuantityUnit = QuantityUnit.Units,
+                    OrderType = StandardOrderType.Market,
+                    ReferencePrice = price,
+                    StopLossPrice = price - 0.01m,
+                    TakeProfitPrice = price + 0.01m,
+                    ExpectedRewardRisk = 1m,
+                    Confidence = 100m,
+                    CreatedAt = context.Timestamp,
+                    Reason = "Deterministic 1R bracket"
                 };
             _submitted = true;
             return Task.FromResult(decision);

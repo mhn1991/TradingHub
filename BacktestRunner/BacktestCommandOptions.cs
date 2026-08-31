@@ -69,6 +69,62 @@ internal sealed record BacktestCommandOptions
     public decimal SpreadBasisPoints { get; init; } = 1m;
     public decimal SlippageBasisPoints { get; init; } = 0.5m;
     public decimal MinimumRewardRisk { get; init; } = 1.5m;
+
+    /// <summary>breakout-detector bracket, in ATR multiples (§3.19). Target/stop is the R multiple.</summary>
+    public decimal BreakoutStopAtrMultiple { get; init; } = 1.5m;
+
+    public decimal BreakoutTargetAtrMultiple { get; init; } = 3.0m;
+
+    /// <summary>--trend-tactical-no-ml runs the design's rung B: trend gate only.</summary>
+    public bool TrendTacticalRequireClassifier { get; init; } = true;
+
+    /// <summary>--trend-tactical-cooldown-bars N</summary>
+    public int TrendTacticalReentryCooldownBars { get; init; }
+
+    /// <summary>--trend-tactical-one-entry-per-trend</summary>
+    public bool TrendTacticalOneEntryPerTrend { get; init; }
+
+    /// <summary>--trend-tactical-ml-stop</summary>
+    public bool TrendTacticalUseMlStop { get; init; }
+
+    /// <summary>--trend-tactical-secondary-trends 30,60</summary>
+    public IReadOnlyList<int> TrendTacticalSecondaryTrendMinutes { get; init; } = [];
+
+    /// <summary>--trend-tactical-swing-entry enables Rung A's validated entry rule.</summary>
+    public bool TrendTacticalUseSwingEntry { get; init; }
+
+    /// <summary>--trend-entry-percentile 0.05</summary>
+    public decimal TrendTacticalEntryPercentile { get; init; } = 0.05m;
+
+    /// <summary>--trend-entry-mode PriceOnly|TimeOnly|PriceAndTime</summary>
+    public TrendStatistics.Trading.SwingEntryMode TrendTacticalSwingEntryMode { get; init; } =
+        TrendStatistics.Trading.SwingEntryMode.PriceOnly;
+
+    /// <summary>
+    /// --classifier-model PATH. Without it the ML agents fall back to a no-trade model and report
+    /// zero trades with no error.
+    /// </summary>
+    public string? ClassifierModelPath { get; init; }
+
+    /// <summary>--stop-model PATH. Absent means the agent keeps its structural stop.</summary>
+    public string? StopModelPath { get; init; }
+
+    /// <summary>Populated from the loaded artifact so the agent matches the model it will score with.</summary>
+    public TradingClassifier.Configuration.ClassifierOptions? ClassifierOptions { get; init; }
+
+    /// <summary>Signal/trigger timeframe from the model artifact.</summary>
+    public BarInterval? ClassifierSignalInterval { get; init; }
+
+    /// <summary>--alfonso-top / --alfonso-middle / --alfonso-lower.</summary>
+    public BarInterval? AlfonsoTopInterval { get; init; }
+    public BarInterval? AlfonsoMiddleInterval { get; init; }
+    public BarInterval? AlfonsoLowerInterval { get; init; }
+    public decimal? AlfonsoRewardMultiple { get; init; }
+    public decimal? AlfonsoStopPadding { get; init; }
+    public bool AlfonsoEliminationRequiresClose { get; init; } = false;
+    public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
+    public bool AlfonsoRequireValidZoneForTrendChange { get; init; } = true;
+    public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
     public decimal? DailyEquityProfitTarget { get; init; }
     public decimal? DailyEquityGivebackActivation { get; init; }
     public decimal? MaximumDailyEquityGiveback { get; init; }
@@ -87,6 +143,7 @@ internal sealed record BacktestCommandOptions
     public PriceActionConfirmationMode PriceActionConfirmation { get; init; } = PriceActionConfirmationMode.Soft;
     public decimal MinimumPriceActionConfidence { get; init; } = 55m;
     public bool RejectStrongOpposingPriceAction { get; init; } = true;
+    public bool InvertSignalPolarity { get; init; }
     public int WarmupDays { get; init; } = RecommendedSimulationDefaults.WarmupDays;
     public int ProgressIntervalMs { get; init; } = 500;
     public IReadOnlyList<string> Strategies { get; init; } = ["legacy", "improved"];
@@ -258,7 +315,13 @@ internal sealed record BacktestCommandOptions
             string key = token[2..];
             if (key is "refresh" or "no-cache" or "full-chart-history" or "trailing-comparison" or
                 "allow-opposing-price-action" or "allow-timeframe-opposition" or
+                "invert-signal-polarity" or
                 "legacy-disable-mechanical-protection" or "improved-disable-mechanical-protection" or
+                "trend-tactical-no-ml" or "trend-tactical-one-entry-per-trend" or
+                "trend-tactical-ml-stop" or "trend-tactical-swing-entry" or
+                "alfonso-elimination-on-wick" or "alfonso-elimination-on-close" or
+                "alfonso-trendline-break-full-candle" or
+                "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -508,6 +571,49 @@ internal sealed record BacktestCommandOptions
             SpreadBasisPoints = ParseDecimal(values.GetValueOrDefault("spread-bps"), 1m, -1m, "spread-bps", allowZero: true),
             SlippageBasisPoints = ParseDecimal(values.GetValueOrDefault("slippage-bps"), 0.5m, -1m, "slippage-bps", allowZero: true),
             MinimumRewardRisk = ParseDecimal(values.GetValueOrDefault("minimum-rr"), 1.5m, 0m, "minimum-rr"),
+            BreakoutStopAtrMultiple = ParseDecimal(
+                values.GetValueOrDefault("breakout-stop-atr"), 1.5m, 0m, "breakout-stop-atr"),
+            BreakoutTargetAtrMultiple = ParseDecimal(
+                values.GetValueOrDefault("breakout-target-atr"), 3.0m, 0m, "breakout-target-atr"),
+            AlfonsoTopInterval = values.GetValueOrDefault("alfonso-top") is string alfonsoTop
+                ? ParseInterval(alfonsoTop) : null,
+            AlfonsoMiddleInterval = values.GetValueOrDefault("alfonso-middle") is string alfonsoMiddle
+                ? ParseInterval(alfonsoMiddle) : null,
+            AlfonsoLowerInterval = values.GetValueOrDefault("alfonso-lower") is string alfonsoLower
+                ? ParseInterval(alfonsoLower) : null,
+            AlfonsoRewardMultiple = values.ContainsKey("alfonso-reward")
+                ? ParseDecimal(values.GetValueOrDefault("alfonso-reward"), 3m, 0m, "alfonso-reward")
+                : null,
+            AlfonsoStopPadding = values.ContainsKey("alfonso-stop-padding")
+                ? ParseDecimal(
+                    values.GetValueOrDefault("alfonso-stop-padding"), 0.25m, 0m, "alfonso-stop-padding",
+                    allowZero: true)
+                : null,
+            // Wick penetration is the literal Module 4 default. Keep the former wick flag accepted
+            // for script compatibility; --alfonso-elimination-on-close selects the stricter reading.
+            AlfonsoEliminationRequiresClose = values.ContainsKey("alfonso-elimination-on-close") &&
+                                               !values.ContainsKey("alfonso-elimination-on-wick"),
+            AlfonsoTrendlineBreakRequiresClose = !values.ContainsKey("alfonso-trendline-break-full-candle"),
+            AlfonsoRequireValidZoneForTrendChange = !values.ContainsKey("alfonso-allow-invalid-zones"),
+            AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
+            TrendTacticalRequireClassifier = !values.ContainsKey("trend-tactical-no-ml"),
+            TrendTacticalReentryCooldownBars = ParseInt(
+                values.GetValueOrDefault("trend-tactical-cooldown-bars"), 0, 0, 5000,
+                "trend-tactical-cooldown-bars"),
+            TrendTacticalOneEntryPerTrend = values.ContainsKey("trend-tactical-one-entry-per-trend"),
+            TrendTacticalUseMlStop = values.ContainsKey("trend-tactical-ml-stop"),
+            TrendTacticalUseSwingEntry = values.ContainsKey("trend-tactical-swing-entry"),
+            TrendTacticalEntryPercentile = ParseDecimal(
+                values.GetValueOrDefault("trend-entry-percentile"), 0.05m, 0m, "trend-entry-percentile"),
+            TrendTacticalSwingEntryMode = Enum.Parse<TrendStatistics.Trading.SwingEntryMode>(
+                values.GetValueOrDefault("trend-entry-mode") ?? "PriceOnly", ignoreCase: true),
+            TrendTacticalSecondaryTrendMinutes =
+                values.TryGetValue("trend-tactical-secondary-trends", out string? secondaries)
+                    ? [.. secondaries!.Split(',', StringSplitOptions.RemoveEmptyEntries |
+                        StringSplitOptions.TrimEntries).Select(int.Parse)]
+                    : [],
+            ClassifierModelPath = values.GetValueOrDefault("classifier-model"),
+            StopModelPath = values.GetValueOrDefault("stop-model"),
             DailyEquityProfitTarget = ParseOptionalPositiveDecimal(
                 values.GetValueOrDefault("daily-equity-profit-target"),
                 "daily-equity-profit-target"),
@@ -526,6 +632,7 @@ internal sealed record BacktestCommandOptions
                 "minimum-price-action-confidence",
                 allowZero: true),
             RejectStrongOpposingPriceAction = !values.ContainsKey("allow-opposing-price-action"),
+            InvertSignalPolarity = values.ContainsKey("invert-signal-polarity"),
             WarmupDays = ParseInt(
                 values.GetValueOrDefault("warmup-days"),
                 RecommendedSimulationDefaults.WarmupDays,
@@ -608,9 +715,31 @@ internal sealed record BacktestCommandOptions
         SpreadBasisPoints = SpreadBasisPoints,
         SlippageBasisPoints = SlippageBasisPoints,
         MinimumRewardRisk = MinimumRewardRisk,
+        BreakoutStopAtrMultiple = BreakoutStopAtrMultiple,
+        BreakoutTargetAtrMultiple = BreakoutTargetAtrMultiple,
+        TrendTacticalRequireClassifier = TrendTacticalRequireClassifier,
+        TrendTacticalReentryCooldownBars = TrendTacticalReentryCooldownBars,
+        TrendTacticalOneEntryPerTrend = TrendTacticalOneEntryPerTrend,
+        TrendTacticalUseMlStop = TrendTacticalUseMlStop,
+        TrendTacticalSecondaryTrendMinutes = TrendTacticalSecondaryTrendMinutes,
+        TrendTacticalUseSwingEntry = TrendTacticalUseSwingEntry,
+        TrendTacticalEntryPercentile = TrendTacticalEntryPercentile,
+        TrendTacticalSwingEntryMode = TrendTacticalSwingEntryMode,
+        ClassifierOptions = ClassifierOptions,
+        ClassifierSignalInterval = ClassifierSignalInterval,
+        AlfonsoTopInterval = AlfonsoTopInterval,
+        AlfonsoMiddleInterval = AlfonsoMiddleInterval,
+        AlfonsoLowerInterval = AlfonsoLowerInterval,
+        AlfonsoRewardMultiple = AlfonsoRewardMultiple,
+        AlfonsoStopPadding = AlfonsoStopPadding,
+        AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,
+        AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
+        AlfonsoRequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
+        AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
         PriceActionConfirmation = PriceActionConfirmation,
         MinimumPriceActionConfidence = MinimumPriceActionConfidence,
         RejectStrongOpposingPriceAction = RejectStrongOpposingPriceAction,
+        InvertSignalPolarity = InvertSignalPolarity,
         CaptureMarketReplay = CaptureMarketReplay,
         OutputDirectory = Path.Combine(OutputDirectory, "simulations"),
         CacheDirectory = CacheDirectory,

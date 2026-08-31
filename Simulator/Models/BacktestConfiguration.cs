@@ -1,9 +1,13 @@
 using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Strategies;
+using Agent.Strategies.Alfonso;
+using Agent.Strategies.BreakoutDetector;
+using Agent.Strategies.TrendTactical;
 using Agent.Strategies.DivergenceReversal;
 using Agent.Strategies.StructuralConfluence;
 using Agent.Strategies.StructuralConfluence.Playbooks;
+using Agent.Strategies.TradingClassification;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.CurrencyStrength;
@@ -165,6 +169,9 @@ public sealed record BacktestRuntimeOptions
     public PositionManagementOptions StructuralPositionManagement { get; init; } =
         PositionManagementOptions.StructuralDefaults;
 
+    public PositionManagementOptions AlfonsoPositionManagement { get; init; } =
+        PositionManagementOptions.BracketOnlyDefaults;
+
     /// <summary>
     /// Account-level safety and daily equity-profit protection. Null thresholds leave
     /// the corresponding rule disabled.
@@ -259,7 +266,8 @@ public sealed record BacktestRuntimeOptions
         decimal minimumRewardRisk,
         PriceActionConfirmationMode priceActionConfirmation,
         decimal minimumPriceActionConfidence,
-        bool rejectStrongOpposingPriceAction)
+        bool rejectStrongOpposingPriceAction,
+        bool invertSignalPolarity = false)
     {
         ProgressiveStrategyTimeframes tf = StrategyTimeframes;
         var options = new ProgressiveStrategyOptions
@@ -279,6 +287,7 @@ public sealed record BacktestRuntimeOptions
             PriceActionConfirmation = priceActionConfirmation,
             MinimumPriceActionConfidence = minimumPriceActionConfidence,
             RejectStrongOpposingPriceAction = rejectStrongOpposingPriceAction,
+            InvertSignalPolarity = invertSignalPolarity,
             MarketRegime = MarketRegimeRouting,
             ValueLocationEvidence = ValueLocationEvidence,
             CurrencyStrengthEvidence = CurrencyStrengthEvidence,
@@ -309,6 +318,7 @@ public sealed record BacktestRuntimeOptions
         LegacyPositionManagement.Validate();
         ImprovedPositionManagement.Validate();
         StructuralPositionManagement.Validate();
+        AlfonsoPositionManagement.Validate();
         SafetyOptions.Validate();
         PositionSizing.Validate();
         AnnotationOptions.Validate();
@@ -439,6 +449,9 @@ public sealed record BacktestRuntimeOptions
     public PositionManagementOptions GetPositionManagement(string strategyId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(strategyId);
+        if (IsAlfonso(strategyId))
+            return AlfonsoPositionManagement;
+
         if (IsStructuralConfluence(strategyId))
             return StructuralPositionManagement;
 
@@ -482,6 +495,11 @@ public sealed record BacktestRuntimeOptions
         string.Equals(strategyId.Trim(), TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase) ||
         strategyId.Trim().StartsWith(
             TradingAgentTypeIds.StructuralConfluence + ":", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsAlfonso(string strategyId) =>
+        string.Equals(strategyId.Trim(), TradingAgentTypeIds.Alfonso, StringComparison.OrdinalIgnoreCase) ||
+        strategyId.Trim().StartsWith(
+            TradingAgentTypeIds.Alfonso + ":", StringComparison.OrdinalIgnoreCase);
 
     public BarInterval ResolveManagementInterval(string strategyId)
     {
@@ -636,9 +654,87 @@ public sealed record BacktestRequest
     public decimal SpreadBasisPoints { get; init; } = 1m;
     public decimal SlippageBasisPoints { get; init; } = 0.5m;
     public decimal MinimumRewardRisk { get; init; } = 1.5m;
+
+    /// <summary>
+    /// breakout-detector bracket geometry, in ATR multiples. Exposed because §3.19 measured the
+    /// stock 1.5/3.0 pair (a 2R target) to be far out of reach — only 9.6% of trades ever travel 2R
+    /// — so the multiples need to be swept, not recompiled.
+    /// </summary>
+    public decimal BreakoutStopAtrMultiple { get; init; } = 1.5m;
+
+    public decimal BreakoutTargetAtrMultiple { get; init; } = 3.0m;
+
+    /// <summary>
+    /// false runs trend-tactical at rung B of its validation ladder: trend gate only, no ML. Needed
+    /// to generate candidates at all before a model exists.
+    /// </summary>
+    public bool TrendTacticalRequireClassifier { get; init; } = true;
+
+    /// <summary>--alfonso-top / --alfonso-middle / --alfonso-lower. The sequence is a parameter:
+    /// module 8 lists five and leaves the choice to the trader.</summary>
+    public BarInterval? AlfonsoTopInterval { get; init; }
+    public BarInterval? AlfonsoMiddleInterval { get; init; }
+    public BarInterval? AlfonsoLowerInterval { get; init; }
+
+    /// <summary>--alfonso-reward N. The course fixes 3:1 but says plans may differ.</summary>
+    public decimal? AlfonsoRewardMultiple { get; init; }
+
+    /// <summary>--alfonso-stop-padding N. 25% of the zone width in the worked examples.</summary>
+    public decimal? AlfonsoStopPadding { get; init; }
+
+    /// <summary>--alfonso-elimination-on-wick reverts to the English text's tick-penetration rule.</summary>
+    public bool AlfonsoEliminationRequiresClose { get; init; } = true;
+
+    /// <summary>--alfonso-trendline-break-full-candle requires the whole candle beyond the line.</summary>
+    public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
+
+    /// <summary>--alfonso-allow-invalid-zones lets any eliminated structure move the trend.</summary>
+    public bool AlfonsoRequireValidZoneForTrendChange { get; init; } = true;
+
+    /// <summary>--alfonso-no-swing-break drops peak/valley breaks as an accomplishment.</summary>
+    public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
+
+    /// <summary>
+    /// Classifier options taken from the loaded model artifact. The agent's feature engine and the
+    /// model must agree on groups, horizon and label geometry — defaulting them independently makes
+    /// `EnsureCompatible` reject the model at run start, which is the guard working but the wiring
+    /// being wrong.
+    /// </summary>
+    public TradingClassifier.Configuration.ClassifierOptions? ClassifierOptions { get; init; }
+
+    /// <summary>Signal/trigger timeframe taken from the model artifact.</summary>
+    public BarInterval? ClassifierSignalInterval { get; init; }
+
+    /// <summary>Trigger bars to wait after any close before re-entering. 0 = original behaviour.</summary>
+    public int TrendTacticalReentryCooldownBars { get; init; }
+
+    /// <summary>At most one entry per detected higher-timeframe trend.</summary>
+    public bool TrendTacticalOneEntryPerTrend { get; init; }
+
+    /// <summary>Place the stop from the predicted adverse excursion instead of structure.</summary>
+    public bool TrendTacticalUseMlStop { get; init; }
+
+    /// <summary>Secondary trend timeframes (minutes) that must not oppose the primary direction.</summary>
+    public IReadOnlyList<int> TrendTacticalSecondaryTrendMinutes { get; init; } = [];
+
+    /// <summary>Rung A: use the validated swing-entry rule over frozen trend profiles.</summary>
+    public bool TrendTacticalUseSwingEntry { get; init; }
+
+    public decimal TrendTacticalEntryPercentile { get; init; } = 0.05m;
+
+    public TrendStatistics.Trading.SwingEntryMode TrendTacticalSwingEntryMode { get; init; } =
+        TrendStatistics.Trading.SwingEntryMode.PriceOnly;
     public PriceActionConfirmationMode PriceActionConfirmation { get; init; } = PriceActionConfirmationMode.Soft;
     public decimal MinimumPriceActionConfidence { get; init; } = 55m;
     public bool RejectStrongOpposingPriceAction { get; init; } = true;
+
+    /// <summary>
+    /// Research switch: trade the OPPOSITE of every signal. Off by default, so no existing run
+    /// changes. See <see cref="ProgressiveStrategyOptions.InvertSignalPolarity"/> - a run with
+    /// this on is only interpretable next to a normal-polarity control over the same window.
+    /// </summary>
+    public bool InvertSignalPolarity { get; init; }
+
     public string OutputDirectory { get; init; } = Path.Combine("Dashboard", "public", "data", "simulations");
     public string CacheDirectory { get; init; } = Path.Combine(".cache", "oanda");
     public string JobsDirectory { get; init; } = Path.Combine(".cache", "simulation-jobs");
@@ -678,7 +774,8 @@ public sealed record BacktestRequest
             MinimumRewardRisk,
             PriceActionConfirmation,
             MinimumPriceActionConfidence,
-            RejectStrongOpposingPriceAction);
+            RejectStrongOpposingPriceAction,
+            InvertSignalPolarity);
 
     public TradingAgentDefinition ResolveAgentDefinition(
         string strategyType,
@@ -749,6 +846,74 @@ public sealed record BacktestRequest
                     Quantity = Quantity
                 };
                 return new TradingAgentDefinition { Kind = kind, DivergenceReversal = divergenceReversal };
+            case TradingAgentKind.TradingClassification:
+                // Intervals, feature groups and thresholds all come from the options record's
+                // defaults, matching the blueprint's section 28 recommended V1 configuration. The
+                // catalogue builds this agent with no trained model unless the host supplies a
+                // resolver, so a bare CLI run observes rather than trades - by design, not fault.
+                var tradingClassification = new TradingClassificationStrategyOptions
+                {
+                    Quantity = Quantity,
+                    MinimumRewardRisk = MinimumRewardRisk,
+                    Classifier = ClassifierOptions ?? new TradingClassificationStrategyOptions().Classifier,
+                    SignalInterval = ClassifierSignalInterval
+                        ?? new TradingClassificationStrategyOptions().SignalInterval
+                };
+                return new TradingAgentDefinition { Kind = kind, TradingClassification = tradingClassification };
+            case TradingAgentKind.TrendTactical:
+                // Intervals are owned by the options record (2H trend / 15m trigger) and are not
+                // restated here, for the same reason as breakout-detector below: a duplicated copy
+                // drifts and silently overrides the real defaults.
+                var trendTactical = new TrendTacticalStrategyOptions
+                {
+                    Quantity = Quantity,
+                    RequireClassifierAgreement = TrendTacticalRequireClassifier,
+                    ReentryCooldownBars = TrendTacticalReentryCooldownBars,
+                    OneEntryPerTrend = TrendTacticalOneEntryPerTrend,
+                    UseMlStopPlacement = TrendTacticalUseMlStop,
+                    SecondaryTrendMinutes = TrendTacticalSecondaryTrendMinutes,
+                    UseSwingEntryRule = TrendTacticalUseSwingEntry,
+                    EntryPercentile = TrendTacticalEntryPercentile,
+                    SwingEntryMode = TrendTacticalSwingEntryMode,
+                    Classifier = ClassifierOptions ?? new TrendTacticalStrategyOptions().Classifier,
+                    TriggerInterval = ClassifierSignalInterval
+                        ?? new TrendTacticalStrategyOptions().TriggerInterval
+                };
+                return new TradingAgentDefinition { Kind = kind, TrendTactical = trendTactical };
+            case TradingAgentKind.Alfonso:
+                var defaultAlfonso = new AlfonsoStrategyOptions();
+                var alfonso = new AlfonsoStrategyOptions
+                {
+                    Quantity = Quantity,
+                    TopInterval = AlfonsoTopInterval ?? defaultAlfonso.TopInterval,
+                    MiddleInterval = AlfonsoMiddleInterval ?? defaultAlfonso.MiddleInterval,
+                    LowerInterval = AlfonsoLowerInterval ?? defaultAlfonso.LowerInterval,
+                    Zones = defaultAlfonso.Zones with
+                    {
+                        RewardMultiple = AlfonsoRewardMultiple ?? defaultAlfonso.Zones.RewardMultiple,
+                        StopPaddingFraction = AlfonsoStopPadding ?? defaultAlfonso.Zones.StopPaddingFraction,
+                        EliminationRequiresClose = AlfonsoEliminationRequiresClose,
+                        SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment
+                    },
+                    Trend = defaultAlfonso.Trend with
+                    {
+                        TrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
+                        RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange
+                    }
+                };
+                return new TradingAgentDefinition { Kind = kind, Alfonso = alfonso };
+            case TradingAgentKind.BreakoutDetector:
+                // Intervals deliberately NOT restated here: the options record owns the
+                // three-role defaults (context/trigger/confirmation), and duplicating them let
+                // this copy drift to a stale two-role pair that silently overrode them.
+                var breakoutDetector = new BreakoutDetectorStrategyOptions
+                {
+                    Quantity = Quantity,
+                    MinimumRewardRisk = MinimumRewardRisk,
+                    StopAtrMultiple = BreakoutStopAtrMultiple,
+                    TargetAtrMultiple = BreakoutTargetAtrMultiple
+                };
+                return new TradingAgentDefinition { Kind = kind, BreakoutDetector = breakoutDetector };
             default:
                 throw new ArgumentOutOfRangeException(nameof(strategyType));
         }

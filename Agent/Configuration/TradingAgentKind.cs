@@ -5,5 +5,9 @@ public enum TradingAgentKind
     LegacyProgressive,
     ImprovedProgressive,
     StructuralConfluence,
-    DivergenceReversal
+    DivergenceReversal,
+    BreakoutDetector,
+    TradingClassification,
+    TrendTactical,
+    Alfonso
 }

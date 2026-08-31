@@ -13,5 +13,9 @@
     "types": ["vite/client"],
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"],
+  // Tests run on Node's built-in runner (`npm test`), which needs explicit .ts import
+  // specifiers and node: builtins. Neither belongs in the browser bundle typecheck, and
+  // pulling @types/node in for them would widen the app's ambient types.
+  "exclude": ["src/**/*.test.ts"]
 }

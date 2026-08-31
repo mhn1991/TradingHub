@@ -100,6 +100,9 @@ public sealed class RsiAnalysisState
 
         if (rsi is decimal currentRsi)
         {
+            // Captured BEFORE the add: afterwards _samples.Latest is this bar, not the previous
+            // one. Same ordering as CciAnalysisState.
+            decimal? previousRsi = _samples.Count == 0 ? null : _samples.Latest.Value;
             _samples.Add(new RsiSample(candle.OpenTime, currentRsi));
             foreach (SwingPoint swing in confirmedSwings)
             {
@@ -140,6 +143,7 @@ public sealed class RsiAnalysisState
                 Zone = ClassifyZone(currentRsi),
                 MomentumDirection = momentumDirection,
                 MomentumChange = momentumChange,
+                PreviousValue = previousRsi,
                 LatestRelationship = _latestRelationship is null
                     ? null
                     : _latestRelationship with { AgeCandles = _relationshipAge },

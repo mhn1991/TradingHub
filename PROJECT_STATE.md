@@ -632,6 +632,220 @@ act on the latest *closed* candle):
 
 ---
 
+### 2.12 Dashboard price-action markers were drawn one bar to the right (2026-08-28)
+
+**Symptom as reported:** signals on the chart looked reversed — "buy where we should sell and
+sell where we should buy" — on 5m XAU/USD.
+
+**Root cause: an off-by-one in marker placement, not a direction error anywhere in the engine.**
+Three facts combine:
+
+1. `ChartAnnotator/PriceAction/PriceActionAnalyzer.cs:973` stamps every event with its source
+   candle's *close* time: `ConfirmedAt = candle.CloseTime ?? candle.OpenTime`.
+2. `Dashboard/src/components/AnalysisChart.vue:117` builds `visibleOpenTimes` from candle
+   *open* times.
+3. The marker's x came from `xForTime(event.confirmedAt)`, a binary search for an **exact**
+   match against those open times.
+
+For any interval a candle's close time *is* the next candle's open time, so the search matched
+the following bar. Every price-action marker rendered one candle to the right of the bar whose
+geometry produced it.
+
+**Evidence (real data, via `GET /api/workspaces/oanda/window`, XAU/USD 5m, 2026-08-27):** the
+02:00 bar is red (4640.03 → 4638.82, closing near its low) and produced `BearishRejection`
+(confidence 86.4, `confirmedAt` 02:05, resistance 4643.49). The 02:05 bar is green
+(4638.90 → 4642.30) and produced nothing. The bearish marker rendered on the green bar. Because
+5m bars alternate colour so often, the shifted marker usually lands on an opposite-coloured
+candle — which is exactly what "reversed signals" looked like.
+
+**Why it only showed up on drill-in.** In the normal live view the event belongs to the newest
+bar, so `confirmedAt` is past every open time and `xForTime` hits its clamp
+(`if (low >= times.length) return xAt(times.length - 1)`) — accidentally correct. The bug only
+bites when candles exist *after* the event's bar, i.e. the centred/drill-in window.
+
+**Fix.** Anchoring moved out of the SFC into `Dashboard/src/components/priceActionMarkers.ts`
+(`collectPriceActionMarkers`), which binds each marker to the index of the frame that reported
+it and never consults `confirmedAt` for positioning. `AnalysisChart.vue` consumes it.
+
+**Verification.** `Dashboard/src/components/priceActionMarkers.test.ts` — 6 tests on Node's
+built-in runner (`npm test`; no new dependency, Node 24 strips types natively), using the real
+02:00/02:05 bars above as the fixture. Confirmed the key assertion *fails* against the old
+lookup: replaying the old binary search on that fixture resolves to frame index 1, the test
+requires 0. `npx vue-tsc --noEmit` and `npm run build` both clean.
+
+**Two things checked and deliberately NOT changed:**
+- Only one frame per response carries price-action data (1 of 921 in the window path, 1 of 150
+  live). That is intentional payload trimming in `DashboardLive/LiveSseFrameProjector.cs`
+  (`ProjectFrame`: *"event rings explode SSE size"*), not a defect.
+- The detector direction logic is correct. Audited end to end — displacement, compression
+  breakout, sweeps, liquidity pool sides, playbook direction filters, agent Buy/Sell conditions,
+  `ExecutionCoordinator.cs:77`, OHLC ingestion, `yPrice`, candle colouring, trade markers. No
+  inversion found in any of it.
+
+**Known-unreproduced.** The originally reported labels were `BullishCompressionBreakout` +
+`BullishDisplacement`; at 02:05 on 2026-08-27 the engine emitted *no* events (the 02:00 bar gave
+`BearishRejection`). 01:05 UTC was also empty, so a local-time (+01:00) reading does not explain
+it either. The off-by-one is independently verified, but it may not be the whole of what was
+seen — if reversed-looking markers persist after this fix, that is a separate lead.
+
+**Zone / pool / liquidity overlays — same bug, fixed in the same session.** `availableAt` is
+close-stamped too (`LiquidityAnalyzer.cs:80`, `SupplyDemandAnalyzer.cs:60`:
+`availableAt = currentCandle.CloseTime ?? currentCandle.OpenTime`), and supply/demand zones,
+liquidity pools and liquidity events resolved it through `xForTime`, shifting them one bar right
+by the identical mechanism. These are not frame-indexed — they come off the edge frame carrying
+their own timestamps — so the marker fix does not apply. Added
+`Dashboard/src/components/chartTime.ts` (`indexForCloseStampedTime`): bar `i` owns
+`(openTimes[i], closeTimes[i]]`, so the producing bar is the last one whose open time is
+strictly before the stamp. Handles weekend gaps, both clamps, and empty input. Wired in as
+`xForCloseStampedTime` at the three call sites.
+
+Measured on the real 2026-08-27 anchor frame: **13 of 24 liquidity pools reposition** by one bar
+under the fix. The 4 supply/demand zones do not — their `availableAt` predates the window, so
+old and new both clamp to the first bar.
+
+**Deliberately left on `xForTime`:** swing pivots (`SwingDetector.cs:78,90` —
+`PivotTime = candidate.OpenTime`, already open-stamped), RSI relationship pivots (derived from
+the same), NeoWave bounds, and trade fills (`openedAt`/`closedAt`/`signalCreatedAt`/
+`executedAt`) — all genuine wall-clock instants where nearest-bar matching is correct.
+
+**Verification.** 14 tests total across `priceActionMarkers.test.ts` (6) and `chartTime.test.ts`
+(8) via `npm test`; `npx vue-tsc --noEmit` and `npm run build` clean.
+
+### 2.13 Telegram signal notifications (2026-08-28) — callable service, not pipeline-wired
+
+Outbound signal alerting so a developing agent can announce a detection. Telegram only; email was
+considered and dropped (SMTP config + a new MailKit dependency + deliverability failure modes for
+no benefit over a bot POST).
+
+**Deliberately not wired to a pipeline stage.** Requested as a service an agent calls directly
+while its detection logic is being written, so it hangs off `ISignalNotifier` rather than
+`SignalFunnel`/`LiveDecisionEpochCoordinator`.
+
+**Shape** — all in `Networking/Notifications/` (a zero-dependency AOT leaf; `Agent` now references
+it, no cycle since `Networking` references nothing):
+- `SignalNotification` — flat payload (instrument, side, strategy, decision time, interval,
+  entry/stop/target, confidence, reason) plus a `DeduplicationKey`.
+- `ISignalNotifier` — `NotifyAsync` returning delivered/not. **Contractually never throws**:
+  alerting is a side effect of a decision and must not fail the evaluation that produced it.
+- `NullSignalNotifier.Instance` — the default everywhere. **This is what keeps backtests silent**:
+  `TradingAgentCatalog` builds agents without a notifier, so a replay cannot emit traffic. Only a
+  host that deliberately injects a real notifier sends anything.
+- `TelegramNotifierOptions` — `Enabled` master switch, timeout, dedupe window. Token is a
+  credential: resolve from the encrypted secret store (`DBManager.Abstractions/Credentials/
+  SecretResolution.cs`, same mechanism as the OANDA token), never `appsettings.json`.
+- `TelegramMessageFormatter` — pure, so message shape is testable without a network round trip.
+- `TelegramSignalNotifier` — `sendMessage` via `HttpClient`, source-generated JSON for AOT.
+
+`BreakoutDetectorAgent` takes an optional `ISignalNotifier` (defaulting to null-object) and has a
+private `NotifySignalAsync` helper with a commented call site at the detection TODO.
+
+**Bug caught by the tests, worth remembering.** The endpoint was first built as a *relative* uri,
+`$"bot{token}/sendMessage"`. Every real bot token contains a colon (`<botid>:<hash>`), which in a
+relative uri parses as a **scheme** — collapsing the path to `<hash>/sendMessage`. It would have
+failed against every real token while passing any test using a colon-free fake. Now built as an
+absolute uri, where colons are legal in the path. Covered by
+`Notify_PostsToSendMessageWithConfiguredChat`, which asserts the full path.
+
+**Verification.** 20 tests (`TelegramSignalNotifierTests`, `TelegramMessageFormatterTests`):
+transport failure and API rejection both contained rather than thrown, disabled notifier makes no
+network call, dedupe suppresses a repeated candle but **releases its slot on failure** so a retry
+is possible, R:R computed from the correct side per direction and omitted when the stop is on the
+wrong side, HTML escaping of free-form reason text, 4096-char truncation. Plus catalogue and
+BreakoutDetector suites green (31 total) and a clean full-solution build.
+
+**Delivery probe CLI** (`Notifications.Cli`, assembly `notify`). Exists to separate "credentials
+or group are wrong" from "agent code is wrong" *before* any agent is wired up, so it shares the
+real `TelegramSignalNotifier` rather than reimplementing the call:
+
+```
+dotnet run --project Notifications.Cli -- --discover              # find the group chat id
+dotnet run --project Notifications.Cli -- --chat -1001234567890   # send one test message
+```
+
+Token/chat come from `--token`/`--chat` or `$TELEGRAM_BOT_TOKEN`/`$TELEGRAM_CHAT_ID` (env
+preferred - an argument lands in shell history). It checks `getMe` before sending, because a bad
+token and a bad chat produce errors that are easy to confuse when they surface together at send
+time. Tokens are masked in all output (`123456:***abcd`). `--discover` lists chats via
+`getUpdates` and explains the two reasons it commonly returns nothing (no recent activity; bot
+privacy mode hiding group messages). Dedupe is disabled for the probe so running it twice in a
+row actually sends twice. Exit codes: 0 ok, 1 send failed, 2 bad usage, 3 token/API error, 4 no
+chats found. Verified against the live API: no token -> exit 2 with usage; bogus token -> exit 3
+reporting Telegram's own "Unauthorized".
+
+**Not done:** no host injects the notifier into an agent yet, so a *running agent* still cannot
+send - the probe CLI can. Wiring `LiveTradingHost` to construct the notifier (token from the
+encrypted secret store) and pass it to the agent is the remaining step.
+
+### 2.14 New `TradingClassificationAgent` + ML subsystem (2026-08-30) — full V1 blueprint, implemented
+
+Implements `Trading Classification Model — V1 Blueprint.md` (36 sections) end to end: a
+three-class (`SELL`/`NO_TRADE`/`BUY`) LightGBM classifier over OHLC-derived and indicator
+features, with walk-forward training, evaluation, ablation and a live agent. **Unlike
+`breakout-detector` (§2.11) this is not a scaffold — it trains, predicts and trades.**
+
+**Three new projects, split on the AOT boundary.** This split is the load-bearing architectural
+decision. `Agent.csproj` is `IsAotCompatible` and is AOT-published by `Simulator.AotSmoke`;
+Microsoft.ML is reflection-heavy with native LightGBM binaries and is *not* AOT-safe. So:
+
+- `TradingClassifier/` — AOT-safe core, **no ML dependency**. Indicators, `FeatureEngine`,
+  `FeatureSchema`, `LabelGenerator`, `DatasetBuilder`, splitters, `ITradingModel`, `Prediction`,
+  `ConfidenceSignalGenerator`, classification/trading metrics, permutation importance. Referenced
+  by `Agent`.
+- `TradingClassifier.ML/` — Microsoft.ML 5.0.0 + Microsoft.ML.LightGbm. Trainers, `MlNetTradingModel`,
+  `ModelEvaluator`, `WalkForwardRunner`, `FeatureExperimentRunner`. **Nothing on the AOT path
+  references this.**
+- `TradingClassifierRunner/` — console: `train`, `walk-forward`, `ladder`, `ablate`.
+
+Verified the boundary holds: `dotnet list Simulator.AotSmoke package --include-transitive` shows no
+Microsoft.ML, and `dotnet publish -r linux-x64` still succeeds. If a future change makes `Agent`
+reference `TradingClassifier.ML`, AOT publish breaks — that is the intended tripwire.
+
+The agent takes `ITradingModel` by constructor injection; `TradingClassificationTradingAgentBuilder`
+supplies a `NoTradeModel` (always `P(NoTrade)=1`) when no resolver is given, so a bare CLI run
+resolves and observes rather than failing. A host that already depends on Microsoft.ML passes a
+resolver to get a real model. **A zero-trade run means no model was injected** — check that before
+concluding anything about the features.
+
+**42 features** (blueprint §8 asks for 40-60), grouped so §35's ladder and §24's ablation both
+work off one `FeatureGroups` flags enum. Configurable via `ClassifierOptions` per §34 — nothing
+hard-coded.
+
+**Two deliberate deviations from the blueprint, both recorded here because they change results:**
+
+1. **Split embargo (`DatasetSplitter.Embargo`).** The blueprint never mentions it. A row at `t`
+   carries a label built from candles through `t + PredictionHorizon`, so without an embargo the
+   last `horizon` rows of every train slice were labelled using candles inside the validation
+   slice. That is the same leak §25 forbids, relocated from the features to the split boundary,
+   and it inflates out-of-sample scores in exactly the way that makes a strategy look tradeable
+   and then fail live. Train and validation slices are trimmed by `PredictionHorizon` rows; test
+   is never trimmed.
+2. **MACD normalised by close.** §8 names `macd`/`macd_signal`/`macd_histogram` plainly, but a raw
+   MACD is in price units and §17 explicitly rules that out. The §8 names are kept; the values are
+   divided by close so the columns are comparable across instruments and price eras.
+
+**Robustness gap found by the tests, fixed in production code:** a training slice containing a
+single class crashes LightGBM with an opaque native error (`"Number of classes should be specified
+and greater than 1"`) that names neither the window nor the cause. A quiet walk-forward period
+where every row labels `NO_TRADE` reaches this legitimately. `TrainingPreconditions.RequireMultipleClasses`
+now throws an actionable message, and `WalkForwardRunner` *skips* such windows (reporting them in
+`SkippedWindows`) rather than losing an entire run to one quiet fortnight.
+
+Registration followed §2.11's checklist exactly, including the two easy-to-miss entries: the
+`[JsonSerializable]` attribute on `AgentDefinitionJsonContext` (source-gen — a miss fails at
+runtime, not compile time) and `DashboardLive/SimulationApi.cs`'s quantity/reward-risk switch.
+That switch **still throws for `divergence-reversal`** (pre-existing, untouched).
+
+Verification: full solution builds clean (0 warnings, 0 errors). `Simulator.Tests` 1187/1187,
+`TradingCore.Tests` 24/24, `LiveTrading.Tests` 119/119, `TradingHub.UnitTests` 60/60.
+29 new tests across `TradingClassifierFeatureTests.cs` and `TradingClassifierAgentTests.cs`.
+The one worth knowing about is `Features_DoNotChangeWhenLaterCandlesExist`: it asserts §25 as a
+property — a feature row for candle `t` must be byte-identical whether or not the series continues
+past `t`. Any indicator that could see forward fails it. The ML.NET round trip is covered too
+(`SavedModel_RoundTripsThroughDisk`, and a score-vector order test that would catch a transposed
+`Sell`/`Buy` probability mapping — which would otherwise train fine and trade backwards).
+
+---
+
 ## 3. Financial / quant state — does this strategy actually have an edge?
 
 **This is the question the project's own July 15 audit
@@ -1121,6 +1335,2235 @@ the user. `Simulator.Tests/WorkspaceDrillWindowTests.cs` covers anchor resolutio
 geometry, edge clamping and the projection; the future-`to` clamp is covered only by the manual
 verification above, since `GetWindowAsync` needs a live broker client.
 
+### 2.11 New `BreakoutDetectorAgent` (2026-08-27) — registered scaffold, no detection logic yet
+
+> **STALE as of 2026-08-30 — detection is implemented.** Everything below describes the original
+> scaffold. `BreakoutDetectorAgent.EvaluateAsync` now emits real Buy/Sell decisions
+> (`Agent/Strategies/BreakoutDetector/BreakoutDetectorAgent.cs:123`) and §3.13 scores a 134-trade
+> log from it. The interval set also changed: it is now **15m context / 5m trigger / 1m
+> confirmation** (a third interval, `ConfirmationInterval`, that did not exist in the scaffold),
+> with `StopAtrMultiple` 1.5 and `TargetAtrMultiple` 3.0 — not the 1h/15m below. The code is still
+> uncommitted (untracked `Agent/Strategies/BreakoutDetector/`). **The "placeholders, not calibrated"
+> warning below still stands: no calibration run for these parameters is recorded anywhere in this
+> file.** See §3.14.
+
+A fifth agent type, `breakout-detector`, exists end to end as a **scaffold**: it is registered,
+serializable, resolvable and selectable, but `EvaluateAsync` returns `Observe` on every bar. It
+will produce **zero trades by construction** — if a backtest of it comes back empty, that is the
+missing logic, not a data or configuration fault. Do not read a zero-trade run of this agent as
+evidence about breakouts.
+
+Declared contract (`Agent/Strategies/BreakoutDetector/BreakoutDetectorAgent.cs`): exit model is
+`AgentExitManagementMode.Bracket`, so when detection is written both bracket legs
+(`StopLossPrice`, `TakeProfitPrice`) must be populated on the decision itself. Options
+(`BreakoutDetectorStrategyOptions.cs`) are `ContextInterval` (default 1h) / `TriggerInterval`
+(default 15m) plus `RangeLookbackCandles`, `BreakoutBufferAtr`, `StopAtrMultiple`,
+`TargetAtrMultiple`, `MinimumRewardRisk`, `CooldownCandles`. **Those parameter values are
+placeholders, not calibrated** — they exist so the options shape, validation and JSON round-trip
+are wired; replace them with calibrated values (and record the run here) before drawing any
+conclusion from them.
+
+Registration points touched, i.e. the checklist for adding agent #6:
+
+- `Agent/Configuration/TradingAgentKind.cs`, `TradingAgentTypeIds.cs` (const + `TryParse`/`Format`
+  + the error message that enumerates valid ids)
+- `Agent/Configuration/AgentDefinition.cs` — `From…`/`Read…Options` pair **and** the
+  `[JsonSerializable]` attribute on `AgentDefinitionJsonContext` (source-gen; a missing attribute
+  fails at runtime, not compile time)
+- `Agent/Configuration/TradingAgentDefinition.cs` — options property, `RequiredIntervals`,
+  `TriggerInterval`, `ToAgentDefinition`, `FromAgentDefinition`, and `Validate`, where **every
+  pre-existing kind's "forbids" check must also be extended** to reject the new options bag
+- `Agent/Factories/TradingAgentCatalog.cs` — an `ITradingAgentBuilder` plus its `CreateDefault` entry
+- `Simulator/Models/BacktestConfiguration.cs:753` — the `ResolveAgentDefinition` switch that turns a
+  `--strategy` string into a definition
+- `DashboardLive/SimulationApi.cs:1213` — the quantity/reward-risk switch in `ApplySimulationProfile`.
+  Note this switch **still throws for `divergence-reversal`** (pre-existing, unrelated to this work):
+  simulation profiles for that agent cannot be applied through the Dashboard path.
+
+Deployment modes are deliberately limited to `ObserveOnly`/`Shadow` in the descriptor while the
+strategy is a scaffold — an agent that cannot produce an entry has nothing to approve or automate.
+Widen this once detection works.
+
+Verification: full solution builds clean (0 warnings, 0 errors);
+`Simulator.Tests/BreakoutDetectorAgentTests.cs` (6 tests) plus the extended
+`AgentCatalogueArchitectureTests` (5) pass 11/11. The new tests pin metadata, missing-snapshot
+handling, options validation, definition round-trip through the catalogue, and — deliberately —
+the observe-only behaviour, so the scaffold's zero-trade state is asserted rather than assumed.
+
+---
+
+---
+
+### 3.12 trading-classification: first section 35 experiment ladder (2026-08-30) — more indicators made it worse
+
+First quant run of the new ML agent (§2.14). **Not a validation — an ablation finding.**
+
+- Instrument/data: `METAL:XAU/USD`, real 1-minute candles, 2025-12-26 to 2026-02-05 (38,377
+  candles), read from the `bd-1m` run's replay chunks.
+- Label: future close, horizon 10 candles, threshold 0.75 x ATR14. Class balance 32.9% SELL /
+  29.7% NO_TRADE / 37.4% BUY — note this is *not* the NO_TRADE-heavy split §18 predicts, because
+  10 bars of 1m gold moves well over 0.75 ATR routinely.
+- Walk-forward: 14d train / 5d validation / 5d test, 4 windows, embargoed by the horizon.
+  Thresholds tuned per window on validation only (§20).
+- Costs applied: 0.15 half-spread + 0.05 commission per trade.
+
+Command: `dotnet run --project TradingClassifierRunner -c Release -- ladder --simulation-market <run>/market --train-days 14 --validation-days 5 --test-days 5 --horizon 10 --half-spread 0.15 --commission 0.05`
+
+```
+experiment         features  trades    win%       PF         net       maxDD
+1 OHLC only              14    1436   50.7%    1.068      335.22      590.88
+2 + EMA                  24     413   55.7%    1.062      175.28      613.82
+3 + RSI/CCI              34     210   60.5%    1.459      367.51      138.25
+4 + ATR                  36     569   50.6%    0.839     -940.04     1524.34
+5 + MACD/BB              42    1235   47.4%    0.795    -2854.80     4336.30
+```
+
+> **SUPERSEDED for rungs 4 and 5 (see §3.12d).** The ATR group in this table still contained the
+> raw `atr{n}_pct` level columns, which were removed from the default feature set on 2026-08-30
+> after §3.12c diagnosed them as non-transportable. Rungs 1-3 are unaffected and still current.
+
+**The full section 8 feature set is the worst of the five.** Adding ATR features (rung 4) flips
+the sign, and adding MACD/Bollinger (rung 5) makes it substantially worse again — PF 0.795 with a
+4,336 max drawdown against rung 3's 138. This is precisely the outcome §35 exists to expose ("do
+not simply throw every indicator into the first model"), and it means **the blueprint's own
+recommended V1 configuration is not the one to use on this data.**
+
+Rung 3 per-window (the §36 check that matters):
+
+```
+window-1  2026-01-14->01-19  thr 0.65/0.85  trades=47  PF=0.911  net=-15.77
+window-2  2026-01-19->01-23  thr 0.70/0.80  trades=91  PF=1.477  net=+109.23
+window-3  2026-01-25->01-29  thr 0.85/0.80  trades=58  PF=2.595  net=+299.98
+window-4  2026-01-29->02-03  thr 0.85/0.70  trades=14  PF=0.874  net=-25.93
+POOLED                                      trades=210 PF=1.459  net=+367.51  maxDD=138.25
+```
+
+The mechanical §36 bar reports **MET**. **Do not read that as an edge.** Concretely:
+
+- 4 windows over ~6 weeks of *one* instrument. §36 asks for consistency across several periods;
+  four is the minimum the spans allowed, not a sample.
+- **Two of the four windows lose money.** Window 3 alone supplies 300 of the 367 net (82%). The
+  automated "no single period responsible for all profit" test only fires when one window exceeds
+  the pooled total, so it passed on a technicality — the concentration is real and the check is
+  weaker than the §36 sentence it implements.
+- 210 trades total, and per-window thresholds were selected from an 11x11 grid on short validation
+  slices. That is a lot of selection pressure for this sample size.
+- Window 4 traded 14 times. Any statistic from it is noise.
+
+**What this run does establish:** the pipeline runs end to end on real data, the ablation
+machinery discriminates between feature sets, and the ordering (3 > 1 ≈ 2 >> 4 > 5) is a real,
+reproducible signal about *this* data. **What it does not establish:** that trading-classification
+has an edge. Before that claim, it needs multiple instruments, a materially longer history, and
+the rung-3 finding reproduced on data that did not select it.
+
+Negative control: `--random-walk 20000` gives accuracy 32.9% against a 36.1% majority-class rate
+and macro-F1 0.328 — i.e. chance, with the §21 warning firing. A pipeline leak would show up here
+as apparent skill, and does not.
+
+---
+
+### 3.12a Standalone: OHLC+EMA+RSI+CCI+**BB** is the best rung, and ATR is what breaks it (2026-08-30, user-requested)
+
+> **The "best configuration" claim here does NOT survive out-of-sample testing — see §3.12f.**
+> On 226 days the same configuration is pooled-negative and clears no success bar. The *relative*
+> ATR/MACD findings below still hold; the absolute result does not.
+
+Follow-up to §3.12. The ladder only tests cumulative rungs, so rung 5 adding ATR *and* MACD *and*
+Bollinger together could not say which of the three caused the collapse. Re-ran the walk-forward
+with individual groups, identical config (14d/5d/5d, horizon 10, 0.15 half-spread + 0.05
+commission, 4 windows, thresholds tuned per window on validation).
+
+Per-window net, then pooled:
+
+```
+feature set                 feat    w1       w2       w3       w4    POOLED   windows +ve
+3 base (no ATR/MACD/BB)       34  -15.77  +109.23  +299.98   -25.93  +367.51      2 / 4
+3 + BB        (requested)     36  +42.45  +174.06  +215.46  +233.45  +665.41      4 / 4
+3 + BB + MACD                 40  +21.28   +84.75  +230.71  -238.13   +98.60      3 / 4
+3 + MACD only                 38  -67.00   +10.14  +283.09  -686.53  -460.31      2 / 4
+3 + ATR only                  36  -77.66   -64.19   -54.86  -743.33  -940.04      0 / 4
+```
+
+**The requested set is the best configuration found so far, and the improvement is in consistency
+rather than headline profit factor.** Pooled PF 1.430 vs rung 3's 1.459 — marginally lower — but:
+
+- **All four windows are positive**, against two of four for rung 3.
+- Profit concentration drops from 82% in one window (rung 3) to 32%. This is the §36 criterion
+  ("no single period responsible for all profit") actually being met rather than passing on a
+  technicality, which is how §3.12 recorded rung 3.
+- 392 trades against 210, so roughly double the sample behind the same claim.
+- Max drawdown rises (227.68 vs 138.25), which is the honest cost of trading more.
+
+**ATR is the single destructive addition: it makes every window negative.** MACD is also harmful
+(2 of 4 positive, pooled negative), and adding MACD on top of BB drags a 4/4 result back to 3/4.
+So §3.12's rung-5 collapse was ATR first, MACD second — Bollinger was carried along and blamed by
+association. **The blueprint's section 8 feature set is not the one to use; OHLC + EMA + RSI + CCI
++ Bollinger is.**
+
+Note this does not contradict §3.13's filter finding that *fewer* features is better. Standalone
+and meta-filter are different problems with different effective sample sizes (392 decisions vs
+~100), and the feature set that wins one need not win the other. Both results stand.
+
+Same caveats as §3.12 apply unchanged: one instrument, ~6 weeks, 4 windows, per-window threshold
+selection from an 11x11 grid. The ordering between these five rows was measured on the same data
+that produced it and needs reproducing elsewhere before it is a fact about markets rather than
+about this window.
+
+---
+
+### 3.12b ATR feature rework (2026-08-30, user-requested) — much better, still not useful here
+
+§3.12a found ATR was the single destructive group (0 of 4 windows positive, pooled -940). The
+diagnosis: the group carried only *level* (`atr14_pct`, `atr20_pct` = ATR/Close). Level says how
+volatile the market is but nothing about whether that is unusual, or which way volatility is
+moving — so the model could not distinguish "ATR 6.7 while expanding out of a squeeze" from
+"ATR 6.7 while decaying after a spike".
+
+Reworked the group to six columns (`TradingClassifier/Features/FeatureEngine.cs`, schema in
+`FeatureSchema.cs`):
+
+| feature | definition | what it adds |
+|---|---|---|
+| `atr14_pct`, `atr20_pct` | ATR(n) / Close | level (unchanged) |
+| `atr_regime` | ATR14 / ATR50 | short-run volatility vs its own baseline; >1 expanding |
+| `atr_change_1` | ATR14[t] / ATR14[t-1] - 1 | direction of travel, one bar |
+| `atr_change_5` | ATR14[t] / ATR14[t-5] - 1 | direction of travel, five bars |
+| `atr_percentile_100` | rank of ATR14 in its trailing 100 | how unusual, comparable across instruments |
+
+New `RollingPercentileState` indicator; new options `AtrBasePeriod` (14), `AtrRegimeSlowPeriod`
+(50), `AtrChangeLags` ([1,5]), `AtrPercentilePeriod` (100). `AtrPeriods` may now be **empty**,
+giving a context-only ATR group with no raw level column (`--atr-levels=`). Full feature set is
+now 46 columns, still inside §8's 40-60. Warm-up lengthens to ~150 bars (ATR50 plus the 100-bar
+percentile window).
+
+Same walk-forward config as §3.12a (14d/5d/5d, horizon 10, costs applied):
+
+```
+feature set                       w1       w2       w3       w4    POOLED   windows +ve
+3 + BB (best, no ATR)          +42.45  +174.06  +215.46  +233.45  +665.41      4 / 4
+3 base (no ATR/MACD/BB)        -15.77  +109.23  +299.98   -25.93  +367.51      2 / 4
+3 + ATR context only           -48.83   +32.39  +300.79  -339.39   -55.05      2 / 4
+3 + BB + ATR context only      -63.12   -16.78  +769.36  -140.26  +549.22      1 / 4
+3 + BB + ATR full              -35.33   +76.19  +160.47  -320.11  -118.79      2 / 4
+3 + ATR full (level+context)   +18.42  +181.32  +378.12  -755.96  -178.10      3 / 4
+3 + ATR OLD (level only)       -77.66   -64.19   -54.86  -743.33  -940.04      0 / 4
+```
+
+**The rework is a large improvement to the ATR group and still does not make it worth including.**
+Old ATR: 0 of 4 windows positive, pooled -940. Reworked: 3 of 4 positive, pooled -178 — an 762
+swing, and the level-only version is now clearly the worst row in the table. But every ATR variant
+is still pooled-negative or badly concentrated, and none beats `3 + BB` alone.
+
+Two things worth noting:
+
+- **Window 4 (2026-01-29 to 02-03) is negative in every single ATR variant**, and is the window
+  that drags each of them under. It is positive in `3 + BB`. Whatever ATR is keying on in that
+  period actively misleads the model; that window is the thing to look at before trying ATR again.
+- `3 + BB + ATR context only` posts a healthy-looking +549 pooled, but on **1 of 4** positive
+  windows with 769 from a single one. That is the concentration failure §3.12 warned about, and it
+  is a worse result than `3 + BB` despite the comparable pooled number — a reminder that pooled PnL
+  alone ranks these wrongly.
+
+**Standing recommendation is unchanged: OHLC + EMA + RSI + CCI + BB, no ATR, no MACD.** The
+reworked ATR features are retained in the codebase (they are strictly better than what they
+replaced, and are the right shape if ATR is revisited on other data) but are not in the
+recommended set.
+
+Coverage: 5 new tests in `TradingClassifierFeatureTests.cs` pin the percentile ranking, that
+`atr_regime` exceeds 1 inside a volatility expansion, that `atr_change_5` is 0 on flat volatility
+and positive on rising, the empty-`AtrPeriods` context-only schema, and the
+`AtrRegimeSlowPeriod > AtrBasePeriod` guard.
+
+---
+
+### 3.12c Why window 4 breaks ATR (2026-08-30, user-requested) — a distribution-shift diagnosis
+
+§3.12b noted window 4 (test 2026-01-29 to 02-03) is negative in *every* ATR variant. It is not a
+bad-luck window: it is a regime break that ATR's level features cannot survive by construction.
+
+**What the window is.** Boundaries are train 01-10→01-24, validation 01-24→01-29, test 01-29→02-03.
+Measured on the real 1m XAU/USD candles:
+
+```
+period       bars    ATR14 mean   ATR14 p95   close range        drift
+train       13610         2.284       4.318   4521 -> 4989      +466.03
+validation   4183         3.911       6.938   4999 -> 5588      +508.83
+TEST         4128        11.299      20.486   4405 -> 5594      -741.02
+```
+
+**Volatility is 4.9x the training mean and the direction inverts.** The model trains on a calm
+uptrend and is scored on a crash: 01-30 alone is -543, and intraday ATR14 peaks at 49.8 on 01-29
+against a training p95 of 4.3. For contrast, window 3 — which every variant handled — steps from
+ATR 2.07 to 3.91, a 1.9x move in the same direction.
+
+**Why this lands on ATR and not on the other groups.** Share of test bars falling outside the
+*entire* training range of each feature:
+
+```
+feature          train min   train max    test med   % outside
+atr14_pct         0.000148    0.002126    0.002085      48.2%
+bb_width          0.000260    0.025465    0.008377       4.6%
+return_20        -0.017856    0.017120   -0.000327       4.5%
+range_pct         0.000016    0.008654    0.001906       1.0%
+bb_position      -0.561479    1.588747    0.488162       0.0%
+```
+
+`atr14_pct` is an order of magnitude worse than anything else — **48% of the test window sits above
+every split point the trees learned.** A gradient-boosted tree cannot extrapolate: those bars all
+fall into the topmost bin, so for half the window the feature is a constant pinned at "maximum",
+carrying no discriminating information while dragging every prediction toward whatever was learned
+from the thin extreme tail of a calm period.
+
+The mechanism is **Wilder smoothing**. ATR is persistent, so a volatility regime shift moves it
+wholesale and it stays moved. `range_pct` is the same quantity measured per bar, but it
+mean-reverts bar to bar and only exceeds the training range 1% of the time. `bb_position` is bounded
+by construction and never leaves range at all. This is a general lesson for this feature set:
+**slow, persistent level features are the ones that fail to transport across a regime break; fast
+or bounded ones survive it.**
+
+**The rework fixed exactly this, and the fix is verified.** The scale-free ATR features are
+distributionally stable across the same break:
+
+```
+                    train      TEST
+atr_regime  median   0.97      0.96
+atr_percentile mean  0.44      0.44
+```
+
+Both transport essentially unchanged, against `atr14_pct`'s 4.9x shift. That is why §3.12b's rework
+moved ATR from 0/4 to 3/4 positive windows.
+
+**But stable is not the same as informative.** `3 + ATR context only` (no raw level column) still
+scores 2/4 windows and pooled -55: the context features no longer *break*, they simply do not carry
+enough signal to pay for four extra columns on ~13k training rows, and the added variance costs
+more than they contribute. Window 4 is not unlearnable either — `3 + BB` makes +233 there.
+
+**Conclusion and the actionable part:** `atr{n}_pct` should not be in any recommended feature set.
+It is not merely unhelpful, it is structurally non-transportable — the failure will recur on any
+data containing a volatility regime shift, which is most data worth trading. `atr_percentile_100`
+is the transportable replacement for the same information and should be preferred if ATR is
+revisited. The standing recommendation (OHLC + EMA + RSI + CCI + BB) is unchanged, now for a
+diagnosed reason rather than an empirical one.
+
+---
+
+### 3.12d Ladder re-run with `atr{n}_pct` removed (2026-08-30, user-requested)
+
+Acting on §3.12c: `AtrPeriods` now defaults to **empty**, so the ATR group ships as
+regime + change_1 + change_5 + percentile only, with no raw level column. Full set is 44 features
+(was 46 with levels, 42 before the ATR rework). Same walk-forward config as §3.12.
+
+```
+                          BEFORE (with atr_pct)              AFTER (levels removed)
+experiment          feat  trades   PF        net    maxDD  | feat trades   PF        net    maxDD
+1 OHLC only           14    1436  1.068   +335.22   590.88 |   14   1436  1.068   +335.22   590.88
+2 + EMA               24     413  1.062   +175.28   613.82 |   24    413  1.062   +175.28   613.82
+3 + RSI/CCI           34     210  1.459   +367.51   138.25 |   34    210  1.459   +367.51   138.25
+4 + ATR               36     569  0.839   -940.04  1524.34 |   38    216  0.961    -55.05   503.65
+5 + MACD/BB           42    1235  0.795  -2854.80  4336.30 |   44    720  0.816  -1734.24  2655.79
+```
+
+Rungs 1-3 contain no ATR and are byte-identical, which is the control confirming nothing else moved.
+
+**Removing two columns recovered +885 on rung 4 and +1,121 on rung 5, and cut max drawdown by
+roughly two thirds on both** (1524 -> 504, 4336 -> 2656). Rung 4 goes from clearly losing
+(PF 0.839) to near break-even (PF 0.961). That is a large effect for deleting 2 of 46 features, and
+it quantifies §3.12c's diagnosis: the level columns were not weak signal, they were actively
+destructive under regime shift.
+
+Per-window, rung 4's problem window improves but does not resolve:
+
+```
+                             w1       w2       w3       w4    POOLED
+4 + ATR with levels       +18.42  +181.32  +378.12  -755.96  -178.10
+4 + ATR levels removed    -48.83   +32.39  +300.79  -339.39   -55.05
+```
+
+Window 4's loss more than halves (-756 -> -339), consistent with removing the feature that had 48%
+of its bars outside the training range. It stays the only badly negative window, so the direction
+inversion in that period (train +466 uptrend, test -741 crash) still costs the ATR variants
+something the other groups absorb.
+
+**Rankings are unchanged: rung 3 is still the best ladder rung, and ATR still does not pay for
+itself.** The ladder does not test the actual best-known configuration — `3 + BB` (§3.12a, +665.41
+on 4/4 positive windows) — because that is not a cumulative rung. Standing recommendation remains
+**OHLC + EMA + RSI + CCI + BB**.
+
+The `atr{n}_pct` columns remain available via `--atr-levels 14,20` / `AtrPeriods = [14, 20]` for
+anyone who wants to reproduce the old behaviour; they are simply no longer the default.
+
+---
+
+### 3.12e Multi-timeframe run of the recommended set (2026-08-30, user-requested)
+
+> **SUPERSEDED by §3.12g.** Every run below sits inside the 41-day Dec-Feb window. On 3.5 years of
+> real OANDA data all three timeframes are negative; the "MET" verdicts here do not generalise.
+
+Ran OHLC + EMA + RSI + CCI + BB (36 features, no ATR, no MACD) on 1m, 5m, 15m and 1h. Source is the
+same XAU/USD 1m series aggregated up by `CandleSources.Resample`, which buckets by **close** time -
+a 5m bar stamped 03:15 is the 1m bars closing 03:11-03:15 - so the causal stamp survives
+aggregation. Partial trailing buckets are dropped. Identical config otherwise: 14d/5d/5d
+walk-forward, horizon 10 **bars** (so 10 minutes on 1m, 10 hours on 1h), 0.15 half-spread + 0.05
+commission, thresholds tuned per window on validation.
+
+```
+TF     candles    rows  train rows/win  trades   win%      PF        net    maxDD  win+ve  §36
+1m      38,377  38,313        ~20,160      392  56.4%   1.430    +665.41   227.68   4 / 4  MET
+5m       7,698   7,634         ~4,032      591  55.0%   1.238   +1255.04   896.25   4 / 4  MET
+15m      2,566   2,502         ~1,344      244  53.3%   1.358    +877.85   410.88   3 / 4  MET
+1h         642     578           ~336       69  36.2%   0.137   -5702.58  5849.03   0 / 3  not met
+```
+
+**The result holds on 1m, 5m and 15m and collapses on 1h.** All three lower timeframes clear the
+§36 bar, with profit factors in a tight 1.24-1.43 band and no reliance on a single window. 5m
+produces the largest net (+1,255) but also the largest drawdown; 1m has by far the best
+drawdown-to-profit ratio.
+
+**This is the first evidence the finding is not an artefact of the 1m timeframe** - but it is much
+weaker evidence than it looks. The four runs share one underlying price series over one 41-day
+period on one instrument, so they are correlated re-samplings, not independent replications. A
+regime that suits this feature set will suit it at every sampling rate. Replication still requires
+a second instrument and a different date range.
+
+**The 1h failure is a data-volume artefact, not a verdict on 1h.** 41 days yields only 642 hourly
+candles, leaving ~336 training rows for 36 features - roughly 9 rows per feature - and only 3
+windows instead of 4. Diagnostics run to separate signal from sample size:
+
+- Smaller model (15 leaves / 100 iterations / min-leaf 10): still fails, pooled PF 0.348. Not
+  simply model capacity.
+- Longer 25d training window: only one walk-forward window survives, containing **2 trades**.
+  Correctly reported as not met - there is nothing left to evaluate.
+- The crash period (01-28 to 02-02) lands in 1h's window 3 and is catastrophic there (PF 0.046,
+  8% win rate, -5,091 from 25 trades) while the *same calendar period* is positive on 1m, 5m and
+  15m. With ~120 test bars instead of ~7,200, a handful of trades dominates the window.
+
+The honest reading is **"1h cannot be evaluated on this dataset"**, not "1h does not work". Testing
+it needs roughly a year of data, which the current `bd-1m` replay artefacts do not contain.
+
+Coverage: 3 new tests in `TradingClassifierResampleTests` pin the close-time bucketing, the dropped
+partial trailing bucket, and that aggregation neither invents nor loses range at 5m/15m/60m.
+
+---
+
+### 3.12f 15m on 226 days — the edge does not replicate out of sample (2026-08-30, user-requested)
+
+The user asked for the 15m test on far more data. 39,000 15m candles are not obtainable from the
+cache; the longest XAU/USD series is `METAL_XAU_USD_1m_20251211_20260724` (216,323 1m candles,
+2025-12-11 to 2026-07-23), which resamples to **14,465 15m candles** — 5.6x §3.12e's 2,566.
+Added `CandleSources.FromHistoricalCache` to read `.cache/historical/*.jsonl.gz` (stamps candles by
+`closeTime`, matching the `availableAt` convention).
+
+Same recommended set (OHLC + EMA + RSI + CCI + BB, 36 features), same horizon, same costs.
+
+**60d/20d/20d — 7 windows:**
+
+```
+POOLED  trades=1319  win-rate=50.64%  PF=0.881  net=-1636.15  maxDD=3749.84   1 of 7 windows positive
+success bar (section 36): NOT MET
+```
+
+**21d/7d/7d — 28 windows, the finer picture:**
+
+```
+windows: 28   positive: 13 (46%)   pooled PF=0.953   net=-1802.09   trades=3927
+  windows  1- 4 (Jan 08-Feb 05):  +2200.87   (3/4 positive)
+  windows  5- 8 (Feb 05-Mar 05):   -264.78   (2/4 positive)
+  windows  9-12 (Mar 05-Apr 02):  -1975.51   (1/4 positive)
+  windows 13-16 (Apr 02-Apr 30):  -1246.97   (0/4 positive)
+  windows 17-20 (Apr 30-May 28):   -169.18   (3/4 positive)
+  windows 21-24 (May 28-Jun 25):   +179.45   (3/4 positive)
+  windows 25-28 (Jun 25-Jul 23):   -525.97   (1/4 positive)
+```
+
+**The decisive split:**
+
+```
+windows 1-3  (2026-01-08 -> 01-29, the period every earlier result came from):  +2779.43
+windows 4-28 (everything after):                                                -4581.52
+```
+
+**The edge found in §3.12/§3.12a/§3.12e was period-specific.** Windows 1-3 cover almost exactly the
+41-day Dec 26 - Feb 5 slice that the `bd-1m` replay artefacts contain, and they are the three
+strongest windows in the entire 226-day series. Every subsequent period gives it back and more. Over
+28 windows the configuration is a coin flip that loses to costs: 51.7% win rate, pooled PF 0.953,
+negative expectancy.
+
+This is the replication test §3.12 and §3.12e both said was required, and **it does not replicate**.
+It is not a marginal miss — the out-of-sample half is decisively negative.
+
+What still stands:
+
+- The **relative** findings. ATR levels being non-transportable (§3.12c), MACD hurting, ATR hurting,
+  and Bollinger helping *relative to* the other groups were all measured the same way and are
+  ablation comparisons, not absolute performance claims. They should be re-measured on the long
+  series before being trusted, but nothing here contradicts them.
+- The **pipeline**. The negative-control behaviour, the look-ahead guards, the embargo and the
+  walk-forward machinery all did their job: this is exactly the failure mode they exist to expose,
+  and they exposed it as soon as they were given enough data.
+- §3.13's **meta-labelling** result is untouched by this, but note it was measured on the same
+  Jan-Feb window and is now under the same suspicion. It needs the identical long-series treatment.
+
+What this changes: **there is currently no evidence that trading-classification has an edge on
+XAU/USD.** The standing recommendation (OHLC + EMA + RSI + CCI + BB) is now only a statement about
+which feature set is least bad, not about a tradeable configuration. Any future work here should
+start from the 226-day series, never the 41-day one.
+
+---
+
+### 3.12g Definitive multi-timeframe result on 3.5 years (2026-08-30) — no edge at any timeframe
+
+Fetched real OANDA XAU/USD history via the encrypted database credential vault (new
+`TradingClassifierRunner fetch` command, `CandleFetcher.cs` - reuses `OandaHistoricalCandleSource`
+and `BrokerCredentialVault`; the token is never placed in the environment or printed, and output is
+written outside `.cache/historical` so it cannot leave a half-valid entry in the repo's own cache).
+
+Three series, all 2023-01-02 to 2026-07-24: **1,257,460** 1m, **252,358** 5m, **84,129** 15m candles.
+Recommended feature set (OHLC + EMA + RSI + CCI + BB, 36 features), horizon 10, 90d train / 30d
+validation, costs 0.15 half-spread + 0.05 commission, thresholds tuned per window on validation.
+
+```
+TF     candles      rows   test block  windows  positive   trades   win%      PF        net     maxDD
+1m   1,257,460  1,257,396         90d       13    3 (23%)   19200   43.4%   0.849   -4764.82   5657.43
+5m     252,358    252,294         30d       39   12 (31%)    6471   46.3%   0.898   -1530.60   2812.28
+15m     84,129     84,065         30d       39   18 (46%)    5014   49.2%   0.905   -1957.07   2589.86
+```
+
+**Every timeframe is negative. None clears the section 36 bar.** Profit factors cluster tightly at
+0.85-0.91 — consistently below break-even by roughly the cost of trading, which is what a model with
+no edge looks like once spread and commission are charged.
+
+Per year, both 39-window runs are negative in almost every year:
+
+```
+        5m                              15m
+  2023:  9 win,  0 positive,  -673.61     9 win,  3 positive,  -681.03
+  2024: 12 win,  2 positive,  -708.94    12 win,  5 positive,  -296.73
+  2025: 12 win,  6 positive,  -633.55    12 win,  8 positive,  -472.37
+  2026:  6 win,  4 positive,  +485.44     6 win,  2 positive,  -506.94
+```
+
+**A preliminary 5m run showed PF 1.160 / +300.08 and did not survive.** That run used 240-day test
+blocks (4 windows); re-run with the matched 30-day blocks the same data gives PF 0.898 / -1530.60.
+The positive sign was a block-size artefact, not a finding — recorded here because it is exactly the
+kind of number that gets quoted out of context.
+
+**Threshold-tuner weakness found.** In two 1m windows the tuner selected 0.40 on one side and the
+model then traded almost every bar: window-3 took 7,448 trades (-2,539) and window-11 took 10,032
+(-1,629), together 17,480 of the 19,200 total. `ModelEvaluator.TuneThresholds` enforces a
+`minimumTrades` floor but has **no ceiling**, so it cannot reject a threshold that degenerates into
+trading constantly. Excluding both windows the remaining 11 still sum to roughly -415 with 3
+positive, so this does not change the verdict — but the tuner should grow a maximum-trade-rate guard
+before it is used for anything else.
+
+**Conclusion: the trading-classification model has no demonstrable edge on XAU/USD at 1m, 5m or 15m
+over 3.5 years.** Sections 3.12, 3.12a and 3.12e recorded positive results; all of them came from
+the same 41-day Dec-2025/Feb-2026 window, which §3.12f showed to be the best stretch in the data.
+With 15x more data and 3.5 years of coverage the result is uniformly negative.
+
+The pipeline itself is validated by this: the embargo, the look-ahead property test, the negative
+control and the walk-forward machinery all behaved correctly and produced the honest answer as soon
+as they were given enough data. What is refuted is the strategy, not the infrastructure.
+
+---
+
+### 3.13 Meta-labelling: the classifier as a filter over breakout-detector (2026-08-30)
+
+Asks a different and much lower-bar question than §3.12: not "can the classifier trade" but "can
+it tell breakout-detector which of its own signals to skip". Implemented as
+`TradingClassifier.ML/Experiments/MetaFilter.cs`, driven by
+`TradingClassifierRunner filter-signals`.
+
+Setup: breakout-detector's own 134-trade log from run `41d670c87f134babb70ad67f2e99f547`
+(`Books/trades.csv`), XAU/USD, 2026-01-05 to 2026-02-04. Classifier = rung 3 feature set
+(§3.12's winner, 34 features), horizon 10, walk-forward 10d/3d/3d.
+
+**Strictly out of sample.** Each window trains on its own past and judges only the primary trades
+opening inside its own test period, so no trade is ever scored by a model that saw it. The
+classifier is asked about the *decision* bar (`Opened - 1m`), not the fill bar, so it gets no
+candle the primary strategy did not have. 103 of 134 trades fall inside some test window; the
+other 31 are excluded from **both** the baseline and the filtered column.
+
+```
+filter                      kept    win%       PF        net   randPF  rand p95   pctile
+BASELINE (no filter)         103   43.7%    0.756   -3610.90
+Agreement >= 0.30             63   50.8%    1.252    1768.44    0.751     1.028    99.8%
+Agreement >= 0.40             41   51.2%    1.365    1670.80    0.748     1.220    98.1%
+Agreement >= 0.50             29   62.1%    2.337    3230.81    0.749     1.368    99.8%
+Agreement >= 0.60             17   70.6%    4.177    2704.80    0.747     1.774    99.9%
+Agreement >= 0.70              8   75.0%    6.943    1549.21    0.728     2.998    99.5%
+NotOpposed >= 0.40            74   44.6%    0.990    -100.00    0.755     0.966    96.9%
+NotOpposed >= 0.70           100   42.0%    0.733   -3949.16    0.759     0.803    22.4%
+```
+
+**The random-subset control is the load-bearing column.** breakout-detector loses money, so its
+losses are large and concentrated, and dropping *any* sizeable fraction of its trades has a decent
+chance of flipping the sign by luck. Every row is therefore compared against 2,000 random subsets
+of the same size. Random median PF stays at ~0.75 no matter how many trades are dropped, while the
+filter reaches 2.34 at the 0.50 cut — beating 99.8% of random subsets. **Without this control the
+result would be worthless; with it, the selection is real.**
+
+The `NotOpposed >= 0.70` row is the sanity check working: it keeps 100 of 103 trades, lands at the
+22nd percentile, and is correctly indistinguishable from random, because it is barely filtering.
+
+Robustness — the effect is not horizon-specific (`Agreement >= 0.50`, all beating the random p95):
+
+```
+horizon=5   kept=26  PF=2.369  pctile=99.8%
+horizon=10  kept=29  PF=2.337  pctile=99.8%
+horizon=15  kept=33  PF=1.505  pctile=97.1%
+horizon=20  kept=30  PF=1.539  pctile=97.3%
+horizon=30  kept=31  PF=2.239  pctile=99.8%
+```
+
+(An earlier run at horizon 45 showed no effect; that was the coarser 14d/5d/5d window config,
+which covers only 70 of 134 trades. Coverage, not horizon, was the difference.)
+
+**It is not simply refusing to sell.** breakout-detector's sells lost 6,434 while its buys made
+1,165, so "stop selling" would be the trivial explanation. It filters and improves *both* sides:
+
+```
+side       all  kept   keep%     net all    net kept
+Buy         46    16     35%     1584.65     2676.56
+Sell        57    13     23%    -5195.55      554.25
+```
+
+That is conditional selection on setup quality, not a directional bias.
+
+**Caveats, and they are serious.** 103 trades, one instrument, five weeks. The 0.50 cut rests on
+29 trades and the 0.60 cut on 17. The thresholds were not tuned out of sample — the whole grid is
+shown precisely because no single row should be read as "the" number. This says the classifier
+carries information breakout-detector is not using; it does **not** establish a tradeable filtered
+strategy.
+
+**Feature-set comparison as a filter (2026-08-30, user-requested).** Re-ran the filter with
+OHLC+EMA+RSI+CCI+**BB** (36 features, i.e. rung 3 plus Bollinger, still excluding ATR and MACD),
+then swept the whole ladder. Horizon 10, `Agreement >= 0.50`, same 103-trade out-of-sample set:
+
+```
+feature set                 feat  kept    win%       PF        net   pctile
+1 OHLC only                   14    22   63.6%    3.064    3345.92    99.8%
+2 + EMA                       24    25   60.0%    2.578    2834.82    99.9%
+3 + RSI/CCI                   34    29   62.1%    2.337    3230.81    99.8%
+4 + BB      (requested)       36    28   60.7%    2.264    2826.88    99.8%
+5 + ATR/MACD (all)            42    38   50.0%    1.737    2743.95    99.4%
+```
+
+**Adding Bollinger does not help: 2.264 vs 2.337 without it.** More importantly the ranking here is
+the *inverse* of §3.12's standalone-strategy ladder, where rung 3 won and rung 1 was mediocre. As a
+filter, **fewer features is monotonically better** — plain OHLC-derived features (14 columns) give
+the best profit factor, and every indicator group added degrades it.
+
+That inversion is consistent rather than contradictory. Standalone the model must locate the move
+itself, which needs indicator context. As a filter it only has to answer a much narrower question
+about a setup breakout-detector has already found, on an effective sample of ~100 decisions — and
+there the extra 28 columns buy nothing and cost generalisation.
+
+All five sets still beat 99%+ of random subsets, so the *effect* is not feature-set dependent; only
+its magnitude is. The BB variant is robust across horizons (PF 1.55-2.26 at h=5/10/15/20/30, all
+above the random p95), same as rung 3.
+
+**Practical read: if this is ever wired in, start from the OHLC-only feature set, not the section 8
+one.** Note this is 22 trades at the 0.50 cut, so the ordering between rungs 1-4 is not separable
+at this sample size; the reliable statement is "small beats large", not "14 is the right number".
+
+**Suggested next step:** this is the natural fit for the existing meta-model slot
+(`Calibration/MetaModelArtifact.cs`, `RiskManager.Calibration.MetaLabelFeatureFactory`), which is
+currently bucket-based rather than ML-backed, and which `breakout-detector`'s descriptor advertises
+as `SupportsMetaModel = false`. Wiring it needs the finding reproduced on a second instrument and a
+longer window first.
+
+---
+
+### 2.15 TrendStatistics / 4H Statistical Trend Agent — Phase 1 only (reviewed 2026-08-30)
+
+`Blueprint — 4H Statistical Trend Agent.md` (2,483 lines, 72 sections) specifies a phased build
+V0-V10 (section 71). **Only V0 is implemented.** It is a library, not an agent: no
+`ITradingAgent`, no `TradingAgentKind` entry, no catalogue builder, and section 53 explicitly says
+"do not implement trading yet". A backtest of it would return zero trades by construction.
+
+Against section 51's project structure:
+
+```
+Data/            Candle only                    CandleAggregator MISSING
+Detection/       ITrendDetector, TrendDetector, TrendState, TrendPhase,
+                 TrendDirection, TrendDetectorConfig, TrendDetectorUpdate   DONE
+                 (TrendStateMachine folded into TrendDetector)
+Segmentation/    ITrendSegmenter, TrendSegmenter, TrendRecord               DONE
+Statistics/      QuantileCalculator, BootstrapEngine, BootstrapResult,
+                 JointDistribution                                          MISSING (whole folder)
+Profiles/        SymbolTrendProfile, DirectionTrendProfile, ProfileRepository  MISSING
+Runtime/         TrendStateEstimator, TrendProgressEstimator, ExhaustionEstimator  MISSING
+Trading/         SwingSignalGenerator, SwingPositionManager, DirectionGate   MISSING
+Evaluation/      TrendBacktester, WalkForwardRunner, TrendMetrics            MISSING
+```
+
+Interfaces `IBootstrapEngine`, `ITrendProfileBuilder`, `ITrendStateEstimator` (section 52) do not
+exist. Builds clean; `TrendStatistics.Tests` passes 6/6.
+
+**Phase 2 (section 55) run on real data**, via the new `TradingClassifierRunner trend-stats`
+command: XAU/USD 1m resampled to 4H, 2023-01-02 to 2026-07-24, 5,691 4H candles, detector defaults
+(EMA20, ATR14, candidate 0.75 ATR, confirm 1.25 ATR).
+
+**146 completed trends, 76 bull / 70 bear, 39 candles per trend.**
+
+```
+                        BULL (76)                          BEAR (70)
+                   P05    P50    P90    P95   mean     P05    P50    P90    P95   mean
+total move %      1.30   3.95   8.78  10.51   5.01    1.22   3.28   6.92   9.24   3.96
+move after conf % 0.18   1.90   6.97   8.53   3.16    0.14   1.07   4.66   5.99   1.96
+max retracement % 1.02   2.00   3.96   4.97   2.42    0.94   1.80   3.72   5.27   2.47
+ATR-norm move     2.39   6.53  16.90  23.88   9.80    2.45   4.94   9.04  13.33   5.91
+duration (bars)  12.75  34.00  67.00  89.00  41.64   12.00  25.00  55.10  66.55  31.16
+confirm delay bar 4.00   7.00  12.50  14.00   7.93    4.00   8.00  14.00  15.10   8.26
+confirm delay %   0.74   1.61   2.96   3.41   1.78    0.73   1.78   3.14   3.99   2.05
+```
+
+**Section 54 acceptance criteria: PASS.** 0 concurrent live trends (no two confirmed at once),
+0 negative confirmation delays, 0 out-of-order timestamps, 0 zero-duration trends. 76
+structural-start overlaps are *expected* - section 9 discovers the structural start retroactively
+at the swing extreme, which normally precedes the prior trend's end. Of those, **16 are
+same-direction and worth inspecting** as possible single trends split in two.
+
+**The headline finding is confirmation cost.** Median bull trend moves 3.95%, but the median
+confirmation delay consumes 1.61% - leaving 1.90% after entry, which is exactly the
+move-after-confirmation median. **Entry efficiency is roughly 48% on bulls and 33% on bears**
+(1.07 of 3.28). Two thirds of a median bear trend is gone before the detector will confirm it.
+That is the number sections 29, 30 and 39 exist to attack, and it should frame the entry research:
+the tradeable edge is not the trend size, it is what survives confirmation.
+
+Bull trends are larger and longer than bear (P50 3.95% / 34 bars vs 3.28% / 25 bars), consistent
+with gold's trend over this window - section 5's insistence on never pooling directions is
+justified by this data.
+
+**Defect found and FIXED (2026-08-30):** `TrendDetector.cs` set `MfePct = moveAfterConfirmation`,
+the identical value already assigned to `MoveAfterConfirmationPct`. Not a miscalculation - MFE from
+confirmation *is* that quantity - but the field carried no information while the statistics table
+made it look like two measurements agreeing.
+
+Replaced with `MaximumAdverseExcursionPct`: the worst excursion against the trend measured from the
+confirmation price, tracked bar by bar from confirmation onward. This is genuinely new -
+`MaximumRetracementPct` measures giveback from the running favourable extreme, so a trend that runs
+straight up then hands back 3% has a large retracement while never trading against a confirmation
+entry at all. The new field is what a stop placed at confirmation actually had to survive, which is
+the input section 37 needs. Pinned by
+`MaximumAdverseExcursion_IsNotADuplicateOfMoveAfterConfirmation`, which drives a trend below its
+entry and asserts the two fields differ. TrendStatistics.Tests 7/7.
+
+Measured on the same 3.5-year series:
+
+```
+                        BULL (76)                          BEAR (70)
+                   P05    P50    P90    P95   mean     P05    P50    P90    P95   mean
+move after conf % 0.18   1.90   6.97   8.53   3.16    0.14   1.07   4.66   5.99   1.96
+max adverse exc % 0.14   0.75   1.97   2.70   0.94    0.07   0.97   2.34   2.91   1.31
+```
+
+**The excursion asymmetry is the actionable result.** A median confirmed bull risks 0.75% to make
+1.90% (~2.5:1); a median bear risks 0.97% to make 1.07% (~1.1:1). A stop 2.70% beyond entry would
+have survived 95% of bull trends, 2.91% for bears. Combined with the confirmation-cost finding
+above, the bull side is the tradeable one on this data and the bear side barely clears its own
+risk - further justification for section 5's refusal to pool directions.
+
+**The 16 same-direction overlaps were a false alarm in the check, not a detector defect.** All 16
+have a gap of exactly -1 bar, and 15 of 16 anchor at or after the previous trend's favourable
+extreme. `EndTime` is the closing bar's close and the next trend's `StructuralStartTime` is the
+extreme that ended it, so a one-bar overlap is the interval convention. A pullback inside a larger
+move being measured as two chained trends is correct segmentation. The acceptance check now
+separates 1-bar boundary overlaps (16, benign) from deeper ones (**0**), and the real concurrency
+test - did a trend confirm while another was still live - reads 0.
+
+Next step per section 71 is V1/V2 proper: a `Statistics/` folder with `QuantileCalculator` and the
+bull/bear trend library as a first-class type, then V3's bootstrap engine. The numbers above were
+produced ad hoc by the reporting command and are not yet a reusable component.
+
+---
+
+### 2.16 TrendStatistics V1 built out: statistics, entry, exit, metrics (2026-08-30)
+
+Continuation of §2.15, which found only V0 (the causal detector) implemented. Built the remaining
+V1 statistical machinery per section 68's scope - no ML, no news, no order book; the question is
+whether the statistical structure of 4H trends alone is tradeable.
+
+**Added** (all in `TrendStatistics/`, 25/25 tests pass):
+
+```
+Statistics/QuantileCalculator   sections 15/18: empirical quantiles + the inverse PercentileOf
+Statistics/BootstrapEngine      sections 16-20: resample with replacement, CIs, convergence test,
+                                deterministic seed
+Statistics/JointDistribution    sections 26/27: joint exceedance and rarity in percentile space
+Profiles/DirectionTrendProfile  section 21, per direction, never pooled (section 5)
+Profiles/SymbolTrendProfile     with BuildAsOf enforcing section 49's leakage rule
+Runtime/TrendProgressEstimator  sections 23/24: price and time percentiles, kept separate per s25
+Runtime/ExhaustionEstimator     sections 34/35: TrendExhaustionState with score + raw inputs
+Trading/SwingSignalGenerator    sections 28-30: Confirmed + percentile gate, 4 modes
+Trading/SwingPositionManager    sections 36/37: Open->NormalHold->ProfitProtection->Trail->Exit
+Evaluation/TrendMetrics         sections 38-40: capture ratio, entry efficiency, exit giveback
+Data/CandleAggregator           section 51
+```
+
+Still missing: `Profiles/ProfileRepository`, `Evaluation/TrendBacktester` + `WalkForwardRunner` as
+first-class types (section 48), regime conditioning (section 60, V8), multi-symbol (V9),
+lower-timeframe tactical integration (V9/V10), and the `ITradingAgent` wiring. The V1 question can
+now be answered without them.
+
+**Section 29/30 entry experiments on 3.5 years of 4H XAU/USD** (5,690 candles, exit fixed at the
+detector's trend-end signal so only entry timing varies, profiles rebuilt causally per section 49,
+gross of costs). Command: `TradingClassifierRunner swing-entry --historical <1m> --resample 240`.
+
+```
+mode            entry  trades    win%       PF      sum%    mean%   maxDD%
+BASELINE conf    0.00     146   37.7%    1.182     20.25    0.139    21.02
+PriceOnly        0.05      95   33.7%    1.215     16.73    0.176    12.61
+PriceOnly        0.10      86   31.4%    1.164     12.25    0.142    12.85
+PriceOnly        0.15      80   28.7%    0.854    -10.44   -0.130    24.10
+PriceOnly        0.20      75   29.3%    0.851    -10.18   -0.136    21.95
+PriceOnly        0.25      68   29.4%    0.853     -9.72   -0.143    21.69
+TimeOnly         0.05      40   35.0%    1.139      4.11    0.103     9.66
+TimeOnly         0.10      30   46.7%    1.813     13.95    0.465     4.28
+TimeOnly         0.15      22   45.5%    1.708     10.48    0.476     3.14
+TimeOnly         0.20      16   37.5%    1.132      1.58    0.099     6.38
+PriceAndTime     0.10      29   44.8%    1.649     11.54    0.398     4.28
+PriceAndTime     0.15      22   45.5%    1.597      9.22    0.419     3.14
+```
+
+**Section 30's Experiment B beats Experiment A: time confirmation outperforms price
+confirmation.** The blueprint refused to assume which would win; on this data price-only actively
+degrades past P10 (PF 0.85, worse than taking every confirmation), while time-only at P10-P15
+roughly halves the trade count and cuts max drawdown from 21% to 3-4%. Entry gating does what
+section 28 claims it should.
+
+**But the bootstrap (sections 16-19) undercuts the exhaustion half of the design:**
+
+```
+Bullish total move %, n=76, 10,000 iterations
+    q   estimate     CI low    CI high  rel width  stable
+ 0.25      2.578      2.223      2.841      0.240  yes
+ 0.50      3.954      3.217      4.544      0.336  yes
+ 0.90      8.782      7.425      9.771      0.267  yes
+ 0.95     10.509      8.602     23.493      1.417  NO
+Bearish: P90 rel width 0.507 NO, P95 rel width 0.687 NO
+```
+
+Section 17's own worked example says a P95 CI of 7.1-18.5 means "poorly estimated"; the measured
+bull P95 CI is 8.6-23.5. **The P90/P95 exhaustion thresholds that sections 32-35 depend on are not
+estimable from 3.5 years of 4H data on one symbol.** The convergence test settles this as a sample
+problem rather than an iteration problem - the interval stops moving between 5,000 and 10,000
+iterations, so more iterations cannot help:
+
+```
+  1000 iters  P95=10.509  CI  8.598 -> 19.443  width 10.846
+  5000 iters  P95=10.509  CI  8.602 -> 23.493  width 14.890
+ 10000 iters  P95=10.509  CI  8.602 -> 23.493  width 14.890
+```
+
+76 bull and 70 bear trends is simply too few for a 95th percentile. This is what section 61's
+multi-symbol expansion is for, and it is now a prerequisite rather than a later nicety: exhaustion
+logic built on these thresholds would be acting on noise. The middle quantiles (P25-P75) are stable
+in both directions, which is consistent with the entry sweep finding its usable thresholds at
+P10-P15.
+
+**Caveats on the entry result.** 22-30 trades at the best settings over 3.5 years is thin, the
+figures are gross of costs, and the best cell was selected from a 15-cell grid - some of that PF
+1.813 is selection. Section 48's walk-forward is not yet built, so the threshold choice itself has
+never been validated out of sample. The honest reading is that time-based entry confirmation shows
+a real and directionally consistent effect across adjacent thresholds (P10 and P15 both good, both
+neighbours of each other), not that PF 1.81 is a tradeable number.
+
+---
+
+### 2.17 TrendStatistics: 16 years, 5 symbols — the edge is metals-only (2026-08-30)
+
+§2.16 found the P90/P95 exhaustion thresholds unestimable from 3.5 years (bull P95 CI 8.6-23.5,
+relative width 1.42). Two fixes were possible: more history per symbol, or pooling symbols. Section
+4 forbids pooling ("every symbol must have its own statistical profile"), so history it is.
+
+**OANDA serves 4H back to 2010.** Fetched 16.5 years for five symbols via
+`TradingClassifierRunner fetch --interval 4h` (~27,000 candles and ~500KB each - trivial next to
+the 1.26M-row 1m series).
+
+**More history solves the estimation problem outright:**
+
+```
+XAU/USD bull P95, 76 trends (3.5y):   10.509   CI  8.602 -> 23.493   rel width 1.417   NO
+XAU/USD bull P95, 375 trends (16.5y):  8.873   CI  8.045 ->  9.969   rel width 0.217   yes
+convergence identical at 10,000 and 20,000 iterations
+```
+
+Every quantile is stable in both directions on all five symbols. Note the estimate itself moved
+from 10.509 to 8.873 - the short sample was not merely imprecise, it was biased ~18% high, which is
+what the confidence interval was warning about.
+
+**The section 29/30 entry finding replicates.** TimeOnly P10 gave PF 1.813 on 30 trades over 3.5
+years; on 16.5 years - 13 of which the original run never saw - it gives PF 1.802 on 107 trades,
+and beats the baseline on every axis (PF 1.802 vs 1.072, net +45.49% vs +34.01%, max drawdown
+**10.19% vs 40.52%**). PriceOnly still decays monotonically (1.038 -> 0.952 -> 0.914 -> 0.833 ->
+0.809).
+
+**But it does not transfer across symbols, and section 61 said not to assume it would:**
+
+```
+symbol    trends  bull  baseline PF  TimeOnly P10 PF  PriceAndTime P10 PF   verdict
+XAU/USD      725   375        1.072            1.802                1.682   works
+XAG/USD      702   352        1.184            1.979                2.164   works
+EUR/USD      798   395        0.840            0.960                0.962   no edge to gate
+GBP/USD      786   385        0.918            0.666                0.618   gate makes it WORSE
+USD/JPY      749   398        0.970            0.993                0.943   no edge to gate
+```
+
+**The trend edge exists in metals and not in FX majors.** Both metals have a positive baseline
+before any gating (1.072, 1.184) and both are lifted to ~1.8-2.2 by the time gate, peaking at the
+same P10 threshold with the same mode ranking - that is an independent cross-validation on a
+symbol whose data played no part in choosing P10. All three FX majors have a baseline below 1.0,
+and gating cannot manufacture an edge from a strategy that has none: on GBP/USD it actively
+destroys value (0.918 -> 0.666), because filtering to fewer trades concentrates a negative
+expectancy rather than diluting it.
+
+The trend populations themselves are similar in size across symbols (702-798 trends), so this is
+not a sample artefact. The distributions differ enormously though - bull P95 move is 18.8% on
+silver, 8.9% on gold, and 4.3% on EUR/USD and GBP/USD - which is section 4's point made
+quantitatively: a shared profile would have been wrong for every symbol.
+
+**How to improve, from this data:**
+
+1. **Restrict deployment to metals.** This is section 51's `Trading/DirectionGate` generalised to a
+   symbol gate, and it should be driven by the measured baseline PF, not by asset class as a
+   prior.
+2. **The time percentile is the mechanism, not price.** Price gating is harmful everywhere
+   (monotonic decay on XAU, negative on all FX). Section 30's Experiment A can be retired;
+   Experiment B is the one to develop.
+3. **P10 is the operating point** on both metals independently. P05 under-filters, P15+ thins the
+   sample without improving PF.
+4. **Gating amplifies, it does not create.** Screen a symbol on its ungated baseline before
+   applying the gate at all - GBP/USD is the counter-example that makes this a rule rather than a
+   preference.
+
+**Caveats.** Gross of costs, though at 107 trades over 16.5 years costs are immaterial. The P10
+threshold was chosen on XAU 3.5y and confirmed on XAU 16.5y and XAG 16.5y - the XAG confirmation is
+the genuinely independent one. Section 48's walk-forward is still not built, so nothing here is a
+formal out-of-sample validation of the whole procedure.
+
+---
+
+### 2.18 TrendStatistics V7 + V8: walk-forward cuts the headline result roughly in half (2026-08-30)
+
+Implemented the two phases §2.17 flagged as missing.
+
+**V7, section 48** - `Evaluation/TrendBacktester` (runs against a FROZEN profile over an explicit
+trade window, with a cost model) and `Evaluation/WalkForwardRunner` (expanding history, per-window
+threshold and mode selected on a validation slice carved from the training period, then frozen).
+**V8, section 60** - `Profiles/RegimeClassifier` (volatility terciles fitted causally on
+ATR-normalised move) and `Profiles/ProfileRepository` (section 51's missing type), with a
+sample-count fallback from the conditioned profile to the unconditional one.
+
+29/29 tests. New coverage pins that entries respect the trade window, costs reduce returns, test
+periods tile without overlap, the training library grows monotonically, a too-thin conditioned
+profile falls back, and that a report carried entirely by one window fails section 69's bar.
+
+**Result on XAU/USD 4H, 2010-2026, after 0.03% round-trip costs:**
+
+```
+                        windows   trades     PF     net%   positive   maxDD   §69 bar
+V7 unconditioned             12      170  1.174   +18.89       7/12   20.44%      MET
+V8 regime-conditioned        12      185  1.248   +27.16       9/12   19.03%      MET
+```
+
+**Both clear section 69's bar. The headline number is nonetheless roughly half what §2.16/§2.17
+reported.** The single-pass sweep gave PF 1.802; with the entry threshold chosen per window without
+hindsight it is 1.174. **That gap is the measure of how much of the earlier figure was in-sample
+threshold selection**, and it is exactly what section 48 exists to expose. The earlier "TimeOnly at
+P10 is the operating point" conclusion should be read as an in-sample observation, not a validated
+parameter.
+
+**Section 60's fragmentation warning does not bite here - conditioning helps.** PF 1.174 -> 1.248,
+positive windows 7/12 -> 9/12, and slightly lower drawdown. The `ProfileRepository` fallback is
+probably why: where a volatility tercile is too thin the conditioned profile is not used at all, so
+conditioning can add information without ever costing sample size. That is a design detail worth
+keeping if this is developed further.
+
+**The finding that most undermines confidence is threshold instability.** The per-window selections
+are scattered across the whole grid:
+
+```
+TimeOnly P10, TimeOnly P05, PriceOnly P20, TimeOnly P05, PriceOnly P20, PriceOnly P05,
+PriceOnly P05, PriceAndTime P15, PriceOnly P25, TimeOnly P10, TimeOnly P05, TimeOnly P10
+```
+
+If the P10/TimeOnly optimum were a stable property of the market, validation slices should keep
+rediscovering it. They do not. Several windows also trade too few times for their statistics to
+mean anything (windows 1, 8 and 10 took 4, 1 and 3 trades; PF 17.018 and infinity are artefacts, not
+results).
+
+**Section 38-40 diagnostics, now measurable for the first time:** median trend capture 32.5%
+(34.2% conditioned), entry efficiency 38.9% (40.9%), exit giveback 35.6% (35.3%). So the strategy
+captures about a third of the move it identifies, enters with ~40% of the move still ahead, and
+hands back a third of what it could have taken. Entry efficiency is the weakest link and is where
+sections 28-30 were always aimed.
+
+**Timeframe follow-up (2026-08-30, user-suggested): 2H beats 4H under walk-forward.** The user
+asked whether a lower timeframe would give more trades and less noise. Half right - lower timeframe
+buys trade count and cuts drawdown, and costs per-trade edge. Gross, 16.5 years XAU/USD:
+
+```
+TF   baseline PF  trades   sum%   maxDD%  |  best gated       PF  trades  mean%/trade
+1H         1.155    2641  130.45   18.90  |  TimeOnly P15  1.362     423       0.112
+2H         1.108    1343   68.71   32.50  |  TimeOnly P15  1.704     176       0.284
+4H         1.072     725   34.01   40.52  |  TimeOnly P10  1.802     107       0.425
+```
+
+Run through V7's walk-forward with 0.03% round-trip costs, 2H is decisively the better timeframe:
+
+```
+                        trades   win%     PF    net%  positive  maxDD%   §69
+2H unconditioned           125  43.2%  1.694  +34.64      8/12    8.11   MET
+2H regime-conditioned      388  38.1%  1.199  +30.77      7/12   12.83   MET
+4H unconditioned           170  38.8%  1.174  +18.89      7/12   20.44   MET
+4H regime-conditioned      185  38.4%  1.248  +27.16      9/12   19.03   MET
+```
+
+**The decisive detail is the in-sample/walk-forward gap.** 2H gross 1.704 -> walk-forward 1.694,
+essentially unchanged. 4H gross 1.802 -> walk-forward 1.174, a 35% collapse. An edge that survives
+hindsight-free threshold selection is real; one that halves was largely selection. **4H's apparent
+superiority in the single-pass sweep was an artefact, and the blueprint's choice of 4H as the base
+timeframe is not supported by this data - 2H is better on PF, net, drawdown and robustness.** The
+likely mechanism is the threshold instability recorded above: 2H roughly doubles the trend
+population per window, which stabilises the per-window selection.
+
+1H is the worst of the three after costs despite the best gross sum - a 0.03% charge takes 27% of a
+0.112% mean edge, against 6% of 2H's 0.284%.
+
+**V8 (regime conditioning) should not be used.** It helps at 4H (1.174 -> 1.248) and hurts at 2H
+(1.694 -> 1.199). An effect that reverses sign between adjacent timeframes is not an effect;
+section 60's fragmentation warning evidently bites at 2H, where the larger trend population is
+divided three ways at exactly the point it was starting to help. The code stays (it is correct and
+tested) but the recommended configuration is unconditioned.
+
+**Honest status: V0-V8 implemented; V9 and V10 deliberately not.** Sections 62/63 connect this to
+the ML agent, and that agent came back at PF 0.85-0.91 across 3.5 years (§3.12g), so there is
+nothing worth connecting to. It is also still not an `ITradingAgent` - no `TradingAgentKind` entry,
+no catalogue builder - so every number here comes from the research harness rather than the trading
+pipeline.
+
+---
+
+### 2.19 Training/evaluation methodology review (2026-08-30) — one real flaw, two open
+
+Reviewed how the classifier is trained and scored, after the question "is the way we train the
+model right". Three problems, one corrected claim, and one confirmation of concurrent work.
+
+**FLAW 1 (fixed): the backtester allowed overlapping positions.**
+`ClassifierBacktester.Run` had no position tracking - it opened a trade on every actionable bar and
+held for `PredictionHorizon` bars, so up to `horizon` positions could be open simultaneously on the
+same instrument in the same direction. **Every classifier figure in §3.12-§3.13 counted those as
+independent trades.** They are not: they overlap, they would need `horizon` times the capital, and
+they inflate apparent statistical confidence. The 19,200 "trades" at 1m are the extreme case.
+Added `MaximumConcurrentPositions` / `AverageConcurrentPositions` to `TradingReport` and a
+`--no-overlap` mode enforcing one position at a time. The before/after comparison had not completed
+when this was written.
+
+**FLAW 1 fully closed 2026-08-30 — see §3.14.** The `--no-overlap` mode existed but only
+`walk-forward` passed it; `train`, `ladder` and `ablate` used the library default of `true`, so the
+commands measured different strategies. Defaults are now `false` everywhere and one shared policy is
+threaded through every command. **The scope of the damage is narrower than stated above: it affects
+§3.12/§3.12g only, not §3.13** — the meta-filter never simulates positions, and the primary log it
+scores is strictly serial (§3.14).
+
+**FLAW 2 (open): label overlap / sample uniqueness.** Row *t*'s label is built from candles
+*t+1..t+horizon* and row *t+1*'s from *t+2..t+horizon+1*, so consecutive labels share 9 of 10 bars.
+84,065 training rows therefore carry far fewer independent observations, which inflates effective
+sample size and feeds LightGBM near-duplicate examples. Standard remedy is sample-uniqueness
+weighting. Not implemented.
+
+**FLAW 3 (open): the threshold tuner has no maximum-trade guard.** Recorded in §3.12g -
+`ModelEvaluator.TuneThresholds` enforces a `minimumTrades` floor but no ceiling, so it cannot
+reject a threshold that degenerates into trading almost every bar (two 1m windows took 7,448 and
+10,032 trades).
+
+**CORRECTION to §2.15.** That entry recorded "same-direction, deeper: 0" overlaps as evidence the
+detector was sound. That was measured on the 3.5-year sample only. On 16.5 years there are **15**,
+with gaps of -5 to -22 bars. They are **not a defect**: `TrendDetector` sets the re-anchor floor at
+the previous trend's *favourable extreme* rather than its end (an explicit, commented design
+choice, correct for reversals), so a same-direction successor legitimately anchors at the
+retracement low inside its predecessor. The consequence is correlated trend records, not
+miscounted ones. The acceptance check's "DOUBLE-COUNT" label was wrong and has been corrected.
+
+**Concurrent work confirmed correct.** `BootstrapEngine` gained a block bootstrap
+(`BuildBlockDistribution`, calendar-bucketed non-overlapping blocks) and `DirectionTrendProfile`
+gained `IndependentBlockCount` / `ReliabilityScore` gating `IsReliable`, plus a symbol-mixing guard
+in `Build`. Verified on XAU/USD 4H 2010-2026 that the block version widens intervals as theory
+requires:
+
+```
+   q  estimate   IID width   block width   ratio
+0.05     1.387       0.210         0.237    1.13
+0.50     3.568       0.456         0.520    1.14
+0.90     7.946       0.982         1.267    1.29
+0.95     9.970       1.840         2.218    1.21
+  68 independent 90-day blocks vs 382 observations
+```
+
+**382 trend records carry roughly 68 independent units** - a 5.6x reduction in effective sample
+size, and the direct quantification of the correlation the overlaps above create. The quantiles
+still clear the stability bar under blocking (P95 relative width 0.222 vs the 0.5 threshold), so
+§2.17's conclusions survive, now with honest rather than understated uncertainty. This is the right
+tool for the problem and should be preferred over the IID path for any trend-derived statistic.
+
+---
+
+### 3.14 Classification Agent V2 — Phase 0a: execution parity and baseline reconciliation (2026-08-30)
+
+First implementation step of `Books/Trading Classification Agent V2 — Investigation and Redesign.md`.
+That document gates all model work behind a Phase 0 falsification of the §3.13 filter premise; this
+is P0a (correctness parity and reproducibility) only. **No V2 model, candidate contract or trend
+join has been built, and none should be until P0b returns a verdict.**
+
+**1. Overlap parity (closes §2.19 FLAW 1).** Three library entry points defaulted
+`allowOverlappingPositions` to `true` — `ClassifierBacktester.Run`
+(`TradingClassifier/Evaluation/TradingMetrics.cs:91`), `ModelEvaluator`
+(`TradingClassifier.ML/Evaluation/ModelEvaluator.cs:52`) and `WalkForwardRunner`
+(`TradingClassifier.ML/Experiments/ExperimentRunners.cs:91`) — while only `walk-forward` passed the
+`--allow-overlap` flag. `train` (Program.cs:110,142), `ladder` and `ablate` therefore scored a
+strategy holding up to `horizon` simultaneous positions. All three defaults are now `false`,
+`FeatureExperimentRunner` threads the policy to its inner `WalkForwardRunner`, and the runner reads
+the flag **once** into a shared `allowOverlap` passed by all five construction sites.
+
+New `Simulator.Tests/OverlapPolicyParityTests.cs` (3 tests) pins all of it: a behavioural check that
+the default serialises 4 actionable bars into 2 trades and that the flag genuinely changes the
+count; a reflection check that every entry point still defaults to `false`; and a source check that
+the runner reads the flag once and every command passes it. 37/37 classifier tests pass.
+
+**2. The 0.626 vs 0.756 baseline discrepancy is resolved in favour of §3.13.**
+`Books/Blueprint — ML Meta-Label Redesign.md:69` reports the §3.13 unfiltered baseline as PF 0.626 /
+net -4089.27; §3.13 reports PF 0.756 / net -3610.90. Both claim the same 103 trades at 43.7%.
+Reconstructing the covered set directly from `Books/trades.csv` (134 trades, 2026-01-05 to
+2026-02-04):
+
+```
+covered set              n    win     PF        net    grossProfit  grossLoss
+suffix from 2026-01-09  102     45   0.751   -3716.71      11134.6    14851.3
+§3.13 reported          103     45   0.756   -3610.90      11187.9    14798.8
+Blueprint:69 implied    103     45   0.626   -4089.27       6844.6    10933.9
+full 134-trade log      134     56   0.729   -5268.83      14205.8    19474.6
+```
+
+**§3.13 reproduces to within one trade; the blueprint's figure does not reproduce at all.** Its
+implied gross turnover (17,778) is 53% of the full log's, where 103/134 trades should be ~77% — and
+§3.13's 25,987 is exactly that. Treat `Blueprint — ML Meta-Label Redesign.md:69` as stale or from a
+different run; **§3.13 is the authoritative baseline** and does not need re-deriving for P0b.
+
+**3. The meta-filter path never had the overlap defect.** `MetaFilter.Apply` carries the primary
+strategy's realised `Net` through unchanged and calls `ClassifierBacktester.Summarise`, not `.Run`
+(`TradingClassifier.ML/Experiments/MetaFilter.cs:240-244`) — it never simulates a position, so no
+overlap policy applies. Measured directly, the BreakoutDetector log is **strictly serial: maximum
+concurrent positions 1, zero trades opened while another was live**, consistent with
+`BreakoutDetectorAgent.cs:72` refusing to signal while a position is open. So §2.19 FLAW 1 taints
+§3.12/§3.12g only. The V2 document's §3.1 item 1 ("use one-position-at-a-time in ... meta-filter
+evaluation") is a no-op, and its §2.4 claim that old baselines are not comparable applies to the
+standalone results, not to §3.13.
+
+**4. BreakoutDetector uses managed exits, not a fixed bracket.** Exit reasons across the 134 trades:
+73 `InitialStopLoss`, 28 `TakeProfit`, 22 `BreakEvenStop`, 4 `ProfitFloorStop`, 3
+`TrailedStructureStop`, and one each of `MfeGivebackStop`, `ProfitFloorExit`, `MaximumGivebackExit`,
+`EndOfSimulation`. **31 of 134 (23%) exit through management rather than either bracket leg**, even
+though §2.11 declares the exit model as `AgentExitManagementMode.Bracket`. This is decisive for V2's
+label design: a three-class `TargetFirst`/`StopFirst`/`Timeout` label would be wrong for ~23% of
+candidates, which independently confirms the V2 document's choice of after-cost realised R as the
+primary target (its §5.2) rather than the earlier three-class proposal.
+
+**5. Scale-outs make the bracket label structurally inapplicable, not merely inaccurate.** The run
+manifest (`/mnt/storage/scratch/bd-1m/simulations/41d670c8.../manifest.json`) shows
+`legacyPositionManagement.enableScaleOut: true` with two stages — `scale-1r` and
+`scale-1.5r-or-structure`, each closing 20% of initial quantity — plus `breakEvenActivationR: 1`,
+`structureTrailActivationR: 1.5`, 53 break-even activations and 78 accepted stop amendments across
+the 134 trades. A candidate's realised R is therefore **a blend across up to three partial exits at
+different prices**, not one barrier outcome. This goes beyond §3.14.4: the V2 document's §5.2
+`CandidateOutcome` schema (single `EntryPrice`/`ExitPrice`) cannot represent it either, and will
+need a partial-fill representation. After-cost realised R remains the correct primary target.
+
+**6. P0b harness built and validated (`filter-nested`).** `MetaFilter.SelectNested`
+(`TradingClassifier.ML/Experiments/MetaFilter.cs`) plus a `filter-nested` runner command implement
+the nested selection §3.4 of the V2 document requires: each fold picks its **feature set, mode and
+threshold on validation candidates only**, freezes them, and applies them once to untouched test
+candidates. `filter-signals` cannot do this — it prints a whole grid scored on the test period, so
+the reader selects after seeing the answer.
+
+Smoke-run on the same 5-week data as §3.13, predeclared sets `ohlc:Experiment1` and
+`rung3:Experiment3`, 10d/3d/3d, horizon 10, costs 0.15+0.05:
+
+```
+column                        trades    win%       PF         net       maxDD
+BASELINE (no filter)             104   44.2%    0.781    -3245.34     6257.15
+NESTED (frozen per fold)          33   57.6%    1.295     1160.93     1409.39
+
+Random control (33 of 104): median PF 0.773, p95 1.360, result at the 93.8th percentile.
+Folds 9; rule selected in 7; positive test folds 5. ohlc chosen 5x, rung3 2x.
+```
+
+A first version of this run reported a 74-trade baseline at the 87.3rd percentile. That was **a bug
+in `SelectNested`, caught by `NestedFilterSelectionTests`**: the fold's baseline was derived from the
+winning rule's scored set, so a fold where no rule cleared the validation guard contributed *nothing*
+to the denominator — silently comparing accepted trades only against folds that happened to produce
+a rule. Both guard-failing folds here had negative baseline net (-1,157.94 and -1,569.92), so the
+defect flattered the result. The baseline is now fixed by the first feature set independently of
+selection, and accepted is drawn from the baseline's membership. Corrected coverage (104) matches
+§3.13's 103 and the corrected baseline PF 0.781 matches §3.13's 0.756.
+
+**This is a harness validation, not the gate — but it is the first honest look at the §3.13 effect,
+and the effect shrinks.** §3.13's hindsight-selected threshold reached PF 2.337 at the 99.8th
+percentile; with the threshold and feature set chosen per fold on validation only, the same data
+gives PF 1.295 at the **93.8th percentile — still short of the 95th-percentile bar** the V2
+document's §3.5 and §8 require, though borderline rather than clearly failing. It is a milder form
+of the pattern §2.18 recorded when 4H's PF 1.802 fell to 1.174 under hindsight-free selection.
+
+**Compute budget for the real gate.** The §3.13 run covered 31 days / 38,377 base candles in 3m44s
+at 64 candles/sec (job snapshot). 3.5 years is 1,257,460 1m candles ≈ **5.5 hours per candidate-log
+generation**, and the chosen "both geometries" option needs two of them plus a calibration sweep to
+produce the second geometry — roughly 15-20 hours total. Not yet launched.
+
+**8. Stale-snapshot duplication measured: 5.2%, not ~18%.** The V2 document §3.1 item 4 asks for a
+measured before/after rather than reuse of the blueprint's ~18% estimate. `BreakoutDetectorAgent`
+has no last-processed-trigger guard — it wakes on the 1m interval, reads `trigger.LatestCandle` from
+the 5m snapshot, and its only re-entry guard is "a position is already open"
+(`BreakoutDetectorAgent.cs:71-75`). Grouping the 134-trade validation run by the 5m bucket of
+`signalCreatedAt`: **127 distinct trigger buckets, 7 buckets holding more than one candidate, 7
+surplus candidates = 5.2%**. Materially smaller than the blueprint's estimate. §3.1 item 4 allows
+"deterministically deduplicate by source event" instead of an agent-side guard, so the long
+candidate log will be deduplicated post-hoc (first candidate per 5m trigger bucket) rather than
+regenerated. Caveat to record with the result: position sizing is `FixedFractionalRisk` on equity,
+so dropping a candidate post-hoc leaves later trades sized on an equity path that included it.
+
+**7. P0b pre-registration (recorded 2026-08-30, BEFORE the gate result exists).** The V2 document's
+§3.4 requires the primary claim be declared before the final test is read. Registered here so it
+cannot be adjusted afterwards:
+
+- **Primary comparison.** Pooled `NESTED (frozen per fold)` accepted candidates versus the pooled
+  `BASELINE (no filter)` candidates over the same covered set, after costs. One comparison, one
+  number.
+- **Candidate source.** `breakout-detector` at its **current, uncalibrated geometry** — 15m context /
+  5m trigger / 1m confirmation, `StopAtrMultiple` 1.5, `TargetAtrMultiple` 3.0, `BreakoutBufferAtr`
+  0.25, `RangeLookbackCandles` 20, `CooldownCandles` 4 — frozen as an explicit premise of the gate
+  (per the open item below). A second, calibrated geometry is deferred until this run reports.
+- **Instrument / period.** XAU/USD, 2023-01-02 to 2026-07-24, the same span as §3.12g.
+- **Candidate log.** Generated by `BacktestRunner` at 1m execution, analysis 5m/15m/1h, OANDA demo
+  source. The 31-day reproduction of §3.13's run under this exact command returned **134 trades at
+  41.8% win rate**, matching the original job snapshot, so the geometry is confirmed reproducible.
+- **Classifier.** Existing directional classifier, unmodified. Horizon 10, 1m features.
+- **Feature sets (both, nested).** `ohlc:Experiment1` (14 features) and `rung3:Experiment3` (34),
+  selected per fold on validation only — never on test.
+- **Walk-forward.** 90d train / 30d validation / 30d test, matching §3.12g's long-history config,
+  embargoed by the horizon.
+- **Filter grid searched on validation only.** Modes Agreement and NotOpposed; thresholds
+  0.30/0.40/0.50/0.60/0.70; minimum 5 kept validation candidates for a rule to be eligible.
+- **Selection objective.** Total after-cost net on validation-accepted candidates.
+- **Gate criteria (§3.5).** Pass requires: after-cost improvement over the unfiltered baseline; the
+  accepted subset beating the **95th percentile** of equal-sized random subsets; a majority of
+  positive walk-forward test folds; no dependence on one year or one side; and enough accepted
+  events for usable uncertainty bounds. Failing any of these is a **stop**, which the document
+  (§12) treats as a successful research outcome.
+
+**AMENDMENT 1 (2026-08-30, made before any gate result existed; user-approved).** The primary
+metric changes from **account currency to R multiples**, with currency reported as a secondary
+column that is never optimised. Rationale, which depends only on the candidate source and not on any
+filter outcome: the source is sized by `FixedFractionalRisk` on equity, and the 3.5-year run takes
+the account from 100,000 to under 24,000. A currency evaluation therefore (a) weights 2023
+candidates several times more heavily than 2025 ones purely because the account was larger, making
+"does it work in every year" untestable, and (b) credits the filter with the de-risking that the
+drawdown itself produced. Measured on the partial run at 73.5%: **PF 0.695 in currency versus 0.656
+in R** — the dollar figure flatters the source by exactly that mechanism. Selection now optimises
+total validation net R; `NestedFilterResult` exposes both views. No gate result had been computed
+when this amendment was made.
+
+A second defect surfaced while implementing the amendment: `MetaFilter.RandomControl` drew its
+random subsets from `Trade.Net` while being handed an R-based profit factor to rank, so the
+percentile compared an R statistic against a currency distribution. Now metric-aware
+(`useRMultiple`), and both controls are reported.
+
+**Restated in R, the 5-week validation result changes conclusion:**
+
+```
+PRIMARY - R multiples          trades   win%    PF_R      netR    maxDD_R
+BASELINE (no filter)              104  44.2%   0.631    -21.59      27.94
+NESTED (frozen per fold)           33  57.6%   0.778     -4.56      10.51
+Random control in R: median 0.630, p95 1.134 -> result at the 70.5th percentile
+
+SECONDARY - account currency    trades   win%     PF$      net$     maxDD$
+BASELINE (no filter)              104  44.2%   0.781  -3245.34    6257.18
+NESTED (frozen per fold)           33  57.6%   1.295   1160.93    1409.40
+Random control in currency: median 0.773, p95 1.360 -> 93.8th percentile
+```
+
+**In currency the filter appears to turn -3,245 into +1,161 at the 93.8th percentile. In R it turns
+-21.59R into -4.56R at the 70.5th percentile — still losing, and well inside the random
+distribution.** The apparent profitability is a position-sizing effect, not selection.
+
+Mechanism: within this 31-day window equity moved only -5%, yet the risk-per-trade proxy `|net/R|`
+spans 15.8 to 368.1 — a **23x range** (median 333.9, p25 184.5). Partial exits (61.6% of trades)
+confound that ratio, so the exact mechanism is not fully attributed, but the conclusion does not
+depend on it: two views of the same 33 trades disagree by 23 percentile points, so the currency
+view is not a clean measure of selection quality.
+
+Recorded before the run completed. The preliminary 5-week validation now sits at the 70.5th
+percentile in R, materially below this gate's 95th-percentile bar.
+
+**9. Pre-registered SECOND hypothesis: training-window length (recorded 2026-08-30, before the
+first gate result existed; user-proposed).** §3.12 and §3.12g differ in **two** variables at once:
+
+| | training config | period | PF (1m) |
+|---|---|---|---|
+| §3.12 | **14d** train / 5d val / 5d test | 41 days, Dec-Feb | **1.430** |
+| §3.12g | **90d** train / 30d val / 30d test | 3.5 years | **0.849** |
+
+The repo concluded the short-window result "did not generalise", attributing the collapse to the
+**period**. That conclusion is not established: the **training-window length** changed too, and was
+never tested independently. A 14d model retrained every 5d adapts to regime; a 90d model averages
+over regimes that may no longer be relevant. Both stories fit the observed data.
+
+**Registered test:** run the identical gate at **14d train / 5d validation / 5d test across the full
+3.5 years** — the unfavourable history, not the Dec-Feb window. Same candidate log, same code, same
+feature sets, same R-primary evaluation; only the spans change. ~250 folds of ~21 candidates each
+(vs 39 folds of ~138), same ~5,400 pooled candidates, and likely *faster* than the primary run
+because each model trains on ~20k rows rather than ~130k.
+
+- Comes back ≈1.4 → training length was the driver; a significant and previously untested finding.
+- Comes back ≈0.85 → the period was the explanation; the question closes.
+
+**Registered as a declared second hypothesis, not a search.** It is recorded here before the primary
+90d/30d/30d gate reported, so it cannot be a reaction to that result. It does not supersede the
+primary registration in item 7; both will be reported. If a live retrain cadence is later specified,
+the config matching deployment becomes primary by definition and the other becomes a diagnostic —
+that choice must be made on deployment grounds, never on which profit factor is higher. Running
+14d/30d/90d and reporting the winner is explicitly out of scope without the §3.4 multiple-testing
+treatment.
+
+**Open before P0b can run — neither is a code defect, both are premises:**
+
+- **The candidate source is uncalibrated.** §2.11's "placeholders, not calibrated — replace them
+  with calibrated values (and record the run here)" still stands; no calibration run exists in this
+  file. P0b would spend a 3.5-year falsification on an arbitrarily parameterised source, making a
+  *failure* ambiguous (no classifier signal vs. bad candidate geometry) and a *pass* fragile (labels
+  conditioned on 1.5/3.0 ATR that change the moment anyone calibrates). Either calibrate first or
+  freeze the values as an explicit, documented premise of the gate.
+- **P0b does not declare which feature set it runs.** §3.13 found OHLC-only (14 features) the best
+  *filter* (PF 3.064); §3.12 found rung 3 (34 features) the best *standalone*. The V2 document's
+  §3.4 requires the primary claim be predeclared, so this choice must be registered before the run,
+  not made during it.
+
+---
+
+### 3.15 Classification Agent V2 — Phase 0b GATE RESULT: FAILED **for breakout-detector**. (2026-08-30)
+
+> **SCOPE CORRECTION (2026-08-31).** This section, §3.16 and §3.18 all measured **one candidate
+> source: `breakout-detector`**. §3.19 then showed that source hits its target 29.8% of the time
+> against a 35.6% random-walk expectation — indistinguishable from a coin flip on its own bracket.
+> **A meta-model can only select structure that exists**, so a null result over a source with no
+> entry edge is the expected outcome and is not evidence about the technique.
+>
+> - **Settled:** candidate-conditioned meta-labelling does not rescue `breakout-detector`.
+> - **NOT settled:** whether meta-labelling or direct-R regression works against a source that has a
+>   demonstrated edge. Never tested.
+> - **Transfers regardless:** the harness, the gate methodology, nested selection on validation,
+>   R-primary evaluation, metric-matched random controls.
+>
+> Read "the gate failed" throughout §3.15-§3.18 as "failed for this source". The natural retest is
+> the trend-gated agent in `Books/Design — Trend-Gated Tactical Agent.md`, built on the 2H
+> TrendStatistics result (§2.18, PF 1.694 walk-forward) — the only validated edge in this repo.
+
+
+
+The pre-registered falsification gate (§3.14 item 7) ran to completion on the full 3.5-year
+BreakoutDetector candidate log. **It fails every criterion that discriminates. Per the V2 document
+§3.5 and §12, the correct action is to stop: do not build P1-P4.**
+
+Candidate log: `breakout-detector` at the frozen uncalibrated geometry, XAU/USD, 2023-01-03 to
+2026-07-23, generated in 3h27m over 1,276,655 1m candles. **5,452 candidates**, net -85,068.21,
+account 100,000 -> 16,634. Simulation `8e19544350bc49c6bd16e66ee36c1db7`.
+
+```
+PRIMARY - R multiples          trades   win%    PF_R       netR    maxDD_R
+BASELINE (no filter)             4901  42.1%   0.688    -801.50     808.60
+NESTED (frozen per fold)          650  42.2%   0.719     -96.52     113.36
+Random control in R: median 0.688, p95 0.790 -> result at the 70.1st percentile
+
+SECONDARY - account currency   trades   win%    PF$        net$     maxDD$
+BASELINE (no filter)             4901  42.1%   0.719  -68714.88   69208.24
+NESTED (frozen per fold)          650  42.2%   0.706  -10093.39   11189.01
+Random control in currency: median 0.719, p95 0.846 -> 42.5th percentile
+
+39 folds, a rule was selected in all 39, positive test folds 12/39 (31%).
+Feature set chosen: rung3 23x, ohlc 16x.
+```
+
+**Against the registered §3.5 criteria:**
+
+| Criterion | Required | Actual | |
+|---|---|---|---|
+| After-cost improvement | credible | PF_R 0.688 -> 0.719, still **-96.52R** | FAIL |
+| Beat random same-size subsets | > 95th pct | **70.1st** percentile | FAIL |
+| Majority of positive test folds | > 50% | **12/39 = 31%** | FAIL |
+| Enough accepted events | usable bounds | 650 accepted | pass |
+
+**The decisive number is the win rate: baseline 42.1%, filtered 42.2%.** The classifier has
+essentially zero discriminative power over these candidates. It is not selecting better trades; it
+is trading less. The random-control median PF_R (0.688) is *identical to the baseline*, and the
+filtered result (0.719) sits at the 70th percentile of that distribution — a mildly lucky random
+subset, nothing more. In account currency the filter is **worse than the unfiltered baseline**
+(0.706 vs 0.719, 42.5th percentile — below random median).
+
+No consistent feature set won (rung3 23 folds, ohlc 16), which is itself what noise looks like.
+
+**§3.13's headline is now fully explained** and should be treated as superseded. The decomposition,
+each step measured this session on progressively honest methodology:
+
+| | PF | percentile |
+|---|---:|---:|
+| §3.13, hindsight-picked threshold, currency, 5 weeks | 2.337 | 99.8th |
+| Frozen on validation, currency, 5 weeks | 1.295 | 93.8th |
+| Frozen on validation, **R**, 5 weeks | 0.778 | 70.5th |
+| Frozen on validation, **R, 3.5 years** | **0.719** | **70.1st** |
+
+Roughly half the original effect was hindsight threshold selection, most of the remainder was
+position sizing, and what survives is indistinguishable from random — and the 5-week and 3.5-year
+honest results agree closely (70.5th vs 70.1st percentile), so this is a stable null, not a
+small-sample accident.
+
+**Consequence.** Per the V2 document §12, a failed Phase 0 is a *successful* research outcome: it
+cost one 3.5-hour simulation and a small harness instead of four implementation phases built on a
+transient selection effect. **P1-P4 are not authorised.** The existing `ISetupMetaModel`
+infrastructure stays as-is.
+
+**Confirmed under deduplication (2026-08-30).** §3.1 item 4 was measured but not applied when the
+gate first ran. `MetaFilter.DeduplicateBySourceEvent` is now wired into `filter-nested`
+(`--dedup-trigger-minutes`, default 5) and the gate was re-run, removing 274 of 5,452 candidates
+(5.0%). The prediction recorded before the re-run — that removing ~5% of candidates cannot move a
+verdict that failed by 25 percentile points — holds:
+
+```
+                        original            deduplicated
+baseline PF_R           0.688               0.711
+nested PF_R             0.719               0.744
+nested netR             -96.52              -112.76
+random control (R)      70.1st pct          73.2nd pct      (bar: 95th)
+positive test folds     12/39 = 31%         13/39 = 33%     (bar: >50%)
+win-rate lift           42.1 -> 42.2        42.7 -> 42.9    (+0.2pp)
+currency percentile     42.5th              42.2nd
+```
+
+Every discriminating criterion still fails, by the same margins. The feature-set split also stays a
+dead heat (ohlc 20 folds, rung3 19), which is what noise looks like. **§3.15's verdict stands, now
+on a gate that meets its own §3.1 item 4 requirement.**
+
+**Still open (pre-registered before this result, §3.14 item 9):** the 14d/5d/5d training-window
+hypothesis. §3.12 and §3.12g confounded training length with time period, and only the period was
+ever tested. That question is untouched by this result and remains worth running on the same log.
+
+**Not a valid response to this result:** calibrating the source, re-running with different
+thresholds, or trying further feature sets in search of a better number. Any of those is a
+post-result search and would rebuild exactly the selection effect this gate just eliminated.
+
+---
+
+### 3.16 V2 second hypothesis: training-window length. Answered — the PERIOD was the explanation. (2026-08-30)
+
+Ran the pre-registered 14d/5d/5d hypothesis (§3.14 item 9) on the same 3.5-year candidate log, same
+code, same feature sets, same R-primary evaluation. Only the walk-forward spans changed.
+
+```
+PRIMARY - R multiples          trades   win%    PF_R       netR    maxDD_R
+BASELINE (no filter)             5442  42.0%   0.681    -911.30     913.47
+NESTED (frozen per fold)         2737  43.1%   0.716    -400.21     405.06
+Random control in R: median 0.682, p95 0.716 -> result at the 95.2nd percentile
+
+SECONDARY - account currency   trades   win%     PF$       net$     maxDD$
+BASELINE (no filter)             5442  42.0%   0.707  -84958.31   85748.11
+NESTED (frozen per fold)         2737  43.1%   0.731  -39108.64   39544.14
+Random control in currency: median 0.707, p95 0.751 -> 81.1st percentile
+
+260 folds, rule selected in 255, positive test folds 87/260 (33.5%).
+Feature set: rung3 128x, ohlc 127x - a dead heat, i.e. noise.
+```
+
+**The hypothesis is answered: training-window length was NOT the driver.**
+
+| | 90d/30d/30d | 14d/5d/5d | §3.12 (41 days) |
+|---|---:|---:|---:|
+| Nested PF_R | 0.719 | **0.716** | 1.430 (currency, hindsight) |
+| netR | -96.52 | -400.21 | — |
+| positive folds | 31% | 33.5% | 4/4 |
+
+Shortening the training window from 90d to 14d moves the filtered profit factor from 0.719 to
+**0.716 — indistinguishable**, and nowhere near §3.12's 1.430. **§3.12's short-window result does not
+reproduce at its own 14d/5d/5d configuration once run over the full history. The favourable Dec-Feb
+2026 period was the explanation, exactly as the repo originally concluded — that conclusion is now
+tested rather than assumed, and it holds.**
+
+**Do not misread the 95.2nd percentile as a pass.** Three reasons:
+
+1. The result *equals* p95 to three decimals (0.716 vs 0.716). It is at the boundary, not past it.
+2. The null distribution narrowed because the keep fraction rose from 13.3% (90d) to **50.3%** (14d).
+   Random subsets of half the population cluster tightly around the baseline, so a trivial edge
+   becomes "distinguishable from random" without becoming valuable. This is statistical
+   significance without economic significance, and the currency view agrees (81.1st percentile).
+3. Economically it is negligible: the filter lifts avgR from **-0.1675 to -0.1462**, a gain of
+   **+0.0212R per trade** against the **0.1675R per trade needed to reach breakeven — 12.7% of the
+   gap**. It still loses 400R over 2,737 trades.
+
+Against the §3.5 criteria: after-cost improvement **FAIL** (still -400R), beat-random **marginal**
+(95.2nd, at the boundary), majority positive folds **FAIL** (33.5%), sample size pass. **The gate
+verdict in §3.15 stands unchanged: stop.**
+
+There is a real but tiny signal — the win-rate lift is +1.1pp here versus +0.1pp at 90d, so the
+shorter, more adaptive model does discriminate marginally better. It is roughly an eighth of what
+would be needed to matter, against a source that loses 0.17R per trade. **That is a reason to fix
+the source, not to keep modelling it.** See §3.14 item 5 and the exit-management analysis, which
+*estimated* a 673R leak from scale-outs and break-even stops — but see §3.17a: that decomposition
+was tested and **falsified**, and the real leak is far smaller. The conclusion above does not rest
+on it; it rests on the -0.17R/trade source.
+
+---
+
+### 3.17 THIRD hypothesis: management-off geometry (registered 2026-08-30, before the run)
+
+Motivated by the measured leak in §3.14 item 5 and the exit-reason analysis, not by a parameter
+search. On the 3.5-year log the realised payoff ratio was **0.93:1 against a planned 1.79:1** — the
+bracket's designed edge is destroyed after entry, not at entry:
+
+```
+avg WIN  +0.828R (n=1846)      avg LOSS -0.894R (n=2543)
+win rate  42.1%  ->  breakeven needs 51.9%; the PLAN (1.79:1) needs only 35.8%
+
+exit reason              n      avgR     totalR
+InitialStopLoss       2481    -0.911    -2259.3
+TakeProfit            1002    +1.288    +1290.9     <- planned 1.79R, delivered 1.288R
+BreakEvenStop          738    +0.164     +120.7     <- reached 1R, returned ~0
+```
+
+Decomposition of the -747R deficit: scale-outs cost ~`1002 x (1.79 - 1.288) = 503R`; break-even
+stops ~`738 x 0.23 = 170R`. Together ~673R, **~30x larger than anything the classifier filter
+recovered** (§3.16: +0.021R/trade over 2,737 trades = ~58R).
+
+**Registered test:** identical run with `--legacy-trailing-mode disabled --legacy-no-scale-out`.
+Everything else — instrument, period, intervals, bracket geometry, costs, source — unchanged.
+
+**Predictions, recorded before the run:**
+
+- If the decomposition is right, PF_R should move from 0.673 toward ~0.85-0.95 and netR from -747R
+  toward roughly -100R to -250R. A price-reconstruction counterfactual (§3.14) put the raw bracket
+  at PF 0.788, so **that is the honest expectation; profitability is NOT predicted.**
+- `TakeProfit` avgR should rise from +1.288 toward ~+1.79 (no scale-out drag).
+- `BreakEvenStop` should vanish as an exit reason; those 738 trades redistribute to TakeProfit and
+  InitialStopLoss.
+- Losing `MfeGivebackStop` (+1.277R on 71 trades, ~+91R) is an expected small cost of the change.
+
+**This is a new candidate source, not a re-scoring of the old one.** Entry logic is unchanged, but
+because exits close at different times the "a position is already open" guard fires differently, so
+the candidate set will not be identical. Any filter result on it requires the gate to be re-run and
+is a separately registered hypothesis — it does **not** reopen §3.15's verdict, which stands for the
+geometry it tested.
+
+**Scope discipline:** this is a source-improvement experiment. It is explicitly *not* an attempt to
+rescue the meta-filter premise, and a better source does not by itself re-authorise P1-P4.
+
+#### 3.17a Result: the 673R decomposition is FALSIFIED (2026-08-31)
+
+Run `nomgmt-validate` (complete, `COMPLETE` marker present, 122 trades, management fully disabled —
+the exit histogram contains only `InitialStopLoss`, `TakeProfit` and one `EndOfSimulation`, so
+unlike the abandoned `geometry-nomgmt` run this one really did turn management off).
+
+```
+                      WITH management        WITHOUT management
+PF_R                        0.673                   0.683
+avg R / trade              -0.17                   -0.2320
+TakeProfit    avgR         +1.288                  +1.685   <- prediction HELD
+BreakEvenStop  n             738                        0   <- prediction HELD
+InitialStopLoss avgR       -0.911                  -1.050   <- prediction MISSED (worse)
+```
+
+**Two of three predictions held; the headline one did not.** PF_R was predicted to move from 0.673
+toward ~0.85-0.95. It moved to **0.683** — inside noise.
+
+**Why the decomposition was wrong:** it counted what management *cost winners* (scale-outs capping
++1.79R at +1.288R) without counting what break-even stops *saved on losers*. With break-even stops
+removed, average loss deepened from -0.911R to -1.050R. The two effects very nearly cancel. The
+management leak is real in direction but roughly an order of magnitude smaller than 673R, and the
+"~30x larger than the filter" claim in §3.16 does not survive.
+
+**Caveat:** 122 trades against the baseline's thousands, so the PF comparison is directional, not a
+matched-window measurement. The *mechanism* (winners capped, losers unprotected) is what the exit
+histogram establishes, and that does not depend on sample size.
+
+**Standing lesson:** an arithmetic decomposition of a deficit is a hypothesis, not a measurement.
+This one was labelled "measured" in §3.16 before any run tested it. Corrected there.
+
+---
+
+### 3.18 V2 P1 + P2-slice: candidate-outcome dataset and direct-R regression (registered 2026-08-30)
+
+Building the load-bearing tenth of V2 rather than all of P1-P4: the candidate-outcome dataset (P1)
+and a direct realised-R regression on it (a slice of P2). Skips the feature registry, the 2H join
+(P3) and robustness (P4). Purpose: measure whether *any* information in a candidate predicts its
+realised R, before committing weeks to the rest.
+
+**PRE-REGISTERED SUCCESS BAR (recorded before the model was built or run).** The source loses
+**0.17R per trade**. For a filtered subset to break even, the model must select candidates averaging
+0R from a pool averaging -0.17R. With R having stdev ~1.0 and a ~20% keep rate, the mean lift from
+selecting the top 20% by a predictor correlating rho with realised R is approximately `rho x 1.4`.
+So the bar is:
+
+**rho >= 0.12 out-of-sample (Pearson, predicted vs realised R, pooled across walk-forward test
+folds).**
+
+For calibration against what has actually been measured: §3.16's best filter delivered +0.021R at a
+50% keep, implying **rho ~ 0.026**. V2 therefore needs roughly **5x** the predictive signal anything
+has shown. Interpretation fixed in advance:
+
+- **rho >= 0.12** -> the premise survives; P3/P4 are justified.
+- **0.05 <= rho < 0.12** -> real but insufficient signal; report and stop, do not tune toward the bar.
+- **rho < 0.05** -> no usable information; P3/P4 cannot rescue it. Stop.
+
+**Structural finding that shapes the build (measured before running).** Two things the V2 document
+assumed are not available for this source:
+
+1. **The journal carries almost no candidate context.** Across sampled trades, `entryRegime`,
+   `entrySetupType`, `entryVolatilityBucket` are all the constant `"Unknown"`, `entryConfidence` is
+   constant 70, and `plannedR`, `initialRiskCash`, `entryRegimeConfidence`, and every
+   NeoWave/SupplyDemand/StructuralConfluence field are null. Only `side`, `entrySession`,
+   `entryMultiTimeframeAlignment` and the prices vary. Features must therefore be rebuilt causally
+   from candles, confirming the document's §6.3 warning that detailed state "may not exist in the
+   current journal".
+2. **The document's §6.1 "candidate geometry" feature group is degenerate here.** The bracket is a
+   fixed ATR multiple: `stopSource` is always "1.50 ATR", `targetSource` always "3.00 ATR", and
+   `expectedRewardRisk` is constant 2.0. Stop distance in ATR, target distance in ATR and planned
+   reward/risk are therefore **constants carrying zero information**. They are retained in the
+   feature vector for provenance and will be reported as constant rather than silently dropped.
+
+The consequence is worth stating plainly: for this source, V2's feature set collapses to local
+causal price state plus side — close to what the directional classifier already had. **What remains
+genuinely new is the target** (after-cost realised R instead of direction at a fixed horizon), which
+is the half of the V2 claim this slice actually tests.
+
+**RESULT (2026-08-30): rho = 0.025. Below the "no usable information" floor. Stop.**
+
+```
+5,178 candidate rows x 21 features, 0 unjoined. Target mean -0.1523, stdev 0.9584.
+Walk-forward by event: 600 train -> 200 test, rolling, 22 folds, 4,400 scored out of sample.
+
+model               folds  scored      rho      MAE    baseR   top20%R   top10%R
+Sdca-linear-R          22    4400   0.0252   0.8533  -0.1452   -0.1171   -0.1412
+LightGBM-R             22    4400   0.0044   0.8606  -0.1452   -0.1183   -0.0869
+```
+
+Against the bar registered before the model was built: **rho 0.0252 and 0.0044 both fall in the
+`< 0.05` band = no usable information. P3/P4 cannot rescue this and are not authorised.**
+
+Three things make this decisive rather than merely negative:
+
+1. **It independently reproduces the predicted base rate.** The bar was derived from §3.16's filter
+   result, which implied rho ~ 0.026. The direct R regression returns **0.0252**. Two unrelated
+   methods — a directional classifier used as a filter, and a linear regression on realised R —
+   land on the same effect size. That is a stable measurement of the source, not an artefact of
+   either method.
+2. **Selection does not pay.** Taking the top 20% by predicted R lifts mean R from -0.1452 to
+   -0.1171 (+0.028R), still deeply negative; the top 10% is -0.1412, *worse* than the top 20%,
+   which is what noise looks like when it is ranked.
+3. **Complexity makes it worse.** LightGBM (rho 0.0044) underperforms the regularised linear model
+   (0.0252), exactly as §7 anticipated when it required LightGBM to earn its complexity. It did not.
+
+**This closes the V2 question.** The gate (§3.15) showed the existing classifier cannot select these
+candidates; this shows *no model on the available causal features* can, using the redesigned target
+V2 was built around. The remaining explanation is in §3.19: the entry itself has no edge.
+
+---
+
+### 3.19 Target geometry: the 2R target is far out of reach — but no target fixes the source (2026-08-30)
+
+User hypothesis: a 1:2 risk:reward is too ambitious and the market rarely travels that far. **Tested
+and confirmed.** MFE re-expressed in units of the *actual* initial risk distance from prices (not
+the trade record's R fields), 5,452 trades:
+
+```
+MFE median 0.88R   p60 1.22   p70 1.58   p80 1.83   p90 1.99
+
+reached MFE >= 0.50R : 3401 (62.4%)      >= 1.50R : 1745 (32.0%)
+reached MFE >= 0.75R : 2954 (54.2%)      >= 1.75R : 1305 (23.9%)
+reached MFE >= 1.00R : 2555 (46.9%)      >= 2.00R :  526 ( 9.6%)
+```
+
+**Only 9.6% of trades ever travel 2R.** The bracket's target sits where roughly one trade in ten can
+reach it.
+
+Target sweep with the stop fixed at 1R, barrier order resolved by MFE/MAE timestamps:
+
+```
+ target   winRate   expR/trade     totalR
+   0.50     60.0%      -0.0995     -542.5
+   0.75     52.0%      -0.0889     -484.8   <- best
+   1.00     44.8%      -0.0970     -529.0
+   1.25     36.8%      -0.1117     -609.0
+   1.50     30.2%      -0.1192     -650.0
+   1.75     22.2%      -0.1859    -1013.5   <- approximately the current bracket
+```
+
+**CENSORING CAVEAT, and it matters.** MFE is truncated at the live target: a trade that reaches the
+target is closed, so its recorded MFE stops there and cannot exceed ~1.81R. The sweep is therefore
+**valid only for target multiples at or below ~1.75R** and the 2.0R+ rows are artefacts of that
+truncation, not measurements. The calibration check: at m=1.75 the sweep gives a 22.2% win rate
+against the 22.8% `TakeProfit` rate actually observed, so the simulation is well calibrated in its
+valid range.
+
+**Conclusion, in two parts.**
+
+1. **The hypothesis is right.** Expectancy roughly halves from -0.186R/trade at the current ~1.75R
+   target to **-0.0889R/trade at a 0.75R target**. The geometry is genuinely mis-specified: a
+   mean-reversion entry was given a trend-following target.
+2. **It does not rescue the strategy.** Every target multiple in the valid range is negative. The
+   optimum is a shallow basin between 0.5R and 1.0R, all of it losing. Fixing the target halves the
+   bleed; it does not create an edge. This is consistent with §3.19's coin-flip finding and with
+   §3.18's rho = 0.025 — there is no edge in the entry for any exit geometry to harvest.
+
+**Architecture finding: the agent/platform exit contract is violated.** `BreakoutDetectorAgent`
+declares `AgentExitManagementMode.Bracket` (`BreakoutDetectorAgent.cs:57`) — "stop and target
+submitted with the entry, the bracket owns the exit" — and contains **no management logic at all**,
+returning `Observe` whenever a position is open. Yet the platform's `improvedPositionManagement`
+layer applied scale-outs, break-even stops and structural-deterioration reductions to 61.6% of its
+trades regardless. Of the three logics, only **entry** and the **initial bracket** live in the
+agent; "keeping the trade alive" is entirely external and overrides the declared contract.
+
+---
+
+### 3.20 New entry-model feature groups + extended ladder/ablation (2026-08-30)
+
+Groundwork for the trend-gated tactical agent (`Books/Design — Trend-Gated Tactical Agent.md`):
+every analysis the annotation engine already computes must be an independently toggleable feature
+group so the combination can be *discovered* rather than assumed.
+
+**Added four groups** the classifier could never consume — `Adx`, `StochRsi`, `Donchian`,
+`Efficiency` (`TradingClassifier/Features/ExtendedIndicatorFeatures.cs`), plus
+`FeatureGroups.Everything` for superset construction. All columns are **bounded by construction**
+(ratios, percentiles, 0/1 flags, categorical codes) per §3.12c's finding that the one feature which
+destroyed walk-forward performance was an unbounded *level*; Donchian therefore emits channel
+*position* and ATR-normalised width, never band prices.
+
+**Three bugs found and fixed during the build — all of the same shape: a silent no-op that reads as
+a measured null result.**
+
+1. `FeatureEngine` gated the annotation-dataset path on `Analysis` alone, so enabling `Adx` via the
+   cheap `DatasetBuilder` would have emitted **zeros for every ADX column** and the ablation would
+   have priced ADX at exactly nothing. Fixed by `FeatureEngine.RequiresAnnotation`.
+2. The ladder's new superset-projection cache (added to stop the annotation engine rerunning per
+   rung) projected from `FeatureGroups.All`, which stops at `Experiment5`. Rungs 6-10 came back
+   **byte-identical at 44 features** — including a regression of the pre-existing `Analysis` rung.
+   Fixed by projecting from `Everything`.
+3. `RunAblation` hardcoded `FeatureGroups.All` and ignored `--groups`, so removing a group outside
+   that set removed nothing and printed a row identical to the baseline. Fixed to use the
+   configured base set and to skip groups it never contained.
+
+Regression tests now pin all three: every ladder rung must add columns over the previous, and
+`Everything` must contain every group.
+
+**Results on the 41-day window (2025-12-26 to 2026-02-05, XAU/USD 15m, 14d/5d/5d, horizon 10).**
+
+```
+LADDER                                            ABLATION (base = Everything, 93 features)
+experiment      feat trades   PF      net         experiment       feat trades   PF      net
+1 OHLC only       14     20  7.514  +553.81       all features       93     71  0.743  -301.13
+2 + EMA           24     21  1.608  +161.50       minus Rsi          88     70  0.622  -468.19
+3 + RSI/CCI       34     43  1.854  +838.37       minus Cci          88     75  1.000    -0.34
+4 + ATR           38     46  1.455  +348.08       minus Macd         89     77  1.565  +566.42
+5 + MACD/BB       44     41  0.895   -78.71       minus Trend        83     71  1.353  +324.04
+6 + Analysis      75     70  1.089   +96.18       minus Atr          89     73  0.930   -82.35
+7 + ADX           82     73  1.022   +27.04       minus Bollinger    91     71  0.743  -301.13
+8 + StochRSI      85     69  1.135  +143.18       minus RangePos     89     73  0.992    -8.60
+9 + Donchian      89     67  0.871  -169.23       minus PriceAction  83     74  1.049   +49.64
+10 + Efficiency   93     71  0.743  -301.13       minus Adx          86     75  0.728  -342.51
+                                                  minus StochRsi     90     79  1.158  +146.41
+                                                  minus Donchian     89     72  1.925  +799.44
+                                                  minus Efficiency   89     67  0.871  -169.23
+```
+
+Reading the ablation (base PF 0.743; *lower* after removal means the group was helping): only
+**RSI (0.622) and ADX (0.728)** help. Everything else is neutral or harmful, and **Donchian is the
+most harmful by a wide margin** (removing it takes PF 0.743 -> 1.925).
+
+**These numbers must not be used to choose a configuration.** This is the same 41-day window whose
+ladder winner §3.12 crowned and §3.12g then destroyed on 3.5 years (PF 0.849-0.905). Sample sizes
+here are 20-79 trades; rung 1's PF 7.514 rests on 20 trades. The run's purpose was to verify the
+plumbing, and it did — feature counts now increase monotonically and every rung and ablation row is
+distinct.
+
+**What is worth carrying forward** is the *direction*, which now agrees across three independent
+observations: §3.12 (rung 3 best standalone), §3.13 (fewer features monotonically better as a
+filter), and this ablation (only 2 of 12 groups help). **Small feature sets keep winning.** ADX
+earning one of only two positive slots is the one genuinely new signal, and it is the group that was
+computed by default yet never consumed.
+
+**Open oddity:** `minus Bollinger` returns results byte-identical to the full set across trades,
+win%, PF, net and maxDD despite dropping 2 columns. Plausible if the trees never split on them, but
+worth confirming rather than assuming.
+
+---
+
+### 3.21 All 11 optional feature groups live; ATR moved to the end of the ladder (2026-08-31)
+
+Completes §3.20. Added `Volume`, `Structure`, `SupportResistance`, `SupplyDemand`, `Liquidity` and
+`Regime` alongside the four indicator groups, giving **11 optional groups / 125 columns**.
+`FeatureEngine` gained a full-`AnalysisSnapshot` overload (`RequiresFullSnapshot`) because those
+groups read swings, zones, pools and regime, none of which live on `IndicatorSnapshot`.
+
+**Five more silent no-ops found and fixed.** Every one produced constant columns that the ablation
+would have scored as a genuine "this group does not help":
+
+1. **Volume was never in the data.** `ClassifierCandle` had no volume field, so it was dropped at the
+   source. Added, and populated from simulation replay chunks — the fetched OANDA jsonl carries OHLC
+   only, so `--historical` still has no volume and the group must not be enabled on it.
+2. **`Resample` discarded volume**, which would have re-broken it for every resampled run. Volume is
+   now summed across the bucket.
+3. **`AnnotationDatasetBuilder` never set `Candle.Volume`**, so the engine's volume analysis stayed
+   empty even once the source carried it.
+4. **`SupplyDemand`, `Liquidity` and `MarketRegime` all default to `Enabled = false`.** They are now
+   switched on only when the matching feature group is requested — expensive otherwise, and silently
+   empty if left off. This is why those groups were absent from *every* prior experiment in this file.
+5. **Count columns saturated.** A hard `Math.Min(count, 50)` looked bounded but pinned
+   `liq_recent_event_count` at 50 on every single row — 1 distinct value. Replaced with log1p
+   compression: that column now has **80 distinct values**, `sd_recent_event_count` 135.
+
+Constant columns fell from **16 of 125 to 8**, and the remaining 8 are legitimately constant on this
+window (`sd_enabled`, `liq_enabled`, `vol_is_reliable`, `vol_is_activity_proxy`,
+`regime_is_tradeable`, `struct_last_swing_strength`, `sr_trendline_count`, `sr_channel_direction`).
+
+**ATR moved to the last rung (user-directed).** §3.12 measured ATR as harmful, but it sat at rung 4,
+so every rung above it carried that damage and no later group could be judged on its own merits.
+The ladder now runs ATR-free to rung 15 and adds ATR only at 16, making that rung a direct
+measurement of ATR's cost.
+
+```
+experiment         features  trades    win%       PF         net       maxDD
+1 OHLC only              14      20   60.0%    7.514      553.81       28.08
+2 + EMA                  24      21   57.1%    1.608      161.50      135.54
+3 + RSI/CCI              34      43   55.8%    1.854      838.37      256.12   <- best net
+4 + MACD/BB              40      39   51.3%    0.746     -350.35     1018.74
+5 + Analysis             71      80   61.3%    1.578      519.09      276.32
+6 + ADX                  78      71   54.9%    1.206      203.48      580.45
+7 + StochRSI             81      78   62.8%    1.231      268.61      316.35
+8 + Donchian             85      70   54.3%    0.885     -139.09      497.65
+9 + Efficiency           89      73   54.8%    0.930      -82.35      533.73
+10 + Volume              95      78   60.3%    0.989      -11.83      518.32
+11 + Structure          102      68   51.5%    0.941      -57.08      359.50
+12 + S/R                108      66   54.5%    1.221      164.53      301.87
+13 + SupplyDemand       111      69   53.6%    1.075       63.06      339.68
+14 + Liquidity          114      71   53.5%    1.144      119.63      301.87
+15 + Regime             121      70   54.3%    0.829     -184.08      465.41
+16 + ATR (last)         125      68   50.0%    0.829     -153.34      442.16
+```
+
+**Do not read a configuration out of this table.** 20-80 trades per rung on the same 41-day window
+whose §3.12 winner was destroyed by §3.12g on 3.5 years. Its purpose was to prove the plumbing, and
+it does: all 16 rungs are now distinct, where three of them were previously byte-identical no-ops.
+
+The one durable observation: **rung 3 (34 features) still has the best net**, agreeing with §3.12,
+§3.13 and §3.20 that small feature sets win. That is now four independent observations.
+
+**Also note the earlier ATR reading was itself an artefact.** Before regime was enabled, rung 16
+showed ATR *improving* results (0.896 -> 1.362); with regime populated it shows no improvement
+(0.829 -> 0.829). A conclusion that flips on an unrelated fix is a sample-size artefact, not a
+finding — which is precisely why this window cannot be used to choose features.
+
+---
+
+### 3.22 trend-tactical agent built; rung B is the first positive result — with three caveats (2026-08-31)
+
+New agent `trend-tactical` (`Agent/Strategies/TrendTactical/`), implementing the composition
+specified in `Blueprint — 4H Statistical Trend Agent.md` §41-43 and never previously built: 2H
+TrendStatistics gates direction and phase, the classifier times entry, structural stop, trend-driven
+exit. Registered across the full §2.11 checklist; declares
+`ProtectiveStopAndStrategyExit`, **not** `Bracket` — §3.19 measured a fixed ATR target as reachable
+by under 10% of trades, and `Bracket` also makes `PreTradeRiskManager` hard-floor reward:risk at 1.5
+and silently reject every decision below it.
+
+**Integration bug found only by running it.** `ExecutionCoordinator.ValidateDecision` requires a
+quantity on a CLOSE as well as an entry. The agent's exit path omitted it, so the run threw at
+sequence 22075 after opening its first position. Exits are now sized from the open position, which
+also means a partially reduced position closes for what remains.
+
+**Rung B (trend gate only, no ML) on the 41-day window, 2026-01-05 to 02-05:**
+
+```
+n=84  win=47.6%  PF_R=1.368  netR=+4.19  avgR=+0.0499
+avgWin +0.389R  avgLoss -0.258R  payoff 1.51:1
+
+by side:  Buy  n=11  win 72.7%  PF_R 3.650  netR +5.92
+          Sell n=73  win 43.8%  PF_R 0.810  netR -1.73
+
+same window, for comparison:
+  breakout-detector mgmt ON   n=134  win 41.8%  PF_R 0.604  avgR -0.2229
+  breakout-detector mgmt OFF  n=122  win 30.3%  PF_R 0.683  avgR -0.2320
+```
+
+**This is the first positive expectancy any agent in this repo has produced** (+0.0499R/trade against
+breakout-detector's -0.22). It is also not yet a result, for three measured reasons:
+
+1. **All the profit is 11 trades.** Buy side netR +5.92, sell side -1.73; total +4.19. Eleven trades
+   carry the entire result on the favourable 41-day window that §3.12g already destroyed once.
+2. **The agent's own exit logic barely fires.** 75 of 84 exits are `StructuralInvalidation` — the
+   platform's structural exit — against 3 `InitialStopLoss`, 3 `MfeGivebackStop`, 3 `BreakEvenStop`.
+   The designed `ExitOnExhaustion` / `ExitOnTrendReversal` path is doing almost nothing, so what was
+   measured is not the exit policy that was designed.
+3. **Repeated re-entry inside one trend.** The 2H detector found **7 trends** over this window
+   (4 bull / 3 bear, `trend-stats`), yet the agent took 84 trades. Because a structural exit leaves
+   the trend still Confirmed, the agent re-enters on the next trigger bar. There is no cooldown, so
+   trade count reflects re-entry frequency rather than trend count — and the 73/11 sell/buy split is
+   a consequence of one persistent bear trend, not of 73 independent decisions.
+
+**Consequence for feature selection.** 84 candidates cannot support the greedy walk-forward search:
+the §3.21 run needed validation folds with enough events to choose between 17 groups, and 84 events
+across folds gives single-digit validation sets. Selection on this agent needs a multi-year run
+first — which also addresses caveat 1.
+
+---
+
+### 3.23 ML agents could never trade through the pipeline; all subsystems now smoke-tested (2026-08-31)
+
+**The defect.** `TradingAgentFactory` built its catalogue with no model resolver, so
+`trading-classification` and `trend-tactical` at rung C both fell back to `NoTradeModel` and reported
+**0 trades with no error** in every backtest. Verified empirically before fixing. Consequence:
+**every classifier figure in §3.12-§3.18 came from `TradingClassifierRunner`'s research harness**,
+which never touches `ExecutionCoordinator`, `PreTradeRiskManager`, position sizing or the pipeline
+cost model. This is the same gap §2.18 recorded for TrendStatistics; nobody had noticed it applied
+to the classifier too.
+
+**The fix.** `TradingAgentFactory.Install(catalog)` lets a host that can take the Microsoft.ML
+dependency install model-backed builders while the AOT-safe default stays model-free.
+`BacktestRunner/ClassifierModelInstaller` loads the artifact and **reconstructs the agent's
+configuration from it** — feature groups, horizon, ATR multiplier, stride, thresholds and signal
+interval all come from the model rather than being defaulted alongside it. A loud warning fires when
+an ML agent is requested without `--classifier-model`, so the zero-trade case announces itself.
+
+`EnsureCompatible` rejected four genuine mismatches during wiring — feature-set, configuration hash,
+scoring interval, and signal interval — each of which would have produced confident predictions from
+misaligned columns. First run through the real pipeline: **365 trades, net +5,926.48** on the 41-day
+window (pipe connected, not a validated result: overlapping training data, no walk-forward).
+
+**Rung C answered — the classifier subtracts value here.** Design doc §5's primary claim is C vs B:
+
+```
+B: trend gate only        84 trades   PF_R 1.368   avgR +0.0499
+B + cooldown 4 bars       39 trades   PF_R 1.932   avgR +0.1505
+C: + classifier           19 trades   PF_R 0.881   avgR -0.0484
+```
+
+Adding the classifier halves the trades again and flips expectancy negative. Caveat: a weak model
+trained on overlapping data, 19 trades, favourable window — so this is a working end-to-end test, not
+a verdict.
+
+**Re-entry controls (both added, independently switchable).** `ReentryCooldownBars` counts from ANY
+close, including the platform's own structural exit, which was 75 of 84 exits in §3.22.
+`OneEntryPerTrend` collapsed 84 trades to **5, all losers (-2.37R)** — so the edge is not in the
+first entry after a trend confirms, it is in the pullback re-entries, which is what the blueprint's
+tactical layer actually describes. Cooldown 4 is the best variant and, importantly, flips the sell
+side from -1.73R to +0.40R, so the result stops being carried by one direction.
+
+**Subsystem smoke test (`diagnose` command, 41-day window, 44 features).** All four previously
+untested subsystems work:
+
+```
+DRIFT (train -> test PSI)     range_pct 6.134 · bb_width 5.237 · ema20_vs_ema50 2.133
+                              ema50_slope_5 1.631 · close_vs_ema50 1.591 · macd 1.410
+                              22 of 44 features show a SIGNIFICANT shift
+
+CALIBRATION                   Brier    mean p   actual
+  raw                        0.2718    0.3526   0.4108     <- under-confident
+  Platt                      0.2391    0.4108
+  Isotonic                   0.2343    0.4108
+
+ENSEMBLE (test)   LightGBM PF 1.083 · Logistic PF 0.603 · Ensemble PF 0.906
+SELECTOR          refuses the losing strategy and the 5-trade sample; selects only the qualifying one
+```
+
+**The drift result is the most important thing here.** Half the feature set does not transport from
+train to test *within a single 41-day window*, and the worst offenders — `range_pct`, `bb_width`,
+`ema20_vs_ema50`, `close_vs_ema50`, `macd` — are all **unbounded levels**, exactly the failure mode
+§3.12c identified when `atr14_pct` destroyed walk-forward performance with 48% of a test window
+outside the training range. That single measurement explains a great deal of the instability seen
+across §3.20-§3.21, where feature rankings flipped sign on reordering and on unrelated fixes.
+
+Calibration behaves correctly: the raw model is under-confident (mean p 0.3526 against a 0.4108 base
+rate), and both calibrators improve Brier and pull the mean onto the actual rate. The ensemble lands
+between its members rather than beating the best one, which is what averaging does.
+
+---
+
+### 3.24 Feature drift fixed: 22 of 44 shifting features down to 4 (2026-08-31)
+
+§3.23 measured **22 of 44 features shifting significantly** between train and test *inside a single
+41-day window*, worst PSI 6.134. Diagnosis: every offender was a **price-normalised ratio**.
+Dividing by `close` removes the price *level* but not the volatility *regime*, so the ratio's own
+distribution still moves when volatility does. ATR tracks the regime, so dividing by ATR removes
+both.
+
+New `ClassifierOptions.NormalizeByAtr` (default **false**, so this is a measurable A/B rather than a
+silent redefinition of every existing model's inputs), exposed as `--normalize-by-atr`. It switches
+level-like features from price-normalised to ATR-normalised: `range_pct`, `bb_width`, EMA distances
+and differences, MACD/signal/histogram, EMA slopes, and the `return_N` series.
+
+```
+                                 significant   worst PSI
+original (price-normalised)        22 of 44        6.134   range_pct
++ ATR on levels                    11 of 44        1.631   ema50_slope_5
++ ATR on returns and slopes         4 of 44        0.441   ema20_vs_ema50
+```
+
+**14x reduction in the worst PSI, 5.5x fewer drifting features.** The four survivors
+(`ema20_vs_ema50` 0.441, `ema50_slope_5` 0.281, `atr_regime` 0.251, `macd_signal` 0.251) all sit
+just over the 0.25 threshold rather than multiples above it.
+
+**Why this matters more than a tidy-up.** §3.12c had already identified the mechanism — `atr14_pct`,
+an unbounded level, destroyed walk-forward performance with 48% of a test window outside the entire
+training range — but it was treated as one bad feature rather than a whole class. It was the class.
+This retroactively explains the instability running through §3.20-§3.21: feature rankings that
+flipped sign on reordering, ATR moving from "helps" to "neutral" on an unrelated regime fix, and
+RSI/CCI swinging +838 to -246 purely on ladder position. Models were being asked about distributions
+they had never seen, so which feature "won" was substantially a lottery.
+
+The conceptual reading of the change: a return over price asks "what percentage did it move"; a
+return over ATR asks "how many normal candles of movement was that". Only the second question has
+the same meaning in December and in June.
+
+**Status:** off by default and not yet re-validated for performance. The ladder, ablation and greedy
+selection in §3.20-§3.21 were all run price-normalised and should be re-run with
+`--normalize-by-atr` before any of their orderings are trusted — the drift measurement says those
+orderings were made on unstable inputs.
+
+---
+
+### 3.25 trend-tactical: two P0 correctness bugs invalidate this session's numbers (2026-08-31)
+
+An independent review (`Books/Trend Tactical Agent Review and Improvement Plan.md`) found two P0
+defects. Both **verified against the code**; see that document's addendum for the full self-review.
+
+**P0-1: every position is treated as long.** `SimulatedBrokerState.cs:835-836` exposes
+`Quantity = Math.Abs(SignedQuantity)` with direction in `Side`. The agent tests `item.Quantity > 0m`
+(`TrendTacticalAgent.cs:139,307`) and never reads `Side`, so shorts are closed while their bearish
+trend is intact and can survive a reversal to bullish.
+
+**P0-2: the agent's own exits are mislabelled.** `StrategySimulationSession.cs:1091-1095` assigns
+`ReverseStrategyClose` only when the close reason contains `"Opposite trend"`, otherwise
+`StructuralInvalidation`. None of the agent's three close reasons contains that string.
+
+**P1: "Rung B" is not the validated strategy.** The agent references `TrendDetector` only — zero
+references to `TrendProgressEstimator`, `ExhaustionEstimator`, `TrendProfiles` or any percentile,
+i.e. none of the machinery that produced §2.18's PF 1.694. The design document's Rung A ("does 1.694
+survive leaving the research harness?") was never built, so B and C were measured on top of a
+foundation that does not exist.
+
+**Conclusions from §3.22 and later that are now invalid:**
+
+- "75 of 84 exits were the platform's, not the agent's" — an artefact of P0-2; those were plausibly
+  the agent's own trend exits. A substantial line of reasoning was built on this.
+- "Removing platform management let winners run" (avgR +0.1505 -> +0.6242) — the measurement stands,
+  the explanation does not.
+- "The cooldown found a pullback edge" — may instead have suppressed forced short churn from P0-1.
+- "73 sells vs 11 buys is a directional asymmetry" — that is P0-1's signature.
+- "One-entry-per-trend loses every trade, so the edge is in re-entries" — same contamination.
+
+**Every trend-tactical performance figure in this session is suspect; the short-side ones are
+near-certainly wrong.** The 11 green agent tests do not catch either P0 because every case passes
+`Positions = []`, so `ManageOpenPosition` never executes.
+
+All background runs (3.5-year baseline, out-of-sample training, 20-candidate selection, gate
+variants) were terminated. None should be resumed against the current agent.
+
+#### 3.22a P0-1's blast radius measured exactly: every phantom trade was a short (2026-08-31)
+
+`rungB-p0fixed` re-runs `tt-rungB`'s exact configuration (window 2026-01-05 -> 2026-02-05,
+management ON, no swing rule, no cooldown, intervals 1m/5m/15m/1h/2h, config lifted from the
+original run's manifest rather than reconstructed) on post-fix code.
+
+```
+                    tt-rungB (buggy)     rungB-p0fixed
+trades                     84                  22        -74%
+Buy / Sell              11 / 73             11 / 11
+sell share                 87%                 50%
+win rate                 47.6%               68.2%
+PF_R                     1.368               1.907
+avgR                   +0.0499             +0.2385
+```
+
+**The buy count is identical (11 and 11).** P0-1 could not affect longs - `Quantity > 0m` is
+legitimately true for a long, so that path always behaved. All 62 excess trades were shorts, churned
+by the spurious "opposite trend" exit that read every short as a long. The fixed run lands exactly
+where the mechanism predicts.
+
+**Invalidated by this measurement** (beyond what 3.23 already listed):
+
+- "73 sells vs 11 buys is a directional asymmetry" - it is 11/11. The asymmetry *was* the bug.
+- `avgR +0.0499` - the phantom shorts depressed expectancy ~5x. Clean figure is +0.2385.
+- Per-side conclusions: in the clean run the sell side is marginally negative (-0.0613R) and longs
+  carry the result (+0.5383R) - the opposite of the buggy run's implication. At n=11 per side this
+  is noise, and no directional claim should be made from it either way.
+
+**Corrected trade rates** (the "10x more trades than Rung A" claim was contamination):
+
+```
+Rung A  260 trades / 1,065 days = 0.244/day
+Rung B   22 trades /     31 days = 0.710/day     ~2.9x, not ~10x
+```
+
+**Do not quote Rung B's PF 1.907 as a result.** n=22 over 31 days, and 8 of 22 exits are
+`BreakEvenStop` because platform management is ON in this config. This run is a contamination check,
+not a performance measurement. A clean Rung B needs the management-disable flags and a 3.5-year
+window to be comparable with Rung A.
+
+#### 3.22b Rung A vs Rung B, 3.5 years, matched configs: the swing rule buys efficiency, not edge (2026-08-31)
+
+`rungB-long` against `rungA-long`. Same instrument, window (2023-01-02 -> 2026-07-24), intervals and
+costs; management disabled on both by the same nine flags, verified by diffing the two runs'
+`improvedPositionManagement` blocks to zero difference before launching. The only intended
+difference is `UseSwingEntryRule`.
+
+```
+                    Rung A            Rung B
+trades               260               435          1.67x
+win rate            30.8%             30.1%
+PF_R                1.276             1.148
+netR               +38.29            +34.80
+avgR              +0.1473           +0.0800
+95% CI     [-0.117, +0.412]  [-0.108, +0.268]
+avg win            +2.210            +2.058
+avg loss           -0.770            -0.772
+```
+
+**What the percentile gate does.** Rung B's 175 extra trades contributed `34.80 - 38.29 = -3.49R`
+between them, about **-0.02R each**. The gate removes near-zero-expectancy entries rather than
+selecting better ones: Rung A reaches the same total profit with 40% fewer trades. That is a real
+efficiency gain - less exposure, less cost - and **not** an improvement in edge.
+
+**It is not statistically significant.** The expectancy difference is +0.067R against a standard
+error on the difference of ~0.166, i.e. **0.4 SE**. Both rungs' own intervals also straddle zero.
+Neither configuration is demonstrated, and the gap between them is well inside noise. Do not report
+"the swing rule works" from this.
+
+**Exit attribution is trustworthy on both for the first time** (post P0-2). Rung B: `StrategyClose`
+231 at avgR **+1.008**, `InitialStopLoss` 203 at avgR -0.975. Agent exits are where the profit is;
+before the fix all 231 were mislabelled as platform exits.
+
+**Method note.** The 2.9x trade-rate ratio predicted in 3.22a from the 31-day window was wrong; the
+matched-window ratio is 1.67x. Three separate short-window extrapolations this session
+(Rung A trade count, Rung B trade count, the 673R decomposition) have all been wrong. Short windows
+are not being used to predict long-window behaviour again.
+
+#### 3.22c Decile test: the classifier does not discriminate trend-tactical candidates either (2026-08-31)
+
+`filter-signals` walk-forward (90d/30d/30d, horizon 10) over Rung A's 260 trades; 253 scored
+out-of-sample. Added a decile breakdown and a Spearman rank correlation to that command for this
+purpose - the existing threshold grid can only show that a filter trades LESS, never that its score
+ORDERS trades by quality.
+
+```
+Spearman(score, R) = 0.0004 over 253 trades
+
+bucket   p range        win%    mean R          bucket   p range        win%    mean R
+D1       0.079-0.247    36.0%   +0.171          D6       0.322-0.333    24.0%   -0.386
+D2       0.247-0.272    24.0%   +0.057          D7       0.333-0.348    34.6%   +0.961
+D3       0.273-0.289    32.0%   +0.391          D8       0.349-0.366    20.0%   -0.504
+D4       0.290-0.306    34.6%   -0.091          D9       0.367-0.398    20.0%   -0.333
+D5       0.308-0.322    60.0%   +1.339          D10      0.398-0.580    26.9%   -0.072
+```
+
+**No monotonicity, and the three highest-confidence deciles are all negative.** D5's +1.339R on 25
+trades is a spike, not a signal. Every filter threshold lands at or below baseline; the best reaches
+the **46.9th percentile** of 2,000 random same-size subsets - worse than the random median.
+`Agreement >= 0.50` keeps 6 of 253 trades at PF 0.071.
+
+**This closes the question 3.15/3.16 left open.** Those measured the classifier on BreakoutDetector
+candidates, and it was correctly objected that the result need not transfer to a different agent's
+candidate population. It has now been measured on trend-tactical's own candidates and the answer is
+the same. **Calibration, conviction sizing and ensembling are all refining noise, and Rung C has no
+basis.** The meta-labelling architecture is still the right shape; the signal is not there.
+
+**Separate finding, larger than the ML one.** Rung A's profit is entirely one-sided:
+
+```
+side    trades       net
+Buy        145   +16,057
+Sell       108    -1,879
+```
+
+Shorts are net negative across 3.5 years. A long-only variant is worth a registered test - but gold
+trended up strongly over this window, so this may be regime rather than edge, and it must be tested
+on a different period before being believed.
+
+---
+
+### 3.26 Alfonso / Set and Forget agent built from `Books/alfonso`; trend layer latched (2026-08-31)
+
+Six phases under `Agent/Strategies/Alfonso/`: zone engine, trendlines and Up/Down/OOA trend state,
+range and control, three-timeframe sequence with nesting and module 11's eight-setup whitelist, the
+agent itself, and catalogue/CLI wiring as `--strategies alfonso`. 60 dedicated tests; suite 1311 green.
+
+**Four rules were corrected against the strategy as taught, each behind a switch so the alternative
+reading stays measurable:** elimination needs a CLOSE beyond the distal (not a wick); a trendline
+break needs a candle CLOSING beyond the line (not the whole candle); taking out a prior peak or
+valley is an accomplishment (not only the all-time extreme); and only zones that themselves
+accomplished something can move the trend. The peak/valley correction was the largest - the all-time
+route fired 15 times in eight months of H4 gold, swing breaks fire 120 times.
+
+**Bugs found by running real candles, none caught by unit tests.** Seven during construction, all of
+the silent-no-op shape: an impulse defined as consecutive ERCs (runs of 2 occur 4 times in 1,018 H4
+bars, so every zone scored Weak and none reached 2:1); over-extension latching at 80% of bars; every
+truncation of a basing run emitting its own duplicate zone; and a bootstrap deadlock where zones
+needed an accomplishment, the principal accomplishment is a trendline break, trendlines are drawn
+from swings, and swings come from zones - which left 10 swings in eight months and awarded the
+trendline accomplishment exactly zero times.
+
+**The trend layer latched, and it took three attempts to fix.** `Resolve` returned early whenever a
+trend was already set, so the only exit was out-of-alignment. On 200 daily gold candles the state was
+`Downtrend` 74.5% and `Unknown` 25.5% - never `Uptrend`, never OOA - across a window where price ran
+4,212 -> 5,602 -> 4,047, and the D1/H4/H1 sequence took **zero trades**. This contradicted the rule as
+taught, which describes a DIRECT flip: the market reversed, one opposing zone is gone and a new
+opposite trendline is drawable, or two are gone and none is.
+
+```
+                 with latch    attempt 2      fixed
+gold H4 OOA           24.9%          -        21.3%   (Down 47.9 / Up 23.5)
+silver H4 OOA         42.8%      82.9%        28.7%   (Down 42.8 / Up 21.4)
+gold 1m OOA               -      99.8%        37.2%
+```
+
+Attempt 1 allowed the flip but `ApplyEliminations` still fired OOA on the same event and cleared the
+counters that would have carried it. Attempt 2 deferred the decision but spent BOTH counters on
+establishing a trend, leaving it no buffer - the first undermining event knocked it out, pushing the
+state to OOA for 83-99% of bars. **The correct rule: while a trend runs only the OPPOSITE case can
+change it.** Its own supporting eliminations are the trend working, not evidence against it; counting
+them made every reversal look like both sides eliminating at once.
+
+**Consequence for earlier Alfonso numbers.** The 8-month gold run (24 trades, avgR +0.065) and the
+first reward sweep were both produced with the latch present and are superseded. Re-running the
+sweep on fixed code moved the book's 3:1 from +0.0032 to **-0.1217** per trade.
+
+**Cost arithmetic, and it has predicted correctly twice.** Round trip is ~2.4bp; zone width sets how
+much of R that consumes, so the viable timeframe is decided before any edge question:
+
+```
+TF    R(p50)  cost/R   break-even win%      observed win% at 3:1 = 25.0%
+1m      1.90   57.6%        39.4%   NEGATIVE
+5m      4.79   22.9%        30.7%   NEGATIVE
+15m     8.66   12.6%        28.2%   NEGATIVE
+30m    12.01    9.1%        27.3%   marginal
+1h     18.32    6.0%        26.5%   marginal
+4h     37.23    2.9%        25.7%   marginal
+```
+
+**Going to lower timeframes is arithmetically excluded**, not merely inadvisable: at 1m the median
+zone pays 58% of its R to costs and the tightest decile pays 156%. No sequence gets comfortably below
+the observed 25% win rate, so the binding lever is geometry, not timeframe.
+
+**Silver, 3 trades in 7 months - explained, not a defect.** 92 zones planned against gold's 109, but
+price ARRIVED at only 7 of them (7.6%) versus gold's 23 (21%). Silver sits out-of-alignment far more
+(H4 42.8% vs 24.9%), so zones are eliminated before price retraces to them. The method's yield is
+instrument-specific and gold's numbers are not characteristic of it.
+
+**Open:** 3.5-year gold runs at H4/H1/M15 and D1/H4/H1 are running on fixed code. D1 still latches at
+200 bars for want of structure (14 accomplished zones); whether ~900 bars is enough is what that run
+answers. No Alfonso number should be quoted until it lands.
+
 ---
 
 ## 4. Governance / packaging gaps (from the 2026-08-02 sponsorship-readiness assessment)
@@ -1599,10 +4042,40 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-08-30**: V2 redesign Phase 0a (§3.14) — unified the classifier overlap policy (three
+  library defaults flipped to no-overlap; one shared flag threaded through `train`, `walk-forward`,
+  `ladder`, `ablate`), added `Simulator.Tests/OverlapPolicyParityTests.cs` (3 tests, 37/37 green),
+  closed §2.19 FLAW 1, resolved the 0.626-vs-0.756 baseline discrepancy in favour of §3.13,
+  established that the meta-filter path never had the overlap defect, found that BreakoutDetector
+  exits 23% of trades through management rather than its declared bracket, and marked §2.11 stale.
+
 *Append-only. Newest at top. One entry per meaningful change — keep it short (what changed, why,
 verification done). Move stale/superseded entries into the relevant numbered section above instead
 of letting this grow forever; this is a changelog, not the whole story.*
 
+- **2026-08-28**: Added Telegram signal notifications (§2.13) as a callable `ISignalNotifier`
+  service in `Networking/Notifications/`, defaulting to a null object so backtests stay silent.
+  `BreakoutDetectorAgent` takes it optionally. Tests caught a real defect: a colon-bearing bot
+  token in a relative uri parses as a scheme, so the endpoint is now absolute. 20 notifier tests
+  green; full solution builds. Added `Notifications.Cli` (`notify`) as a delivery probe —
+  `--discover` to find the group id, `--chat` to send one test message through the real notifier;
+  error paths verified against the live API. No host injects it into an agent yet — that wiring
+  is the remaining step.
+
+- **2026-08-28**: Fixed dashboard price-action markers rendering one bar to the right of their
+  source candle (§2.12) — cause was close-time-stamped `ConfirmedAt` resolved against candle open
+  times. Anchoring extracted to `Dashboard/src/components/priceActionMarkers.ts` and covered by 6
+  Node-runner tests built from real 2026-08-27 XAU/USD 5m bars; verified the test fails against
+  the old lookup. Engine direction logic audited and found correct — this was a rendering bug
+  only. Extended the same fix to supply/demand zones, liquidity pools and liquidity events via
+  `chartTime.ts`/`indexForCloseStampedTime` (13 of 24 real pools reposition); 14 tests green.
+
+- **2026-08-27**: Added the `breakout-detector` agent as a fully registered scaffold with no
+  detection logic (§2.11) — new `Agent/Strategies/BreakoutDetector/`, wired through the enum, type
+  ids, `AgentDefinition` JSON source-gen context, `TradingAgentDefinition`, the catalogue,
+  `BacktestConfiguration.ResolveAgentDefinition` and `SimulationApi.ApplySimulationProfile`. It
+  observes on every bar by design. Solution build clean; 11/11 tests in
+  `BreakoutDetectorAgentTests` + `AgentCatalogueArchitectureTests`.
 - **2026-08-25 (cont'd 3)**: Gave `DBManager.Tests` a Docker-free path. `PostgresPersistenceTests`
   hard-coded `PostgreSqlBuilder`, so the only suite in the repo that needs a database was
   unrunnable on any machine without a Docker daemon - which is this one. The fixture now reads

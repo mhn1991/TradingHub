@@ -31,5 +31,7 @@
     <ProjectReference Include="../PortfolioManager/PortfolioManager.csproj" />
     <ProjectReference Include="../QuantResearch/QuantResearch.csproj" />
     <ProjectReference Include="../DashboardLive/DashboardLive.csproj" />
+    <ProjectReference Include="../TradingClassifier.ML/TradingClassifier.ML.csproj" />
+    <ProjectReference Include="../TradingClassifierRunner/TradingClassifierRunner.csproj" />
   </ItemGroup>
 </Project>

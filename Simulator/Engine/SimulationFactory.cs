@@ -111,7 +111,8 @@ public static class SimulationFactory
         TradingSafetyOptions? safetyOptions = null,
         MarketDataQualityOptions? dataQualityOptions = null,
         ExecutionOptions? executionOptions = null,
-        BrokerExecutionSafetyOptions? brokerSafetyOptions = null)
+        BrokerExecutionSafetyOptions? brokerSafetyOptions = null,
+        decimal? minimumRewardRiskRatio = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         PreTradeRiskOptions riskOptions = agent.ExitManagementMode switch
@@ -130,7 +131,10 @@ public static class SimulationFactory
             {
                 RequireStopLoss = true,
                 RequireTakeProfit = true,
-                MinimumRewardRiskRatio = PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
+                // Keep the safe default for ordinary runs, but honor an explicit run-level
+                // minimum so a deliberately smaller bracket is not silently rejected.
+                MinimumRewardRiskRatio =
+                    minimumRewardRiskRatio ?? PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
                 MaximumOpenPositions = 1,
                 MaximumLossPercentageOfBalance = null,
                 MaximumOpenRiskPercentOfEquity = null,

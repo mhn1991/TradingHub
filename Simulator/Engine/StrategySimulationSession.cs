@@ -263,7 +263,8 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         bool detailedExcursionTracking = false,
         RuntimeFeaturePolicy? featurePolicy = null,
         string? strategyVersion = null,
-        AnalysisProfileKey? analysisProfile = null)
+        AnalysisProfileKey? analysisProfile = null,
+        decimal? minimumRewardRiskRatio = null)
     {
         ArgumentNullException.ThrowIfNull(agent);
         SimulationOptions options = simulationOptions;
@@ -308,7 +309,10 @@ public sealed class StrategySimulationSession : IAsyncDisposable
             {
                 RequireStopLoss = true,
                 RequireTakeProfit = true,
-                MinimumRewardRiskRatio = PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
+                // Keep the safe default for ordinary runs, but honor an explicit run-level
+                // minimum so a deliberately smaller bracket is not silently rejected.
+                MinimumRewardRiskRatio =
+                    minimumRewardRiskRatio ?? PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
                 MaximumOpenPositions = 1,
                 MaximumLossPercentageOfBalance = null,
                 MaximumOpenRiskPercentOfEquity = null,
@@ -1054,6 +1058,13 @@ public sealed class StrategySimulationSession : IAsyncDisposable
                 priceActionTrigger: decision.PriceActionTrigger,
                 priceActionConfidence: decision.PriceActionConfidence);
         }
+        if (decision.Action == AgentAction.Cancel)
+        {
+            _pendingEntryDecision = null;
+            _pendingEntryMultiTimeframeAlignment = null;
+            _pendingEntryBrokerOrderId = null;
+            return;
+        }
         if (result.Submission is null)
             return;
         if (result.Submission.Status == SubmissionStatus.Rejected)
@@ -1081,11 +1092,20 @@ public sealed class StrategySimulationSession : IAsyncDisposable
         else if (decision.Action == AgentAction.Close)
         {
             _pendingExitReason = decision.Reason;
+
+            // An agent-requested close is a STRATEGY close. Defaulting it to StructuralInvalidation
+            // attributed every strategy exit to the platform's structural-invalidation path, which
+            // made exit analysis actively misleading: trend-tactical's own "Trend reached
+            // Exhaustion" / "Trend is no longer active" exits were all recorded as platform exits,
+            // and 75 of 84 trades were wrongly read as platform-driven (PROJECT_STATE §3.25).
+            //
+            // StructuralInvalidation stays reserved for the paths that genuinely detect it
+            // (SimulationRunner.cs:399 and the management path below).
             _pendingExitReasonKind = decision.Reason.Contains(
                 "Opposite trend",
                 StringComparison.OrdinalIgnoreCase)
                 ? SimulatedTradeExitReason.ReverseStrategyClose
-                : SimulatedTradeExitReason.StructuralInvalidation;
+                : SimulatedTradeExitReason.StrategyClose;
             AddFrameEvent(
                 StrategyReplayEventType.StrategyCloseRequested,
                 decision.CreatedAt,

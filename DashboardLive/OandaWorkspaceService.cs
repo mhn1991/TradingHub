@@ -10,6 +10,14 @@ internal sealed class OandaWorkspaceService : BackgroundService
 {
     private const int MaximumSessions = 8;
     private static readonly TimeSpan AssetLifetime = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// How long a cached list is served after a failed refresh before discovery is retried.
+    /// Much shorter than <see cref="AssetLifetime"/>: serving stale data is a stopgap, so the
+    /// service should recover promptly once the broker's account API comes back, without
+    /// hammering it every request while it is still down.
+    /// </summary>
+    private static readonly TimeSpan StaleRetryInterval = TimeSpan.FromMinutes(2);
     private readonly object _sync = new();
     private readonly SemaphoreSlim _assetGate = new(1, 1);
     private readonly TimeProvider _timeProvider;
@@ -17,6 +25,8 @@ internal sealed class OandaWorkspaceService : BackgroundService
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<OandaWorkspaceService> _logger;
     private readonly OandaBrokerClient? _client;
+    private readonly OandaInstrumentCache _instrumentCache;
+    private bool _assetsAreStale;
     private readonly Dictionary<string, SessionEntry> _sessions = new(StringComparer.Ordinal);
     private readonly HashSet<OandaLiveAnalysisSession> _retiredSessions = [];
     private readonly List<RevisionedOrderEvent> _orderEvents = [];
@@ -41,6 +51,8 @@ internal sealed class OandaWorkspaceService : BackgroundService
         _timeProvider = timeProvider;
         _loggerFactory = loggerFactory;
         _logger = logger;
+        _instrumentCache = new OandaInstrumentCache(
+            Path.Combine(".state", "dashboard-live"), logger);
         if (_options.IsConfigured)
         {
             _client = new OandaBrokerClient(new OandaOptions
@@ -90,9 +102,12 @@ internal sealed class OandaWorkspaceService : BackgroundService
                 WorkspaceDataKind.Market,
                 IsConfigured: true,
                 IsReadOnly: !DemoOrderExecutionEnabled,
-                DemoOrderExecutionEnabled
-                    ? "Connected to OANDA practice pricing and candles; demo orders are enabled by backend policy."
-                    : "Connected to OANDA pricing and candles; order execution is disabled by backend policy.",
+                _assetsAreStale
+                    ? "Connected to OANDA pricing and candles. Instrument discovery is currently " +
+                      "unavailable, so the instrument list is the last known good one and may be out of date."
+                    : DemoOrderExecutionEnabled
+                        ? "Connected to OANDA practice pricing and candles; demo orders are enabled by backend policy."
+                        : "Connected to OANDA pricing and candles; order execution is disabled by backend policy.",
                 assets,
                 CanTrade: DemoOrderExecutionEnabled);
         }
@@ -495,11 +510,42 @@ internal sealed class OandaWorkspaceService : BackgroundService
                 return _assets;
             }
 
-            IReadOnlyList<OandaInstrumentInfo> instruments = await RequireClient()
-                .GetInstrumentsAsync(cancellationToken).ConfigureAwait(false);
-            _assets = instruments.Select(ToWorkspaceAsset).ToArray();
-            _assetsExpireAt = now + AssetLifetime;
-            return _assets;
+            try
+            {
+                IReadOnlyList<OandaInstrumentInfo> instruments = await RequireClient()
+                    .GetInstrumentsAsync(cancellationToken).ConfigureAwait(false);
+                _assets = instruments.Select(ToWorkspaceAsset).ToArray();
+                _assetsExpireAt = now + AssetLifetime;
+                _assetsAreStale = false;
+                _instrumentCache.Save(_options.AccountId, _options.Environment.ToString(), _assets, now);
+                return _assets;
+            }
+            catch (Exception exception) when (
+                exception is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                // Discovery is account-scoped and can fail while market data is perfectly healthy,
+                // so a failure here must not take the whole workspace down. Serve the last known
+                // good list if we have one; only surface the error when there is nothing to fall
+                // back to and the workspace genuinely cannot be described.
+                // Preference order: this process's list, then the persisted one, then the
+                // configured seed. The seed is last because it is a human-declared guess, while
+                // the other two were actually returned by the account at some point.
+                IReadOnlyList<WorkspaceAsset>? fallback = _assets
+                    ?? _instrumentCache.TryLoad(_options.AccountId, _options.Environment.ToString())
+                    ?? ConfiguredFallbackAssets();
+                if (fallback is null || fallback.Count == 0)
+                    throw;
+
+                _logger.LogWarning(
+                    exception,
+                    "OANDA instrument discovery failed; serving {Count} fallback instruments and retrying in {Retry}.",
+                    fallback.Count,
+                    StaleRetryInterval);
+                _assets = fallback;
+                _assetsAreStale = true;
+                _assetsExpireAt = now + StaleRetryInterval;
+                return _assets;
+            }
         }
         finally
         {
@@ -556,6 +602,37 @@ internal sealed class OandaWorkspaceService : BackgroundService
                 "OANDA demo order execution is disabled. Enable Oanda:AllowDemoOrders on the backend.");
         }
     }
+
+    /// <summary>
+    /// Builds assets from <see cref="OandaWorkspaceOptions.FallbackInstruments"/>, or null when
+    /// none are configured. Discovery normally supplies the instrument type, which decides the
+    /// <c>FX:</c>/<c>METAL:</c> prefix; without it the prefix is inferred from the symbol, since
+    /// a wrong prefix would produce an instrument key that matches no cached data or annotation.
+    /// </summary>
+    private IReadOnlyList<WorkspaceAsset>? ConfiguredFallbackAssets()
+    {
+        if (_options.FallbackInstruments.Count == 0)
+            return null;
+        return _options.FallbackInstruments
+            .Select(symbol =>
+            {
+                string pair = symbol.Replace('_', '/');
+                return new WorkspaceAsset(symbol, pair, $"{InferPrefix(symbol)}:{pair}", WorkspaceAnalysis.OandaTimeframes);
+            })
+            .ToArray();
+    }
+
+    /// <summary>
+    /// OANDA prefixes metals with XAU/XAG/XPT/XPD and quotes them against a currency; everything
+    /// else in the practice instrument set that this dashboard charts is a currency pair.
+    /// </summary>
+    private static string InferPrefix(string symbol) =>
+        symbol.StartsWith("XAU", StringComparison.OrdinalIgnoreCase) ||
+        symbol.StartsWith("XAG", StringComparison.OrdinalIgnoreCase) ||
+        symbol.StartsWith("XPT", StringComparison.OrdinalIgnoreCase) ||
+        symbol.StartsWith("XPD", StringComparison.OrdinalIgnoreCase)
+            ? "METAL"
+            : "FX";
 
     private static WorkspaceAsset ToWorkspaceAsset(OandaInstrumentInfo instrument)
     {

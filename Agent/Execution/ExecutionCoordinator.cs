@@ -40,6 +40,18 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             return null;
         }
 
+        if (decision.Action == AgentAction.Cancel)
+        {
+            if (decision.Instrument.IsEmpty)
+                throw new InvalidOperationException("A cancel decision requires an instrument.");
+            if (string.IsNullOrWhiteSpace(decision.BrokerOrderId))
+                throw new InvalidOperationException("A cancel decision requires a broker order ID.");
+
+            await broker.Orders.CancelOrderAsync(decision.BrokerOrderId, cancellationToken)
+                .ConfigureAwait(false);
+            return null;
+        }
+
         if (decision.Action is not (AgentAction.Buy or AgentAction.Sell))
         {
             throw new NotSupportedException(

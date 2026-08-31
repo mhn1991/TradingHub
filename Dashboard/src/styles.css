@@ -3020,3 +3020,20 @@ input:focus-visible {
   margin-top: 0.25rem;
   font-size: 0.8rem;
 }
+
+.go-to-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.go-to-date input[type='datetime-local'] {
+  color-scheme: dark;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.go-to-date-error {
+  color: var(--coral);
+  font-size: 11px;
+  flex-basis: 100%;
+}

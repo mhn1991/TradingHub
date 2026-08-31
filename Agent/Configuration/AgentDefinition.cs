@@ -1,8 +1,12 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Agent.Strategies;
+using Agent.Strategies.Alfonso;
+using Agent.Strategies.BreakoutDetector;
+using Agent.Strategies.TrendTactical;
 using Agent.Strategies.DivergenceReversal;
 using Agent.Strategies.StructuralConfluence;
+using Agent.Strategies.TradingClassification;
 
 namespace Agent.Configuration;
 
@@ -64,6 +68,62 @@ public sealed record AgentDefinition
         };
     }
 
+    public static AgentDefinition FromBreakoutDetector(BreakoutDetectorStrategyOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        return new AgentDefinition
+        {
+            AgentTypeId = TradingAgentTypeIds.BreakoutDetector,
+            SchemaVersion = CurrentSchemaVersion,
+            Options = JsonSerializer.SerializeToElement(
+                options,
+                AgentDefinitionJsonContext.Default.BreakoutDetectorStrategyOptions)
+        };
+    }
+
+    public static AgentDefinition FromAlfonso(AlfonsoStrategyOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        return new AgentDefinition
+        {
+            AgentTypeId = TradingAgentTypeIds.Alfonso,
+            SchemaVersion = CurrentSchemaVersion,
+            Options = JsonSerializer.SerializeToElement(
+                options,
+                AgentDefinitionJsonContext.Default.AlfonsoStrategyOptions)
+        };
+    }
+
+    public static AgentDefinition FromTrendTactical(TrendTacticalStrategyOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        return new AgentDefinition
+        {
+            AgentTypeId = TradingAgentTypeIds.TrendTactical,
+            SchemaVersion = CurrentSchemaVersion,
+            Options = JsonSerializer.SerializeToElement(
+                options,
+                AgentDefinitionJsonContext.Default.TrendTacticalStrategyOptions)
+        };
+    }
+
+    public static AgentDefinition FromTradingClassification(TradingClassificationStrategyOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        return new AgentDefinition
+        {
+            AgentTypeId = TradingAgentTypeIds.TradingClassification,
+            SchemaVersion = CurrentSchemaVersion,
+            Options = JsonSerializer.SerializeToElement(
+                options,
+                AgentDefinitionJsonContext.Default.TradingClassificationStrategyOptions)
+        };
+    }
+
     public ProgressiveStrategyOptions ReadProgressiveOptions()
     {
         EnsureSchemaAndType(
@@ -92,6 +152,46 @@ public sealed record AgentDefinition
         DivergenceReversalStrategyOptions result = Options.Deserialize(
             AgentDefinitionJsonContext.Default.DivergenceReversalStrategyOptions)
             ?? throw new ArgumentException("Divergence-reversal Agent options were empty.", nameof(Options));
+        result.Validate();
+        return result;
+    }
+
+    public BreakoutDetectorStrategyOptions ReadBreakoutDetectorOptions()
+    {
+        EnsureSchemaAndType(TradingAgentTypeIds.BreakoutDetector);
+        BreakoutDetectorStrategyOptions result = Options.Deserialize(
+            AgentDefinitionJsonContext.Default.BreakoutDetectorStrategyOptions)
+            ?? throw new ArgumentException("Breakout-detector Agent options were empty.", nameof(Options));
+        result.Validate();
+        return result;
+    }
+
+    public TrendTacticalStrategyOptions ReadTrendTacticalOptions()
+    {
+        EnsureSchemaAndType(TradingAgentTypeIds.TrendTactical);
+        TrendTacticalStrategyOptions result = Options.Deserialize(
+            AgentDefinitionJsonContext.Default.TrendTacticalStrategyOptions)
+            ?? throw new ArgumentException("Trend-tactical Agent options were empty.", nameof(Options));
+        result.Validate();
+        return result;
+    }
+
+    public TradingClassificationStrategyOptions ReadTradingClassificationOptions()
+    {
+        EnsureSchemaAndType(TradingAgentTypeIds.TradingClassification);
+        TradingClassificationStrategyOptions result = Options.Deserialize(
+            AgentDefinitionJsonContext.Default.TradingClassificationStrategyOptions)
+            ?? throw new ArgumentException("Trading-classification Agent options were empty.", nameof(Options));
+        result.Validate();
+        return result;
+    }
+
+    public AlfonsoStrategyOptions ReadAlfonsoOptions()
+    {
+        EnsureSchemaAndType(TradingAgentTypeIds.Alfonso);
+        AlfonsoStrategyOptions result = Options.Deserialize(
+            AgentDefinitionJsonContext.Default.AlfonsoStrategyOptions)
+            ?? throw new ArgumentException("Alfonso Agent options were empty.", nameof(Options));
         result.Validate();
         return result;
     }
@@ -126,4 +226,8 @@ public sealed record AgentDefinition
 [JsonSerializable(typeof(ProgressiveStrategyOptions))]
 [JsonSerializable(typeof(StructuralConfluenceStrategyOptions))]
 [JsonSerializable(typeof(DivergenceReversalStrategyOptions))]
+[JsonSerializable(typeof(BreakoutDetectorStrategyOptions))]
+[JsonSerializable(typeof(TradingClassificationStrategyOptions))]
+[JsonSerializable(typeof(TrendTacticalStrategyOptions))]
+[JsonSerializable(typeof(AlfonsoStrategyOptions))]
 internal partial class AgentDefinitionJsonContext : JsonSerializerContext;

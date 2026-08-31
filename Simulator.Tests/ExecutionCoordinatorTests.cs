@@ -105,14 +105,39 @@ public sealed class ExecutionCoordinatorTests
     }
 
     [Test]
-    public void UnsupportedCancelDecision_IsRejected()
+    public async Task CancelDecision_CancelsTheSpecifiedOrderWithoutEntryRiskReads()
     {
-        var broker = new FakeTradingBroker();
-        AgentDecision decision = BuyDecision() with { Action = AgentAction.Cancel };
+        var broker = new FakeTradingBroker { ThrowOnRead = true };
+        AgentDecision decision = BuyDecision() with
+        {
+            Action = AgentAction.Cancel,
+            BrokerOrderId = "broker-order-to-cancel",
+            SuggestedQuantity = null
+        };
+
+        OrderSubmission? result = await new ExecutionCoordinator().ProcessAsync(decision, broker);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result, Is.Null);
+            Assert.That(broker.CancelledOrderIds, Is.EqualTo(new[] { "broker-order-to-cancel" }));
+            Assert.That(broker.PlacedRequests, Is.Empty);
+        });
+    }
+
+    [Test]
+    public void CancelDecisionWithoutBrokerOrderId_IsRejected()
+    {
+        AgentDecision decision = BuyDecision() with
+        {
+            Action = AgentAction.Cancel,
+            SuggestedQuantity = null
+        };
 
         Assert.That(
-            async () => await new ExecutionCoordinator().ProcessAsync(decision, broker),
-            Throws.TypeOf<NotSupportedException>());
+            async () => await new ExecutionCoordinator().ProcessAsync(
+                decision, new FakeTradingBroker { ThrowOnRead = true }),
+            Throws.TypeOf<InvalidOperationException>());
     }
 
     [Test]

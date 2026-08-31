@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>TradingClassifier</RootNamespace>
+    <AssemblyName>TradingClassifier</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- Referenced by Agent, which Simulator.AotSmoke AOT-publishes. Microsoft.ML must never
+         appear in this project: it is not AOT-safe. Training/inference lives in
+         TradingClassifier.ML, which nothing on the AOT path references. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <!-- For Collections.RingBuffer only: the existing, tested fixed-capacity buffer every other
+         incremental indicator in this repo is built on. -->
+    <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
+    <!-- Standalone project with its own Candle model and no references of its own, so this
+         cannot create a cycle. Needed for the cross-timeframe TrendState feature group. -->
+    <ProjectReference Include="../TrendStatistics/TrendStatistics.csproj" />
+  </ItemGroup>
+</Project>

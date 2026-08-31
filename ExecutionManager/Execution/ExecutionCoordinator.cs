@@ -61,6 +61,21 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             return Task.FromResult<OrderSubmission?>(null);
         }
 
+        if (decision.Action == AgentAction.Cancel)
+        {
+            if (decision.Instrument.IsEmpty)
+                throw new InvalidOperationException("A cancel decision requires an instrument.");
+            if (string.IsNullOrWhiteSpace(decision.BrokerOrderId))
+                throw new InvalidOperationException("A cancel decision requires a broker order ID.");
+
+            AppendJournal(
+                TradeJournalEventType.SignalEvaluated,
+                decision,
+                decision.ClientOrderId,
+                decision.Reason);
+            return CancelOrderAsync(decision.BrokerOrderId, broker, cancellationToken);
+        }
+
         ValidateDecision(decision);
         string clientOrderId = string.IsNullOrWhiteSpace(decision.ClientOrderId)
             ? CreateClientOrderId(decision, _options.ClientOrderIdPrefix)
@@ -85,6 +100,15 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             LazyThreadSafetyMode.ExecutionAndPublication);
         Lazy<Task<OrderSubmission?>> operation = _inFlight.GetOrAdd(clientOrderId, candidate);
         return AwaitAndReleaseAsync(clientOrderId, operation, cancellationToken);
+    }
+
+    private static async Task<OrderSubmission?> CancelOrderAsync(
+        string brokerOrderId,
+        ITradingBrokerClient broker,
+        CancellationToken cancellationToken)
+    {
+        await broker.Orders.CancelOrderAsync(brokerOrderId, cancellationToken).ConfigureAwait(false);
+        return null;
     }
 
     public Task<ProtectiveStopAmendmentResult> AmendProtectiveStopAsync(

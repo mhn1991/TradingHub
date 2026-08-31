@@ -263,6 +263,17 @@ public record PositionManagementOptions
     public decimal ExecutionCostStressMinimumOpenProfitR { get; init; } = 0.50m;
     public decimal ExecutionCostStressReductionFraction { get; init; } = 0.15m;
 
+    /// <summary>
+    /// Leaves the entry bracket untouched. This is for strategies whose stop and target are the
+    /// complete trade plan rather than inputs to the platform's active management layer.
+    /// </summary>
+    public static PositionManagementOptions BracketOnlyDefaults { get; } = new()
+    {
+        Mode = TrailingStopMode.Disabled,
+        EvaluateMechanicalProtectionOnEveryExecutionFrame = false,
+        PreserveBracketTarget = true
+    };
+
     public static PositionManagementOptions LegacyDefaults { get; } = new()
     {
         Mode = TrailingStopMode.StructureAtr,

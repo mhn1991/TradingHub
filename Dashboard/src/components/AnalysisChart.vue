@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { compact, price, shortTime, timestamp } from '../format'
+import { collectPriceActionMarkers } from './priceActionMarkers'
+import { indexForCloseStampedTime } from './chartTime'
 import type {
   ChartLayers,
   PriceChannel,
@@ -495,8 +497,8 @@ const supplyDemandZoneVisuals = computed(() => {
         .filter((event) => event.zoneId === zone.zoneId
           && ['Invalidated', 'Expired', 'Merged'].includes(event.eventType))
         .at(-1)
-      const startX = xForTime(zone.availableAt)
-      const endX = terminal ? xForTime(terminal.availableAt) : plotLeft + plotWidth
+      const startX = xForCloseStampedTime(zone.availableAt)
+      const endX = terminal ? xForCloseStampedTime(terminal.availableAt) : plotLeft + plotWidth
       const confluenceCount = analysisFrame.value?.supplyDemandLiquidityConfluence?.relationships
         ?.filter((item) => item.zoneId === zone.zoneId).length ?? 0
       return {
@@ -525,8 +527,8 @@ const liquidityPoolVisuals = computed(() => {
         .filter((event) => event.poolId === pool.poolId
           && ['Sweep', 'AcceptedBreak', 'Consumption', 'Failure'].includes(event.eventType))
         .at(-1)
-      const startX = xForTime(pool.availableAt)
-      const endX = terminal ? xForTime(terminal.availableAt) : plotLeft + plotWidth
+      const startX = xForCloseStampedTime(pool.availableAt)
+      const endX = terminal ? xForCloseStampedTime(terminal.availableAt) : plotLeft + plotWidth
       return {
         ...pool,
         x: startX,
@@ -544,7 +546,7 @@ const liquidityEventVisuals = computed(() => {
   return (snapshot.recentEvents ?? [])
     .filter((event) => isTimeVisible(event.availableAt)
       && ['Sweep', 'AcceptedBreak', 'Consumption'].includes(event.eventType))
-    .map((event) => ({ ...event, x: xForTime(event.availableAt), y: yPrice(event.price) }))
+    .map((event) => ({ ...event, x: xForCloseStampedTime(event.availableAt), y: yPrice(event.price) }))
 })
 
 const trendVisuals = computed(() => {
@@ -653,29 +655,19 @@ const provisionalNeoWaveVisual = computed(() => {
 
 const priceActionVisuals = computed(() => {
   if (props.layers.priceAction === false) return []
-  const events = new Map<string, NonNullable<ReplayFrame['priceAction']>['events'][number]>()
-  for (const frame of visibleFrames.value) {
-    for (const event of frame.priceAction?.events ?? []) {
-      if (event.confidence < 55) continue
-      if (event.type.endsWith('Impulse') || event.type.endsWith('Pullback')) continue
-      events.set(event.eventId, event)
+  // Markers are anchored by the index of the frame that produced them, not by resolving
+  // event.confirmedAt against candle open times — see collectPriceActionMarkers for why.
+  return collectPriceActionMarkers(visibleFrames.value).map(({ event, index, bullish, reference }) => {
+    const y = yPrice(reference)
+    const x = xAt(index)
+    return {
+      event,
+      bullish,
+      x,
+      y,
+      points: priceActionPoints(bullish, x, y),
     }
-  }
-
-  return [...events.values()]
-    .filter(event => isTimeVisible(event.confirmedAt))
-    .map(event => {
-      const bullish = event.direction === 'Bullish'
-      const reference = event.referenceLevel ?? event.brokenLevel ?? priceForTime(event.confirmedAt)
-      const y = yPrice(reference)
-      return {
-        event,
-        bullish,
-        x: xForTime(event.confirmedAt),
-        y,
-        points: priceActionPoints(bullish, xForTime(event.confirmedAt), y),
-      }
-    })
+  })
 })
 
 function stopVisual(trade: ReplayTrade) {
@@ -1090,6 +1082,16 @@ function xForTime(value: string): number {
   if (low <= 0) return xAt(0)
   if (low >= times.length) return xAt(times.length - 1)
   return xAt(target - times[low - 1] <= times[low] - target ? low - 1 : low)
+}
+
+/**
+ * x for a timestamp the annotator stamped with its source candle's CLOSE time (zone/pool/event
+ * `availableAt`). Resolving these through xForTime matched the next candle's open time and drew
+ * the overlay one bar to the right — see indexForCloseStampedTime.
+ */
+function xForCloseStampedTime(value: string): number {
+  const index = indexForCloseStampedTime(visibleOpenTimes.value, new Date(value).getTime())
+  return index < 0 ? plotLeft : xAt(index)
 }
 
 function isTimeVisible(value: string): boolean {

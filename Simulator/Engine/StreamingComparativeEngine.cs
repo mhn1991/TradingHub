@@ -12,6 +12,7 @@ using Simulator.Abstractions;
 using Simulator.MarketData;
 using Simulator.Models;
 using Simulator.Replay;
+using RiskManager;
 using RiskManager.Calibration;
 using TradingCore.Pipeline;
 
@@ -44,6 +45,8 @@ public sealed class StreamingComparativeEngineOptions
     public required IReadOnlyList<BarInterval> AnalysisIntervals { get; init; }
     public required BacktestRuntimeOptions Runtime { get; init; }
     public required SimulationOptions SimulationOptions { get; init; }
+    public decimal MinimumRewardRiskRatio { get; init; } =
+        PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio ?? 1.5m;
     public required string OutputDirectory { get; init; }
     public required string InputStreamId { get; init; }
     public string? SimulationConfigurationId { get; init; }
@@ -166,7 +169,8 @@ public sealed class StreamingComparativeEngine
                     CurrencyStrength = options.Runtime.CurrencyStrength,
                     SetupCalibration = options.Runtime.SetupCalibration
                 },
-                strategyVersion: id);
+                strategyVersion: id,
+                minimumRewardRiskRatio: options.MinimumRewardRiskRatio);
             sessions.Add(session);
             sharedPortfolio?.Register(session);
         }

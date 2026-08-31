@@ -2,7 +2,7 @@
 import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, shallowRef, watch } from 'vue'
 import AnalysisChart from './components/AnalysisChart.vue'
 import { useMultiTimeframeSelection } from './composables/useMultiTimeframeSelection'
-import { findAnchorIndex, parseIntervalSeconds } from './utils/timeframeSeries'
+import { findAnchorIndex, resolveGoToDate, parseIntervalSeconds } from './utils/timeframeSeries'
 import SimulatorPanel from './components/SimulatorPanel.vue'
 import LiveDemoPanel from './components/LiveDemoPanel.vue'
 import ResearchPanel from './components/ResearchPanel.vue'
@@ -1189,6 +1189,61 @@ function stepBackward() {
   selectedIndex.value = Math.max(0, selectedIndex.value - 1)
 }
 
+const goToDateValue = ref('')
+const goToDateError = ref<string | null>(null)
+
+/**
+ * Jump to a typed date/time and centre it in a 1000-candle window (DRILL_BEFORE 499 before,
+ * DRILL_AFTER 500 after).
+ *
+ * Two paths, because the data sources differ:
+ *  - Workspace/live: fetches a fresh window from the server anchored on the target. That endpoint
+ *    prepends warm-up candles before the window, so Bollinger/RSI/CCI are settled at its left
+ *    edge rather than null for the first ~20-50 candles, and it reports when warm-up fell short.
+ *    A local lookup could not do this - the loaded feed only holds the recent live edge, so any
+ *    older date simply is not in memory.
+ *  - Replay: frames are already loaded and were analysed during the backtest (with its own
+ *    --warmup-days), so the target is resolved in place with no fetch.
+ *
+ * Input is read as UTC, matching the UTC-stamped frames - see resolveGoToDate.
+ */
+async function goToDate() {
+  const raw = goToDateValue.value.trim()
+  if (raw.length === 0) {
+    goToDateError.value = 'Enter a date and time.'
+    return
+  }
+
+  if (mode.value === 'live' && activeBroker.value?.id === 'oanda' && activeWorkspace.value) {
+    const anchorAt = /(?:Z|[+-]\d{2}:\d{2})$/.test(raw) ? raw : `${raw}:00Z`.replace('::', ':')
+    if (Number.isNaN(Date.parse(anchorAt))) {
+      goToDateError.value = `"${raw}" is not a valid date and time.`
+      return
+    }
+    goToDateError.value = null
+    isPlaying.value = false
+    const interval = activeInterval.value
+    const series = await fetchDrillWindow(interval, anchorAt)
+    if (!series) return
+    drillWindows.value = { ...drillWindows.value, [interval]: series }
+    selectedIndex.value = findAnchorIndex(series.frames, anchorAt)
+    windowSize.value = DRILL_BEFORE + DRILL_AFTER + 1
+    centeredView.value = true
+    return
+  }
+
+  const result = resolveGoToDate(activeSeries.value?.frames ?? [], raw)
+  if (result.error !== undefined) {
+    goToDateError.value = result.error
+    return
+  }
+  goToDateError.value = null
+  isPlaying.value = false
+  selectedIndex.value = result.index
+  windowSize.value = DRILL_BEFORE + DRILL_AFTER + 1
+  centeredView.value = true
+}
+
 function jumpToEdge(edge: 'start' | 'end') {
   isPlaying.value = false
   selectedIndex.value = edge === 'start' ? 0 : Math.max(0, (activeSeries.value?.frames.length ?? 1) - 1)
@@ -1936,6 +1991,23 @@ function isAbortError(error: unknown) {
 
                 <button type="button" class="button drill-prompt-cancel" @click="dismissDrillPrompt()">Cancel</button>
               </div>
+            </div>
+
+            <div v-if="activeSeries" class="go-to-date">
+              <label class="select-control">
+                <span>Go to (UTC)</span>
+                <input
+                  v-model="goToDateValue"
+                  type="datetime-local"
+                  step="60"
+                  aria-label="Go to date and time (UTC)"
+                  @keyup.enter="goToDate()"
+                />
+              </label>
+              <button type="button" class="button" :disabled="drillLoading" @click="goToDate()">
+                {{ drillLoading ? 'Loading…' : 'Go' }}
+              </button>
+              <small v-if="goToDateError" class="go-to-date-error">{{ goToDateError }}</small>
             </div>
 
             <div v-if="mode === 'replay'" class="replay-controls">

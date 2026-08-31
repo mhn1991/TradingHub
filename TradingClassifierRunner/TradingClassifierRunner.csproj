@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>TradingClassifierRunner</RootNamespace>
+    <AssemblyName>TradingClassifierRunner</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TradingClassifier/TradingClassifier.csproj" />
+    <ProjectReference Include="../TradingClassifier.ML/TradingClassifier.ML.csproj" />
+    <!-- For the `fetch` command only: reuses the repo's own OANDA paging source and its encrypted
+         database credential vault, rather than asking anyone to put a token in the environment. -->
+    <ProjectReference Include="../Simulator/Simulator.csproj" />
+    <ProjectReference Include="../Brokers/Brokers.csproj" />
+    <ProjectReference Include="../DBManager.Postgres/DBManager.Postgres.csproj" />
+    <!-- For the `trend-stats` command: blueprint section 55's Phase 2 historical trend library. -->
+    <ProjectReference Include="../TrendStatistics/TrendStatistics.csproj" />
+  </ItemGroup>
+</Project>

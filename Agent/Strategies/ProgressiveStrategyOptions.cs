@@ -31,6 +31,31 @@ public sealed record ProgressiveStrategyOptions
     public BarInterval ConfirmationInterval { get; init; } = BarInterval.Minutes(15);
     public IReadOnlyList<BarInterval> AdditionalConfirmationIntervals { get; init; } = [];
     public BarInterval EntryInterval { get; init; } = BarInterval.Minutes(5);
+
+    /// <summary>
+    /// Trades the OPPOSITE of every detected setup side: a detected Buy becomes a Sell and vice
+    /// versa. Off by default.
+    /// <para>
+    /// This is a research switch for testing whether the directional edge is negative - i.e.
+    /// whether fading the signal beats following it. It is applied at decision construction in
+    /// <c>ProgressiveStrategyBase.Trade</c>, which flips the action and mirrors the bracket
+    /// through the entry price so risk and reward:risk are preserved and
+    /// <c>PreTradeRiskManager</c> (<c>Buy =&gt; stopLoss &lt; reference</c>) still accepts it.
+    /// </para>
+    /// <para>
+    /// It is deliberately NOT applied at side detection. The detected side feeds the evidence
+    /// gates - higher-timeframe structure opposition and opposing price action - so a side
+    /// flipped before them is vetoed by the same evidence that selected the setup, yielding a
+    /// near-empty run that reads as "no signals" rather than a self-defeating configuration.
+    /// Flipping at the end keeps setup SELECTION identical to the control arm and reverses only
+    /// the direction traded.
+    /// </para>
+    /// <para>
+    /// A run with this enabled is not comparable to one without it unless both use the same
+    /// window, costs and instruments - always pair it with a normal-polarity control.
+    /// </para>
+    /// </summary>
+    public bool InvertSignalPolarity { get; init; }
     public int MinimumSecondaryTrendAlignments { get; init; }
     public int MinimumSetupAlignments { get; init; }
     public int MinimumConfirmationAlignments { get; init; } = 1;

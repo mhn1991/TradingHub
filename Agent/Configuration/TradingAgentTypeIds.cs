@@ -6,6 +6,10 @@ public static class TradingAgentTypeIds
     public const string ImprovedProgressive = "improved-progressive";
     public const string StructuralConfluence = "structural-confluence";
     public const string DivergenceReversal = "divergence-reversal";
+    public const string BreakoutDetector = "breakout-detector";
+    public const string TrendTactical = "trend-tactical";
+    public const string TradingClassification = "trading-classification";
+    public const string Alfonso = "alfonso";
 
     public const string LegacyAlias = "legacy";
     public const string ImprovedAlias = "improved";
@@ -15,7 +19,8 @@ public static class TradingAgentTypeIds
         if (!TryParse(value, out TradingAgentKind kind))
             throw new ArgumentException(
                 $"Unknown trading agent '{value}'. Expected legacy-progressive, improved-progressive, " +
-                "structural-confluence, or divergence-reversal.",
+                "structural-confluence, divergence-reversal, breakout-detector, trend-tactical, " +
+                "trading-classification, or alfonso.",
                 nameof(value));
         return kind;
     }
@@ -38,6 +43,18 @@ public static class TradingAgentTypeIds
             case DivergenceReversal:
                 kind = TradingAgentKind.DivergenceReversal;
                 return true;
+            case TrendTactical:
+                kind = TradingAgentKind.TrendTactical;
+                return true;
+            case BreakoutDetector:
+                kind = TradingAgentKind.BreakoutDetector;
+                return true;
+            case TradingClassification:
+                kind = TradingAgentKind.TradingClassification;
+                return true;
+            case Alfonso:
+                kind = TradingAgentKind.Alfonso;
+                return true;
             default:
                 kind = default;
                 return false;
@@ -50,6 +67,10 @@ public static class TradingAgentTypeIds
         TradingAgentKind.ImprovedProgressive => ImprovedProgressive,
         TradingAgentKind.StructuralConfluence => StructuralConfluence,
         TradingAgentKind.DivergenceReversal => DivergenceReversal,
+        TradingAgentKind.BreakoutDetector => BreakoutDetector,
+        TradingAgentKind.TrendTactical => TrendTactical,
+        TradingAgentKind.TradingClassification => TradingClassification,
+        TradingAgentKind.Alfonso => Alfonso,
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     };
 

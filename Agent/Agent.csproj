@@ -13,5 +13,12 @@
   <ItemGroup>
     <ProjectReference Include="../Brokers/Brokers.csproj" />
     <ProjectReference Include="../ChartAnnotator/ChartAnnotator.csproj" />
+    <ProjectReference Include="../Networking/Networking.csproj" />
+    <!-- Core classifier only (features/labels/signals/ITradingModel). Microsoft.ML lives in
+         TradingClassifier.ML and must never reach this assembly: it is AOT-published. -->
+    <ProjectReference Include="../TradingClassifier/TradingClassifier.csproj" />
+    <!-- Standalone: TrendStatistics has no project references of its own and carries its own
+         Candle model, so this adds no transitive dependency and cannot create a cycle. -->
+    <ProjectReference Include="../TrendStatistics/TrendStatistics.csproj" />
   </ItemGroup>
 </Project>

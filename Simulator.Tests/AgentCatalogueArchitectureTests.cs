@@ -4,7 +4,10 @@ using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Factories;
 using Agent.Strategies;
+using Agent.Strategies.BreakoutDetector;
+using Agent.Strategies.TrendTactical;
 using Agent.Strategies.DivergenceReversal;
+using Agent.Strategies.TradingClassification;
 using Brokers.Models;
 using NUnit.Framework;
 using Simulator.Models;
@@ -31,7 +34,10 @@ public sealed class AgentCatalogueArchitectureTests
             {
                 MonitoredIntervals = [BarInterval.Minutes(30), BarInterval.Minutes(15)],
                 ConfirmationIntervals = [BarInterval.Minutes(5), BarInterval.Minutes(1)]
-            })
+            }),
+            AgentDefinition.FromBreakoutDetector(new BreakoutDetectorStrategyOptions()),
+            AgentDefinition.FromTradingClassification(new TradingClassificationStrategyOptions()),
+            AgentDefinition.FromTrendTactical(new TrendTacticalStrategyOptions())
         ];
 
         Assert.Multiple(() =>
@@ -41,7 +47,11 @@ public sealed class AgentCatalogueArchitectureTests
                 TradingAgentTypeIds.LegacyProgressive,
                 TradingAgentTypeIds.ImprovedProgressive,
                 TradingAgentTypeIds.StructuralConfluence,
-                TradingAgentTypeIds.DivergenceReversal
+                TradingAgentTypeIds.DivergenceReversal,
+                TradingAgentTypeIds.BreakoutDetector,
+                TradingAgentTypeIds.TradingClassification,
+                TradingAgentTypeIds.TrendTactical,
+                TradingAgentTypeIds.Alfonso
             }));
             foreach (AgentDefinition definition in definitions)
             {

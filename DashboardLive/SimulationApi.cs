@@ -1210,6 +1210,17 @@ public static class SimulationApi
             TradingAgentKind.StructuralConfluence =>
                 (profile.Agent.StructuralConfluence!.Quantity,
                     profile.Agent.StructuralConfluence.MinimumRewardRisk),
+            TradingAgentKind.BreakoutDetector =>
+                (profile.Agent.BreakoutDetector!.Quantity,
+                    profile.Agent.BreakoutDetector.MinimumRewardRisk),
+            TradingAgentKind.TradingClassification =>
+                (profile.Agent.TradingClassification!.Quantity,
+                    profile.Agent.TradingClassification.MinimumRewardRisk),
+            // No MinimumRewardRisk on this agent: it submits no take-profit, so a reward:risk ratio
+            // is undefined at decision time. 0 means "no ratio constraint", matching its
+            // ProtectiveStopAndStrategyExit contract.
+            TradingAgentKind.TrendTactical =>
+                (profile.Agent.TrendTactical!.Quantity, 0m),
             _ => throw new ArgumentOutOfRangeException(nameof(profile))
         };
         BacktestRuntimeOptions runtime = profile.Runtime.Options with

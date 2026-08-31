@@ -278,6 +278,16 @@ public sealed record RsiAnalysisSnapshot
     public RsiZone Zone { get; init; }
     public MomentumDirection MomentumDirection { get; init; }
     public decimal? MomentumChange { get; init; }
+
+    /// <summary>
+    /// RSI on the immediately preceding candle, or null on the first sample. Distinct from
+    /// <see cref="MomentumChange"/>, which spans <c>RsiMomentumLookback</c> candles (default 3)
+    /// and applies a dead-band: this is the raw one-bar predecessor, for callers that need
+    /// "did RSI tick up since the last candle" rather than a smoothed direction.
+    /// Mirrors <see cref="CciAnalysisSnapshot.PreviousValue"/>.
+    /// </summary>
+    public decimal? PreviousValue { get; init; }
+
     public RsiRelationshipSnapshot? LatestRelationship { get; init; }
     public bool IsNewRelationship { get; init; }
     public int SampleCount { get; init; }

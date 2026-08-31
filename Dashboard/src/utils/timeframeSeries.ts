@@ -88,3 +88,41 @@ export function resampleFrames(
       }
     })
 }
+
+/**
+ * Resolve a user-typed date/time to a frame index, for the chart's "go to date" control.
+ *
+ * Returns `{ index }` on success, or `{ error }` with a message meant to be shown verbatim.
+ * Deliberately reports *why* a lookup missed rather than silently clamping: jumping to a date
+ * outside the loaded run would otherwise land on the first or last candle and look like the data
+ * is wrong, when the real answer is "that date isn't in this run".
+ *
+ * `value` is a `datetime-local` string (no zone). Replay frames are stamped UTC, so it is read as
+ * UTC — a local-time reading would silently shift the target by the viewer's offset.
+ */
+export function resolveGoToDate(
+  frames: ReplayFrame[],
+  value: string,
+): { index: number; error?: undefined } | { index?: undefined; error: string } {
+  if (frames.length === 0) return { error: 'No frames are loaded.' }
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return { error: 'Enter a date and time.' }
+
+  // datetime-local omits the zone; append Z so it is parsed as UTC rather than local.
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(trimmed) ? trimmed : `${trimmed}Z`
+  const target = Date.parse(normalized)
+  if (Number.isNaN(target)) return { error: `"${value}" is not a valid date and time.` }
+
+  const first = Date.parse(frames[0]!.availableAt)
+  const last = Date.parse(frames[frames.length - 1]!.availableAt)
+  const asIso = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ')
+
+  if (target < first) {
+    return { error: `That is before this run starts (${asIso(first)} UTC).` }
+  }
+  if (target > last) {
+    return { error: `That is after this run ends (${asIso(last)} UTC).` }
+  }
+
+  return { index: findAnchorIndex(frames, normalized) }
+}

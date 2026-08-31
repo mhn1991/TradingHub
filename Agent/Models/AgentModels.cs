@@ -64,6 +64,8 @@ public sealed record AgentDecision
     public string? DecisionId { get; init; }
     /// <summary>Optional caller-owned idempotency key for broker submission.</summary>
     public string? ClientOrderId { get; init; }
+    /// <summary>The broker order targeted by a <see cref="AgentAction.Cancel"/> decision.</summary>
+    public string? BrokerOrderId { get; init; }
     public string? SetupId { get; init; }
     public string? StrategyName { get; init; }
     public string? StrategyId { get; init; }

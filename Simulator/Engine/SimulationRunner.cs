@@ -221,6 +221,12 @@ public sealed class SimulationRunner
     private void CaptureDecision(TradingPipelineResult result)
     {
         AgentDecision? decision = result.Decision;
+        if (decision?.Action == AgentAction.Cancel)
+        {
+            _pendingEntryDecision = null;
+            _pendingEntryBrokerOrderId = null;
+            return;
+        }
         if (decision is null || result.Submission is null ||
             result.Submission.Status == SubmissionStatus.Rejected)
         {

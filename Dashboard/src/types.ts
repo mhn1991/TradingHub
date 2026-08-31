@@ -668,6 +668,8 @@ export interface RsiAnalysisSnapshot {
   zone: RsiZone
   momentumDirection: MomentumDirection
   momentumChange: number | null
+  /** RSI on the immediately preceding candle; null on the first sample. */
+  previousValue: number | null
   latestRelationship: RsiRelationshipSnapshot | null
   isNewRelationship: boolean
   sampleCount: number

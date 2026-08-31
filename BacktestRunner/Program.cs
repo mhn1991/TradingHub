@@ -72,6 +72,35 @@ internal static class Program
                 cancellation.Cancel();
             };
 
+            // Must happen before any agent is built. Without it the ML agents resolve to a no-trade
+            // model and the run reports 0 trades with no error, which is indistinguishable from the
+            // strategy genuinely finding nothing (PROJECT_STATE §3.23).
+            string? modelDescription = ClassifierModelInstaller.Install(
+                options.ClassifierModelPath, options.ExecutionInterval.Value, options.StopModelPath);
+            if (options.StopModelPath is not null)
+                Console.WriteLine($"Stop-placement model loaded from {options.StopModelPath}");
+            if (modelDescription is not null)
+            {
+                Console.WriteLine($"Classifier model loaded from {options.ClassifierModelPath}");
+                Console.WriteLine(modelDescription);
+                // The agent is configured FROM the model, not alongside it.
+                options = options with
+                {
+                    ClassifierOptions = ClassifierModelInstaller.LoadedOptions,
+                    ClassifierSignalInterval = ClassifierModelInstaller.LoadedIntervalMinutes is int minutes
+                        ? BarInterval.Minutes(minutes)
+                        : null
+                };
+            }
+            else if (options.Strategies.Any(strategy =>
+                strategy.Contains("classification", StringComparison.OrdinalIgnoreCase) ||
+                strategy.Contains("trend-tactical", StringComparison.OrdinalIgnoreCase)))
+            {
+                Console.WriteLine(
+                    "WARNING: an ML agent was requested without --classifier-model. It will fall back " +
+                    "to a no-trade model and produce ZERO trades. This is not a strategy result.");
+            }
+
             options = await ResolveCalibrationArtifactsAsync(options, cancellation.Token);
             BacktestRequest request = requestJsonPath is null
                 ? options.ToBacktestRequest()
@@ -922,7 +951,14 @@ Options:
   --maximum-daily-equity-giveback 750
   --price-action-mode disabled|soft|required|required-with-context
   --minimum-price-action-confidence 55
+  --classifier-model PATH                  (required by trading-classification and by
+                                             trend-tactical rung C; without it those agents
+                                             produce zero trades)
   --allow-opposing-price-action
+  --invert-signal-polarity                 (research: trade the OPPOSITE of every signal. Setup
+                                             selection is unchanged; only the direction and the
+                                             mirrored bracket differ. Only interpretable against a
+                                             normal-polarity control over the same window.)
   --progress-interval 500
   --trailing-comparison
   --legacy-trailing-mode disabled|break-even|structure-atr

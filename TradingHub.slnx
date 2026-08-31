@@ -14,6 +14,7 @@
   <Project Path="DashboardExporter/DashboardExporter.csproj" />
   <Project Path="DashboardLive/DashboardLive.csproj" />
   <Project Path="Networking/Networking.csproj" />
+  <Project Path="Notifications.Cli/Notifications.Cli.csproj" />
   <Project Path="PortfolioManager/PortfolioManager.csproj" />
   <Project Path="QuantResearch/QuantResearch.csproj" />
   <Project Path="QuantResearchRunner/QuantResearchRunner.csproj" />
@@ -30,6 +31,11 @@
   <Project Path="LiveTrading.Tests/LiveTrading.Tests.csproj" />
   <Project Path="RiskManager/RiskManager.csproj" />
   <Project Path="TradeManager/TradeManager.csproj" />
+  <Project Path="TrendStatistics.Tests/TrendStatistics.Tests.csproj" />
+  <Project Path="TrendStatistics/TrendStatistics.csproj" />
+  <Project Path="TradingClassifier/TradingClassifier.csproj" />
+  <Project Path="TradingClassifier.ML/TradingClassifier.ML.csproj" />
+  <Project Path="TradingClassifierRunner/TradingClassifierRunner.csproj" />
   <Project Path="TradingCore/TradingCore.csproj" />
   <Project Path="TradingJournal/TradingJournal.csproj" />
   <Project Path="TradingObservability.Abstractions/TradingObservability.Abstractions.csproj" />
