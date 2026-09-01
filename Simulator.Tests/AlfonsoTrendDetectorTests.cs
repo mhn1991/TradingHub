@@ -345,6 +345,71 @@ public sealed class AlfonsoTrendDetectorTests
             "a detector built without the analyzer has no way to see trendline breaks");
     }
 
+    /// <summary>
+    /// Builds falling peaks and falling troughs, then presents the evidence for an uptrend. Module 5
+    /// reads structure as "each successive peak AND trough", so with the context rule on, an uptrend
+    /// declared against falling structure should be vetoed.
+    /// </summary>
+    private static AlfonsoTrendDetector FallingStructure(AlfonsoTrendOptions options)
+    {
+        AlfonsoTrendDetector detector = new(options);
+        (decimal Valley, decimal Peak)[] pairs = [(90m, 112m), (85m, 108m)];
+        int hour = 0;
+        foreach ((decimal valley, decimal peak) in pairs)
+        {
+            DateTimeOffset at = Start.AddHours(hour++);
+            detector.Apply(
+                new AlfonsoBar(at, 100m, 113m, 84m, 100m),
+                new ImbalanceDetectorUpdate
+                {
+                    Created =
+                    [
+                        Zone(ImbalanceKind.Demand) with { BaseEnd = at, ConfirmedAt = at, Distal = valley },
+                        Zone(ImbalanceKind.Supply) with { BaseEnd = at, ConfirmedAt = at, Distal = peak }
+                    ]
+                });
+        }
+
+        return detector;
+    }
+
+    [Test]
+    public void StructuralAgreementVetoesATrendItsOwnStructureContradicts()
+    {
+        AlfonsoTrendDetector detector =
+            FallingStructure(new AlfonsoTrendOptions { RequireStructuralAgreement = true });
+
+        AlfonsoTrendSnapshot state = detector.Apply(
+            new AlfonsoBar(Start.AddHours(3), 100m, 101m, 99m, 100.5m),
+            new ImbalanceDetectorUpdate
+            {
+                Eliminated = [Zone(ImbalanceKind.Supply), Zone(ImbalanceKind.Supply)]
+            });
+
+        Assert.That(state.Trend, Is.Not.EqualTo(AlfonsoTrend.Uptrend),
+            "peaks and troughs are both falling, so an uptrend has no structural context");
+    }
+
+    [Test]
+    public void StructuralAgreementIsOffByDefaultSoTheSameEvidenceEstablishesTheTrend()
+    {
+        // Default flipped 2026-09-02. It was adopted on a trend-accuracy gain that did not reach
+        // trading results: on six instruments it costs 70% of trades (127 -> 38) while the avgR
+        // difference is -0.2077 with a 95% CI of [-0.679, +0.263], containing zero. Off on
+        // statistical-power grounds. This test fails if the default is flipped back silently.
+        Assert.That(new AlfonsoTrendOptions().RequireStructuralAgreement, Is.False);
+
+        AlfonsoTrendDetector detector = FallingStructure(new AlfonsoTrendOptions());
+        AlfonsoTrendSnapshot state = detector.Apply(
+            new AlfonsoBar(Start.AddHours(3), 100m, 101m, 99m, 100.5m),
+            new ImbalanceDetectorUpdate
+            {
+                Eliminated = [Zone(ImbalanceKind.Supply), Zone(ImbalanceKind.Supply)]
+            });
+
+        Assert.That(state.Trend, Is.EqualTo(AlfonsoTrend.Uptrend));
+    }
+
     private static Imbalance Zone(ImbalanceKind kind, bool continuation = false) => new()
     {
         Interval = TimeSpan.FromHours(4),

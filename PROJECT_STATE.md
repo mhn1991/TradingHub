@@ -3930,8 +3930,15 @@ baseline **exactly** - all six instruments, same trade counts, same avgR to four
 So it is **not** demonstrably harmful to P&L. What it demonstrably does is discard 70% of trades for
 no measurable benefit, which triples the noise on every subsequent measurement. It was adopted on the
 strength of a trend-*accuracy* improvement (Uptrend 55.0% -> 62.5%, calls halved 1,641 -> 819); the
-accuracy gain did not translate into trading results. Recommend defaulting it off on statistical-power
-grounds rather than P&L grounds. Currently still on.
+accuracy gain did not translate into trading results.
+
+**Turned off by default 2026-09-02**, on statistical-power grounds rather than P&L grounds - at 38
+trades nothing downstream can be measured. `--alfonso-structural-agreement` opts back in;
+`--alfonso-no-structural-agreement` stays accepted so existing scripts keep working. The option had
+**no test coverage in either direction** before this, which is how a switch worth 70% of the sample
+went unexamined; `AlfonsoTrendDetectorTests.StructuralAgreementVetoesATrendItsOwnStructureContradicts`
+and `...IsOffByDefaultSoTheSameEvidenceEstablishesTheTrend` now pin both the semantics and the
+default, and fail if it is flipped back silently.
 
 **Process failure, three instances today, one shape.** Every false conclusion this session came from
 comparing two runs whose binaries differed by more than the single variable under test:

@@ -737,8 +737,11 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-tradeable-zone-trend. Only a tradeable zone may move the trend.</summary>
     public bool AlfonsoRequireTradeableZoneForTrendChange { get; init; }
 
-    /// <summary>--alfonso-no-structural-agreement. Module 5's higher-highs/higher-lows context.</summary>
-    public bool AlfonsoRequireStructuralAgreement { get; init; } = true;
+    /// <summary>
+    /// --alfonso-structural-agreement. Module 5's higher-highs/higher-lows context, off by default
+    /// since it costs 70% of trades for no measurable edge.
+    /// </summary>
+    public bool AlfonsoRequireStructuralAgreement { get; init; }
 
     /// <summary>--alfonso-candidate-log PATH. Decision-time candidate CSV, or null for none.</summary>
     public string? AlfonsoCandidateLogPath { get; init; }

@@ -94,8 +94,17 @@ public sealed record AlfonsoTrendOptions
     /// Structure that cannot be read - fewer than two swings of either kind - does not veto. The
     /// rule is a context requirement, and absence of context is not disagreement.
     /// </para>
+    /// <para>
+    /// Default false as of 2026-09-02. It was adopted on a trend-accuracy gain (Uptrend 55.0% ->
+    /// 62.5%, calls halved 1,641 -> 819) that did not survive contact with trading results: on six
+    /// instruments it costs 70% of trades (127 -> 38) while the difference in avgR is -0.2077 with a
+    /// 95% CI of [-0.679, +0.263], which contains zero. So it is not demonstrably harmful to edge -
+    /// it just discards most of the sample for no measurable benefit, which triples the noise on
+    /// every subsequent measurement. Turned off on statistical-power grounds, not P&amp;L grounds.
+    /// Re-enable with --alfonso-structural-agreement.
+    /// </para>
     /// </summary>
-    public bool RequireStructuralAgreement { get; init; } = true;
+    public bool RequireStructuralAgreement { get; init; }
 }
 
 /// <summary>

@@ -132,7 +132,7 @@ internal sealed record BacktestCommandOptions
 
     public bool AlfonsoRequireTradeableZoneForTrendChange { get; init; }
 
-    public bool AlfonsoRequireStructuralAgreement { get; init; } = true;
+    public bool AlfonsoRequireStructuralAgreement { get; init; }
 
     public string? AlfonsoCandidateLogPath { get; init; }
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
@@ -344,7 +344,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-nested-only" or "alfonso-ignore-control" or
                 "alfonso-confirmation-trades" or
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
-                "alfonso-no-structural-agreement" or
+                "alfonso-no-structural-agreement" or "alfonso-structural-agreement" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -625,7 +625,10 @@ internal sealed record BacktestCommandOptions
                 values.ContainsKey("alfonso-ambiguous-base-cp"),
             AlfonsoRequireTradeableZoneForTrendChange =
                 values.ContainsKey("alfonso-tradeable-zone-trend"),
+            // Off by default since 2026-09-02. The former disable flag stays accepted so existing
+            // scripts keep working; --alfonso-structural-agreement opts back in.
             AlfonsoRequireStructuralAgreement =
+                values.ContainsKey("alfonso-structural-agreement") &&
                 !values.ContainsKey("alfonso-no-structural-agreement"),
             AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
