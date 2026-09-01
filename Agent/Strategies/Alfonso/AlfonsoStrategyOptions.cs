@@ -105,6 +105,30 @@ public sealed record AlfonsoStrategyOptions
     /// <summary>Candles of ATR history used to compute the percentile.</summary>
     public int AtrPercentileLookback { get; init; } = 200;
 
+    /// <summary>
+    /// Room the trade must have to the nearest opposing zone, as a multiple of its own risk. Zero
+    /// disables the check.
+    /// <para>
+    /// Module 7 lists this alongside the 2:1 impulse and consolidation away: "A minimum 2:1
+    /// imbalance and one full OHCL candle consolidating away from the level is needed, as well as
+    /// 3:1 profit margin or more to the opposing level." It asks whether the target is REACHABLE -
+    /// a demand entry with supply sitting 1.5R above cannot make a 3:1 target whatever the zone
+    /// scores - and it was missing entirely, so every trade measured so far was taken without it,
+    /// including ones that could not physically reach their target.
+    /// </para>
+    /// <para>
+    /// Should not sit below <see cref="ImbalanceOptions.RewardMultiple"/>: requiring less room than
+    /// the target needs would defeat the purpose.
+    /// </para>
+    /// </summary>
+    public decimal MinimumProfitMarginMultiple { get; init; } = 3.0m;
+
+    /// <summary>
+    /// CSV path for decision-time candidate logging, or null to log nothing. Set by
+    /// --alfonso-candidate-log.
+    /// </summary>
+    public string? CandidateLogPath { get; init; }
+
     public IReadOnlySet<BarInterval> RequiredIntervals =>
         new HashSet<BarInterval> { TopInterval, MiddleInterval, LowerInterval };
 
@@ -147,6 +171,8 @@ public sealed record AlfonsoStrategyOptions
             throw new InvalidOperationException("ATR percentiles must be within [0, 1].");
         if (MinimumAtrPercentile >= MaximumAtrPercentile)
             throw new InvalidOperationException("MinimumAtrPercentile must be below MaximumAtrPercentile.");
+        if (MinimumProfitMarginMultiple < 0m)
+            throw new InvalidOperationException("MinimumProfitMarginMultiple cannot be negative.");
         if (AtrPercentileLookback < 2)
             throw new InvalidOperationException("AtrPercentileLookback must be at least 2.");
     }

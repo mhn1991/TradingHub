@@ -2,6 +2,8 @@ using Agent.Strategies.Alfonso.Sequence;
 using Agent.Strategies.Alfonso.Zones;
 using Brokers.Models;
 
+using Agent.Strategies.Alfonso.Trend;
+
 namespace Agent.Strategies.Alfonso;
 
 /// <summary>Why a candidate the agent looked at did not become a trade.</summary>
@@ -50,6 +52,13 @@ public sealed record AlfonsoCandidateRecord
     public required CandidateOutcome Outcome { get; init; }
     public required ImbalanceKind Side { get; init; }
     public required SequenceRole EntryTimeframe { get; init; }
+
+    /// <summary>Trend on each timeframe of the sequence at the moment of the decision.</summary>
+    public AlfonsoTrend? TopTrend { get; init; }
+
+    public AlfonsoTrend? MiddleTrend { get; init; }
+
+    public AlfonsoTrend? LowerTrend { get; init; }
 
     public required decimal Proximal { get; init; }
     public required decimal Distal { get; init; }

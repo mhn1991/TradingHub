@@ -182,6 +182,19 @@ public sealed record ImbalanceOptions
     /// </summary>
     public bool SwingBreakIsAnAccomplishment { get; init; } = true;
 
+    /// <summary>
+    /// Whether a base with no readable approach is treated as a continuation pattern rather than a
+    /// swing. Module 2: "When you are in doubt, consider them as a CP."
+    /// <para>
+    /// Default false, which is the behaviour every result before 2026-09-01 was measured under.
+    /// Turning it on is faithful to the book's sentence but it is not a small change: it feeds
+    /// swing detection, which feeds trendlines, which feeds trend establishment. Measured on six
+    /// instruments it cut trade count 127 -> 40 and took pooled avgR from -0.239 to -0.474, so it
+    /// stays off until there is evidence for it.
+    /// </para>
+    /// </summary>
+    public bool TreatAmbiguousBaseAsContinuation { get; init; } = false;
+
     /// <summary>Peaks and valleys retained for the swing-break test.</summary>
     public int SwingMemory { get; init; } = 16;
 

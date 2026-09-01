@@ -36,6 +36,8 @@ public sealed class AlfonsoSequenceAnalyzer
     private readonly bool _freshLevelsOnly;
     private readonly bool _requireControlAgreement;
     private readonly bool _allowConfirmationEntries;
+    private readonly decimal _minimumProfitMargin;
+    private readonly decimal _stopPadding;
 
     public AlfonsoSequenceAnalyzer(
         TimeframeSequence sequence,
@@ -44,7 +46,9 @@ public sealed class AlfonsoSequenceAnalyzer
         RangeOptions? rangeOptions = null,
         bool freshLevelsOnly = true,
         bool requireControlAgreement = true,
-        bool allowConfirmationEntries = false)
+        bool allowConfirmationEntries = false,
+        decimal minimumProfitMarginMultiple = 0m,
+        decimal stopPaddingFraction = 0.25m)
     {
         ArgumentNullException.ThrowIfNull(sequence);
         sequence.Validate();
@@ -52,6 +56,8 @@ public sealed class AlfonsoSequenceAnalyzer
         _freshLevelsOnly = freshLevelsOnly;
         _requireControlAgreement = requireControlAgreement;
         _allowConfirmationEntries = allowConfirmationEntries;
+        _minimumProfitMargin = minimumProfitMarginMultiple;
+        _stopPadding = stopPaddingFraction;
 
         foreach ((SequenceRole role, TimeSpan interval) in sequence.All())
             _timeframes[role] = new AlfonsoTimeframeAnalyzer(interval, zoneOptions, trendOptions, rangeOptions);
@@ -66,6 +72,9 @@ public sealed class AlfonsoSequenceAnalyzer
     /// <summary>Applies one CLOSED candle of the timeframe filling <paramref name="role"/>.</summary>
     public ImbalanceDetectorUpdate Apply(SequenceRole role, AlfonsoBar bar) =>
         _timeframes[role].Apply(bar);
+
+    /// <summary>Trend on one timeframe of the sequence, for decision-time logging.</summary>
+    public AlfonsoTrend TrendOf(SequenceRole role) => _timeframes[role].Trend.Trend;
 
     /// <summary>The alignment currently in force, resolved against module 11's table.</summary>
     public ScenarioResolution Scenario => ScenarioMatrix.Resolve(
@@ -160,6 +169,9 @@ public sealed class AlfonsoSequenceAnalyzer
                 if (!live)
                     continue;
 
+                if (!HasRoomToTarget(zone, side, timeframe.Zones))
+                    continue;
+
                 candidates.Add(new TradeCandidate
                 {
                     Zone = zone,
@@ -174,6 +186,51 @@ public sealed class AlfonsoSequenceAnalyzer
         return candidates
             .OrderBy(candidate => Math.Abs(candidate.Zone.Proximal - price))
             .ToArray();
+    }
+
+    /// <summary>
+    /// Whether the nearest opposing zone leaves enough room for the target to be reached.
+    /// <para>
+    /// Module 7 requires "3:1 profit margin or more to the opposing level" alongside the 2:1 impulse
+    /// and consolidation away. It is a reachability test, not a quality one: a demand entry with
+    /// supply 1.5R above it cannot make a 3:1 target however well the zone scores.
+    /// </para>
+    /// <para>
+    /// Only zones on the SAME timeframe are considered obstacles, and an absent opposing zone is
+    /// treated as open road - module 6 says the same of the range, that with nothing opposing there
+    /// is no measurement to make rather than a prohibition.
+    /// </para>
+    /// </summary>
+    private bool HasRoomToTarget(Imbalance zone, ImbalanceKind side, IReadOnlyList<Imbalance> onTimeframe)
+    {
+        if (_minimumProfitMargin <= 0m)
+            return true;
+
+        decimal risk = Math.Abs(zone.Proximal - zone.StopPrice(_stopPadding));
+        if (risk <= 0m)
+            return false;
+
+        ImbalanceKind opposing = side == ImbalanceKind.Demand
+            ? ImbalanceKind.Supply
+            : ImbalanceKind.Demand;
+
+        // The first opposing level price would meet on the way to target is the one that matters.
+        decimal? obstacle = onTimeframe
+            .Where(other => other.Kind == opposing &&
+                other.State != ImbalanceState.Eliminated &&
+                (side == ImbalanceKind.Demand
+                    ? other.Proximal > zone.Proximal
+                    : other.Proximal < zone.Proximal))
+            .Select(other => (decimal?)other.Proximal)
+            .DefaultIfEmpty(null)
+            .Aggregate((a, b) => side == ImbalanceKind.Demand
+                ? (a is null ? b : b is null ? a : Math.Min(a.Value, b.Value))
+                : (a is null ? b : b is null ? a : Math.Max(a.Value, b.Value)));
+
+        if (obstacle is not decimal level)
+            return true;
+
+        return Math.Abs(level - zone.Proximal) >= risk * _minimumProfitMargin;
     }
 
     internal static bool AcceptsLevel(Imbalance zone, bool freshLevelsOnly) =>

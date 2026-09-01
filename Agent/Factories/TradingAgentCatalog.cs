@@ -450,6 +450,11 @@ public sealed class AlfonsoTradingAgentBuilder : ITradingAgentBuilder
         if (!string.Equals(definition.AgentTypeId, AgentTypeId, StringComparison.Ordinal))
             throw new ArgumentException("Agent definition was routed to the wrong builder.", nameof(definition));
 
-        return new AlfonsoAgent(definition.ReadAlfonsoOptions());
+        AlfonsoStrategyOptions alfonsoOptions = definition.ReadAlfonsoOptions();
+        return new AlfonsoAgent(
+            alfonsoOptions,
+            string.IsNullOrWhiteSpace(alfonsoOptions.CandidateLogPath)
+                ? null
+                : AlfonsoCandidateLog.ToFile(alfonsoOptions.CandidateLogPath));
     }
 }

@@ -127,6 +127,14 @@ internal sealed record BacktestCommandOptions
     public bool AlfonsoEliminationRequiresClose { get; init; } = false;
     public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
     public bool AlfonsoRequireValidZoneForTrendChange { get; init; } = true;
+
+    public bool AlfonsoTreatAmbiguousBaseAsContinuation { get; init; }
+
+    public bool AlfonsoRequireTradeableZoneForTrendChange { get; init; }
+
+    public bool AlfonsoRequireStructuralAgreement { get; init; } = true;
+
+    public string? AlfonsoCandidateLogPath { get; init; }
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
     public bool AlfonsoRequireNestedEntries { get; init; }
     public bool AlfonsoRequireControlAgreement { get; init; } = true;
@@ -135,6 +143,7 @@ internal sealed record BacktestCommandOptions
     public decimal AlfonsoMinimumStopAtrMultiple { get; init; }
     public decimal AlfonsoMinimumAtrPercentile { get; init; }
     public decimal AlfonsoMaximumAtrPercentile { get; init; } = 1m;
+    public decimal AlfonsoMinimumProfitMarginMultiple { get; init; } = 3.0m;
     public decimal? DailyEquityProfitTarget { get; init; }
     public decimal? DailyEquityGivebackActivation { get; init; }
     public decimal? MaximumDailyEquityGiveback { get; init; }
@@ -334,6 +343,8 @@ internal sealed record BacktestCommandOptions
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
                 "alfonso-nested-only" or "alfonso-ignore-control" or
                 "alfonso-confirmation-trades" or
+                "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
+                "alfonso-no-structural-agreement" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -610,6 +621,13 @@ internal sealed record BacktestCommandOptions
                                                !values.ContainsKey("alfonso-elimination-on-wick"),
             AlfonsoTrendlineBreakRequiresClose = !values.ContainsKey("alfonso-trendline-break-full-candle"),
             AlfonsoRequireValidZoneForTrendChange = !values.ContainsKey("alfonso-allow-invalid-zones"),
+            AlfonsoTreatAmbiguousBaseAsContinuation =
+                values.ContainsKey("alfonso-ambiguous-base-cp"),
+            AlfonsoRequireTradeableZoneForTrendChange =
+                values.ContainsKey("alfonso-tradeable-zone-trend"),
+            AlfonsoRequireStructuralAgreement =
+                !values.ContainsKey("alfonso-no-structural-agreement"),
+            AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
             AlfonsoRequireNestedEntries = values.ContainsKey("alfonso-nested-only"),
             AlfonsoRequireControlAgreement = !values.ContainsKey("alfonso-ignore-control"),
@@ -620,6 +638,9 @@ internal sealed record BacktestCommandOptions
             AlfonsoMinimumStopAtrMultiple = ParseDecimal(
                 values.GetValueOrDefault("alfonso-min-stop-atr"), 0m, 0m,
                 "alfonso-min-stop-atr", allowZero: true),
+            AlfonsoMinimumProfitMarginMultiple = ParseDecimal(
+                values.GetValueOrDefault("alfonso-profit-margin"), 3.0m, 0m,
+                "alfonso-profit-margin", allowZero: true),
             AlfonsoMinimumAtrPercentile = ParseDecimal(
                 values.GetValueOrDefault("alfonso-atr-percentile-min"), 0m, 0m,
                 "alfonso-atr-percentile-min", allowZero: true),
@@ -765,12 +786,17 @@ internal sealed record BacktestCommandOptions
         AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,
         AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
         AlfonsoRequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
+        AlfonsoTreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation,
+        AlfonsoRequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
+        AlfonsoRequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
+        AlfonsoCandidateLogPath = AlfonsoCandidateLogPath,
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
         AlfonsoRequireNestedEntries = AlfonsoRequireNestedEntries,
         AlfonsoRequireControlAgreement = AlfonsoRequireControlAgreement,
         AlfonsoAllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
         AlfonsoMaximumCostToRiskFraction = AlfonsoMaximumCostToRiskFraction,
         AlfonsoMinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
+        AlfonsoMinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
         AlfonsoMinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
         AlfonsoMaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
         PriceActionConfirmation = PriceActionConfirmation,

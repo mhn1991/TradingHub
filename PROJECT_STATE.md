@@ -3727,9 +3727,228 @@ history; and `AlfonsoCandidateRecord`, an optional decision-time sink capturing 
 agent considered with the reason it was not traded. That last one closes a real gap - a research
 harness counted 49 entries where the agent took 87 and the divergence was found by accident.
 
-**Standing position.** Direction works. Entry selection does not beat random out-of-sample across
-three independent tests. The strategy is negative on 5 of 6 instruments. The remaining explanation is
-entry quality and cost, not the trend layer and not zone drawing.
+**Standing position (SUPERSEDED 2026-09-01 - see 3.30).** This previously read "Direction works
+... the remaining explanation is entry quality and cost, not the trend layer and not zone drawing."
+Direct measurement of the trend layer on 2026-09-01 contradicts it: the trend state carries no
+usable directional edge on any of six instruments. Do not rely on the old wording.
+
+
+### 3.30 Alfonso trend layer measured directly: no directional edge; zone quality is decoupled from it (2026-09-01)
+
+> **CAVEAT ADDED SAME DAY - READ FIRST.** Everything in this section below the caveat was measured
+> with a standalone replay harness (`ZZAlfonsoTrendLayerDiagnostic`) that feeds CSVs aggregated by
+> `/mnt/storage/scratch/alfonso/export_bars.py` into the production analyzer classes. That harness
+> **does not reproduce the agent's trend states.** The check that caught it: on EUR/USD the agent
+> took 14 trades whose `setupReason` says "All three timeframes ...", while the replay finds exactly
+> **1** aligned bar in 16,420. Silver: 15 trades vs 125 bars; gold: 21 vs 297.
+>
+> The classes are the same; the bars are not. The export buckets by wall-clock with no gap tolerance
+> and no incomplete-bucket rule, where `MultiTimeframeAggregator` has both, and warm-up differs.
+>
+> So the headline below - "the trend state carries no usable directional information" - is
+> established for the *replayed* state machine, not for the one that trades. Treat it as suggestive.
+> The same caveat applies to the marginal-occupancy figures and to the zone-quality sweep, which
+> swept the replay's trend layer. The barrier-race method itself is sound and worth reusing.
+>
+> Unaffected, because they come from the agent's own run output rather than the replay: all
+> trade-level statistics (the 92-sells/35-buys split, per-side win rates and avgR, setup-reason
+> labels), the structural-agreement A/B in 3.31, and the switch measurements in 3.31.
+>
+> **Next step is to instrument the agent, not the replay.** `AlfonsoCandidateRecord` already exists
+> for this and only needs wiring through BacktestRunner to emit decision-time trend state and
+> rejection reason from the real pipeline.
+
+Six-instrument window 2025-11-24 -> 2026-07-23, bars exported from the simulator's own 1m cache
+(`/mnt/storage/scratch/alfonso/export_bars.py`). New diagnostic:
+`Simulator.Tests/ZZAlfonsoTrendLayerDiagnostic.cs` (Explicit).
+
+**Method.** A barrier race from every bar with the geometry the agent actually trades - 1xATR stop,
+3xATR target, stop checked first, break-even 25%. Each trend state is scored as its hit rate minus
+the *unconditional* hit rate for the same direction over the same bars, so drift cancels. Races
+overlap heavily, so nominal n far exceeds effective n; the load-bearing statistic is sign
+consistency across six independent instruments, not any single figure.
+
+**Result - the trend state carries no usable information.**
+
+| timeframe | Uptrend edge | positive | Downtrend edge | positive |
+|---|---|---|---|---|
+| m15 (n approx 2,000-2,800/state) | -0.8% | 2/6 | +1.2% | 5/6 |
+| h1 (n approx 460-780) | -1.1% | 3/6 | -3.9% | **0/6** |
+| h4 (n 53-301) | -1.4% | 4/6 | +14.0% | 4/6 |
+| d1 (n 5-112) | -14.4% | 1/5 | +8.2% | 4/6 |
+
+At m15/h1 every edge sits inside +/-7% with signs flipping between instruments. The best consistent
+cell is m15 Downtrend at +1.3%, i.e. EV +0.05R against a measured 15m round-trip cost of 12.6% of R
+- roughly a quarter of the cost of trading it. h4/d1 look dramatic but n is small and silver h4
+shows Downtrend +26.7% while silver lost money over the same window; not trustworthy.
+
+**Retracted.** The intra-session hypothesis that the detector was "stuck in Downtrend" is wrong.
+Occupancy is balanced (gold m15 Uptrend 14.3% / Downtrend 14.0%; same pattern on all six). The
+92-shorts-vs-35-longs skew in the trade population is therefore not a trend-layer bias. The likely
+cause is the resting-limit entry: sell limits sit above price and fill whenever price rises into
+them, buy limits fill only on pullbacks, so in six markets that drifted up 4-19% sell limits fill
+far more often. Adverse selection in the fill, not a bad directional call. Not yet directly tested.
+
+**Why the layer is weak: it is fed noise.** Gold m15, 16,939 bars: 2,254 zones created (one every
+7.5 bars), 99% of demand zones and 93% of supply zones eventually eliminated, and 262 trend
+establishments - a new trend every ~16 hours. Also OutOfAlignment is 56-76% of all bars, so the
+layer has no opinion most of the time. Demand zones outnumber supply ~1.13:1 and demand
+eliminations outnumber supply ~1.16:1 on nearly every instrument/timeframe; recorded as an
+observation, not a demonstrated cause, since occupancy still comes out balanced.
+
+**Zone-quality sweep (`SweepZoneQuality`, same file) - hypothesis refuted, defect found.**
+Eleven configurations x six instruments x m15/h1/h4, scored on trend-layer edge rather than P&L
+(20 trades/instrument cannot separate settings; thousands of races can).
+
+Five of eleven configurations were bit-identical to default: `MinimumImpulseToBaseRatio` at 3 and 5,
+and `MinimumImpulseAtrMultiple` at 3x and 4x, all produced 12,684 zones / 1,500 flips / identical
+edges at m15. Traced in code: the ratio is used only at `Agent/Strategies/Alfonso/Zones/ImbalanceDetector.cs:546`
+inside `Qualifies()` -> `MeetsTradeabilityCriteria`, and the ATR multiple only at `:155` to set
+`Strength`. **Neither gates zone creation.** And `AlfonsoTrendDetector.ApplyEliminations`
+(`Agent/Strategies/Alfonso/Trend/AlfonsoTrendDetector.cs:282-290`) filters on
+`zone.Accomplished != Accomplishment.None`, *not* on `MeetsTradeabilityCriteria`.
+
+So the book's central quality rule - the 2:1 imbalance - has no influence whatsoever on the trend
+read. Zone quality and trend formation are architecturally decoupled. This is the most likely
+reason the sweep is flat, and it is testable with a one-line change (gate `ApplyEliminations` on
+`MeetsTradeabilityCriteria`, behind an option defaulting to current behaviour, then re-sweep).
+Not yet done.
+
+The two knobs that do reduce zone count do not help: `consolidate 2` cuts m15 zones 12,684 -> 9,928
+(-22%) and moves the Uptrend edge -0.8% -> +0.4% (5/6, the only consistently positive Uptrend cell
+anywhere) but goes to -1.6% at h1 and -1.1% at h4 - it does not replicate.
+
+### 3.30a Two candidate explanations for the 92/35 short skew, both refuted (2026-09-01)
+
+The six-instrument run took 92 sells to 35 buys (2.63:1). Two mechanisms were pre-registered and
+measured; neither survives.
+
+**Resting-limit adverse selection - refuted on magnitude.** The agent rests limit orders ahead of
+price, so sells sit above and buys below; in a rising market price should walk into sells and away
+from buys. Measured directly on the price path (limits at 1x and 2x ATR from every close, 100-bar
+horizon) the sell:buy touch ratio is **1.01-1.16**, against the 2.63 that needs explaining. The
+direction is right - EUR/USD, the one instrument that did not rise (-0.8%), is the only one below
+1.0 (0.90 at 2xATR on h1), which is a clean confirmation that drift is the mechanism - but the
+effect is roughly 2.5x too small. Cause is visible in the raw rates: 86-90% of limits on *both*
+sides are touched within the horizon, so at these distances the fill is barely selective at all.
+
+**Joint three-timeframe alignment - refuted.** Marginal occupancy per timeframe is balanced, but
+entries need H4/H1/M15 agreement and marginal balance does not imply joint balance. Measured
+DOWN:UP ratios for full alignment: gold 5.60, silver 0.10, nas100 0.67, us30 0.68, gbpjpy 0.62,
+eurusd undefined (0 up, 1 down). Four of six lean the *wrong* way while all six traded short-heavy.
+Only gold supports it.
+
+This measurement is also what exposed the replay-fidelity problem recorded in the 3.30 caveat, since
+full alignment turned out to be far too rare in the replay to account for the trades the agent
+actually took. The skew remains unexplained and needs agent-side instrumentation to settle.
+
+### 3.32 ROOT CAUSE: the agent's intentions are symmetric; its FILLS are 2.2:1 against it (2026-09-01)
+
+`AlfonsoCandidateRecord` is now wired through BacktestRunner (`--alfonso-candidate-log PATH`,
+`Agent/Strategies/Alfonso/AlfonsoCandidateLog.cs`), with the trend on each timeframe captured at
+decision time from the live analyzers. This replaces the standalone replay whose infidelity is
+recorded in the 3.30 caveat. Five instruments reproduce the 127-trade baseline exactly; gold's first
+attempt died on a snapshot-persistence error under six-way parallelism and was rerun alone.
+
+**The finding.** All six instruments reproduce their baseline exactly (gold 32 / +0.2181, and the
+other five likewise), and the candidate log recovers the observed 92-sells / 35-buys split precisely.
+
+| | placed | filled | fill rate |
+|---|---|---|---|
+| buy limits (demand) | 1,212 | 35 | 2.89% |
+| sell limits (supply) | 1,379 | 92 | 6.67% |
+
+The 2.63:1 trade skew decomposes cleanly into **placement 1.14x times fill 2.31x**. Fill selection is
+the dominant term by a wide margin. On five of the six instruments placement is essentially
+symmetric (1,093 buys vs 1,075 sells, 0.98:1) and the whole skew is fill; gold is the exception,
+placing 304 sells against 119 buys, so it carries most of the placement term.
+
+Per instrument the fill ratio is silver 3.29x, gbpjpy 2.62x, us30 2.42x, gold 2.11x, nas100 1.82x -
+and **eurusd 0.89x**, the one instrument that did not rise (-0.8% drift) and the only one that
+flips. That is the control case and it behaves exactly as the drift mechanism predicts.
+
+**Only 4.9% of placed orders ever fill.** The strategy's realised behaviour is therefore almost
+entirely a property of fill selection, not of zone selection - any improvement to zone quality
+operates on 5% of its intentions. This is the most likely reason every downstream filter tested this
+session (nesting 3/7, module 6's control gate 2/6, the profit margin, the zone-quality sweep) failed
+to generalise: they were all filtering a population that fill selection had already biased.
+
+**Mechanism, and what it is not.** Median placement-to-fill lag is **0.9h (buy) / 0.8h (sell)**, p90
+about 3h, and the top-timeframe trend at placement matches the trade's direction in **100%** of
+fills. So this is *not* stale orders resting through a regime change. Within roughly an hour, an
+upward-drifting market is simply likelier to reach a sell limit above price than a buy limit below
+it. Symmetric intentions plus drift selects for shorts entered immediately before continuation up -
+which is why shorts win 20.7% against longs' 31.4%.
+
+**CORRECTION to 3.30a.** That section refuted resting-limit adverse selection on magnitude
+(measured 1.01-1.16 against 2.63 needed). The refutation was wrong - the proxy was. It measured
+touch rates for hypothetical limits at a fixed 1-2x ATR from every close within a 100-bar horizon,
+where 86-90% of limits on *both* sides are touched, so it had no power to discriminate. Real orders
+sit at zone edges with short effective lives, and there the asymmetry is 2.2x. The joint-alignment
+refutation in 3.30a still stands, but for an additional reason found here: entries do not require
+full three-timeframe agreement at all (only 30.4% of entered candidates have it), so counting fully
+aligned bars was the wrong question.
+
+**Where this points.** The lever is the entry mechanism, not the zone or trend engines:
+enter on touch or confirmation rather than resting ahead of price; or cancel a resting order when
+the move that justified it has run; or size/skip by the fill asymmetry the instrument's drift
+implies. None of these are tested yet.
+
+### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
+
+Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,
+`--alfonso-ignore-control`, margin 0 unless stated). All are now CLI-selectable so both arms of any
+future comparison come from one binary.
+
+**`--alfonso-profit-margin N`** (module 7's 3:1 room-to-the-opposing-level rule). Cuts 38 trades to
+26; 2/6 instruments positive against a pre-registered 5/6 bar. With 1-11 trades per instrument this
+is *uninformative*, not a refutation - unlike nesting (3/7) and module 6's control gate (2/6), which
+had the sample to fail. Record as untested. Default 3.0, the book's value.
+
+**`--alfonso-ambiguous-base-cp`** (module 2's "when in doubt, consider them as a CP"). Total measured
+effect across six instruments: **silver only, 2 trades**. Five of six instruments are byte-identical
+between on and off. This is arithmetic, not luck - the branch is
+`if (Math.Max(0, baseStart - LegInLookbackCandles) >= baseStart)`, which with the default lookback of
+5 can only fire when `baseStart <= 0`, i.e. once per series. Default off (the pre-existing
+behaviour); there is no evidence either way at this sample size.
+
+**CORRECTION.** An earlier version of this section claimed this change "cuts trade count 68% and
+roughly doubles the loss rate (127 -> 40, -0.239 -> -0.474)". That was wrong. It came from diffing
+two runs whose binaries differed by far more than this switch. The switch is worth 2 trades.
+
+**The real cause: `RequireStructuralAgreement`** (commit `8bc113a`, module 5's higher-highs /
+higher-lows context, default true). It had no CLI flag, so it had never been compared against the
+baseline it replaced. Adding `--alfonso-no-structural-agreement` reproduces the pre-`8bc113a`
+baseline **exactly** - all six instruments, same trade counts, same avgR to four decimals:
+
+| | trades | avgR | 95% CI |
+|---|---|---|---|
+| structural agreement ON (current default) | 38 | -0.4470 | [-0.844, -0.050] |
+| structural agreement OFF | 127 | -0.2394 | [-0.493, +0.015] |
+| difference | | -0.2077 | [-0.679, +0.263] - contains zero |
+
+So it is **not** demonstrably harmful to P&L. What it demonstrably does is discard 70% of trades for
+no measurable benefit, which triples the noise on every subsequent measurement. It was adopted on the
+strength of a trend-*accuracy* improvement (Uptrend 55.0% -> 62.5%, calls halved 1,641 -> 819); the
+accuracy gain did not translate into trading results. Recommend defaulting it off on statistical-power
+grounds rather than P&L grounds. Currently still on.
+
+**Process failure, three instances today, one shape.** Every false conclusion this session came from
+comparing two runs whose binaries differed by more than the single variable under test:
+
+1. The profit-margin A/B returned byte-identical arms that read as a clean null. Cause: a stale
+   Release binary (`BacktestRunner/bin/Release` at 11:44 vs source at 19:42) plus BacktestRunner
+   **silently ignoring unknown `--flags`** - so a stale binary looks exactly like a working
+   experiment that found nothing.
+2. "#4 is behaviourally inert" - same stale binary.
+3. "#4 cuts trades 68%" - two builds straddling commit `8bc113a`.
+
+Two rules follow. Rebuild explicitly with `dotnet build BacktestRunner -c Release` (building
+`TradingHub.slnx` or `Simulator.Tests` does **not** refresh it) and check the DLL mtime against the
+source mtime. And an A/B is only trustworthy when both arms run from **one** binary and differ by
+**one** flag - which is why every option above now has a CLI flag instead of being toggled by
+editing a default and rebuilding. New valueless flags must also be added to the registry at
+`BacktestRunner/BacktestCommandOptions.cs:337-342` or they are silently ignored.
 
 ---
 
@@ -4209,6 +4428,23 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-01/02**: Found the root cause of the Alfonso long/short skew (§3.32). Wired
+  `AlfonsoCandidateRecord` through BacktestRunner (`--alfonso-candidate-log`) after establishing that
+  the standalone replay harness does not reproduce the agent (§3.30 caveat: EUR/USD, 14 trades on
+  three-timeframe alignment vs 1 aligned bar in replay). Result: intentions are near-symmetric,
+  **fills are 2.31x against us**, and only 4.9% of placed orders ever fill — so fill selection, not
+  zone or trend quality, governs what the strategy actually trades. Corrected three of my own earlier
+  claims in the process (§3.30a resting-limit refutation was a bad proxy; "in doubt → CP" is worth 2
+  trades not 87; the 127→38 collapse is `RequireStructuralAgreement`, §3.31). Added three CLI
+  switches so future A/Bs run one binary, one flag.
+- **2026-09-01**: Measured the Alfonso trend layer directly for the first time (§3.30) — barrier-race
+  edge vs the unconditional rate, six instruments, m15/h1/h4/d1. No usable directional edge anywhere;
+  best consistent cell is EV +0.05R against 12.6% of R in cost. Retracted the "stuck in Downtrend"
+  hypothesis (occupancy is balanced). Zone-quality sweep refuted the "fewer, better zones" fix and
+  exposed the real defect: the 2:1 imbalance rule never reaches the trend layer
+  (`ImbalanceDetector.cs:546` / `AlfonsoTrendDetector.cs:282-290`). Also measured the two module-audit
+  changes (§3.31): "in doubt → CP" cuts trades 127→40 and doubles the loss rate. Third stale-Release-
+  binary false result of the last two sessions — cause and check recorded in §3.31.
 - **2026-08-30**: V2 redesign Phase 0a (§3.14) — unified the classifier overlap policy (three
   library defaults flipped to no-overlap; one shared flag threaded through `train`, `walk-forward`,
   `ladder`, `ablate`), added `Simulator.Tests/OverlapPolicyParityTests.cs` (3 tests, 37/37 green),

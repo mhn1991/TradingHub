@@ -642,6 +642,13 @@ public sealed class ImbalanceDetector
     {
         int from = Math.Max(0, baseStart - _options.LegInLookbackCandles);
 
+        // Module 2: "When you are in doubt, consider them as a CP." With no approach to read there
+        // is no evidence this base turned anything, so it is a pause until shown otherwise. The
+        // inverted default made every zone at the start of a series a swing, and swings are what
+        // trendlines are built from.
+        if (from >= baseStart)
+            return _options.TreatAmbiguousBaseAsContinuation;
+
         for (int index = from; index < baseStart; index++)
         {
             bool beyond = kind == ImbalanceKind.Demand

@@ -728,6 +728,21 @@ public sealed record BacktestRequest
 
     public decimal AlfonsoMaximumAtrPercentile { get; init; } = 1m;
 
+    /// <summary>--alfonso-profit-margin N. Module 7's room-to-the-opposing-level rule.</summary>
+    public decimal AlfonsoMinimumProfitMarginMultiple { get; init; } = 3.0m;
+
+    /// <summary>--alfonso-ambiguous-base-cp. Module 2's "when in doubt, consider them as a CP".</summary>
+    public bool AlfonsoTreatAmbiguousBaseAsContinuation { get; init; }
+
+    /// <summary>--alfonso-tradeable-zone-trend. Only a tradeable zone may move the trend.</summary>
+    public bool AlfonsoRequireTradeableZoneForTrendChange { get; init; }
+
+    /// <summary>--alfonso-no-structural-agreement. Module 5's higher-highs/higher-lows context.</summary>
+    public bool AlfonsoRequireStructuralAgreement { get; init; } = true;
+
+    /// <summary>--alfonso-candidate-log PATH. Decision-time candidate CSV, or null for none.</summary>
+    public string? AlfonsoCandidateLogPath { get; init; }
+
     /// <summary>
     /// Classifier options taken from the loaded model artifact. The agent's feature engine and the
     /// model must agree on groups, horizon and label geometry — defaulting them independently makes
@@ -927,6 +942,8 @@ public sealed record BacktestRequest
                     AllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
                     MaximumCostToRiskFraction = AlfonsoMaximumCostToRiskFraction,
                     MinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
+                    MinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
+                    CandidateLogPath = AlfonsoCandidateLogPath,
                     MinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
                     MaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
                     Zones = defaultAlfonso.Zones with
@@ -934,12 +951,15 @@ public sealed record BacktestRequest
                         RewardMultiple = AlfonsoRewardMultiple ?? defaultAlfonso.Zones.RewardMultiple,
                         StopPaddingFraction = AlfonsoStopPadding ?? defaultAlfonso.Zones.StopPaddingFraction,
                         EliminationRequiresClose = AlfonsoEliminationRequiresClose,
-                        SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment
+                        SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
+                        TreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation
                     },
                     Trend = defaultAlfonso.Trend with
                     {
                         TrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
-                        RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange
+                        RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
+                        RequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
+                        RequireStructuralAgreement = AlfonsoRequireStructuralAgreement
                     }
                 };
                 return new TradingAgentDefinition { Kind = kind, Alfonso = alfonso };

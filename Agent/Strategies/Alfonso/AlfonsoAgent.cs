@@ -275,9 +275,13 @@ public sealed class AlfonsoAgent : ITradingAgent
             return;
 
         Imbalance zone = candidate.Zone;
+        _state.TryGetValue(context.Instrument, out InstrumentState? logged);
         _candidateSink(new AlfonsoCandidateRecord
         {
             At = context.Timestamp,
+            TopTrend = logged?.Analyzer.TrendOf(SequenceRole.Top),
+            MiddleTrend = logged?.Analyzer.TrendOf(SequenceRole.Middle),
+            LowerTrend = logged?.Analyzer.TrendOf(SequenceRole.Lower),
             Instrument = context.Instrument,
             Outcome = outcome,
             Side = candidate.Side,
@@ -340,7 +344,8 @@ public sealed class AlfonsoAgent : ITradingAgent
         {
             Analyzer = new AlfonsoSequenceAnalyzer(
                 options.Sequence, options.Zones, options.Trend, options.Range, options.FreshLevelsOnly,
-                options.RequireControlAgreement, options.AllowConfirmationEntries);
+                options.RequireControlAgreement, options.AllowConfirmationEntries,
+                options.MinimumProfitMarginMultiple, options.Zones.StopPaddingFraction);
 
             Intervals =
             [

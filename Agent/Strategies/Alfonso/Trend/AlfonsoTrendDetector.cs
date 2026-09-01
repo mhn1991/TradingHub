@@ -65,6 +65,19 @@ public sealed record AlfonsoTrendOptions
     public bool RequireValidZoneForTrendChange { get; init; } = true;
 
     /// <summary>
+    /// Whether a zone must also have met the tradeability bar - module 7's 2:1 imbalance and a
+    /// departure that is not weak - before its elimination is allowed to move the trend.
+    /// <para>
+    /// Default false, which is the behaviour every result before 2026-09-01 was measured under.
+    /// The measurement that prompted this option: the impulse thresholds turned out to reach only
+    /// <c>Strength</c> and <c>MeetsTradeabilityCriteria</c>, never zone creation and never this
+    /// method, so the 2:1 rule had no influence at all on the trend read. Setting this true is the
+    /// test of whether that decoupling is why the trend layer shows no directional edge.
+    /// </para>
+    /// </summary>
+    public bool RequireTradeableZoneForTrendChange { get; init; } = false;
+
+    /// <summary>
     /// Whether a trend must also agree with market structure - ascending peaks AND troughs for an
     /// uptrend, descending for a downtrend.
     /// <para>
@@ -287,6 +300,9 @@ public sealed class AlfonsoTrendDetector
             // the trend. Structures that never achieved anything are tracked for their swings, not
             // for their significance.
             if (_options.RequireValidZoneForTrendChange && zone.Accomplished == Accomplishment.None)
+                continue;
+
+            if (_options.RequireTradeableZoneForTrendChange && !zone.MeetsTradeabilityCriteria)
                 continue;
 
             if (zone.Kind == ImbalanceKind.Supply)

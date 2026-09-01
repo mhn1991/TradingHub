@@ -254,6 +254,29 @@ public sealed class AlfonsoSequenceTests
     }
 
     [Test]
+    public void ThreeToOneProfitMarginIsMeasuredAgainstTheNearestOpposingLevel()
+    {
+        // Module 7: "as well as 3:1 profit margin or more to the opposing level." A reachability
+        // test - a demand entry with supply close above it cannot make its target however well the
+        // zone itself scores. The arithmetic is pinned here; behaviour on real candles is reported
+        // by ZZAlfonsoRealDataDiagnostic.
+        Imbalance demand = Zone(ImbalanceKind.Demand, proximal: 100m, distal: 96m);
+
+        // Padded stop sits at 95, so risk is 5 and a 3:1 margin needs the opposing level at 115+.
+        decimal risk = demand.Proximal - demand.StopPrice(0.25m);
+        Assert.That(risk, Is.EqualTo(5m));
+        Assert.That(demand.Proximal + (risk * 3m), Is.EqualTo(115m));
+
+        // Supply at 112 leaves only 2.4R of room - not enough.
+        Imbalance tooClose = Zone(ImbalanceKind.Supply, proximal: 112m, distal: 116m);
+        Assert.That((tooClose.Proximal - demand.Proximal) / risk, Is.EqualTo(2.4m));
+
+        // Supply at 120 leaves 4R - enough.
+        Imbalance farEnough = Zone(ImbalanceKind.Supply, proximal: 120m, distal: 124m);
+        Assert.That((farEnough.Proximal - demand.Proximal) / risk, Is.EqualTo(4m));
+    }
+
+    [Test]
     public void CandidatesAreEmptyUntilTheSequenceHasATradeableAlignment()
     {
         // A fresh analyzer has no trend on any timeframe, so module 10's waiting game applies.
