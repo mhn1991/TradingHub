@@ -3615,6 +3615,122 @@ instrument with cached data.** No further tuning is warranted without a reason t
 population is different. AUD/USD failed on a snapshot-persistence error and is excluded; recovering
 it does not turn 3 of 7 into evidence.
 
+> **CORRECTED 2026-09-01 - see 3.28. The gold figures in this section were measured on an agent that
+> no longer exists.** On current code gold is **+0.0705R**, not -0.1728R, and its win rate is 28.7%
+> rather than 19.5%. The claim that the method is negative on every instrument does not hold for
+> gold. The 3-of-7 nesting refutation is unaffected - it was a paired comparison within one code
+> version - but the FX and index baselines share the same staleness and need re-measuring.
+
+#### 3.28 The gold baseline was stale; module 6 helps, module 10 hurts (2026-09-01)
+
+**How the error happened.** The gold baseline run started 2026-08-31 20:58. `AlfonsoAgent.cs` was
+then modified at 22:33 that night, again at 11:06 the next morning, and carried further uncommitted
+work after that - including a change from waiting for price to touch the proximal line to placing a
+**resting limit order ahead of price**, which is both more faithful to the method and materially
+different in fill behaviour. Every later comparison was drawn against that stale number without the
+code version being checked. It surfaced only because two unrelated edit anchors failed.
+
+**Four-way isolation, gold 2023-01-02 to 2026-07-24, one variable per run, identical code.**
+
+```
+run             n    win%      PF      avgR      net   maxDD     control  confirm
+iso-baseline   129    28.7   1.129   +0.0705    3,434   4,447       off      off
+iso-control     95    32.6   1.315   +0.1476    5,745   3,620       ON       off
+iso-both       116    30.2   1.230   +0.0874    5,166   4,096       ON       ON
+iso-confirm    150    28.0   1.094   +0.0499    3,004   4,797       off      ON
+```
+
+**Module 6's in-control gate is worth roughly +0.077R per trade.** It doubles expectancy, lifts the
+win rate 28.7% -> 32.6%, and does so while CUTTING trades 129 -> 95 and reducing drawdown
+4,447 -> 3,620. Higher return on fewer trades with less risk is the profile of a filter that removes
+bad trades rather than one that trades less at random. This rule had been computed and enforced
+nowhere until 2026-09-01.
+
+**Module 10's confirmation path costs roughly -0.021R per trade.** It adds 21 trades, lowers
+expectancy, and produces the worst drawdown of the four. The course presents confirmation trades as
+the lower-grade half of the method and the measurement agrees. Leave it off.
+
+**What this invalidates.** The -0.1728R gold figure quoted throughout 3.26 and 3.27, the framing
+that the method "needs 28.2% and delivers 19.5%" (it now delivers 28.7%, essentially at the hurdle),
+and the claim that the method loses on every instrument. The nesting refutation stands. The FX and
+index baselines were measured before today's agent changes and are not yet re-verified.
+
+**Method lesson.** Record the code revision with every result. Four separate conclusions this
+session rested on a number whose provenance was never checked, and the only reason it was caught was
+an unrelated edit failing to apply. A result without a commit hash beside it is not a measurement.
+
+**Not yet established.** The control gate's +0.0705 -> +0.1476 is a single in-sample result on one
+instrument. Nesting looked exactly this good in-sample and failed 3 of 7 out-of-sample. It needs the
+same pre-registered generalisation test before it is believed.
+
+#### 3.29 Control gate refuted; the trend detector is sound; three claims withdrawn (2026-09-01)
+
+**Module 6's control gate failed its pre-registered test: 2 of 6.** Six instruments, matched window
+2025-11-24 to 2026-07-23, paired baseline vs gate, threshold fixed before the data arrived (5-6 real,
+3-4 coin flip, <=2 refuted).
+
+```
+inst     baseline avgR   gate avgR    delta
+gbpjpy        -0.4178     -0.2334   +0.1844
+eurusd        -0.0530     +0.2486   +0.3016
+nas100        -0.5613     -0.6444   -0.0831
+us30          -0.5352     -0.6355   -0.1003
+gold          +0.2181     +0.0532   -0.1648
+silver        -0.3458     -0.5878   -0.2420
+```
+
+Gold contradicts ITSELF between windows: the gate was +0.0705 -> +0.1476 on 3.5 years and
++0.2181 -> +0.0532 here. Third filter to look strong in-sample and fail out - after nesting (3 of 7)
+and the 2:1 target. **Baseline is negative on 5 of 6 instruments**, gold the sole exception.
+
+**WITHDRAWN: "the Downtrend state is anti-predictive."** Measured across all of gold's 3.5 years it
+looked inverted - price rose 67% of the time it fired. Gold rose 121% over that period, so the
+aggregate could not separate a broken detector from a bull market. Partitioning by leg settles it
+(detector run on the CONTINUOUS series, only the results partitioned, so no warm-up contamination):
+
+```
+leg          state        n    agreed   mean move
+up-leg     Uptrend      807     59.9%    +0.848%   good
+up-leg     Downtrend    426     25.6%    -1.163%   INVERTED
+down-leg   Uptrend       12      8.3%    -1.972%   INVERTED
+down-leg   Downtrend    152     53.9%    +0.775%   coin flip
+```
+
+Each state is right in its own leg and wrong in the other, which is what a working trend follower
+looks like. **The trend layer is sound and does not need fixing.** Caveat: the down-leg carries only
+152 observations and 53.9% does not clear the 55% bar set in advance - "consistent with working", not
+"proven good".
+
+**FIXED: module 5's structural context was never implemented.** The rule is "each successive peak and
+trough is higher than the ones found earlier" AND an accomplishment; only the accomplishment half
+existed. Requiring both improved Uptrend accuracy 55.0% -> 62.5% at 6 bars and halved the number of
+calls (1,641 -> 819). Behind `RequireStructuralAgreement`, default on.
+
+**WITHDRAWN: "the trendline fallback is a misreading."** `EliminationsWithTrendline` is 1 and
+`EliminationsWithoutTrendline` is 2, so the with-line path always fires first and the fallback could
+never be the deciding route while a line existed. The restriction added is behaviourally inert at
+default thresholds and is kept only as a guard. The claim came from a diagnostic **I wrote and then
+misread**: it counts bars where a trending state has no line drawable AT THAT BAR, which is not the
+same as "the trend was established without a line". Those are different statements and the second was
+never measured.
+
+**Validation against the course's own charts.** 75 chart images extracted from the PDFs. Convention
+validation PASSES: USD/CAD H4 confirms proximal at the basing candles' body top and distal at the
+lowest low including wicks, matching `max(bodyTop)`/`min(low)`; the "never cut through candles" chart
+matches `TrendlineBuilder.Fit`'s pivot onto the constraining bar; the AAPL "very weak demand" example
+matches the Weak classification. Quantitative validation is IMPOSSIBLE - the charts are 2020-21 US
+single stocks (AAPL, CSX, PSX, NFLX, TSLA) with no date overlap with any obtainable data.
+
+**Also added, all default-off:** a cost-to-risk gate and minimum-stop-ATR floor using the platform's
+existing `RoundTripCostEstimate`; an ATR-percentile regime veto scaled to each instrument's own
+history; and `AlfonsoCandidateRecord`, an optional decision-time sink capturing every candidate the
+agent considered with the reason it was not traded. That last one closes a real gap - a research
+harness counted 49 entries where the agent took 87 and the divergence was found by accident.
+
+**Standing position.** Direction works. Entry selection does not beat random out-of-sample across
+three independent tests. The strategy is negative on 5 of 6 instruments. The remaining explanation is
+entry quality and cost, not the trend layer and not zone drawing.
+
 ---
 
 ## 4. Governance / packaging gaps (from the 2026-08-02 sponsorship-readiness assessment)

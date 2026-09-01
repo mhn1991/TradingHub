@@ -54,6 +54,57 @@ public sealed record AlfonsoStrategyOptions
     /// </summary>
     public bool RequireNestedEntries { get; init; }
 
+    /// <summary>
+    /// Whether a higher timeframe holding an opposing zone in control blocks entries below it.
+    /// Module 6: "When an imbalance on timeframe X has gained control, trading at timeframes smaller
+    /// than X will not be allowed." Control was computed and enforced nowhere until this was wired.
+    /// </summary>
+    public bool RequireControlAgreement { get; init; } = true;
+
+    /// <summary>
+    /// Whether module 10's confirmation trades are taken alongside set-and-forget ones. Off by
+    /// default because the core rules present set-and-forget as the path a beginner trades; on, a
+    /// tested level nested in a live higher-timeframe zone becomes tradeable.
+    /// </summary>
+    public bool AllowConfirmationEntries { get; init; }
+
+    /// <summary>
+    /// Largest share of a trade's initial risk that estimated round-trip cost may consume. Zero
+    /// disables the gate, which is the default.
+    /// <para>
+    /// This attacks the binding constraint rather than searching for signal. A fixed 3:1 target
+    /// needs a 28.2% win rate to clear costs at M15 on gold and the method delivers 19.5%, and the
+    /// shortfall is not uniform across trades: measured cost drag is 12.6% of R at the median zone
+    /// but 30.5% at the tightest decile. The tightest stops are structurally unprofitable before
+    /// price moves at all, and this removes them without touching Alfonso's structural stop.
+    /// </para>
+    /// </summary>
+    public decimal MaximumCostToRiskFraction { get; init; }
+
+    /// <summary>
+    /// Smallest stop distance, in ATR of the execution timeframe, that a trade may have. Zero
+    /// disables it. A second expression of the same concern as
+    /// <see cref="MaximumCostToRiskFraction"/>, for runs where no cost estimate is available.
+    /// </summary>
+    public decimal MinimumStopAtrMultiple { get; init; }
+
+    /// <summary>
+    /// ATR percentile band, measured against this instrument's own recent history on the execution
+    /// timeframe, outside which entries are refused. Defaults to the full range, i.e. no veto.
+    /// <para>
+    /// A regime veto rather than an entry trigger - the course forbids indicators as triggers, and
+    /// this does not create, price or time a trade. The low end excludes stretches so quiet that
+    /// costs dominate the R the zone can offer; the high end excludes conditions where fills and
+    /// slippage stop resembling the model.
+    /// </para>
+    /// </summary>
+    public decimal MinimumAtrPercentile { get; init; }
+
+    public decimal MaximumAtrPercentile { get; init; } = 1m;
+
+    /// <summary>Candles of ATR history used to compute the percentile.</summary>
+    public int AtrPercentileLookback { get; init; } = 200;
+
     public IReadOnlySet<BarInterval> RequiredIntervals =>
         new HashSet<BarInterval> { TopInterval, MiddleInterval, LowerInterval };
 
@@ -88,5 +139,15 @@ public sealed record AlfonsoStrategyOptions
 
         if (Quantity <= 0m)
             throw new InvalidOperationException("Quantity must be positive.");
+        if (MaximumCostToRiskFraction is < 0m or >= 1m)
+            throw new InvalidOperationException("MaximumCostToRiskFraction must be within [0, 1).");
+        if (MinimumStopAtrMultiple < 0m)
+            throw new InvalidOperationException("MinimumStopAtrMultiple cannot be negative.");
+        if (MinimumAtrPercentile is < 0m or > 1m || MaximumAtrPercentile is < 0m or > 1m)
+            throw new InvalidOperationException("ATR percentiles must be within [0, 1].");
+        if (MinimumAtrPercentile >= MaximumAtrPercentile)
+            throw new InvalidOperationException("MinimumAtrPercentile must be below MaximumAtrPercentile.");
+        if (AtrPercentileLookback < 2)
+            throw new InvalidOperationException("AtrPercentileLookback must be at least 2.");
     }
 }

@@ -125,10 +125,17 @@ public sealed record ImbalanceOptions
     public int MaximumTests { get; init; } = 2;
 
     /// <summary>
-    /// Zones retained per side per timeframe. Old imbalances stay relevant - "go as far back as you
-    /// need to in order to look for imbalances" - but memory is not unbounded.
+    /// Live zones retained per timeframe, as a memory bound rather than a behavioural knob.
+    /// <para>
+    /// Module 4 says to "go as far back as you need to in order to look for imbalances", and a zone
+    /// only stops mattering when price eliminates it - which the engine already handles. Trimming
+    /// live zones therefore discards setups the rules still consider valid, silently. At 200 the cap
+    /// was binding on one-minute data (peak live hit exactly 200) while never approaching it at the
+    /// timeframes actually traded (19 to 69 at H4 through M15), so it was invisible where it applied
+    /// and irrelevant where it did not.
+    /// </para>
     /// </summary>
-    public int MaximumTrackedZones { get; init; } = 200;
+    public int MaximumTrackedZones { get; init; } = 5_000;
 
     /// <summary>
     /// When true the proximal line covers the basing wicks instead of the extreme body edge. Module

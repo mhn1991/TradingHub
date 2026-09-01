@@ -30,8 +30,18 @@ public sealed class AlfonsoAgent : ITradingAgent
     private readonly AlfonsoStrategyOptions _options;
     private readonly ConcurrentDictionary<InstrumentKey, InstrumentState> _state = new();
 
-    public AlfonsoAgent(AlfonsoStrategyOptions? options = null)
+    private readonly Action<AlfonsoCandidateRecord>? _candidateSink;
+
+    /// <param name="options">Strategy configuration; defaults are the course's own values.</param>
+    /// <param name="candidateSink">
+    /// Optional observer of every candidate considered, including rejected ones. Null by default so
+    /// production behaviour and cost are untouched; research harnesses pass a writer.
+    /// </param>
+    public AlfonsoAgent(
+        AlfonsoStrategyOptions? options = null,
+        Action<AlfonsoCandidateRecord>? candidateSink = null)
     {
+        _candidateSink = candidateSink;
         _options = options ?? new AlfonsoStrategyOptions();
         _options.Validate();
         RequiredIntervals = _options.RequiredIntervals;
@@ -105,6 +115,14 @@ public sealed class AlfonsoAgent : ITradingAgent
                 return Observe(context, "This execution candle has already been evaluated.");
             state.LastEvaluated = bar.OpenTime;
 
+            decimal? atr = trigger.Indicators.Atr;
+            if (atr is decimal sample && sample > 0m)
+                state.RecordAtr(sample);
+
+            decimal? atrPercentile = state.AtrPercentile(atr);
+            bool atrRegimeOk = atrPercentile is not decimal band ||
+                (band >= _options.MinimumAtrPercentile && band <= _options.MaximumAtrPercentile);
+
             ScenarioResolution scenario = state.Analyzer.Scenario;
 
             if (restingOrder is not null)
@@ -151,8 +169,13 @@ public sealed class AlfonsoAgent : ITradingAgent
                 Imbalance zone = candidate.Zone;
                 ZoneOrderKey key = Key(candidate);
 
-                if (_options.FreshLevelsOnly && zone.State != ImbalanceState.Fresh)
+                if (_options.FreshLevelsOnly && zone.State != ImbalanceState.Fresh &&
+                    !(_options.AllowConfirmationEntries && candidate.Host is not null &&
+                      zone.State == ImbalanceState.Tested))
+                {
+                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotFresh);
                     continue;
+                }
 
                 if (_options.RequireNestedEntries && candidate.Host is null)
                     continue;
@@ -160,19 +183,58 @@ public sealed class AlfonsoAgent : ITradingAgent
                 bool aheadOfPrice = IsAheadOfPrice(
                     candidate.Side, zone.Proximal, bar.Prices.Close);
                 if (!aheadOfPrice)
+                {
+                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
                     continue;
+                }
 
                 decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
                 decimal target = zone.TargetPrice(
                     _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple);
 
                 bool buy = candidate.Side == ImbalanceKind.Demand;
+                decimal risk = Math.Abs(zone.Proximal - stop);
+                decimal? costToRisk = context.RoundTripCostEstimate is decimal cost && risk > 0m
+                    ? cost / risk
+                    : null;
+                decimal? stopAtr = atr is decimal unit && unit > 0m ? risk / unit : null;
+
                 if (buy ? stop >= zone.Proximal || target <= zone.Proximal
                         : stop <= zone.Proximal || target >= zone.Proximal)
                 {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.DegenerateGeometry);
                     continue;
                 }
 
+                // A stop this tight loses a large share of its planned R before price moves, and no
+                // target multiple recovers that. The structural stop is untouched; the trade is
+                // simply refused.
+                if (_options.MaximumCostToRiskFraction > 0m &&
+                    costToRisk is decimal ratio && ratio > _options.MaximumCostToRiskFraction)
+                {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.CostTooHigh);
+                    continue;
+                }
+
+                if (_options.MinimumStopAtrMultiple > 0m &&
+                    stopAtr is decimal multiple && multiple < _options.MinimumStopAtrMultiple)
+                {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.StopTooTight);
+                    continue;
+                }
+
+                if (!atrRegimeOk)
+                {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.AtrRegime);
+                    continue;
+                }
+
+                Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                    atrPercentile, CandidateOutcome.Entered);
                 state.PendingOrder = key;
 
                 return Task.FromResult(new AgentDecision
@@ -204,6 +266,58 @@ public sealed class AlfonsoAgent : ITradingAgent
         }
     }
 
+    private void Log(
+        AgentMarketContext context, TradeCandidate candidate, Candle bar,
+        decimal stop, decimal target, decimal risk, decimal? costToRisk, decimal? stopAtr,
+        decimal? atrPercentile, CandidateOutcome outcome)
+    {
+        if (_candidateSink is null)
+            return;
+
+        Imbalance zone = candidate.Zone;
+        _candidateSink(new AlfonsoCandidateRecord
+        {
+            At = context.Timestamp,
+            Instrument = context.Instrument,
+            Outcome = outcome,
+            Side = candidate.Side,
+            EntryTimeframe = candidate.EntryTimeframe,
+            Proximal = zone.Proximal,
+            Distal = zone.Distal,
+            Stop = stop,
+            Target = target,
+            Risk = risk,
+            MarketPrice = bar.Prices.Close,
+            Nested = candidate.Host is not null,
+            IsContinuationPattern = zone.IsContinuationPattern,
+            State = zone.State,
+            Strength = zone.Strength,
+            Accomplished = zone.Accomplished,
+            ImpulseToBaseRatio = zone.ImpulseToBaseRatio,
+            ImpulseDisplacement = zone.ImpulseDisplacement,
+            BaseCandleCount = zone.BaseCandleCount,
+            CostToRisk = costToRisk,
+            StopAtrMultiple = stopAtr,
+            AtrPercentile = atrPercentile,
+            Scenario = candidate.Reason
+        });
+    }
+
+    /// <summary>Record for a candidate rejected before its geometry was computed.</summary>
+    private void LogSimple(
+        AgentMarketContext context, TradeCandidate candidate, Candle bar,
+        decimal? atrPercentile, CandidateOutcome outcome)
+    {
+        if (_candidateSink is null)
+            return;
+
+        Imbalance zone = candidate.Zone;
+        decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
+        Log(context, candidate, bar, stop,
+            zone.TargetPrice(_options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple),
+            Math.Abs(zone.Proximal - stop), null, null, atrPercentile, outcome);
+    }
+
     private static Task<AgentDecision> Observe(AgentMarketContext context, string reason) =>
         Task.FromResult(new AgentDecision
         {
@@ -225,7 +339,8 @@ public sealed class AlfonsoAgent : ITradingAgent
         public InstrumentState(AlfonsoStrategyOptions options)
         {
             Analyzer = new AlfonsoSequenceAnalyzer(
-                options.Sequence, options.Zones, options.Trend, options.Range, options.FreshLevelsOnly);
+                options.Sequence, options.Zones, options.Trend, options.Range, options.FreshLevelsOnly,
+                options.RequireControlAgreement, options.AllowConfirmationEntries);
 
             Intervals =
             [
@@ -234,6 +349,7 @@ public sealed class AlfonsoAgent : ITradingAgent
                 (SequenceRole.Lower, options.LowerInterval)
             ];
 
+            AtrLookback = options.AtrPercentileLookback;
             foreach ((SequenceRole role, _) in Intervals)
                 LastCandle[role] = null;
         }
@@ -249,6 +365,32 @@ public sealed class AlfonsoAgent : ITradingAgent
         public DateTimeOffset? LastEvaluated { get; set; }
 
         public ZoneOrderKey? PendingOrder { get; set; }
+
+        private readonly List<decimal> _atrHistory = [];
+
+        public int AtrLookback { get; init; } = 200;
+
+        /// <summary>Keeps a bounded window of execution-timeframe ATR for the percentile veto.</summary>
+        public void RecordAtr(decimal value)
+        {
+            _atrHistory.Add(value);
+            if (_atrHistory.Count > AtrLookback)
+                _atrHistory.RemoveRange(0, _atrHistory.Count - AtrLookback);
+        }
+
+        /// <summary>
+        /// Where <paramref name="value"/> sits in the retained history, or null until the window has
+        /// filled. Returning null rather than a provisional figure keeps the veto from firing on a
+        /// percentile computed from a handful of bars.
+        /// </summary>
+        public decimal? AtrPercentile(decimal? value)
+        {
+            if (value is not decimal current || _atrHistory.Count < AtrLookback)
+                return null;
+
+            int below = _atrHistory.Count(sample => sample < current);
+            return (decimal)below / _atrHistory.Count;
+        }
     }
 
     private readonly record struct ZoneOrderKey(

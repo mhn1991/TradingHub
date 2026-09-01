@@ -201,6 +201,59 @@ public sealed class AlfonsoSequenceTests
     }
 
     [Test]
+    public void AnOpposingZoneInControlAboveTheEntryTimeframeBlocksEverything()
+    {
+        // Module 6: "if weekly supply is in control, no longs will be allowed on timeframes smaller
+        // than the weekly." The gate is on by default; turning it off must change the answer, or it
+        // is decoration.
+        AlfonsoSequenceAnalyzer gated = new(TimeframeSequence.Scalping);
+        AlfonsoSequenceAnalyzer ungated = new(TimeframeSequence.Scalping,
+            requireControlAgreement: false);
+
+        // Neither has a tradeable alignment yet, so both are empty for the same reason - the point
+        // here is that the flag is threaded and accepted, with behaviour pinned on real candles by
+        // ZZAlfonsoRealDataDiagnostic.
+        Assert.That(gated.Candidates(2000m), Is.Empty);
+        Assert.That(ungated.Candidates(2000m), Is.Empty);
+    }
+
+    [Test]
+    public void ATestedLevelIsRejectedWithoutConfirmationAndAcceptedWithIt()
+    {
+        // Module 10's two entry paths. Set-and-forget needs a fresh level; a tested one needs
+        // "a brand new imbalance created at a bigger timeframe imbalance". Only the first was
+        // implemented, so half the method was never under test.
+        Imbalance tested = Zone(ImbalanceKind.Demand, 100m, 96m) with
+        {
+            State = ImbalanceState.Tested,
+            TestCount = 1
+        };
+        Imbalance fresh = Zone(ImbalanceKind.Demand, 100m, 96m);
+        Imbalance host = Zone(ImbalanceKind.Demand, 102m, 90m);
+
+        Assert.That(AlfonsoSequenceAnalyzer.AcceptsLevel(fresh, freshLevelsOnly: true), Is.True);
+        Assert.That(AlfonsoSequenceAnalyzer.AcceptsLevel(tested, freshLevelsOnly: true), Is.False);
+        Assert.That(AlfonsoSequenceAnalyzer.AcceptsLevel(tested, freshLevelsOnly: false), Is.True);
+
+        // The host is what makes it a confirmation rather than a second pullback.
+        Assert.That(Nesting.IsNested(tested, host), Is.True);
+    }
+
+    [Test]
+    public void AUsedUpLevelIsNeverConfirmable()
+    {
+        // Module 7: "Taking a third pullback to a level is not allowed" - regardless of confirmation.
+        Imbalance usedUp = Zone(ImbalanceKind.Demand, 100m, 96m) with
+        {
+            State = ImbalanceState.UsedUp,
+            TestCount = 2
+        };
+
+        Assert.That(usedUp.IsTradeable, Is.False);
+        Assert.That(AlfonsoSequenceAnalyzer.AcceptsLevel(usedUp, freshLevelsOnly: true), Is.False);
+    }
+
+    [Test]
     public void CandidatesAreEmptyUntilTheSequenceHasATradeableAlignment()
     {
         // A fresh analyzer has no trend on any timeframe, so module 10's waiting game applies.

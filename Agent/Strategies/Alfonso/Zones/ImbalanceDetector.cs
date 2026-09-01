@@ -260,7 +260,9 @@ public sealed class ImbalanceDetector
 
             _pendingTest.Remove(zone.BaseEnd);
 
-            int count = zone.TestCount + 1;
+            // Capped: a level is retired once it reaches the maximum, and counting further
+            // pullbacks past that point makes the field disagree with its own configured bound.
+            int count = Math.Min(zone.TestCount + 1, _options.MaximumTests);
             Imbalance worn = zone with
             {
                 TestCount = count,

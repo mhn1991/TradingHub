@@ -129,6 +129,12 @@ internal sealed record BacktestCommandOptions
     public bool AlfonsoRequireValidZoneForTrendChange { get; init; } = true;
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
     public bool AlfonsoRequireNestedEntries { get; init; }
+    public bool AlfonsoRequireControlAgreement { get; init; } = true;
+    public bool AlfonsoAllowConfirmationEntries { get; init; }
+    public decimal AlfonsoMaximumCostToRiskFraction { get; init; }
+    public decimal AlfonsoMinimumStopAtrMultiple { get; init; }
+    public decimal AlfonsoMinimumAtrPercentile { get; init; }
+    public decimal AlfonsoMaximumAtrPercentile { get; init; } = 1m;
     public decimal? DailyEquityProfitTarget { get; init; }
     public decimal? DailyEquityGivebackActivation { get; init; }
     public decimal? MaximumDailyEquityGiveback { get; init; }
@@ -326,7 +332,8 @@ internal sealed record BacktestCommandOptions
                 "alfonso-elimination-on-wick" or "alfonso-elimination-on-close" or
                 "alfonso-trendline-break-full-candle" or
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
-                "alfonso-nested-only" or
+                "alfonso-nested-only" or "alfonso-ignore-control" or
+                "alfonso-confirmation-trades" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -605,6 +612,20 @@ internal sealed record BacktestCommandOptions
             AlfonsoRequireValidZoneForTrendChange = !values.ContainsKey("alfonso-allow-invalid-zones"),
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
             AlfonsoRequireNestedEntries = values.ContainsKey("alfonso-nested-only"),
+            AlfonsoRequireControlAgreement = !values.ContainsKey("alfonso-ignore-control"),
+            AlfonsoAllowConfirmationEntries = values.ContainsKey("alfonso-confirmation-trades"),
+            AlfonsoMaximumCostToRiskFraction = ParseDecimal(
+                values.GetValueOrDefault("alfonso-max-cost-to-risk"), 0m, 0m,
+                "alfonso-max-cost-to-risk", allowZero: true),
+            AlfonsoMinimumStopAtrMultiple = ParseDecimal(
+                values.GetValueOrDefault("alfonso-min-stop-atr"), 0m, 0m,
+                "alfonso-min-stop-atr", allowZero: true),
+            AlfonsoMinimumAtrPercentile = ParseDecimal(
+                values.GetValueOrDefault("alfonso-atr-percentile-min"), 0m, 0m,
+                "alfonso-atr-percentile-min", allowZero: true),
+            AlfonsoMaximumAtrPercentile = ParseDecimal(
+                values.GetValueOrDefault("alfonso-atr-percentile-max"), 1m, 0m,
+                "alfonso-atr-percentile-max"),
             TrendTacticalRequireClassifier = !values.ContainsKey("trend-tactical-no-ml"),
             TrendTacticalReentryCooldownBars = ParseInt(
                 values.GetValueOrDefault("trend-tactical-cooldown-bars"), 0, 0, 5000,
@@ -746,6 +767,12 @@ internal sealed record BacktestCommandOptions
         AlfonsoRequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
         AlfonsoRequireNestedEntries = AlfonsoRequireNestedEntries,
+        AlfonsoRequireControlAgreement = AlfonsoRequireControlAgreement,
+        AlfonsoAllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
+        AlfonsoMaximumCostToRiskFraction = AlfonsoMaximumCostToRiskFraction,
+        AlfonsoMinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
+        AlfonsoMinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
+        AlfonsoMaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
         PriceActionConfirmation = PriceActionConfirmation,
         MinimumPriceActionConfidence = MinimumPriceActionConfidence,
         RejectStrongOpposingPriceAction = RejectStrongOpposingPriceAction,

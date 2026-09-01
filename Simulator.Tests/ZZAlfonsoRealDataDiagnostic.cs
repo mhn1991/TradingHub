@@ -55,6 +55,7 @@ public sealed class ZZAlfonsoRealDataDiagnostic
         return bars;
     }
 
+    [TestCase("xauusd-w1.csv", 10080)]
     [TestCase("xauusd-d1full.csv", 1440)]
     [TestCase("xauusd-d1.csv", 1440)]
     [TestCase("xagusd-h4.csv", 240)]
@@ -582,6 +583,201 @@ public sealed class ZZAlfonsoRealDataDiagnostic
                 $"{created.Count(z => z.Accomplished.HasFlag(Accomplishment.TrendlineBreak)),10}" +
                 $"{created.Count(z => z.MeetsTradeabilityCriteria),11}");
         }
+    }
+
+    /// <summary>
+    /// Does the trend state actually describe what price then does?
+    /// <para>
+    /// Every trade the agent takes inherits its direction from this state, so a state that does not
+    /// track price is not a gate that occasionally misfires - it is the whole strategy pointed the
+    /// wrong way. Silver made this concrete: fourteen of seventeen trades were shorts, they went
+    /// 1-for-14, and nine of them were taken through three consecutive months of +14% to +17%
+    /// rallies while the H4 state reported Downtrend. Price ran 62 to 121 without the call flipping.
+    /// </para>
+    /// <para>
+    /// The test is forward-looking and needs no backtest: for each bar, compare the state against
+    /// the price change over the next N bars. A useful trend call is right more often than a coin
+    /// flip; a broken one is not, and one that is systematically inverted is worse than useless.
+    /// </para>
+    /// </summary>
+    [TestCase("xauusd-h4.csv", 240)]
+    [TestCase("xagusd-h4.csv", 240)]
+    [TestCase("full-xauusd-h4.csv", 240)]
+    [TestCase("xauusd-h1.csv", 60)]
+    [TestCase("xagusd-h1.csv", 60)]
+    public void DoesTheTrendStateActuallyPredictDirection(string file, int intervalMinutes)
+    {
+        List<AlfonsoBar> bars = Load(file);
+        AlfonsoTimeframeAnalyzer analyzer = new(TimeSpan.FromMinutes(intervalMinutes));
+
+        List<(AlfonsoTrend Trend, decimal Close)> path = [];
+        foreach (AlfonsoBar bar in bars)
+        {
+            analyzer.Apply(bar);
+            path.Add((analyzer.Trend.Trend, bar.Close));
+        }
+
+        TestContext.Out.WriteLine($"=== {file} · {bars.Count:N0} bars ===");
+        TestContext.Out.WriteLine(
+            $"{"horizon",8}{"state",14}{"n",7}{"agreed",9}{"mean move",12}{"verdict",10}");
+
+        foreach (int horizon in (int[])[6, 24, 60])
+        {
+            foreach (AlfonsoTrend state in (AlfonsoTrend[])[AlfonsoTrend.Uptrend, AlfonsoTrend.Downtrend])
+            {
+                List<decimal> moves = [];
+                for (int index = 0; index + horizon < path.Count; index++)
+                {
+                    if (path[index].Trend != state)
+                        continue;
+
+                    decimal from = path[index].Close;
+                    if (from <= 0m)
+                        continue;
+
+                    // Signed by the direction the state claimed, so positive always means the call
+                    // was right regardless of which way it pointed.
+                    decimal move = (path[index + horizon].Close - from) / from;
+                    moves.Add(state == AlfonsoTrend.Uptrend ? move : -move);
+                }
+
+                if (moves.Count == 0)
+                    continue;
+
+                int agreed = moves.Count(move => move > 0m);
+                double share = agreed / (double)moves.Count;
+                decimal mean = moves.Average();
+                string verdict = share > 0.55 ? "good" : share < 0.45 ? "INVERTED" : "coin flip";
+
+                TestContext.Out.WriteLine(
+                    $"{horizon,8}{state,14}{moves.Count,7}{share,9:P1}{mean,12:P3}{verdict,10}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Is the trend state wrong, or did the market simply rise?
+    /// <para>
+    /// Measured across all of gold's 3.5 years the Downtrend state looks anti-predictive: price rose
+    /// over the following 60 bars 67% of the time it fired. But gold rose 121% over that period, so
+    /// every short signal was fighting the tape and the aggregate cannot separate a broken detector
+    /// from a bull market. The period does contain a real decline - 5,549 down to 4,047, -27.1% from
+    /// 2026-01-29 - so the two can be told apart by asking how the state performed INSIDE each leg.
+    /// </para>
+    /// <para>
+    /// The detector runs over the CONTINUOUS series and only the results are partitioned. Slicing
+    /// the input instead would restart it from Unknown at each leg boundary, and the warm-up would
+    /// be measured as if it were signal.
+    /// </para>
+    /// </summary>
+    [Test]
+    public void IsTheTrendStateWrongOrDidTheMarketSimplyRise()
+    {
+        List<AlfonsoBar> bars = Load("full-xauusd-h4.csv");
+        AlfonsoTimeframeAnalyzer analyzer = new(TimeSpan.FromHours(4));
+
+        List<(AlfonsoTrend Trend, decimal Close, DateTimeOffset At)> path = [];
+        foreach (AlfonsoBar bar in bars)
+        {
+            analyzer.Apply(bar);
+            path.Add((analyzer.Trend.Trend, bar.Close, bar.OpenTime));
+        }
+
+        int peak = 0;
+        for (int index = 1; index < path.Count; index++)
+        {
+            if (path[index].Close > path[peak].Close)
+                peak = index;
+        }
+
+        TestContext.Out.WriteLine(
+            $"up-leg   bars 0-{peak}      {path[0].Close:F0} -> {path[peak].Close:F0}  " +
+            $"({path[0].At:yyyy-MM-dd} -> {path[peak].At:yyyy-MM-dd})");
+        TestContext.Out.WriteLine(
+            $"down-leg bars {peak}-{path.Count - 1}   {path[peak].Close:F0} -> {path[^1].Close:F0}  " +
+            $"({path[peak].At:yyyy-MM-dd} -> {path[^1].At:yyyy-MM-dd})");
+
+        const int horizon = 60;
+        TestContext.Out.WriteLine(
+            $"\nforward {horizon} bars, signed by the direction the state claimed");
+        TestContext.Out.WriteLine(
+            $"{"leg",-10}{"state",12}{"n",7}{"agreed",9}{"mean move",12}{"verdict",11}");
+
+        foreach ((string name, int from, int to) in
+            ((string, int, int)[])[("up-leg", 0, peak), ("down-leg", peak, path.Count - 1)])
+        {
+            foreach (AlfonsoTrend state in
+                (AlfonsoTrend[])[AlfonsoTrend.Uptrend, AlfonsoTrend.Downtrend])
+            {
+                List<decimal> moves = [];
+                for (int index = from; index < to && index + horizon < path.Count; index++)
+                {
+                    if (path[index].Trend != state || path[index].Close <= 0m)
+                        continue;
+
+                    decimal move = (path[index + horizon].Close - path[index].Close) / path[index].Close;
+                    moves.Add(state == AlfonsoTrend.Uptrend ? move : -move);
+                }
+
+                if (moves.Count == 0)
+                {
+                    TestContext.Out.WriteLine($"{name,-10}{state,12}{0,7}{"-",9}{"-",12}{"no calls",11}");
+                    continue;
+                }
+
+                double share = moves.Count(move => move > 0m) / (double)moves.Count;
+                string verdict = share > 0.55 ? "good" : share < 0.45 ? "INVERTED" : "coin flip";
+                TestContext.Out.WriteLine(
+                    $"{name,-10}{state,12}{moves.Count,7}{share,9:P1}{moves.Average(),12:P3}{verdict,11}");
+            }
+        }
+
+        // The decisive comparison: inside a genuine decline, does the short signal work?
+        TestContext.Out.WriteLine(
+            "\nIf Downtrend is good inside the down-leg, the detector works and the aggregate was");
+        TestContext.Out.WriteLine(
+            "regime. If it is inverted in BOTH legs, the detector is broken.");
+    }
+
+    /// <summary>
+    /// How often can a trendline actually be drawn?
+    /// <para>
+    /// The course's charts show trendlines on ordinary pullback structure, routinely - module 3
+    /// treats drawing one as the normal case and says only that "sometimes they just can't be
+    /// drawn". This implementation is far stingier: the trendline-break accomplishment fires on
+    /// 2.6% of zones even at the most permissive swing setting. If a line is almost never available,
+    /// then the course's PRIMARY route to creating an imbalance is effectively disabled and the
+    /// engine is running on its secondary routes alone.
+    /// </para>
+    /// </summary>
+    [TestCase("full-xauusd-h4.csv", 240)]
+    [TestCase("xagusd-h4.csv", 240)]
+    public void HowOftenIsATrendlineActuallyDrawable(string file, int intervalMinutes)
+    {
+        List<AlfonsoBar> bars = Load(file);
+        AlfonsoTimeframeAnalyzer analyzer = new(TimeSpan.FromMinutes(intervalMinutes));
+
+        int withLine = 0, trending = 0;
+        foreach (AlfonsoBar bar in bars)
+        {
+            analyzer.Apply(bar);
+            AlfonsoTrendSnapshot state = analyzer.Trend;
+            if (!state.IsTrending)
+                continue;
+
+            trending++;
+            if (state.Line is not null)
+                withLine++;
+        }
+
+        TestContext.Out.WriteLine($"=== {file} · {bars.Count:N0} bars ===");
+        TestContext.Out.WriteLine($"  bars in a trend            {trending,7:N0}");
+        TestContext.Out.WriteLine(
+            $"  of those, a line was drawn {withLine,7:N0}  " +
+            $"({(trending == 0 ? 0 : withLine / (double)trending):P1})");
+        TestContext.Out.WriteLine(
+            $"  trend established WITHOUT a line {trending - withLine,7:N0}  " +
+            $"({(trending == 0 ? 0 : (trending - withLine) / (double)trending):P1})");
     }
 
     private static void Percentiles(string label, IEnumerable<decimal> values)

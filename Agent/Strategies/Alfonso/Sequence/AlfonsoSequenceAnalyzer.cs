@@ -34,18 +34,24 @@ public sealed class AlfonsoSequenceAnalyzer
 {
     private readonly Dictionary<SequenceRole, AlfonsoTimeframeAnalyzer> _timeframes = [];
     private readonly bool _freshLevelsOnly;
+    private readonly bool _requireControlAgreement;
+    private readonly bool _allowConfirmationEntries;
 
     public AlfonsoSequenceAnalyzer(
         TimeframeSequence sequence,
         ImbalanceOptions? zoneOptions = null,
         AlfonsoTrendOptions? trendOptions = null,
         RangeOptions? rangeOptions = null,
-        bool freshLevelsOnly = true)
+        bool freshLevelsOnly = true,
+        bool requireControlAgreement = true,
+        bool allowConfirmationEntries = false)
     {
         ArgumentNullException.ThrowIfNull(sequence);
         sequence.Validate();
         Sequence = sequence;
         _freshLevelsOnly = freshLevelsOnly;
+        _requireControlAgreement = requireControlAgreement;
+        _allowConfirmationEntries = allowConfirmationEntries;
 
         foreach ((SequenceRole role, TimeSpan interval) in sequence.All())
             _timeframes[role] = new AlfonsoTimeframeAnalyzer(interval, zoneOptions, trendOptions, rangeOptions);
@@ -92,6 +98,25 @@ public sealed class AlfonsoSequenceAnalyzer
                 return [];
         }
 
+        // Module 6: "When an imbalance on timeframe X has gained control, trading at timeframes
+        // smaller than X will not be allowed. For instance, if weekly supply is in control, no longs
+        // will be allowed on timeframes smaller than the weekly."
+        //
+        // Control was being computed and then read by nothing - the rule existed in the engine and
+        // was enforced nowhere, which is the same silent no-op shape as the other defects found in
+        // this subsystem.
+        if (_requireControlAgreement)
+        {
+            foreach ((SequenceRole role, _) in Sequence.All())
+            {
+                if (role == SequenceRole.Lower)
+                    continue;
+
+                if (_timeframes[role].InControl is ZoneInControl held && held.Kind != side)
+                    return [];
+            }
+        }
+
         List<TradeCandidate> candidates = [];
 
         foreach (ScenarioEntry entry in scenario.Entries)
@@ -106,8 +131,21 @@ public sealed class AlfonsoSequenceAnalyzer
             foreach (Imbalance zone in timeframe.TradeableZones(side, price))
             {
                 // Module 7: "We will only trade the first pullback to an imbalance, that is, only
-                // fresh levels." A tested level needs confirmation the core rules do not grant.
-                if (!AcceptsLevel(zone, _freshLevelsOnly))
+                // fresh levels." A tested level needs confirmation - which module 10 defines and
+                // which IsConfirmed supplies when it is enabled.
+                Imbalance? host = null;
+                if (entry.NestedIn is SequenceRole hostRole)
+                {
+                    host = Nesting.FindHost(zone, _timeframes[hostRole].Zones);
+                    if (host is null)
+                        continue;
+                }
+
+                // Fresh levels take the set-and-forget path. A tested one needs confirmation, and
+                // that means a host: the bigger-timeframe imbalance the new zone was created at.
+                bool acceptable = AcceptsLevel(zone, _freshLevelsOnly) ||
+                    (_allowConfirmationEntries && IsConfirmed(zone, host));
+                if (!acceptable)
                     continue;
 
                 // A zone stays plannable until price breaks through its distal - at which point the
@@ -121,14 +159,6 @@ public sealed class AlfonsoSequenceAnalyzer
                 bool live = side == ImbalanceKind.Demand ? price > zone.Distal : price < zone.Distal;
                 if (!live)
                     continue;
-
-                Imbalance? host = null;
-                if (entry.NestedIn is SequenceRole hostRole)
-                {
-                    host = Nesting.FindHost(zone, _timeframes[hostRole].Zones);
-                    if (host is null)
-                        continue;
-                }
 
                 candidates.Add(new TradeCandidate
                 {
@@ -148,4 +178,28 @@ public sealed class AlfonsoSequenceAnalyzer
 
     internal static bool AcceptsLevel(Imbalance zone, bool freshLevelsOnly) =>
         !freshLevelsOnly || zone.State == ImbalanceState.Fresh;
+
+    /// <summary>
+    /// Whether a level that is no longer fresh may still be traded, because module 10's confirmation
+    /// has arrived.
+    /// <para>
+    /// Module 10 splits entries in two, and only the first half was implemented. Set-and-forget
+    /// trades need a fresh level and the trend behind them. Confirmation trades are the rest -
+    /// "the level is wicky, tested or used-up, the trend is not with us ... you just wait for a
+    /// confirmation" - and module 7 agrees that non-fresh levels "can also work, but rules do not
+    /// allow us to take them unless there is confirmation in lower timeframes". Rejecting every
+    /// tested level outright therefore tested half the method, not the method.
+    /// </para>
+    /// <para>
+    /// The confirmation itself is module 10's definition: "a brand new imbalance created at a bigger
+    /// timeframe imbalance or a bigger timeframe confluence." So a tested level qualifies when it
+    /// sits inside a higher-timeframe zone that is still live - the bigger-timeframe imbalance the
+    /// new one was created at. A used-up level never qualifies: module 7 puts a third pullback out
+    /// of bounds regardless.
+    /// </para>
+    /// </summary>
+    private static bool IsConfirmed(Imbalance zone, Imbalance? host) =>
+        zone.State == ImbalanceState.Tested &&
+        host is not null &&
+        host.State != ImbalanceState.Eliminated;
 }

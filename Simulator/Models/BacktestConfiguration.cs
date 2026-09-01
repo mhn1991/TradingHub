@@ -711,6 +711,23 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-nested-only. Drops module 11's row 1, which carried the whole loss.</summary>
     public bool AlfonsoRequireNestedEntries { get; init; }
 
+    /// <summary>--alfonso-ignore-control disables module 6's in-control gate.</summary>
+    public bool AlfonsoRequireControlAgreement { get; init; } = true;
+
+    /// <summary>--alfonso-confirmation-trades enables module 10's second entry path.</summary>
+    public bool AlfonsoAllowConfirmationEntries { get; init; }
+
+    /// <summary>--alfonso-max-cost-to-risk N. Rejects trades whose cost eats too much of their R.</summary>
+    public decimal AlfonsoMaximumCostToRiskFraction { get; init; }
+
+    /// <summary>--alfonso-min-stop-atr N.</summary>
+    public decimal AlfonsoMinimumStopAtrMultiple { get; init; }
+
+    /// <summary>--alfonso-atr-percentile MIN,MAX. Regime veto, not an entry trigger.</summary>
+    public decimal AlfonsoMinimumAtrPercentile { get; init; }
+
+    public decimal AlfonsoMaximumAtrPercentile { get; init; } = 1m;
+
     /// <summary>
     /// Classifier options taken from the loaded model artifact. The agent's feature engine and the
     /// model must agree on groups, horizon and label geometry — defaulting them independently makes
@@ -906,6 +923,12 @@ public sealed record BacktestRequest
                     MiddleInterval = AlfonsoMiddleInterval ?? defaultAlfonso.MiddleInterval,
                     LowerInterval = AlfonsoLowerInterval ?? defaultAlfonso.LowerInterval,
                     RequireNestedEntries = AlfonsoRequireNestedEntries,
+                    RequireControlAgreement = AlfonsoRequireControlAgreement,
+                    AllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
+                    MaximumCostToRiskFraction = AlfonsoMaximumCostToRiskFraction,
+                    MinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
+                    MinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
+                    MaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
                     Zones = defaultAlfonso.Zones with
                     {
                         RewardMultiple = AlfonsoRewardMultiple ?? defaultAlfonso.Zones.RewardMultiple,
