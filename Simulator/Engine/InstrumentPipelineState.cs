@@ -31,6 +31,7 @@ internal sealed class InstrumentPipelineState : IAsyncDisposable
         BarInterval analysisBaseInterval,
         IReadOnlyList<BarInterval> analysisIntervals,
         BaseCandleGapPolicy gapPolicy,
+        double gapToleranceFraction,
         int candleCapacity,
         CancellationToken cancellationToken)
     {
@@ -46,7 +47,8 @@ internal sealed class InstrumentPipelineState : IAsyncDisposable
             instrument,
             analysisIntervals,
             candleCapacity,
-            gapPolicy);
+            gapPolicy,
+            gapToleranceFraction);
         _enumerator = stream.StreamAsync(candleRequest, cancellationToken).GetAsyncEnumerator(cancellationToken);
     }
 

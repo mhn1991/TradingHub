@@ -154,6 +154,9 @@ public sealed class AlfonsoAgent : ITradingAgent
                 if (_options.FreshLevelsOnly && zone.State != ImbalanceState.Fresh)
                     continue;
 
+                if (_options.RequireNestedEntries && candidate.Host is null)
+                    continue;
+
                 bool aheadOfPrice = IsAheadOfPrice(
                     candidate.Side, zone.Proximal, bar.Prices.Close);
                 if (!aheadOfPrice)

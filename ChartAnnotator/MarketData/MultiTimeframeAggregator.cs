@@ -20,16 +20,44 @@ public sealed class MultiTimeframeAggregator
     private readonly InstrumentKey _instrument;
     private readonly Dictionary<BarInterval, AggregateState> _states;
     private readonly BaseCandleGapPolicy _gapPolicy;
+    private readonly double _gapToleranceFraction;
     private long _sequence;
     private BarInterval? _baseInterval;
     private DateTimeOffset? _expectedNextBaseOpenTime;
 
+    /// <summary>
+    /// Aggregates an ordered base-candle stream into every requested timeframe.
+    /// </summary>
+    /// <param name="instrument">The instrument every base candle must belong to.</param>
+    /// <param name="intervals">Target timeframes to aggregate into.</param>
+    /// <param name="candleCapacity">Completed candles retained per timeframe.</param>
+    /// <param name="gapPolicy">Whether a discontinuous stream throws or resets buckets.</param>
+    /// <param name="gapToleranceFraction">
+    /// How much of a bucket a stream gap may consume before that bucket is discarded, as a fraction
+    /// of the bucket's own length. Zero - the default - discards every incomplete bucket on any gap,
+    /// which is the long-standing behaviour.
+    /// <para>
+    /// The default cannot express markets that close every day. A one-hour session break is 100% of
+    /// an hourly bucket but only 4% of a daily one, yet zero tolerance discards both. Since gold's
+    /// stream contains a maintenance break in every 24-hour span, a daily bucket always spans one and
+    /// so can NEVER complete: a run configured with `1d` produced 1m/5m/15m/1h/4h closes and not a
+    /// single daily one, and any agent requiring daily analysis silently observed forever. The same
+    /// effect already costs 4h buckets about a tenth of their closes.
+    /// </para>
+    /// </param>
     public MultiTimeframeAggregator(
         InstrumentKey instrument,
         IEnumerable<BarInterval> intervals,
         int candleCapacity = 2_000,
-        BaseCandleGapPolicy gapPolicy = BaseCandleGapPolicy.Throw)
+        BaseCandleGapPolicy gapPolicy = BaseCandleGapPolicy.Throw,
+        double gapToleranceFraction = 0.0)
     {
+        if (gapToleranceFraction is < 0.0 or >= 1.0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(gapToleranceFraction), "Tolerance must be within [0, 1).");
+        }
+
         ArgumentNullException.ThrowIfNull(intervals);
         if (candleCapacity <= 0)
         {
@@ -48,6 +76,7 @@ public sealed class MultiTimeframeAggregator
 
         _instrument = instrument;
         _gapPolicy = gapPolicy;
+        _gapToleranceFraction = gapToleranceFraction;
         BarInterval[] targetIntervals = intervals.Distinct().ToArray();
         if (targetIntervals.Any(interval => !interval.IsValid))
         {
@@ -102,12 +131,18 @@ public sealed class MultiTimeframeAggregator
                     $"but received {baseCandle.OpenTime:O}.");
             }
 
-            // Historical broker feeds naturally omit closed-market periods such as
-            // weekends. Never complete a partially formed aggregate across that gap;
-            // discard it and begin cleanly at the next available session candle.
+            // Historical broker feeds naturally omit closed-market periods such as weekends. A
+            // partially formed aggregate is discarded rather than completed across that gap - but
+            // only where the gap is large enough, relative to that bucket, to have actually damaged
+            // it. Judging every interval by the same absolute gap discards a daily bucket for a
+            // one-hour session break that removed 4% of it.
+            TimeSpan gap = baseCandle.OpenTime - expectedOpen;
             foreach (AggregateState state in _states.Values)
             {
-                state.ResetIncomplete();
+                if (_gapToleranceFraction <= 0.0 || !state.Tolerates(gap, _gapToleranceFraction))
+                {
+                    state.ResetIncomplete();
+                }
             }
         }
 
@@ -223,6 +258,22 @@ public sealed class MultiTimeframeAggregator
             _instrument = instrument;
             Interval = interval;
             Completed = new RingBuffer<Candle>(capacity);
+        }
+
+        /// <summary>
+        /// Whether a stream gap of <paramref name="gap"/> is small enough, relative to this bucket's
+        /// own length, to leave the bucket usable. A bucket with nothing in it yet has nothing to
+        /// damage, so it always survives.
+        /// </summary>
+        public bool Tolerates(TimeSpan gap, double fraction)
+        {
+            if (_current is null)
+            {
+                return true;
+            }
+
+            double bucketSeconds = BarIntervalParser.ApproximateSeconds(Interval);
+            return bucketSeconds > 0 && gap.TotalSeconds <= bucketSeconds * fraction;
         }
 
         public BarInterval Interval { get; }

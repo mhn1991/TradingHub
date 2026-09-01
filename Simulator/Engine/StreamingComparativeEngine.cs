@@ -361,6 +361,7 @@ public sealed class StreamingComparativeEngine
                     timeframes.AnalysisBaseInterval,
                     effectiveAnalysis,
                     options.Runtime.BaseCandleGapPolicy,
+                    options.Runtime.AggregationGapToleranceFraction,
                     options.Runtime.CandleCapacity,
                     cancellationToken);
                 foreach (AnalysisProfileKey profile in profilesByInstrument.GetValueOrDefault(instrument, []))

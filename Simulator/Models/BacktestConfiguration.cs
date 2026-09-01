@@ -160,6 +160,20 @@ public sealed record BacktestRuntimeOptions
 
     public BaseCandleGapPolicy BaseCandleGapPolicy { get; init; } = BaseCandleGapPolicy.ResetIncompleteBuckets;
 
+    /// <summary>
+    /// How much of an aggregate bucket a stream gap may consume before that bucket is discarded, as
+    /// a fraction of the bucket's own length. Zero - the default - keeps the historical behaviour of
+    /// discarding every incomplete bucket on any gap.
+    /// <para>
+    /// Raise it to aggregate timeframes at or above a market's daily close. Gold's stream breaks for
+    /// maintenance every 24 hours, so a daily bucket always spans a gap and at zero tolerance can
+    /// never complete: a run configured with `1d` emitted no daily candle at all, and the agent that
+    /// required daily analysis silently observed on every bar. Left at zero by default because
+    /// changing it changes which 4h buckets survive, and therefore every existing backtest.
+    /// </para>
+    /// </summary>
+    public double AggregationGapToleranceFraction { get; init; }
+
     public PositionManagementOptions LegacyPositionManagement { get; init; } =
         PositionManagementOptions.LegacyDefaults;
 
@@ -694,6 +708,9 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-no-swing-break drops peak/valley breaks as an accomplishment.</summary>
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
 
+    /// <summary>--alfonso-nested-only. Drops module 11's row 1, which carried the whole loss.</summary>
+    public bool AlfonsoRequireNestedEntries { get; init; }
+
     /// <summary>
     /// Classifier options taken from the loaded model artifact. The agent's feature engine and the
     /// model must agree on groups, horizon and label geometry — defaulting them independently makes
@@ -888,6 +905,7 @@ public sealed record BacktestRequest
                     TopInterval = AlfonsoTopInterval ?? defaultAlfonso.TopInterval,
                     MiddleInterval = AlfonsoMiddleInterval ?? defaultAlfonso.MiddleInterval,
                     LowerInterval = AlfonsoLowerInterval ?? defaultAlfonso.LowerInterval,
+                    RequireNestedEntries = AlfonsoRequireNestedEntries,
                     Zones = defaultAlfonso.Zones with
                     {
                         RewardMultiple = AlfonsoRewardMultiple ?? defaultAlfonso.Zones.RewardMultiple,

@@ -55,6 +55,7 @@ public sealed class ZZAlfonsoRealDataDiagnostic
         return bars;
     }
 
+    [TestCase("xauusd-d1full.csv", 1440)]
     [TestCase("xauusd-d1.csv", 1440)]
     [TestCase("xagusd-h4.csv", 240)]
     [TestCase("xagusd-h1.csv", 60)]
@@ -437,8 +438,8 @@ public sealed class ZZAlfonsoRealDataDiagnostic
     {
         Dictionary<int, string> files = new()
         {
-            [1] = "xauusd-m1.csv", [5] = "xauusd-m5.csv", [15] = "xauusd-m15.csv",
-            [30] = "xauusd-m30.csv", [60] = "xauusd-h1.csv", [240] = "xauusd-h4.csv", [1440] = "xauusd-d1.csv"
+            [1] = "xauusd-m1.csv", [5] = "xauusd-m5.csv", [15] = "full-xauusd-m15.csv",
+            [30] = "xauusd-m30.csv", [60] = "full-xauusd-h1.csv", [240] = "full-xauusd-h4.csv", [1440] = "xauusd-d1full.csv"
         };
         if (!files.ContainsKey(topMinutes) || !files.ContainsKey(middleMinutes) || !files.ContainsKey(lowerMinutes))
             Assert.Ignore("no candle file for one of the requested timeframes");
@@ -542,6 +543,44 @@ public sealed class ZZAlfonsoRealDataDiagnostic
             TestContext.Out.WriteLine(
                 $"{multiple,7:F1}:1{results.Count,6}{wins.Count / (double)results.Count,8:P1}" +
                 $"{profitFactor,9:F3}{results.Sum(),10:F2}{results.Average(),10:F4}{unresolved,12}");
+        }
+    }
+
+    /// <summary>
+    /// Sensitivity of the swing / continuation split, which decides everything downstream.
+    /// <para>
+    /// A zone is a swing only when nothing in the preceding LegInLookbackCandles traded beyond its
+    /// distal. Module 3 forbids drawing trendlines from continuation patterns, so this one number
+    /// controls how many swings exist, therefore whether a trendline can be drawn at all, therefore
+    /// how often the course's PRIMARY route to creating an imbalance - the trendline break - can
+    /// fire. It fired 3 times in 152 zones on daily gold and 9 times in 145 on H4, which is either
+    /// correct or a symptom of this threshold being wrong. The sweep is the only way to tell.
+    /// </para>
+    /// </summary>
+    [Test]
+    public void SweepLegInLookbackAndWatchTheSwingSupply()
+    {
+        List<AlfonsoBar> bars = Load("full-xauusd-h4.csv");
+
+        TestContext.Out.WriteLine($"=== leg-in lookback sweep, {bars.Count:N0} H4 bars ===");
+        TestContext.Out.WriteLine(
+            $"{"lookback",10}{"zones",8}{"swings",8}{"swing%",9}{"tlBreaks",10}{"tradeable",11}");
+
+        foreach (int lookback in (int[])[2, 3, 5, 8, 12, 20])
+        {
+            AlfonsoTimeframeAnalyzer analyzer = new(
+                TimeSpan.FromHours(4), new ImbalanceOptions { LegInLookbackCandles = lookback });
+
+            List<Imbalance> created = [];
+            foreach (AlfonsoBar bar in bars)
+                created.AddRange(analyzer.Apply(bar).Created);
+
+            int swings = created.Count(z => !z.IsContinuationPattern);
+            TestContext.Out.WriteLine(
+                $"{lookback,10}{created.Count,8}{swings,8}" +
+                $"{(created.Count == 0 ? 0 : swings / (double)created.Count),9:P1}" +
+                $"{created.Count(z => z.Accomplished.HasFlag(Accomplishment.TrendlineBreak)),10}" +
+                $"{created.Count(z => z.MeetsTradeabilityCriteria),11}");
         }
     }
 

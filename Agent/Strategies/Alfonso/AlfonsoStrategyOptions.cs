@@ -40,6 +40,20 @@ public sealed record AlfonsoStrategyOptions
     /// </summary>
     public bool FreshLevelsOnly { get; init; } = true;
 
+    /// <summary>
+    /// Whether an entry must sit inside a higher-timeframe zone of the same side.
+    /// <para>
+    /// Module 11's first row - all three timeframes aligned, enter at the execution timeframe's own
+    /// zones - needs no nesting, and on 3.5 years of gold that row is where the entire loss came
+    /// from: standalone entries returned -0.4865R over 50 trades while nested ones returned +0.2512R
+    /// over 37, and the split holds in both halves of the period. Module 9's own argument for
+    /// nesting is risk, not selection - "a very powerful and mechanical way of lowering the risk in
+    /// our entries" - so this being the strongest predictor available is not something the course
+    /// claims.
+    /// </para>
+    /// </summary>
+    public bool RequireNestedEntries { get; init; }
+
     public IReadOnlySet<BarInterval> RequiredIntervals =>
         new HashSet<BarInterval> { TopInterval, MiddleInterval, LowerInterval };
 

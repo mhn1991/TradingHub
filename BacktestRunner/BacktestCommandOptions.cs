@@ -116,6 +116,9 @@ internal sealed record BacktestCommandOptions
     public BarInterval? ClassifierSignalInterval { get; init; }
 
     /// <summary>--alfonso-top / --alfonso-middle / --alfonso-lower.</summary>
+    /// <summary>--aggregation-gap-tolerance N (0..1). Needed for timeframes at or above a daily close.</summary>
+    public double AggregationGapToleranceFraction { get; init; }
+
     public BarInterval? AlfonsoTopInterval { get; init; }
     public BarInterval? AlfonsoMiddleInterval { get; init; }
     public BarInterval? AlfonsoLowerInterval { get; init; }
@@ -125,6 +128,7 @@ internal sealed record BacktestCommandOptions
     public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
     public bool AlfonsoRequireValidZoneForTrendChange { get; init; } = true;
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
+    public bool AlfonsoRequireNestedEntries { get; init; }
     public decimal? DailyEquityProfitTarget { get; init; }
     public decimal? DailyEquityGivebackActivation { get; init; }
     public decimal? MaximumDailyEquityGiveback { get; init; }
@@ -322,6 +326,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-elimination-on-wick" or "alfonso-elimination-on-close" or
                 "alfonso-trendline-break-full-candle" or
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
+                "alfonso-nested-only" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -575,6 +580,9 @@ internal sealed record BacktestCommandOptions
                 values.GetValueOrDefault("breakout-stop-atr"), 1.5m, 0m, "breakout-stop-atr"),
             BreakoutTargetAtrMultiple = ParseDecimal(
                 values.GetValueOrDefault("breakout-target-atr"), 3.0m, 0m, "breakout-target-atr"),
+            AggregationGapToleranceFraction = (double)ParseDecimal(
+                values.GetValueOrDefault("aggregation-gap-tolerance"), 0m, 0m,
+                "aggregation-gap-tolerance", allowZero: true),
             AlfonsoTopInterval = values.GetValueOrDefault("alfonso-top") is string alfonsoTop
                 ? ParseInterval(alfonsoTop) : null,
             AlfonsoMiddleInterval = values.GetValueOrDefault("alfonso-middle") is string alfonsoMiddle
@@ -596,6 +604,7 @@ internal sealed record BacktestCommandOptions
             AlfonsoTrendlineBreakRequiresClose = !values.ContainsKey("alfonso-trendline-break-full-candle"),
             AlfonsoRequireValidZoneForTrendChange = !values.ContainsKey("alfonso-allow-invalid-zones"),
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
+            AlfonsoRequireNestedEntries = values.ContainsKey("alfonso-nested-only"),
             TrendTacticalRequireClassifier = !values.ContainsKey("trend-tactical-no-ml"),
             TrendTacticalReentryCooldownBars = ParseInt(
                 values.GetValueOrDefault("trend-tactical-cooldown-bars"), 0, 0, 5000,
@@ -736,6 +745,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
         AlfonsoRequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
+        AlfonsoRequireNestedEntries = AlfonsoRequireNestedEntries,
         PriceActionConfirmation = PriceActionConfirmation,
         MinimumPriceActionConfidence = MinimumPriceActionConfidence,
         RejectStrongOpposingPriceAction = RejectStrongOpposingPriceAction,
@@ -747,6 +757,7 @@ internal sealed record BacktestCommandOptions
         Runtime = new BacktestRuntimeOptions
         {
             AccountMode = AccountMode,
+            AggregationGapToleranceFraction = AggregationGapToleranceFraction,
             ExecutionInterval = ExecutionInterval,
             AnalysisBaseInterval = AnalysisBaseInterval,
             StructuralTriggerInterval = StructuralTriggerInterval,
