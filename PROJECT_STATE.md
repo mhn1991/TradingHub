@@ -3560,9 +3560,60 @@ price ARRIVED at only 7 of them (7.6%) versus gold's 23 (21%). Silver sits out-o
 (H4 42.8% vs 24.9%), so zones are eliminated before price retraces to them. The method's yield is
 instrument-specific and gold's numbers are not characteristic of it.
 
-**Open:** 3.5-year gold runs at H4/H1/M15 and D1/H4/H1 are running on fixed code. D1 still latches at
-200 bars for want of structure (14 accomplished zones); whether ~900 bars is enough is what that run
-answers. No Alfonso number should be quoted until it lands.
+**Resolved.** See 3.27.
+
+#### 3.27 Alfonso loses on every instrument tested, and the "improvement" was in-sample fitting (2026-09-01)
+
+**The method as written.** 3.5 years of gold at H4/H1/M15: 87 trades, 19.5% win, PF_R 0.764,
+avgR **-0.1728**, negative in every year. The cost table predicted it - a fixed 3:1 needs a 28.2%
+win rate at M15 to clear costs and the method delivers 19.5%.
+
+**A predictor was found, and it did not survive an independent test.** Zone attributes were checked
+against realised R on the real 87 trades. Nesting separated strongly - standalone -0.4865R over 50
+trades against nested +0.2512R over 37 - and agreed in both halves of the period. Dropping module
+11's row 1 and moving the target to 2:1 took the same window from -15.03R to **+19.24R**, PF 1.280,
+positive in all four years, with a clean interior optimum at 2:1 (1.5 and 2.5 both lower).
+
+Every part of that was fitted on gold. A pre-registered test over 7 FX pairs and 2 indices, with the
+threshold fixed before the data arrived (7+ of 9 real, 4-5 a coin flip, <=3 refuted):
+
+```
+instrument     book n  book avgR  nested n  nest avgR    delta
+fxeurusd           12    -0.0825         2    +0.1595  +0.2420
+fxgbpusd           14    -0.3292         7    -0.4270  -0.0978
+fxusdjpy           11    +0.0439         0     -         -
+fxusdchf           12    -0.9106         4    -0.2993  +0.6113
+fxusdcad           21    -0.3580         4    -0.3633  -0.0053
+fxnzdusd           10    -0.2425         3    -0.8730  -0.6305
+cfdnas100usd       19    -0.7672         9    -0.9242  -0.1569
+cfdus30usd         21    -0.5352        20    -0.3505  +0.1847
+
+positive deltas 3 of 7      trade-weighted avgR: book -0.4317 -> nested -0.4748
+```
+
+**3 of 7, and the aggregate is worse with the change.** The improvement does not generalise.
+
+**The larger result is the `book avgR` column: every instrument is negative except USD/JPY at
++0.0439.** Nine instruments, two asset classes, seven months. This was never "gold is a hard case" -
+gold's -0.1728R was among the better outcomes.
+
+**Method lessons, recorded because they cost real time here.**
+
+- A chronological split is worth far less than it appears. Five attributes were split-tested and two
+  agreed by sign; under the null the expectation is 2.5. That test had almost no discriminating
+  power, was noted as such, and the finding was still treated as established because the effect size
+  looked large. Effect size on 87 in-sample trades is not protection.
+- A smooth interior optimum is not evidence against fitting. The 2:1 peak with 1.5 and 2.5 flanking
+  lower was read as hard to produce by chance. It is not.
+- Roughly 13 looks were taken at one dataset (8 attribute families, then 5 reward multiples). Finding
+  one positive combination under those conditions is unremarkable.
+- Pre-registering the generalisation threshold before the runs finished is what made this a clean
+  refutation instead of something rationalisable after the fact. Keep doing that.
+
+**Status: the Alfonso agent is correct as an implementation and unprofitable as a strategy on every
+instrument with cached data.** No further tuning is warranted without a reason to believe the
+population is different. AUD/USD failed on a snapshot-persistence error and is excluded; recovering
+it does not turn 3 of 7 into evidence.
 
 ---
 
