@@ -4036,7 +4036,7 @@ demand and supply are never observable at the same instant.
 | us30 | 1.34 | 1.29 | 79.2% | 82.0% |
 | gold | 1.23 | 1.18 | 83.3% | 87.5% |
 | silver | 1.29 | 1.23 | 80.7% | 83.4% |
-| eurusd | 1.36 | 1.40 | 82.4% | 81.6% |
+| eurusd | 1.36 | 1.40 | 83.3% | 84.9% |
 
 The inventory near price is symmetric on every instrument: nearest demand and nearest supply within
 0.1 ATR, and 79-88% of snapshots carry a zone inside 3 ATR on *both* sides. Reachable counts are
