@@ -3978,6 +3978,47 @@ Same applies to 3.33's explanation, which leaned on the same drift premise: conf
 make the asymmetry worse (2.31x -> 7.66x), which is measured, but the drift-based account of why is
 now unsupported.
 
+### 3.35 Why fill rates differ: distance, not direction - and 3.32's "symmetric intentions" is wrong (2026-09-02)
+
+Measured from the candidate log by recovering ATR as `risk / stopAtrMultiple` and matching each
+filled trade back to the placement that produced it (127 of 2,591 placements matched).
+
+**Fill rate collapses with distance from price at placement.**
+
+| distance (ATR) | demand fill | supply fill |
+|---|---|---|
+| 0-3 | 21.43% (n=98) | 35.00% (n=220) |
+| 3-6 | 5.52% (n=181) | 4.26% (n=305) |
+| 6-10 | 1.45% (n=207) | 0.33% (n=306) |
+| 10-16 | 0.47% (n=214) | 0.33% (n=300) |
+| 16-25 | 0% (n=225) | 0% (n=136) |
+| 25+ | 0% (n=287) | 0% (n=112) |
+
+Beyond ~6 ATR almost nothing fills; beyond 16 ATR nothing does. At matched distances the two sides
+are broadly comparable. Buy limits sit a median 13.29 ATR from price against 7.65 for sells (1.74x),
+while zone width is identical at 0.91 ATR on both sides, so this is not a geometry artefact.
+
+**CORRECTION to 3.32.** That section reports 1,212 buy limits against 1,379 sell limits, calls the
+intentions "near symmetric" at 0.98:1, and concludes the skew is entirely in fills. The count
+included orders that could never fill. Counting only placements within reachable distance (<= 6 ATR):
+**demand 279, supply 525 - 1.88:1 supply-heavy before any fill occurs**, against a realised 2.63:1
+trade skew. Most of the skew was in the intentions; the earlier metric counted inert orders as intent.
+
+**Mechanism, at the layer where drift does operate.** Zone *inventory*, not order flow. As price
+rises over months, demand zones formed lower survive untouched and accumulate far below price, while
+supply zones overhead are eliminated as price passes through them, so surviving supply sits nearer.
+This is an endpoint effect over months, which is why the 40-day causal drift filter in 3.34 could not
+reproduce it - and why withdrawing the drift account entirely was an over-correction. EUR/USD fits:
+the only roughly flat instrument end to end, the only one where buy limits are *closer* than sell
+limits (0.68x), and the only one with a fill ratio below 1.0 (0.89x).
+
+**What follows.** About 60% of placements sit where the fill rate is under 1.5%; they are inert and
+should not be counted as strategy behaviour. Any future measurement of intent must be distance-
+weighted or restricted to reachable zones. A cheap, testable change is to stop placing orders beyond
+the distance where fills occur at all, which would not change a single trade but would make the
+agent's intent legible; the substantive question is whether the reachable population - demand 279
+vs supply 525 - can be balanced at the zone-inventory level rather than at the order level.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,
