@@ -3941,6 +3941,43 @@ resting limit continuously. Fixed by reading the zone engine's own `State == Tes
 replay-harness error again: deriving state outside the system that owns it and getting a different
 answer.
 
+### 3.34 Trading only with the drift is refuted; and the drift explanation in 3.32 is withdrawn (2026-09-02)
+
+`--alfonso-with-drift` / `--alfonso-drift-lookback N` (default off, lookback 60). Drift is the sign
+of the top-timeframe close change over the lookback, read only from closed history, and a candidate
+whose side disagrees is dropped. Tested at 60 H4 bars (~10 days) and 240 (~40 days).
+
+**Validity check first, and it fails.** If the six instruments were in a persistent one-way drift, the
+filter should block overwhelmingly on one side. It does not: 60 bars blocked supply 7,313 / demand
+6,335 (1.15:1); 240 bars blocked supply 9,500 / demand 10,336 (**0.92:1** - more longs than shorts).
+
+| | trades | avgR | 95% CI | win | long/short | positive |
+|---|---|---|---|---|---|---|
+| baseline | 127 | -0.2394 | [-0.493, +0.015] | 23.6% | 2.63:1 | 1/6 |
+| drift 60 | 73 | -0.1266 | [-0.471, +0.217] | 26.0% | 2.17:1 | 3/6 |
+| drift 240 | 75 | **-0.3626** | **[-0.690, -0.035]** | 21.3% | **3.17:1** | 2/6 |
+
+At 240 bars it is worse on every axis, and is the only result measured this session whose CI excludes
+zero - negatively. The long/short mix became *more* short-heavy, the opposite of the intent.
+
+**Why it backfires.** A 40-day drift measure lags the zone-based trend layer and is largely redundant
+with it. Demand candidates only exist once the trend layer has already turned up, at which point a
+lagging drift measure often still reads down, so the filter preferentially blocks longs.
+
+**WITHDRAWN: the drift explanation in 3.32.** That section attributes the 2.31:1 fill asymmetry to
+drift - "in a drifting market price walks into the limits facing the drift". The asymmetry itself is
+solid and measured from the agent's own records (1,212 buy limits placed and 2.89% filled, against
+1,379 sell limits and 6.67%). The *mechanism* is not. "Five of six instruments rose" describes
+endpoints, not persistent drift: at both 10-day and 40-day horizons direction is near-balanced, and
+silver ran 63 -> 96 -> 58 inside the window. A direct causal drift filter can neither reproduce nor
+reverse the asymmetry. Treat the cause of the fill asymmetry as **unexplained**. The EUR/USD control
+(the only instrument with a fill ratio below 1.0, at 0.89x, and the only one roughly flat end to end)
+is suggestive but is a single instrument, and I over-read it.
+
+Same applies to 3.33's explanation, which leaned on the same drift premise: confirmation entry did
+make the asymmetry worse (2.31x -> 7.66x), which is measured, but the drift-based account of why is
+now unsupported.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,

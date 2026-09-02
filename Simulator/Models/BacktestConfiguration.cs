@@ -749,6 +749,12 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-confirm-entry. Enter on a close back out of the zone, not on first touch.</summary>
     public bool AlfonsoRequireReversalConfirmation { get; init; }
 
+    /// <summary>--alfonso-with-drift. Only trade the side the top-timeframe drift favours.</summary>
+    public bool AlfonsoRequireDriftAlignment { get; init; }
+
+    /// <summary>--alfonso-drift-lookback N. Top-timeframe bars used to measure drift.</summary>
+    public int AlfonsoDriftLookbackCandles { get; init; } = 60;
+
     /// <summary>
     /// Classifier options taken from the loaded model artifact. The agent's feature engine and the
     /// model must agree on groups, horizon and label geometry — defaulting them independently makes
@@ -951,6 +957,8 @@ public sealed record BacktestRequest
                     MinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
                     CandidateLogPath = AlfonsoCandidateLogPath,
                     RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
+                    RequireDriftAlignment = AlfonsoRequireDriftAlignment,
+                    DriftLookbackCandles = AlfonsoDriftLookbackCandles,
                     MinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
                     MaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
                     Zones = defaultAlfonso.Zones with

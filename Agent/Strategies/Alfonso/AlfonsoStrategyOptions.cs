@@ -150,6 +150,32 @@ public sealed record AlfonsoStrategyOptions
     /// </summary>
     public bool RequireReversalConfirmation { get; init; }
 
+    /// <summary>
+    /// Bars of top-timeframe history used to judge drift, or 0 to ignore drift entirely.
+    /// <para>
+    /// Measured causally as the sign of the change in top-timeframe close over this many bars, so it
+    /// only ever reads closed history. With <see cref="RequireDriftAlignment"/> on, only the side
+    /// that agrees with the drift may be traded.
+    /// </para>
+    /// </summary>
+    public int DriftLookbackCandles { get; init; } = 60;
+
+    /// <summary>
+    /// Whether a candidate must agree with the prevailing drift.
+    /// <para>
+    /// 3.32 established that intentions are near-symmetric while fills run 2.31:1 against us, because
+    /// a drifting market brings price to the levels facing the drift far more often. 3.33 showed that
+    /// changing the entry mechanics at the level cannot fix that - it made the asymmetry worse - so
+    /// the remaining lever is to stop placing orders on the drift-favoured side at all.
+    /// </para>
+    /// <para>
+    /// Off by default. Note this is a momentum overlay on a mean-reversion method, and the six-
+    /// instrument window it was measured on is one where five of six instruments rose, which is
+    /// exactly the sample in which such a filter flatters itself.
+    /// </para>
+    /// </summary>
+    public bool RequireDriftAlignment { get; init; }
+
     public IReadOnlySet<BarInterval> RequiredIntervals =>
         new HashSet<BarInterval> { TopInterval, MiddleInterval, LowerInterval };
 

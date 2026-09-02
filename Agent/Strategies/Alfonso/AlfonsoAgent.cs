@@ -85,6 +85,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                     continue;
 
                 state.LastCandle[role] = candle.OpenTime;
+                if (role == SequenceRole.Top)
+                    state.RecordTopClose(candle.Prices.Close, _options.DriftLookbackCandles);
                 state.Analyzer.Apply(role, new AlfonsoBar(
                     candle.OpenTime,
                     candle.Prices.Open,
@@ -183,6 +185,17 @@ public sealed class AlfonsoAgent : ITradingAgent
                     continue;
 
                 bool buy = candidate.Side == ImbalanceKind.Demand;
+
+                // Only trade the side the drift is already pushing price toward. The opposite side
+                // is the one a drifting market keeps filling and then running over.
+                if (_options.RequireDriftAlignment &&
+                    state.Drift(_options.DriftLookbackCandles) is decimal drift && drift != 0m &&
+                    (buy ? drift < 0m : drift > 0m))
+                {
+                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.Superseded);
+                    continue;
+                }
+
                 decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
                 decimal reference = zone.Proximal;
 
@@ -375,6 +388,29 @@ public sealed class AlfonsoAgent : ITradingAgent
 
     private sealed class InstrumentState
     {
+        private readonly List<decimal> _topCloses = [];
+
+        /// <summary>Keeps just enough top-timeframe history to measure drift over the lookback.</summary>
+        public void RecordTopClose(decimal close, int lookback)
+        {
+            if (lookback <= 0)
+                return;
+
+            _topCloses.Add(close);
+            int keep = lookback + 1;
+            if (_topCloses.Count > keep)
+                _topCloses.RemoveRange(0, _topCloses.Count - keep);
+        }
+
+        /// <summary>Change in top-timeframe close over the lookback, or null before enough history.</summary>
+        public decimal? Drift(int lookback)
+        {
+            if (lookback <= 0 || _topCloses.Count <= lookback)
+                return null;
+
+            return _topCloses[^1] - _topCloses[^(lookback + 1)];
+        }
+
 
         public InstrumentState(AlfonsoStrategyOptions options)
         {

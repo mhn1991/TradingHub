@@ -137,6 +137,10 @@ internal sealed record BacktestCommandOptions
     public string? AlfonsoCandidateLogPath { get; init; }
 
     public bool AlfonsoRequireReversalConfirmation { get; init; }
+
+    public bool AlfonsoRequireDriftAlignment { get; init; }
+
+    public int AlfonsoDriftLookbackCandles { get; init; } = 60;
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
     public bool AlfonsoRequireNestedEntries { get; init; }
     public bool AlfonsoRequireControlAgreement { get; init; } = true;
@@ -346,7 +350,8 @@ internal sealed record BacktestCommandOptions
                 "alfonso-nested-only" or "alfonso-ignore-control" or
                 "alfonso-confirmation-trades" or
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
-                "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or "alfonso-structural-agreement" or
+                "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
+                "alfonso-with-drift" or "alfonso-structural-agreement" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -634,6 +639,10 @@ internal sealed record BacktestCommandOptions
                 !values.ContainsKey("alfonso-no-structural-agreement"),
             AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
             AlfonsoRequireReversalConfirmation = values.ContainsKey("alfonso-confirm-entry"),
+            AlfonsoRequireDriftAlignment = values.ContainsKey("alfonso-with-drift"),
+            AlfonsoDriftLookbackCandles = ParseInt(
+                values.GetValueOrDefault("alfonso-drift-lookback"), 60, 0, 10_000,
+                "alfonso-drift-lookback"),
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
             AlfonsoRequireNestedEntries = values.ContainsKey("alfonso-nested-only"),
             AlfonsoRequireControlAgreement = !values.ContainsKey("alfonso-ignore-control"),
@@ -797,6 +806,8 @@ internal sealed record BacktestCommandOptions
         AlfonsoRequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
         AlfonsoCandidateLogPath = AlfonsoCandidateLogPath,
         AlfonsoRequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
+        AlfonsoRequireDriftAlignment = AlfonsoRequireDriftAlignment,
+        AlfonsoDriftLookbackCandles = AlfonsoDriftLookbackCandles,
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
         AlfonsoRequireNestedEntries = AlfonsoRequireNestedEntries,
         AlfonsoRequireControlAgreement = AlfonsoRequireControlAgreement,
