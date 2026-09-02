@@ -4237,6 +4237,45 @@ fill. Running at thresholds 2 and 5.
 about 12% of the loss. Sizing is fixed-quantity rather than risk-scaled, so absolute cash is small
 and would scale in both directions; avgR is the size-independent measure.
 
+### 3.41 Far placements are bad twice over; the cap beats the direct fix (2026-09-02)
+
+`--alfonso-replace-resting-atr 2` cancels a resting order when a candidate appears 2 ATR nearer,
+addressing the occupancy defect in 3.40 directly rather than working around it.
+
+| config | trades | avgR | 95% CI | win | net P&L |
+|---|---|---|---|---|---|
+| baseline | 127 | -0.2394 | [-0.493, +0.015] | 23.6% | -6,706 |
+| replace 2 ATR | 145 | -0.2245 | [-0.464, +0.015] | 23.4% | **-6,916** |
+| cap 6 | 139 | -0.1750 | [-0.418, +0.068] | 24.5% | -4,954 |
+| cap 3 | 142 | -0.1681 | [-0.409, +0.072] | 24.6% | -5,051 |
+
+Replacement confirms the mechanism - 145 trades against 127, so the slot really was being squatted -
+but avgR barely moves and net P&L is slightly *worse*. **The workaround beats the direct fix.**
+
+**Why: far placements are bad twice over.** Matching all 127 fills back to their placements and
+scoring by distance at placement:
+
+| distance | fills | avgR | win |
+|---|---|---|---|
+| 0-3 ATR | 98 | -0.1810 | 24.5% |
+| 3-6 ATR | 23 | -0.3240 | 21.7% |
+| 6-10 ATR | 4 | -0.9180 | 0.0% |
+| 10+ ATR | 2 | -0.7690 | 50.0% |
+| inside 3 | 98 | -0.1810 | |
+| beyond 3 | 29 | -0.4366 | |
+
+A far order blocks the only slot *and* loses 2.4x as much when it fills. The cap removes both harms;
+replacement removes only the blocking, leaving far orders free to fill while they wait. Two
+independent lines agree: this bucket analysis, and the monotone cap sweep (-0.168 / -0.175 / -0.210 /
+-0.239 as far placements are progressively excluded). The 6-10 and 10+ buckets hold 4 and 2 trades,
+so the weight is on 0-3 vs 3-6 and on the cap sweep.
+
+**Practical position.** `--alfonso-max-placement-atr 3` is the best configuration measured this
+session: 142 trades, avgR -0.1681, net -5,051 against the baseline's 127, -0.2394, -6,706. It is
+still losing money and still 1/6 instruments positive, and every CI overlaps the baseline, so this is
+a defect repair rather than an edge. Keep `--alfonso-replace-resting-atr` for the record but prefer
+the cap.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,
