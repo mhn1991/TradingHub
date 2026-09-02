@@ -35,6 +35,15 @@ public sealed class AlfonsoSequenceAnalyzer
     private readonly Dictionary<SequenceRole, AlfonsoTimeframeAnalyzer> _timeframes = [];
     private readonly bool _freshLevelsOnly;
     private readonly bool _confirmationEntryMode;
+    /// <summary>
+    /// ATR of the execution timeframe, set by the agent before it asks for candidates. Used only to
+    /// classify a zone as near or far when tallying; nothing about selection depends on it.
+    /// </summary>
+    public decimal? ReferenceAtr { get; set; }
+
+    /// <summary>Distance in ATR inside which a resting order has a realistic chance of filling.</summary>
+    public decimal ReachableAtr { get; set; } = 6m;
+
     private readonly AlfonsoFilterTally _demandTally = new();
     private readonly AlfonsoFilterTally _supplyTally = new();
     private readonly bool _requireControlAgreement;
@@ -165,8 +174,34 @@ public sealed class AlfonsoSequenceAnalyzer
             }
 
             IReadOnlyList<Imbalance> tradeable = timeframe.TradeableZones(side, price);
-            tally.NotTradeable +=
-                timeframe.Zones.Count(zone => zone.Kind == side) - tradeable.Count;
+
+            // Which of the three conditions inside TradeableZones removed each zone, and whether the
+            // zone was near enough to price for its removal to change anything.
+            foreach (Imbalance zone in timeframe.Zones)
+            {
+                if (zone.Kind != side)
+                    continue;
+
+                bool near = ReferenceAtr is decimal unit && unit > 0m &&
+                    Math.Abs(price - zone.Proximal) / unit <= ReachableAtr;
+
+                if (!zone.MeetsTradeabilityCriteria)
+                {
+                    if (near) tally.BarNear++; else tally.BarFar++;
+                }
+                else if (zone.State is not (ImbalanceState.Fresh or ImbalanceState.Tested))
+                {
+                    if (near) tally.StateNear++; else tally.StateFar++;
+                }
+                else if (timeframe.HasPendingTest(zone))
+                {
+                    if (near) tally.PendingNear++; else tally.PendingFar++;
+                }
+                else if (near)
+                {
+                    tally.PassedNear++;
+                }
+            }
 
             foreach (Imbalance zone in tradeable)
             {

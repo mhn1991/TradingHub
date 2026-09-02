@@ -25,8 +25,27 @@ public sealed class AlfonsoFilterTally
     /// <summary>The entry timeframe was over-extended.</summary>
     public long OverExtended { get; set; }
 
-    /// <summary>Failed the tradeability bar, or was not Fresh/Tested, or had a test pending.</summary>
-    public long NotTradeable { get; set; }
+    /// <summary>
+    /// The three conditions inside <c>TradeableZones</c>, split, and each split again by whether the
+    /// zone was near enough to price to matter. Near is what decides behaviour: fill rate runs
+    /// 21-35% inside 3 ATR and is zero beyond 16, and the whole asymmetry turned out to be that
+    /// filters remove the NEAR demand zones while passing both sides at a similar overall rate.
+    /// </summary>
+    public long BarNear { get; set; }
+
+    public long BarFar { get; set; }
+
+    public long StateNear { get; set; }
+
+    public long StateFar { get; set; }
+
+    public long PendingNear { get; set; }
+
+    public long PendingFar { get; set; }
+
+    public long PassedNear { get; set; }
+
+    public long NotTradeable => BarNear + BarFar + StateNear + StateFar + PendingNear + PendingFar;
 
     /// <summary>Nesting was required and no host zone was found.</summary>
     public long NoHost { get; set; }

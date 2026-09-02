@@ -173,6 +173,8 @@ public sealed class AlfonsoAgent : ITradingAgent
             if (!scenario.CanTrade)
                 return Observe(context, scenario.Reason);
 
+            state.Analyzer.ReferenceAtr = atr;
+            state.Analyzer.ReachableAtr = _options.ReachableDistanceAtr;
             IReadOnlyList<TradeCandidate> candidates = state.Analyzer.Candidates(bar.Prices.Close);
             if (candidates.Count == 0)
                 return Observe(context, $"{scenario.Reason} No plannable zone ahead of price.");

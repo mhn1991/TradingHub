@@ -90,6 +90,10 @@ public sealed class ImbalanceDetector
     /// Tradeable zones of one kind, nearest the given price first. This is the order the rules care
     /// about: the first level price will reach is the one that matters.
     /// </summary>
+    /// <summary>Whether this zone is sitting out a test the engine has not yet resolved.</summary>
+    public bool HasPendingTest(Imbalance zone) =>
+        zone is not null && _pendingTest.Contains(zone.BaseEnd);
+
     public IReadOnlyList<Imbalance> TradeableZones(ImbalanceKind kind, decimal price) => _zones
         .Where(zone =>
             zone.Kind == kind &&

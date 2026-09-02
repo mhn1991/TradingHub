@@ -4115,6 +4115,46 @@ splitting before that question can be answered.
 invisible to this tally, and control was disabled by `--alfonso-ignore-control` in these runs. How
 often each side is the permitted side is therefore still unmeasured.
 
+### 3.38 The three conditions split: near-zone survival is symmetric, so 3.37 is refuted (2026-09-02)
+
+`notTradeable` split into its three actual conditions - the tradeability bar (`MeetsTradeabilityCriteria`),
+the Fresh/Tested state check, and the pending-test exclusion - each further split by whether the zone
+was within 6 ATR of price. Six instruments, Lower timeframe, cumulative.
+
+| near condition (<= 6 ATR) | demand | supply | D:S |
+|---|---|---|---|
+| barNear | 19,974 | 32,644 | 0.61 |
+| stateNear | 415 | 659 | 0.63 |
+| pendingNear | 162 | 284 | 0.57 |
+| passedNear | 4,941 | 9,288 | 0.53 |
+| **near survival rate** | **19.38%** | **21.66%** | |
+
+**REFUTES 3.37.** That section concluded the filters "disproportionately remove the near demand
+zones". They do not: near survival is 19.38% against 21.66%, within 2.3 points, and each of the three
+conditions removes *supply* more in absolute terms. The explanation was wrong.
+
+**Confound in this instrumentation, stated so the counts are not over-read.** `Candidates` only runs
+for the side the prevailing scenario permits, so these totals are summed over calls where that side
+was active. The near-total ratio of 0.59 therefore mixes "how many near zones exist" with "how often
+this side was active" and cannot support any claim about zone availability. Only the survival
+*rates* are valid, because numerator and denominator share the conditioning. A per-bar rather than
+per-call tally would be needed to compare availability.
+
+**The one clean signal** is in the far zones: `barFar` demand 208,669 against supply 138,107, 1.51x.
+Demand zones far from price fail the tradeability bar substantially more. Far zones never fill, so
+this explains nothing about behaviour, but it is consistent with the large stranded-demand inventory
+seen in 3.36.
+
+**Status of the chain.** Measured and standing: fill rate collapses with distance (3.35); nearest
+qualifying demand zone sits at 13.29 ATR against supply's 7.65 (3.35); live inventory near price is
+symmetric (3.36); near-zone survival through the tradeability filters is symmetric (this section).
+Those four cannot all be true unless something between them is being mismeasured - symmetric near
+inventory plus symmetric near survival should give symmetric nearest-qualifying distance, and it does
+not. The most likely suspect is the 13.29 / 7.65 figure itself, which was derived from placement
+distances in the candidate log and is conditioned on the scenario side in a way the inventory
+measurement is not. **The mechanism is unexplained; do not build on any of the discarded accounts in
+3.32, 3.35, 3.36 or 3.37.**
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,

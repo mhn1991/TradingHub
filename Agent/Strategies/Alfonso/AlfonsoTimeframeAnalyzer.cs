@@ -54,6 +54,9 @@ public sealed class AlfonsoTimeframeAnalyzer
     public IReadOnlyList<Imbalance> TradeableZones(ImbalanceKind kind, decimal price) =>
         _zones.TradeableZones(kind, price);
 
+    /// <summary>Whether this zone is sitting out a test the engine has not yet resolved.</summary>
+    public bool HasPendingTest(Imbalance zone) => _zones.HasPendingTest(zone);
+
     /// <summary>
     /// Applies one CLOSED candle of this timeframe.
     /// <para>

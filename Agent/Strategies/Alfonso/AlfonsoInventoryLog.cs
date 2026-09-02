@@ -41,7 +41,8 @@ public static class AlfonsoInventoryLog
         private const string Header =
             "at,instrument,role,kind,liveZones,reachable,medianDistanceAtr,nearestDistanceAtr,price,atr," +
             "scenarioBlocked,rangeBlocked,controlBlocked,overExtended,notTradeable,noHost," +
-            "notAccepted,notLive,noRoom,passed";
+            "notAccepted,notLive,noRoom,passed," +
+            "barNear,barFar,stateNear,stateFar,pendingNear,pendingFar,passedNear";
 
         private readonly Lock _gate = new();
         private readonly StreamWriter _writer;
@@ -79,7 +80,14 @@ public static class AlfonsoInventoryLog
                 Count(snapshot.Filters?.NotAccepted),
                 Count(snapshot.Filters?.NotLive),
                 Count(snapshot.Filters?.NoRoom),
-                Count(snapshot.Filters?.Passed));
+                Count(snapshot.Filters?.Passed),
+                Count(snapshot.Filters?.BarNear),
+                Count(snapshot.Filters?.BarFar),
+                Count(snapshot.Filters?.StateNear),
+                Count(snapshot.Filters?.StateFar),
+                Count(snapshot.Filters?.PendingNear),
+                Count(snapshot.Filters?.PendingFar),
+                Count(snapshot.Filters?.PassedNear));
 
             lock (_gate)
             {
