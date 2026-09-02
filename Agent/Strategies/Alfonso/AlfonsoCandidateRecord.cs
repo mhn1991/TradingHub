@@ -15,6 +15,9 @@ public enum CandidateOutcome
     /// <summary>Price had not reached the proximal line yet, so the order would not have filled.</summary>
     NotReached,
 
+    /// <summary>Further from price than orders are ever filled at.</summary>
+    TooFarToFill,
+
     /// <summary>Fresh-level rule, without a confirmation to admit it.</summary>
     NotFresh,
 

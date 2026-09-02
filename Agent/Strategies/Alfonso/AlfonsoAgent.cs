@@ -145,12 +145,41 @@ public sealed class AlfonsoAgent : ITradingAgent
                 if (state.PendingOrder is not ZoneOrderKey planned)
                     return Observe(context, "A resting order already owns the next entry.");
 
-                bool stillValid = scenario.CanTrade && state.Analyzer.Candidates(bar.Prices.Close)
-                    .Any(candidate =>
-                        Key(candidate) == planned &&
-                        IsAheadOfPrice(candidate.Side, candidate.Zone.Proximal, bar.Prices.Close));
-                if (stillValid)
+                IReadOnlyList<TradeCandidate> live = state.Analyzer.Candidates(bar.Prices.Close);
+                TradeCandidate? held = live.FirstOrDefault(candidate =>
+                    Key(candidate) == planned &&
+                    IsAheadOfPrice(candidate.Side, candidate.Zone.Proximal, bar.Prices.Close));
+
+                if (held is not null)
+                {
+                    // Candidates arrive sorted by distance, so the first is the best available now.
+                    // Holding a far commitment while a much nearer level is on offer is what leaves
+                    // the only order slot occupied by something that will not fill.
+                    if (_options.RestingOrderReplacementAtr > 0m &&
+                        atr is decimal unit && unit > 0m &&
+                        live.Count > 0)
+                    {
+                        decimal heldAway = Math.Abs(bar.Prices.Close - held.Zone.Proximal);
+                        decimal bestAway = Math.Abs(bar.Prices.Close - live[0].Zone.Proximal);
+                        if ((heldAway - bestAway) / unit >= _options.RestingOrderReplacementAtr)
+                        {
+                            state.PendingOrder = null;
+                            return Task.FromResult(new AgentDecision
+                            {
+                                Action = AgentAction.Cancel,
+                                Instrument = context.Instrument,
+                                BrokerOrderId = restingOrder.BrokerOrderId,
+                                CreatedAt = context.Timestamp,
+                                Confidence = 0m,
+                                Reason =
+                                    $"A level {(heldAway - bestAway) / unit:F1} ATR nearer is available; " +
+                                    "releasing the slot rather than holding a commitment that will not fill."
+                            });
+                        }
+                    }
+
                     return Observe(context, "The pre-planned limit remains valid and is awaiting its first touch.");
+                }
 
                 // Module 11 requires the plan to define conditions that cancel a pending trade and
                 // says set-and-forget entries remain available only while trend/realignment still
@@ -208,6 +237,15 @@ public sealed class AlfonsoAgent : ITradingAgent
                     (buy ? drift < 0m : drift > 0m))
                 {
                     LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.Superseded);
+                    continue;
+                }
+
+                if (_options.MaximumPlacementDistanceAtr > 0m &&
+                    atr is decimal reach && reach > 0m &&
+                    Math.Abs(bar.Prices.Close - zone.Proximal) / reach >
+                        _options.MaximumPlacementDistanceAtr)
+                {
+                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.TooFarToFill);
                     continue;
                 }
 

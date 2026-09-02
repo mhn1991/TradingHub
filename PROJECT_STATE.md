@@ -4193,6 +4193,50 @@ single control reading it was over-read from in 3.35.
 path is conditioned on which side the scenario permits, and can never be compared against one taken
 from the zone engine. Measure both sides unconditionally, per bar, or do not compare.
 
+### 3.40 A resting order squats the only slot: tighter placement caps produce MORE trades (2026-09-02)
+
+`--alfonso-max-placement-atr N` refuses to rest an order further than N ATR from price. Predicted
+from the measured fill curve (3.35): a cap at 16 should change nothing at all, since zero fills were
+observed beyond 16 ATR over 2,591 placements; caps at 6 and 3 should cut trades to about 121 and 98.
+
+| config | trades | avgR | 95% CI | win | net P&L | predicted |
+|---|---|---|---|---|---|---|
+| baseline | 127 | -0.2394 | [-0.493, +0.015] | 23.6% | -6,706 | - |
+| cap 16 | 131 | -0.2104 | [-0.466, +0.045] | 24.4% | -5,873 | 127 |
+| cap 6 | 139 | -0.1750 | [-0.418, +0.068] | 24.5% | -4,954 | ~121 |
+| cap 3 | 142 | -0.1681 | [-0.409, +0.072] | 24.6% | -5,051 | ~98 |
+
+**Every prediction was wrong in the same direction.** Trade counts rose monotonically as the cap
+tightened, 131 -> 139 -> 142, where a filter can only ever reduce them. Refusing to place any order
+beyond 3 ATR yields 15 more trades than placing them anywhere.
+
+**Cause: order-slot occupancy.** The agent rests one order per instrument and holds it while
+`stillValid` finds the *same* zone still a candidate ahead of price
+(`AlfonsoAgent.cs`, the `restingOrder is not null` branch). A far zone stays valid for a long time -
+price rarely reaches it and it survives until its distal breaks - so a far order squats the only slot
+and blocks nearer levels that appear later. Every far placement refused frees the slot for one that
+can fill. Three thresholds moving monotonically is much stronger evidence than the single cap-16
+anomaly that first suggested it.
+
+**Economics unchanged.** avgR improves -0.2394 -> -0.1681 and the net loss falls from -6,706 to about
+-5,000, but all four CIs overlap heavily, positive instruments stay at 1/6, and win rate moves 1
+point. The mechanism is established; profitability is not.
+
+**Consequence for 3.35.** Its fill-rate-by-distance curve was measured over placements whose
+distances were partly determined by which order happened to hold the slot, not purely by where zones
+sit. The shape (fill rate collapsing with distance) is not in doubt, but the bucket populations are
+partly an artefact of this defect.
+
+**Direct fix implemented, not yet measured:** `--alfonso-replace-resting-atr N` cancels a resting
+order when a candidate appears N ATR nearer, releasing the slot rather than refusing far placements
+outright. That should capture the same benefit without discarding the far setups that do occasionally
+fill. Running at thresholds 2 and 5.
+
+**Cash context.** Baseline over 8 months, six instruments, $100k each and a fixed 1 unit per trade:
+-6,706 total, -1.12% on $600k deployed, with gold the only winner at +2,518. Commission was 787,
+about 12% of the loss. Sizing is fixed-quantity rather than risk-scaled, so absolute cash is small
+and would scale in both directions; avgR is the size-independent measure.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,

@@ -143,6 +143,34 @@ public sealed record AlfonsoStrategyOptions
     public decimal ReachableDistanceAtr { get; init; } = 6m;
 
     /// <summary>
+    /// Maximum distance from price, in ATR, at which an order will be placed. 0 places at any
+    /// distance, which is the behaviour every result before 2026-09-02 was measured under.
+    /// <para>
+    /// Fill probability measured against distance at placement: 21-35% inside 3 ATR, about 5% at
+    /// 3-6, under 1.5% beyond 6, and exactly zero beyond 16 over 2,591 placements. Roughly 60% of
+    /// orders sit where fills effectively never happen; they trade nothing and make the agent's
+    /// intent unreadable, since counting them is what produced the false claim that its intentions
+    /// were symmetric. A cap at 16 should therefore change no trade at all.
+    /// </para>
+    /// </summary>
+    public decimal MaximumPlacementDistanceAtr { get; init; }
+
+    /// <summary>
+    /// Cancel a resting order when a candidate appears this many ATR nearer to price, so the nearer
+    /// one can be taken instead. 0 keeps the original behaviour of holding the first commitment.
+    /// <para>
+    /// The agent rests one order per instrument and holds it while its zone remains a valid
+    /// candidate ahead of price. A zone far from price stays valid for a long time - price rarely
+    /// reaches it, and it lives until its distal breaks - so a far order squats the only slot and
+    /// blocks nearer opportunities that appear later. This was found by accident: capping placement
+    /// distance at 16 ATR was predicted to be a no-op, because zero fills were measured beyond 16,
+    /// and instead it INCREASED trade counts on three of five instruments. Removing far candidates
+    /// cannot create trades unless a far order was blocking a nearer one.
+    /// </para>
+    /// </summary>
+    public decimal RestingOrderReplacementAtr { get; init; }
+
+    /// <summary>
     /// Whether an entry waits for the level to prove it held, instead of resting a limit at the
     /// proximal that fills on first touch.
     /// <para>

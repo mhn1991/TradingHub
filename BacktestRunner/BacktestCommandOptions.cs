@@ -138,6 +138,10 @@ internal sealed record BacktestCommandOptions
 
     public string? AlfonsoInventoryLogPath { get; init; }
 
+    public decimal AlfonsoMaximumPlacementDistanceAtr { get; init; }
+
+    public decimal AlfonsoRestingOrderReplacementAtr { get; init; }
+
     public bool AlfonsoRequireReversalConfirmation { get; init; }
 
     public bool AlfonsoRequireDriftAlignment { get; init; }
@@ -641,6 +645,12 @@ internal sealed record BacktestCommandOptions
                 !values.ContainsKey("alfonso-no-structural-agreement"),
             AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
             AlfonsoInventoryLogPath = values.GetValueOrDefault("alfonso-inventory-log"),
+            AlfonsoMaximumPlacementDistanceAtr = ParseDecimal(
+                values.GetValueOrDefault("alfonso-max-placement-atr"), 0m, 0m,
+                "alfonso-max-placement-atr", allowZero: true),
+            AlfonsoRestingOrderReplacementAtr = ParseDecimal(
+                values.GetValueOrDefault("alfonso-replace-resting-atr"), 0m, 0m,
+                "alfonso-replace-resting-atr", allowZero: true),
             AlfonsoRequireReversalConfirmation = values.ContainsKey("alfonso-confirm-entry"),
             AlfonsoRequireDriftAlignment = values.ContainsKey("alfonso-with-drift"),
             AlfonsoDriftLookbackCandles = ParseInt(
@@ -809,6 +819,8 @@ internal sealed record BacktestCommandOptions
         AlfonsoRequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
         AlfonsoCandidateLogPath = AlfonsoCandidateLogPath,
         AlfonsoInventoryLogPath = AlfonsoInventoryLogPath,
+        AlfonsoMaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
+        AlfonsoRestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
         AlfonsoRequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
         AlfonsoRequireDriftAlignment = AlfonsoRequireDriftAlignment,
         AlfonsoDriftLookbackCandles = AlfonsoDriftLookbackCandles,
