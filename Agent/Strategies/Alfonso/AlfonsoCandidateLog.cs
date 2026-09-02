@@ -73,13 +73,13 @@ public static class AlfonsoCandidateLog
             ArgumentNullException.ThrowIfNull(record);
             string line = string.Join(',',
                 record.At.ToString("O", CultureInfo.InvariantCulture),
-                record.Instrument.ToString(),
-                record.Outcome,
-                record.Side,
-                record.EntryTimeframe,
-                Text(record.TopTrend),
-                Text(record.MiddleTrend),
-                Text(record.LowerTrend),
+                Quote(record.Instrument.ToString()),
+                Quote(record.Outcome.ToString()),
+                Quote(record.Side.ToString()),
+                Quote(record.EntryTimeframe.ToString()),
+                Quote(Text(record.TopTrend)),
+                Quote(Text(record.MiddleTrend)),
+                Quote(Text(record.LowerTrend)),
                 Number(record.Proximal),
                 Number(record.Distal),
                 Number(record.Stop),
@@ -88,9 +88,12 @@ public static class AlfonsoCandidateLog
                 Number(record.MarketPrice),
                 record.Nested,
                 record.IsContinuationPattern,
-                record.State,
-                record.Strength,
-                record.Accomplished,
+                Quote(record.State.ToString()),
+                Quote(record.Strength.ToString()),
+                // Accomplishment is a [Flags] enum: a combined value renders as "A, B", whose comma
+                // silently shifted every later column by one and made costToRisk, stopAtrMultiple and
+                // atrPercentile read as garbage (percentiles above 1). Quote every text field.
+                Quote(record.Accomplished.ToString()),
                 Number(record.ImpulseToBaseRatio),
                 Number(record.ImpulseDisplacement),
                 record.BaseCandleCount.ToString(CultureInfo.InvariantCulture),
@@ -113,7 +116,7 @@ public static class AlfonsoCandidateLog
 
         private static string Number(decimal value) => value.ToString(CultureInfo.InvariantCulture);
 
-        /// <summary>Scenario text contains commas, so it is the one field that needs quoting.</summary>
+        /// <summary>Quotes any field that could contain a comma - which is every text field.</summary>
         private static string Quote(string value) =>
             $"\"{(value ?? string.Empty).Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
