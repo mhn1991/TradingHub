@@ -146,14 +146,26 @@ public sealed record AlfonsoStrategyOptions
     /// Maximum distance from price, in ATR, at which an order will be placed. 0 places at any
     /// distance, which is the behaviour every result before 2026-09-02 was measured under.
     /// <para>
-    /// Fill probability measured against distance at placement: 21-35% inside 3 ATR, about 5% at
-    /// 3-6, under 1.5% beyond 6, and exactly zero beyond 16 over 2,591 placements. Roughly 60% of
-    /// orders sit where fills effectively never happen; they trade nothing and make the agent's
-    /// intent unreadable, since counting them is what produced the false claim that its intentions
-    /// were symmetric. A cap at 16 should therefore change no trade at all.
+    /// Default 3 as of 2026-09-02. A far order costs twice over. It squats the single order slot -
+    /// the agent rests one order per instrument and holds it while that zone stays a valid candidate
+    /// ahead of price, and a far zone stays valid a long time - and it loses more when it does fill.
+    /// Matching all 127 baseline fills back to their placements: inside 3 ATR avgR -0.1810, beyond
+    /// 3 ATR -0.4366.
+    /// </para>
+    /// <para>
+    /// Measured over six instruments: baseline 127 trades at -0.2394 and -6,706; cap 6 gives 139 at
+    /// -0.1750 and -4,954; cap 3 gives 142 at -0.1681 and -5,051. Note the trade count RISES as the
+    /// cap tightens, which a filter cannot do - that is the freed slot, and it is how the occupancy
+    /// defect was found. Releasing the slot instead of refusing the order
+    /// (<see cref="RestingOrderReplacementAtr"/>) recovers only about a fifth of the gain, because
+    /// blocking is the smaller of the two harms.
+    /// </para>
+    /// <para>
+    /// This is a defect repair, not an edge: every configuration leaves 1 of 6 instruments positive
+    /// and every confidence interval overlaps the baseline. Set 0 to restore the old behaviour.
     /// </para>
     /// </summary>
-    public decimal MaximumPlacementDistanceAtr { get; init; }
+    public decimal MaximumPlacementDistanceAtr { get; init; } = 3m;
 
     /// <summary>
     /// Cancel a resting order when a candidate appears this many ATR nearer to price, so the nearer

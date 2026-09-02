@@ -231,6 +231,21 @@ public sealed class AlfonsoAgentTests
     // ---- fixtures -----------------------------------------------------------------------------
 
     [Test]
+    public void OrdersAreNotRestedBeyondThreeAtrByDefault()
+    {
+        // Default set 2026-09-02. A far order costs twice: it squats the single order slot, and it
+        // loses more when it fills (inside 3 ATR avgR -0.1810, beyond -0.4366 over 127 fills).
+        // Six instruments: baseline 127 trades at -0.2394, cap 3 gives 142 at -0.1681. The count
+        // RISING as the cap tightens is what a filter cannot do, and is how the defect was found.
+        // Fails if the default is changed without a decision. 0 restores the old behaviour.
+        Assert.That(new AlfonsoStrategyOptions().MaximumPlacementDistanceAtr, Is.EqualTo(3m));
+        Assert.That(
+            new AlfonsoStrategyOptions { MaximumPlacementDistanceAtr = 0m }.MaximumPlacementDistanceAtr,
+            Is.Zero,
+            "zero must remain available as the opt-out, since every result before this default was measured under it");
+    }
+
+    [Test]
     public void SetAndForgetEntryIsTheDefaultAndConfirmationIsOptIn()
     {
         // The book's premise is a resting limit at the proximal. Confirmation entry departs from it

@@ -138,7 +138,7 @@ internal sealed record BacktestCommandOptions
 
     public string? AlfonsoInventoryLogPath { get; init; }
 
-    public decimal AlfonsoMaximumPlacementDistanceAtr { get; init; }
+    public decimal AlfonsoMaximumPlacementDistanceAtr { get; init; } = 3m;
 
     public decimal AlfonsoRestingOrderReplacementAtr { get; init; }
 
@@ -646,7 +646,7 @@ internal sealed record BacktestCommandOptions
             AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
             AlfonsoInventoryLogPath = values.GetValueOrDefault("alfonso-inventory-log"),
             AlfonsoMaximumPlacementDistanceAtr = ParseDecimal(
-                values.GetValueOrDefault("alfonso-max-placement-atr"), 0m, 0m,
+                values.GetValueOrDefault("alfonso-max-placement-atr"), 3m, 0m,
                 "alfonso-max-placement-atr", allowZero: true),
             AlfonsoRestingOrderReplacementAtr = ParseDecimal(
                 values.GetValueOrDefault("alfonso-replace-resting-atr"), 0m, 0m,

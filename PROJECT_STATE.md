@@ -4270,6 +4270,12 @@ independent lines agree: this bucket analysis, and the monotone cap sweep (-0.16
 -0.239 as far placements are progressively excluded). The 6-10 and 10+ buckets hold 4 and 2 trades,
 so the weight is on 0-3 vs 3-6 and on the cap sweep.
 
+**Adopted as the default 2026-09-02** (`MaximumPlacementDistanceAtr = 3m`), verified end to end: a
+run with no flag reproduces the explicit cap-3 arm exactly on gold (37 trades, +0.2341, +3,095)
+against the old baseline's 32, +0.2181, +2,518. `--alfonso-max-placement-atr 0` restores the previous
+behaviour, which every result before this date was measured under.
+`AlfonsoAgentTests.OrdersAreNotRestedBeyondThreeAtrByDefault` pins both the default and the opt-out.
+
 **Practical position.** `--alfonso-max-placement-atr 3` is the best configuration measured this
 session: 142 trades, avgR -0.1681, net -5,051 against the baseline's 127, -0.2394, -6,706. It is
 still losing money and still 1/6 instruments positive, and every CI overlaps the baseline, so this is

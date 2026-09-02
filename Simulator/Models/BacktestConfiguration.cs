@@ -749,8 +749,11 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-inventory-log PATH. Zone-inventory snapshots, or null for none.</summary>
     public string? AlfonsoInventoryLogPath { get; init; }
 
-    /// <summary>--alfonso-max-placement-atr N. Do not rest orders further than N ATR from price.</summary>
-    public decimal AlfonsoMaximumPlacementDistanceAtr { get; init; }
+    /// <summary>
+    /// --alfonso-max-placement-atr N. Do not rest orders further than N ATR from price; 0 disables.
+    /// Default 3 - see AlfonsoStrategyOptions for the measurements.
+    /// </summary>
+    public decimal AlfonsoMaximumPlacementDistanceAtr { get; init; } = 3m;
 
     /// <summary>--alfonso-replace-resting-atr N. Release the slot when a level N ATR nearer appears.</summary>
     public decimal AlfonsoRestingOrderReplacementAtr { get; init; }
