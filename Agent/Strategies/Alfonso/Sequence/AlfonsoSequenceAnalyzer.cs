@@ -90,6 +90,15 @@ public sealed class AlfonsoSequenceAnalyzer
     /// <summary>Live zones on one timeframe, for inventory measurement.</summary>
     public IReadOnlyList<Imbalance> ZonesOf(SequenceRole role) => _timeframes[role].Zones;
 
+    /// <summary>
+    /// Zones on one timeframe that clear the tradeability conditions, for either side, without
+    /// consulting the prevailing scenario. The candidate path can only ever see the permitted side,
+    /// which is the conditioning that makes placement-derived distances unsafe to compare.
+    /// </summary>
+    public IReadOnlyList<Imbalance> TradeableZonesOf(
+        SequenceRole role, ImbalanceKind kind, decimal price) =>
+        _timeframes[role].TradeableZones(kind, price);
+
     /// <summary>Cumulative record of which gate discarded each zone, for one side.</summary>
     public AlfonsoFilterTally TallyOf(ImbalanceKind kind) =>
         kind == ImbalanceKind.Demand ? _demandTally : _supplyTally;

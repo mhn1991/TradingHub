@@ -39,7 +39,8 @@ public static class AlfonsoInventoryLog
     private sealed class Writer : IDisposable
     {
         private const string Header =
-            "at,instrument,role,kind,liveZones,reachable,medianDistanceAtr,nearestDistanceAtr,price,atr," +
+            "at,instrument,role,kind,liveZones,reachable,qualifying,nearestQualifyingAtr," +
+            "medianDistanceAtr,nearestDistanceAtr,price,atr," +
             "scenarioBlocked,rangeBlocked,controlBlocked,overExtended,notTradeable,noHost," +
             "notAccepted,notLive,noRoom,passed," +
             "barNear,barFar,stateNear,stateFar,pendingNear,pendingFar,passedNear";
@@ -67,6 +68,8 @@ public static class AlfonsoInventoryLog
                 Quote(snapshot.Kind.ToString()),
                 snapshot.LiveZones.ToString(CultureInfo.InvariantCulture),
                 snapshot.Reachable.ToString(CultureInfo.InvariantCulture),
+                snapshot.Qualifying.ToString(CultureInfo.InvariantCulture),
+                Number(snapshot.NearestQualifyingAtr),
                 Number(snapshot.MedianDistanceAtr),
                 Number(snapshot.NearestDistanceAtr),
                 Number(snapshot.Price),

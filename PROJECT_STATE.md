@@ -4155,6 +4155,44 @@ distances in the candidate log and is conditioned on the scenario side in a way 
 measurement is not. **The mechanism is unexplained; do not build on any of the discarded accounts in
 3.32, 3.35, 3.36 or 3.37.**
 
+### 3.39 RESOLVED: the fill asymmetry is a chain of mild asymmetries through a convex fill curve (2026-09-02)
+
+The distance figure re-derived per bar and unconditionally, by recording the nearest *qualifying*
+zone for BOTH sides every top bar regardless of which side the scenario permits
+(`AlfonsoSequenceAnalyzer.TradeableZonesOf`). This removes the conditioning that made every
+candidate-log-derived quantity incomparable with engine-derived ones.
+
+| step (per bar, unconditional) | demand | supply | ratio |
+|---|---|---|---|
+| bars with a live zone within 6 ATR | 4,686 | 4,374 | 1.07 |
+| of those, a *qualifying* zone within 6 ATR | 43.2% | 48.1% | 1.11x |
+| nearest qualifying zone | 7.28 ATR | 5.31 ATR | 1.37x |
+| fill rate (3.35) | 2.89% | 6.67% | 2.31x |
+
+**The mechanism is amplification, not a lopsided gate.** Every individual asymmetry is mild - 1.07x
+in inventory, 1.11x in surviving the tradeability conditions, 1.37x in distance. The distance-to-fill
+curve is steeply convex (21-35% inside 3 ATR, under 1.5% beyond 6, zero beyond 16), so a 1.37x
+distance difference becomes a 2.31x fill difference. No single filter or market effect is responsible,
+which is why four successive single-cause explanations (3.32 drift, 3.35 zone stranding, 3.36
+filter bias, 3.37 near-zone removal) each failed.
+
+**CORRECTION to 3.35.** Its distance figure of demand 13.29 ATR against supply 7.65 (1.74x) was
+derived from placements in the candidate log and is inflated about 27% by scenario conditioning. The
+unconditional values are 7.28 and 5.31, ratio 1.37x. Direction and substance hold; magnitude did not.
+
+**3.38 partially rehabilitated.** Its absolute survival rates (19.38% / 21.66%) were distorted by the
+per-call conditioning, but its *ratio* of 1.12x matches the clean per-bar 1.11x. Its conclusion - that
+the tradeability conditions do not disproportionately remove near demand zones - stands.
+
+**Internal validation.** EUR/USD inverts on all three measures independently: survival 57.7% demand
+against 47.7% supply, distance ratio 0.83x, fill ratio 0.89x. It is the only instrument roughly flat
+end to end. Three independent inversions on the same instrument is considerably stronger than the
+single control reading it was over-read from in 3.35.
+
+**Methodological rule this cost eight measurements to learn.** Any quantity taken from the candidate
+path is conditioned on which side the scenario permits, and can never be compared against one taken
+from the zone engine. Measure both sides unconditionally, per bar, or do not compare.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,

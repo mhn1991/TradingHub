@@ -362,6 +362,16 @@ public sealed class AlfonsoAgent : ITradingAgent
                         distances.Add(Math.Abs(price - zone.Proximal) / unit);
                 }
 
+                // The same measurement for zones that would actually be eligible, evaluated for
+                // BOTH sides so it is not conditioned on which side the scenario happens to permit.
+                List<decimal> qualifying = [];
+                foreach (Imbalance zone in state.Analyzer.TradeableZonesOf(role, kind, price))
+                {
+                    if (atr is decimal q && q > 0m)
+                        qualifying.Add(Math.Abs(price - zone.Proximal) / q);
+                }
+
+                qualifying.Sort();
                 distances.Sort();
                 _inventorySink(new AlfonsoInventorySnapshot
                 {
@@ -371,6 +381,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                     Kind = kind,
                     LiveZones = live,
                     Reachable = distances.Count(d => d <= _options.ReachableDistanceAtr),
+                    Qualifying = qualifying.Count,
+                    NearestQualifyingAtr = qualifying.Count == 0 ? null : qualifying[0],
                     MedianDistanceAtr = distances.Count == 0 ? null : distances[distances.Count / 2],
                     NearestDistanceAtr = distances.Count == 0 ? null : distances[0],
                     Price = price,

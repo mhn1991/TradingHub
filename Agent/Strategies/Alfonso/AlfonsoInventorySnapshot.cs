@@ -18,6 +18,12 @@ public sealed record AlfonsoInventorySnapshot
     /// <summary>Of those, how many sit within the distance where fills actually occur.</summary>
     public required int Reachable { get; init; }
 
+    /// <summary>Zones clearing the tradeability conditions on this side, scenario ignored.</summary>
+    public int Qualifying { get; init; }
+
+    /// <summary>Distance to the nearest qualifying zone - what an order would actually be placed at.</summary>
+    public decimal? NearestQualifyingAtr { get; init; }
+
     public decimal? MedianDistanceAtr { get; init; }
     public decimal? NearestDistanceAtr { get; init; }
     public required decimal Price { get; init; }
