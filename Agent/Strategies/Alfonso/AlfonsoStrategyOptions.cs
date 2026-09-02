@@ -130,6 +130,19 @@ public sealed record AlfonsoStrategyOptions
     public string? CandidateLogPath { get; init; }
 
     /// <summary>
+    /// CSV path for periodic zone-inventory snapshots, or null to log nothing. Set by
+    /// --alfonso-inventory-log. Written once per top-timeframe bar.
+    /// </summary>
+    public string? InventoryLogPath { get; init; }
+
+    /// <summary>
+    /// Distance from price, in ATR, inside which a resting order has a realistic chance of filling.
+    /// Used only to label inventory snapshots. Measured fill rates: 21-35% inside 3 ATR, ~5% at 3-6,
+    /// under 1.5% beyond 6, zero beyond 16.
+    /// </summary>
+    public decimal ReachableDistanceAtr { get; init; } = 6m;
+
+    /// <summary>
     /// Whether an entry waits for the level to prove it held, instead of resting a limit at the
     /// proximal that fills on first touch.
     /// <para>

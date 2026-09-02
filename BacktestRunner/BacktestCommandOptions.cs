@@ -136,6 +136,8 @@ internal sealed record BacktestCommandOptions
 
     public string? AlfonsoCandidateLogPath { get; init; }
 
+    public string? AlfonsoInventoryLogPath { get; init; }
+
     public bool AlfonsoRequireReversalConfirmation { get; init; }
 
     public bool AlfonsoRequireDriftAlignment { get; init; }
@@ -638,6 +640,7 @@ internal sealed record BacktestCommandOptions
                 values.ContainsKey("alfonso-structural-agreement") &&
                 !values.ContainsKey("alfonso-no-structural-agreement"),
             AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
+            AlfonsoInventoryLogPath = values.GetValueOrDefault("alfonso-inventory-log"),
             AlfonsoRequireReversalConfirmation = values.ContainsKey("alfonso-confirm-entry"),
             AlfonsoRequireDriftAlignment = values.ContainsKey("alfonso-with-drift"),
             AlfonsoDriftLookbackCandles = ParseInt(
@@ -805,6 +808,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoRequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
         AlfonsoRequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
         AlfonsoCandidateLogPath = AlfonsoCandidateLogPath,
+        AlfonsoInventoryLogPath = AlfonsoInventoryLogPath,
         AlfonsoRequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
         AlfonsoRequireDriftAlignment = AlfonsoRequireDriftAlignment,
         AlfonsoDriftLookbackCandles = AlfonsoDriftLookbackCandles,

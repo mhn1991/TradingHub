@@ -31,17 +31,23 @@ public sealed class AlfonsoAgent : ITradingAgent
     private readonly ConcurrentDictionary<InstrumentKey, InstrumentState> _state = new();
 
     private readonly Action<AlfonsoCandidateRecord>? _candidateSink;
+    private readonly Action<AlfonsoInventorySnapshot>? _inventorySink;
 
     /// <param name="options">Strategy configuration; defaults are the course's own values.</param>
     /// <param name="candidateSink">
     /// Optional observer of every candidate considered, including rejected ones. Null by default so
     /// production behaviour and cost are untouched; research harnesses pass a writer.
     /// </param>
+    /// <param name="inventorySink">
+    /// Optional sink for periodic zone-inventory snapshots. Null disables the measurement entirely.
+    /// </param>
     public AlfonsoAgent(
         AlfonsoStrategyOptions? options = null,
-        Action<AlfonsoCandidateRecord>? candidateSink = null)
+        Action<AlfonsoCandidateRecord>? candidateSink = null,
+        Action<AlfonsoInventorySnapshot>? inventorySink = null)
     {
         _candidateSink = candidateSink;
+        _inventorySink = inventorySink;
         _options = options ?? new AlfonsoStrategyOptions();
         _options.Validate();
         RequiredIntervals = _options.RequiredIntervals;
@@ -75,6 +81,7 @@ public sealed class AlfonsoAgent : ITradingAgent
             // another timeframe's bars turns it into a copy of that timeframe and it silently stops
             // disagreeing - the failure that made three gate configurations produce byte-identical
             // results in this repo before.
+            bool topBarClosed = false;
             foreach ((SequenceRole role, BarInterval interval) in state.Intervals)
             {
                 if (!context.Analysis.TryGet(interval, out AnalysisSnapshot snapshot))
@@ -86,7 +93,10 @@ public sealed class AlfonsoAgent : ITradingAgent
 
                 state.LastCandle[role] = candle.OpenTime;
                 if (role == SequenceRole.Top)
+                {
                     state.RecordTopClose(candle.Prices.Close, _options.DriftLookbackCandles);
+                    topBarClosed = true;
+                }
                 state.Analyzer.Apply(role, new AlfonsoBar(
                     candle.OpenTime,
                     candle.Prices.Open,
@@ -120,6 +130,9 @@ public sealed class AlfonsoAgent : ITradingAgent
             decimal? atr = trigger.Indicators.Atr;
             if (atr is decimal sample && sample > 0m)
                 state.RecordAtr(sample);
+
+            if (topBarClosed)
+                RecordInventory(context, state, bar.Prices.Close, atr);
 
             decimal? atrPercentile = state.AtrPercentile(atr);
             bool atrRegimeOk = atrPercentile is not decimal band ||
@@ -311,6 +324,57 @@ public sealed class AlfonsoAgent : ITradingAgent
 
             return Observe(context,
                 $"{scenario.Reason} {candidates.Count} zone(s) considered; none can take a new resting order.");
+        }
+    }
+
+    /// <summary>
+    /// Snapshots how many zones are live per timeframe and side, and how far they sit from price.
+    /// <para>
+    /// What the agent can trade is decided by where its zones are: fill rate falls from 21-35%
+    /// inside 3 ATR to zero beyond 16, and about 60% of placements sit where fills never happen.
+    /// Counting placements without weighting by distance treats inert orders as intent, which is
+    /// how "intentions are near-symmetric" was concluded from a population that is 1.88:1
+    /// supply-heavy once restricted to reachable zones.
+    /// </para>
+    /// </summary>
+    private void RecordInventory(
+        AgentMarketContext context, InstrumentState state, decimal price, decimal? atr)
+    {
+        if (_inventorySink is null)
+            return;
+
+        foreach ((SequenceRole role, _) in _options.Sequence.All())
+        {
+            IReadOnlyList<Imbalance> zones = state.Analyzer.ZonesOf(role);
+            foreach (ImbalanceKind kind in new[] { ImbalanceKind.Demand, ImbalanceKind.Supply })
+            {
+                List<decimal> distances = [];
+                int live = 0;
+                foreach (Imbalance zone in zones)
+                {
+                    if (zone.Kind != kind || zone.State == ImbalanceState.Eliminated)
+                        continue;
+
+                    live++;
+                    if (atr is decimal unit && unit > 0m)
+                        distances.Add(Math.Abs(price - zone.Proximal) / unit);
+                }
+
+                distances.Sort();
+                _inventorySink(new AlfonsoInventorySnapshot
+                {
+                    At = context.Timestamp,
+                    Instrument = context.Instrument,
+                    Role = role,
+                    Kind = kind,
+                    LiveZones = live,
+                    Reachable = distances.Count(d => d <= _options.ReachableDistanceAtr),
+                    MedianDistanceAtr = distances.Count == 0 ? null : distances[distances.Count / 2],
+                    NearestDistanceAtr = distances.Count == 0 ? null : distances[0],
+                    Price = price,
+                    Atr = atr
+                });
+            }
         }
     }
 

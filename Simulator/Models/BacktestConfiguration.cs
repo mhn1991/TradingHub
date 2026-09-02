@@ -746,6 +746,9 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-candidate-log PATH. Decision-time candidate CSV, or null for none.</summary>
     public string? AlfonsoCandidateLogPath { get; init; }
 
+    /// <summary>--alfonso-inventory-log PATH. Zone-inventory snapshots, or null for none.</summary>
+    public string? AlfonsoInventoryLogPath { get; init; }
+
     /// <summary>--alfonso-confirm-entry. Enter on a close back out of the zone, not on first touch.</summary>
     public bool AlfonsoRequireReversalConfirmation { get; init; }
 
@@ -956,6 +959,7 @@ public sealed record BacktestRequest
                     MinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
                     MinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
                     CandidateLogPath = AlfonsoCandidateLogPath,
+                    InventoryLogPath = AlfonsoInventoryLogPath,
                     RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
                     RequireDriftAlignment = AlfonsoRequireDriftAlignment,
                     DriftLookbackCandles = AlfonsoDriftLookbackCandles,

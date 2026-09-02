@@ -455,6 +455,9 @@ public sealed class AlfonsoTradingAgentBuilder : ITradingAgentBuilder
             alfonsoOptions,
             string.IsNullOrWhiteSpace(alfonsoOptions.CandidateLogPath)
                 ? null
-                : AlfonsoCandidateLog.ToFile(alfonsoOptions.CandidateLogPath));
+                : AlfonsoCandidateLog.ToFile(alfonsoOptions.CandidateLogPath),
+            string.IsNullOrWhiteSpace(alfonsoOptions.InventoryLogPath)
+                ? null
+                : AlfonsoInventoryLog.ToFile(alfonsoOptions.InventoryLogPath));
     }
 }

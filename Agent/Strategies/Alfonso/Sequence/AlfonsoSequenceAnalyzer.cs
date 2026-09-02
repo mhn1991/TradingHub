@@ -76,6 +76,9 @@ public sealed class AlfonsoSequenceAnalyzer
     public ImbalanceDetectorUpdate Apply(SequenceRole role, AlfonsoBar bar) =>
         _timeframes[role].Apply(bar);
 
+    /// <summary>Live zones on one timeframe, for inventory measurement.</summary>
+    public IReadOnlyList<Imbalance> ZonesOf(SequenceRole role) => _timeframes[role].Zones;
+
     /// <summary>Trend on one timeframe of the sequence, for decision-time logging.</summary>
     public AlfonsoTrend TrendOf(SequenceRole role) => _timeframes[role].Trend.Trend;
 

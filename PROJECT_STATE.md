@@ -4019,6 +4019,47 @@ the distance where fills occur at all, which would not change a single trade but
 agent's intent legible; the substantive question is whether the reachable population - demand 279
 vs supply 525 - can be balanced at the zone-inventory level rather than at the order level.
 
+### 3.36 Zone inventory measured in-pipeline: symmetric near price, so 3.35's explanation is refuted (2026-09-02)
+
+`--alfonso-inventory-log` (`AlfonsoInventoryLog`, `AlfonsoInventorySnapshot`) snapshots the live zone
+population once per top-timeframe bar, per role and side: count, count within reachable distance
+(<= 6 ATR), median and nearest distance in ATR. Measured inside the run, because the candidate log
+structurally cannot answer this - it only ever holds the side the prevailing scenario permits, so
+demand and supply are never observable at the same instant.
+
+**Nearest zone to price, median over snapshots, Lower timeframe:**
+
+| | nearest demand | nearest supply | D within 3 ATR | S within 3 ATR |
+|---|---|---|---|---|
+| gbpjpy | 1.29 | 1.24 | 84.2% | 82.4% |
+| nas100 | 1.24 | 1.14 | 84.7% | 82.9% |
+| us30 | 1.34 | 1.29 | 79.2% | 82.0% |
+| gold | 1.23 | 1.18 | 83.3% | 87.5% |
+| silver | 1.29 | 1.23 | 80.7% | 83.4% |
+| eurusd | 1.43 | 1.41 | 83.1% | 84.1% |
+
+The inventory near price is symmetric on every instrument: nearest demand and nearest supply within
+0.1 ATR, and 79-88% of snapshots carry a zone inside 3 ATR on *both* sides. Reachable counts are
+near-equal too (reach ratio supply:demand 0.73-0.99, if anything demand-favoured).
+
+**REFUTES the explanation in 3.35.** That section proposed that drift strands demand zones far below
+price while supply overhead is consumed, so the reachable population becomes supply-heavy. The live
+totals do look like that - gbpjpy Lower averages 39.7 demand against 7.1 supply - but the extra
+demand zones sit a median 37.3 ATR away, in the band where the measured fill rate is exactly zero.
+They inflate the count and change nothing. Near price, where fills happen, the two sides are equal.
+
+**What still stands from 3.35**: fill rate collapsing with distance (21-35% inside 3 ATR, under 1.5%
+beyond 6, zero beyond 16), and reachable placements running 1.88:1 supply-heavy (demand 279, supply
+525) against a 2.63:1 realised skew.
+
+**Where the defect actually is.** Inventory near price is symmetric; placements within reach are
+1.88:1 supply-heavy. The asymmetry is therefore introduced *between* inventory and candidates - in
+`AlfonsoSequenceAnalyzer.Candidates`, i.e. the scenario side, `TradeableZones`, freshness, nesting
+and room-to-target filters - not in where the market leaves zones. That is the next thing to
+measure, and it is a code-side question rather than a market-side one.
+
+**Caveat.** Six instruments, one window, diagnostic rather than result.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,
