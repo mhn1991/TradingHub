@@ -4036,7 +4036,7 @@ demand and supply are never observable at the same instant.
 | us30 | 1.34 | 1.29 | 79.2% | 82.0% |
 | gold | 1.23 | 1.18 | 83.3% | 87.5% |
 | silver | 1.29 | 1.23 | 80.7% | 83.4% |
-| eurusd | 1.43 | 1.41 | 83.1% | 84.1% |
+| eurusd | 1.36 | 1.40 | 82.4% | 81.6% |
 
 The inventory near price is symmetric on every instrument: nearest demand and nearest supply within
 0.1 ATR, and 79-88% of snapshots carry a zone inside 3 ATR on *both* sides. Reachable counts are
@@ -4059,6 +4059,12 @@ and room-to-target filters - not in where the market leaves zones. That is the n
 measure, and it is a code-side question rather than a market-side one.
 
 **Caveat.** Six instruments, one window, diagnostic rather than result.
+
+**Note on the eurusd row.** It was first read from a partially flushed file while that run was still
+going (the writer buffers and flushes on process exit, so a short file looks like a complete one).
+The nearest-distance conclusion was unchanged on the complete file, but the live-zone counts
+reversed - 20.1 demand / 15.7 supply on the partial, 18.5 / 25.7 on the complete. Do not read an
+inventory CSV before its run reports complete.
 
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
