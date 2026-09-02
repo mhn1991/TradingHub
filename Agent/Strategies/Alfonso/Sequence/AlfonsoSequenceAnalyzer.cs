@@ -35,6 +35,8 @@ public sealed class AlfonsoSequenceAnalyzer
     private readonly Dictionary<SequenceRole, AlfonsoTimeframeAnalyzer> _timeframes = [];
     private readonly bool _freshLevelsOnly;
     private readonly bool _confirmationEntryMode;
+    private readonly AlfonsoFilterTally _demandTally = new();
+    private readonly AlfonsoFilterTally _supplyTally = new();
     private readonly bool _requireControlAgreement;
     private readonly bool _allowConfirmationEntries;
     private readonly decimal _minimumProfitMargin;
@@ -79,6 +81,10 @@ public sealed class AlfonsoSequenceAnalyzer
     /// <summary>Live zones on one timeframe, for inventory measurement.</summary>
     public IReadOnlyList<Imbalance> ZonesOf(SequenceRole role) => _timeframes[role].Zones;
 
+    /// <summary>Cumulative record of which gate discarded each zone, for one side.</summary>
+    public AlfonsoFilterTally TallyOf(ImbalanceKind kind) =>
+        kind == ImbalanceKind.Demand ? _demandTally : _supplyTally;
+
     /// <summary>Trend on one timeframe of the sequence, for decision-time logging.</summary>
     public AlfonsoTrend TrendOf(SequenceRole role) => _timeframes[role].Trend.Trend;
 
@@ -99,7 +105,13 @@ public sealed class AlfonsoSequenceAnalyzer
     {
         ScenarioResolution scenario = Scenario;
         if (!scenario.CanTrade || scenario.Side is not ImbalanceKind side)
+        {
+            _demandTally.ScenarioBlocked++;
+            _supplyTally.ScenarioBlocked++;
             return [];
+        }
+
+        AlfonsoFilterTally tally = TallyOf(side);
 
         bool buying = side == ImbalanceKind.Demand;
 
@@ -110,7 +122,10 @@ public sealed class AlfonsoSequenceAnalyzer
         {
             SupplyDemandRange range = _timeframes[role].Range;
             if (buying ? !range.AllowsBuying : !range.AllowsSelling)
+            {
+                tally.RangeBlocked++;
                 return [];
+            }
         }
 
         // Module 6: "When an imbalance on timeframe X has gained control, trading at timeframes
@@ -128,7 +143,10 @@ public sealed class AlfonsoSequenceAnalyzer
                     continue;
 
                 if (_timeframes[role].InControl is ZoneInControl held && held.Kind != side)
+                {
+                    tally.ControlBlocked++;
                     return [];
+                }
             }
         }
 
@@ -141,9 +159,16 @@ public sealed class AlfonsoSequenceAnalyzer
             // Module 5: "Once a certain timeframe is over-extended, that timeframe can no longer be
             // used to place a trade."
             if (timeframe.Trend.IsOverExtended)
+            {
+                tally.OverExtended++;
                 continue;
+            }
 
-            foreach (Imbalance zone in timeframe.TradeableZones(side, price))
+            IReadOnlyList<Imbalance> tradeable = timeframe.TradeableZones(side, price);
+            tally.NotTradeable +=
+                timeframe.Zones.Count(zone => zone.Kind == side) - tradeable.Count;
+
+            foreach (Imbalance zone in tradeable)
             {
                 // Module 7: "We will only trade the first pullback to an imbalance, that is, only
                 // fresh levels." A tested level needs confirmation - which module 10 defines and
@@ -153,7 +178,10 @@ public sealed class AlfonsoSequenceAnalyzer
                 {
                     host = Nesting.FindHost(zone, _timeframes[hostRole].Zones);
                     if (host is null)
+                    {
+                        tally.NoHost++;
                         continue;
+                    }
                 }
 
                 // Fresh levels take the set-and-forget path. A tested one needs confirmation, and
@@ -168,7 +196,10 @@ public sealed class AlfonsoSequenceAnalyzer
                 bool acceptable = AcceptsLevel(zone, _freshLevelsOnly) || firstPullback ||
                     (_allowConfirmationEntries && IsConfirmed(zone, host));
                 if (!acceptable)
+                {
+                    tally.NotAccepted++;
                     continue;
+                }
 
                 // A zone stays plannable until price breaks through its distal - at which point the
                 // zone engine has eliminated it anyway.
@@ -180,10 +211,18 @@ public sealed class AlfonsoSequenceAnalyzer
                 // above it, which is a small fraction of arrivals.
                 bool live = side == ImbalanceKind.Demand ? price > zone.Distal : price < zone.Distal;
                 if (!live)
+                {
+                    tally.NotLive++;
                     continue;
+                }
 
                 if (!HasRoomToTarget(zone, side, timeframe.Zones))
+                {
+                    tally.NoRoom++;
                     continue;
+                }
+
+                tally.Passed++;
 
                 candidates.Add(new TradeCandidate
                 {

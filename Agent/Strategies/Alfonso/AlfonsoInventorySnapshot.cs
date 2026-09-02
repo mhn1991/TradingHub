@@ -22,4 +22,7 @@ public sealed record AlfonsoInventorySnapshot
     public decimal? NearestDistanceAtr { get; init; }
     public required decimal Price { get; init; }
     public decimal? Atr { get; init; }
+
+    /// <summary>Cumulative record of which gate discarded each zone on this side, if measured.</summary>
+    public AlfonsoFilterTally? Filters { get; init; }
 }

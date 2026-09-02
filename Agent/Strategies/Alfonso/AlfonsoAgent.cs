@@ -372,7 +372,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                     MedianDistanceAtr = distances.Count == 0 ? null : distances[distances.Count / 2],
                     NearestDistanceAtr = distances.Count == 0 ? null : distances[0],
                     Price = price,
-                    Atr = atr
+                    Atr = atr,
+                    Filters = role == SequenceRole.Lower ? state.Analyzer.TallyOf(kind) : null
                 });
             }
         }

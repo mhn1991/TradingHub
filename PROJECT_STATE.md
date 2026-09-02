@@ -4066,6 +4066,55 @@ The nearest-distance conclusion was unchanged on the complete file, but the live
 reversed - 20.1 demand / 15.7 supply on the partial, 18.5 / 25.7 on the complete. Do not read an
 inventory CSV before its run reports complete.
 
+### 3.37 The full mechanism: filters are symmetric in RATE but kill the NEAR demand zones (2026-09-02)
+
+`AlfonsoFilterTally` counts, per side, which gate in `Candidates` discarded each zone. Cumulative
+totals over six instruments, Lower timeframe:
+
+| gate | demand | supply | D:S |
+|---|---|---|---|
+| rangeBlocked | 4,396 | 6,715 | 0.65 |
+| overExtended | 197 | 148 | 1.33 |
+| notTradeable | 236,511 | 180,010 | 1.31 |
+| noHost | 29,212 | 31,985 | 0.91 |
+| notAccepted (freshness) | 7,106 | 2,349 | **3.03** |
+| passed | 41,560 | 37,117 | 1.12 |
+| pass rate | 13.22% | 14.76% | |
+
+**No filter produces a 1.9x supply skew, and demand passes MORE in absolute terms.** The hypothesis
+in 3.36 - that some filter preferentially discards demand zones - is wrong as stated.
+
+**The resolution, combining this with 3.36's inventory data.** Symmetric pass *rates* do not imply
+symmetric *distance* distributions among survivors:
+
+| | nearest live zone | nearest qualifying zone (where the order goes) |
+|---|---|---|
+| demand | ~1.3 ATR | 13.29 ATR |
+| supply | ~1.2 ATR | 7.65 ATR |
+
+The filters remove both sides at a similar rate but disproportionately remove the *near* demand
+zones - `notTradeable` 1.31x and freshness 3.03x. Orders are placed at the nearest qualifying zone
+(`TradeableZones` sorts by distance), so demand's nearest survivor sits about 10x further out than
+its nearest live zone while supply's sits about 6x further. Fill rate collapses with distance
+(3.35), so demand fills less. Every link is now measured.
+
+**Complete chain, all measured:** live inventory near price symmetric (3.36) -> tradeability and
+freshness preferentially remove the near demand zones (this section) -> the nearest qualifying demand
+zone is 1.74x further from price than supply's (3.35) -> fill probability falls from 21-35% inside
+3 ATR to zero beyond 16 (3.35) -> buy limits fill at 2.89% against sell at 6.67% (3.32) -> 92 shorts
+against 35 longs, and shorts lose.
+
+**Where to look next.** Not at entry mechanics, drift, or cost - all four attempts there failed
+(3.33, 3.34, and the min-stop-atr sweep). The lever is why near demand zones fail tradeability and
+freshness so much more often than near supply zones. `notTradeable` lumps three conditions together
+(the tradeability bar, the Fresh/Tested state check, and the pending-test exclusion) and needs
+splitting before that question can be answered.
+
+**Gap in this measurement.** `scenarioBlocked` and `controlBlocked` read zero: the agent tests
+`scenario.CanTrade` and returns before ever calling `Candidates`, so scenario-level blocking is
+invisible to this tally, and control was disabled by `--alfonso-ignore-control` in these runs. How
+often each side is the permitted side is therefore still unmeasured.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,

@@ -39,7 +39,9 @@ public static class AlfonsoInventoryLog
     private sealed class Writer : IDisposable
     {
         private const string Header =
-            "at,instrument,role,kind,liveZones,reachable,medianDistanceAtr,nearestDistanceAtr,price,atr";
+            "at,instrument,role,kind,liveZones,reachable,medianDistanceAtr,nearestDistanceAtr,price,atr," +
+            "scenarioBlocked,rangeBlocked,controlBlocked,overExtended,notTradeable,noHost," +
+            "notAccepted,notLive,noRoom,passed";
 
         private readonly Lock _gate = new();
         private readonly StreamWriter _writer;
@@ -67,13 +69,26 @@ public static class AlfonsoInventoryLog
                 Number(snapshot.MedianDistanceAtr),
                 Number(snapshot.NearestDistanceAtr),
                 Number(snapshot.Price),
-                Number(snapshot.Atr));
+                Number(snapshot.Atr),
+                Count(snapshot.Filters?.ScenarioBlocked),
+                Count(snapshot.Filters?.RangeBlocked),
+                Count(snapshot.Filters?.ControlBlocked),
+                Count(snapshot.Filters?.OverExtended),
+                Count(snapshot.Filters?.NotTradeable),
+                Count(snapshot.Filters?.NoHost),
+                Count(snapshot.Filters?.NotAccepted),
+                Count(snapshot.Filters?.NotLive),
+                Count(snapshot.Filters?.NoRoom),
+                Count(snapshot.Filters?.Passed));
 
             lock (_gate)
             {
                 _writer.WriteLine(line);
             }
         }
+
+        private static string Count(long? value) =>
+            value?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
 
         private static string Number(decimal? value) =>
             value?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
