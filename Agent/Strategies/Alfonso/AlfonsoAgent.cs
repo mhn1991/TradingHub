@@ -169,7 +169,9 @@ public sealed class AlfonsoAgent : ITradingAgent
                 Imbalance zone = candidate.Zone;
                 ZoneOrderKey key = Key(candidate);
 
-                if (_options.FreshLevelsOnly && zone.State != ImbalanceState.Fresh &&
+                bool firstPullback = _options.RequireReversalConfirmation &&
+                    zone.State == ImbalanceState.Tested && zone.TestCount <= 1;
+                if (_options.FreshLevelsOnly && zone.State != ImbalanceState.Fresh && !firstPullback &&
                     !(_options.AllowConfirmationEntries && candidate.Host is not null &&
                       zone.State == ImbalanceState.Tested))
                 {
@@ -180,27 +182,58 @@ public sealed class AlfonsoAgent : ITradingAgent
                 if (_options.RequireNestedEntries && candidate.Host is null)
                     continue;
 
-                bool aheadOfPrice = IsAheadOfPrice(
-                    candidate.Side, zone.Proximal, bar.Prices.Close);
-                if (!aheadOfPrice)
+                bool buy = candidate.Side == ImbalanceKind.Demand;
+                decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
+                decimal reference = zone.Proximal;
+
+                if (!_options.RequireReversalConfirmation)
                 {
-                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
-                    continue;
+                    if (!IsAheadOfPrice(candidate.Side, zone.Proximal, bar.Prices.Close))
+                    {
+                        LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
+                        continue;
+                    }
+                }
+                else
+                {
+                    // "Price reached the level" has to come from the zone engine, not from this
+                    // candle. The agent is triggered on the lower interval and sees a sampled bar,
+                    // so testing the bar's own low/high misses any touch that happened between
+                    // samples - which is nearly all of them, and gave 2 trades over six instruments.
+                    // The engine already records the touch continuously on the zone's own timeframe.
+                    bool reached = zone.State == ImbalanceState.Tested;
+
+                    bool heldBack = buy
+                        ? bar.Prices.Close > zone.Proximal
+                        : bar.Prices.Close < zone.Proximal;
+                    bool survived = buy
+                        ? bar.Prices.Close > zone.Distal
+                        : bar.Prices.Close < zone.Distal;
+
+                    if (!reached || !heldBack || !survived)
+                    {
+                        LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
+                        continue;
+                    }
+
+                    // Entry is at market on this close, so risk is measured from there.
+                    reference = bar.Prices.Close;
                 }
 
-                decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
-                decimal target = zone.TargetPrice(
-                    _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple);
-
-                bool buy = candidate.Side == ImbalanceKind.Demand;
-                decimal risk = Math.Abs(zone.Proximal - stop);
+                decimal risk = Math.Abs(reference - stop);
+                decimal target = _options.RequireReversalConfirmation
+                    ? (buy
+                        ? reference + (_options.Zones.RewardMultiple * risk)
+                        : reference - (_options.Zones.RewardMultiple * risk))
+                    : zone.TargetPrice(
+                        _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple);
                 decimal? costToRisk = context.RoundTripCostEstimate is decimal cost && risk > 0m
                     ? cost / risk
                     : null;
                 decimal? stopAtr = atr is decimal unit && unit > 0m ? risk / unit : null;
 
-                if (buy ? stop >= zone.Proximal || target <= zone.Proximal
-                        : stop <= zone.Proximal || target >= zone.Proximal)
+                if (buy ? stop >= reference || target <= reference
+                        : stop <= reference || target >= reference)
                 {
                     Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
                         atrPercentile, CandidateOutcome.DegenerateGeometry);
@@ -249,9 +282,11 @@ public sealed class AlfonsoAgent : ITradingAgent
                         $"({zone.Strength}, {zone.ImpulseToBaseRatio:F2}:1, {zone.Accomplished})" +
                         (candidate.Host is null ? "." : $", nested at {candidate.Host.Proximal:F2}."),
                     SuggestedQuantity = _options.Quantity,
-                    OrderType = StandardOrderType.Limit,
-                    LimitPrice = zone.Proximal,
-                    ReferencePrice = zone.Proximal,
+                    OrderType = _options.RequireReversalConfirmation
+                        ? StandardOrderType.Market
+                        : StandardOrderType.Limit,
+                    LimitPrice = _options.RequireReversalConfirmation ? null : zone.Proximal,
+                    ReferencePrice = reference,
                     StopLossPrice = stop,
                     TakeProfitPrice = target,
                     SignalInterval = _options.LowerInterval,
@@ -340,12 +375,14 @@ public sealed class AlfonsoAgent : ITradingAgent
 
     private sealed class InstrumentState
     {
+
         public InstrumentState(AlfonsoStrategyOptions options)
         {
             Analyzer = new AlfonsoSequenceAnalyzer(
                 options.Sequence, options.Zones, options.Trend, options.Range, options.FreshLevelsOnly,
                 options.RequireControlAgreement, options.AllowConfirmationEntries,
-                options.MinimumProfitMarginMultiple, options.Zones.StopPaddingFraction);
+                options.MinimumProfitMarginMultiple, options.Zones.StopPaddingFraction,
+                options.RequireReversalConfirmation);
 
             Intervals =
             [

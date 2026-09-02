@@ -129,6 +129,27 @@ public sealed record AlfonsoStrategyOptions
     /// </summary>
     public string? CandidateLogPath { get; init; }
 
+    /// <summary>
+    /// Whether an entry waits for the level to prove it held, instead of resting a limit at the
+    /// proximal that fills on first touch.
+    /// <para>
+    /// A resting limit cannot tell a level that holds from one price is about to run straight
+    /// through, so it takes every failure at full size. Measured over six instruments the agent
+    /// placed 1,212 buy limits and 1,379 sell limits - near symmetric - but filled 2.89% of buys
+    /// against 6.67% of sells, a 2.31x asymmetry that is the entire long/short skew: in a drifting
+    /// market price walks into the limits facing the drift and away from the others. Only 4.9% of
+    /// placed orders ever filled, so fill selection, not zone selection, decided what was traded.
+    /// </para>
+    /// <para>
+    /// With this on, the candle must trade into the zone and close back out of it on the trade's
+    /// side, without closing beyond the distal, and entry is at market on that close. The cost is a
+    /// worse entry price: the stop still sits at the padded distal, so risk is measured from the
+    /// close rather than from the proximal, and the target is recomputed to preserve the configured
+    /// reward multiple. Off by default - this departs from the book's set-and-forget premise.
+    /// </para>
+    /// </summary>
+    public bool RequireReversalConfirmation { get; init; }
+
     public IReadOnlySet<BarInterval> RequiredIntervals =>
         new HashSet<BarInterval> { TopInterval, MiddleInterval, LowerInterval };
 

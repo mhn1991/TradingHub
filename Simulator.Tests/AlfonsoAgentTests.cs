@@ -230,6 +230,16 @@ public sealed class AlfonsoAgentTests
 
     // ---- fixtures -----------------------------------------------------------------------------
 
+    [Test]
+    public void SetAndForgetEntryIsTheDefaultAndConfirmationIsOptIn()
+    {
+        // The book's premise is a resting limit at the proximal. Confirmation entry departs from it
+        // deliberately, to address fill selection (six instruments: 1,212 buy limits and 1,379 sell
+        // limits placed, but 2.89% vs 6.67% filled), so it must stay opt-in. This fails if the
+        // default is flipped without a decision.
+        Assert.That(new AlfonsoStrategyOptions().RequireReversalConfirmation, Is.False);
+    }
+
     private static AgentMarketContext Context(params AnalysisSnapshot[] snapshots) =>
         Context(snapshots, []);
 

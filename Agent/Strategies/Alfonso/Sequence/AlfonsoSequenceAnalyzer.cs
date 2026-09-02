@@ -34,6 +34,7 @@ public sealed class AlfonsoSequenceAnalyzer
 {
     private readonly Dictionary<SequenceRole, AlfonsoTimeframeAnalyzer> _timeframes = [];
     private readonly bool _freshLevelsOnly;
+    private readonly bool _confirmationEntryMode;
     private readonly bool _requireControlAgreement;
     private readonly bool _allowConfirmationEntries;
     private readonly decimal _minimumProfitMargin;
@@ -48,12 +49,14 @@ public sealed class AlfonsoSequenceAnalyzer
         bool requireControlAgreement = true,
         bool allowConfirmationEntries = false,
         decimal minimumProfitMarginMultiple = 0m,
-        decimal stopPaddingFraction = 0.25m)
+        decimal stopPaddingFraction = 0.25m,
+        bool confirmationEntryMode = false)
     {
         ArgumentNullException.ThrowIfNull(sequence);
         sequence.Validate();
         Sequence = sequence;
         _freshLevelsOnly = freshLevelsOnly;
+        _confirmationEntryMode = confirmationEntryMode;
         _requireControlAgreement = requireControlAgreement;
         _allowConfirmationEntries = allowConfirmationEntries;
         _minimumProfitMargin = minimumProfitMarginMultiple;
@@ -152,7 +155,14 @@ public sealed class AlfonsoSequenceAnalyzer
 
                 // Fresh levels take the set-and-forget path. A tested one needs confirmation, and
                 // that means a host: the bigger-timeframe imbalance the new zone was created at.
-                bool acceptable = AcceptsLevel(zone, _freshLevelsOnly) ||
+                // Confirmation entry acts on the first pullback rather than ahead of it, so the
+                // zone is necessarily Tested by the time the entry is judged. Fresh-only would drop
+                // every such zone from this list before the agent ever saw it - which it did, giving
+                // 2 trades across six instruments and 80,422 candidates rejected for never having
+                // been reached. Module 7's "first pullback only" is still honoured: TestCount 1.
+                bool firstPullback = _confirmationEntryMode &&
+                    zone.State == ImbalanceState.Tested && zone.TestCount <= 1;
+                bool acceptable = AcceptsLevel(zone, _freshLevelsOnly) || firstPullback ||
                     (_allowConfirmationEntries && IsConfirmed(zone, host));
                 if (!acceptable)
                     continue;

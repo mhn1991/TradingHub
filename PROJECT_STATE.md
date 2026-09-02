@@ -3894,6 +3894,53 @@ enter on touch or confirmation rather than resting ahead of price; or cancel a r
 the move that justified it has run; or size/skip by the fill asymmetry the instrument's drift
 implies. None of these are tested yet.
 
+### 3.33 Confirmation entry does not fix fill selection - it makes it worse (2026-09-02)
+
+`--alfonso-confirm-entry` (`AlfonsoStrategyOptions.RequireReversalConfirmation`, default off) replaces
+the resting limit at the proximal with a market entry once the candle trades into the zone and closes
+back out of it without closing past the distal. Target is recomputed from the actual entry so the
+reward multiple is preserved. Aimed squarely at 3.32: a touch-fill cannot tell a level that holds
+from one price runs through, so it takes every failure.
+
+**Pre-registered and all three failed.**
+
+| | placed buy | placed sell | buy fill | sell fill | ratio |
+|---|---|---|---|---|---|
+| baseline (touch) | 1,212 | 1,379 | 2.89% | 6.67% | 2.31x |
+| confirm entry | 1,163 | 349 | 1.72% | 13.18% | **7.66x** |
+
+| | trades | avgR | 95% CI | positive |
+|---|---|---|---|---|
+| baseline | 127 | -0.2394 | [-0.493, +0.015] | 1/6 |
+| confirm | 66 | -0.1614 | [-0.532, +0.209] | 3/6 |
+
+E1 (asymmetry must fall toward 1.0): failed, 2.31x -> 7.66x. E2 (win rate should rise): failed,
+23.6% -> 22.7%. E3 (avgR positive, 5/6): failed, CI spans zero and overlaps the baseline.
+
+**Why.** The confirming event is itself drift-dependent, in the same direction as the defect.
+Confirmation cut sell candidates by 75% while leaving buys nearly untouched, yet doubled the sell
+fill rate. In a rising market price rises into supply constantly, so supply confirms readily;
+demand needs a fall into the zone and a close back above, which a rising market rarely supplies.
+
+**The generalisable lesson.** The asymmetry is not a property of the order type. Touch-fill and
+confirmation-fill are both triggered by price *arriving* at a level, and in a drifting market price
+arrives at levels on one side far more often. Changing how the entry is taken at a level cannot
+change which levels price visits. Anything that only alters entry mechanics at the level is
+attacking the wrong layer; the remaining candidates are to stop placing orders on the drift-favoured
+side, to size by expected fill probability, or to require the trades that do fill to carry
+expectancy on their own.
+
+**Two implementation bugs found on the way, both the same shape.** (1) `AcceptsLevel` admits only
+`Fresh` zones, but a touch makes a zone `Tested`, so zones left the candidate list at the exact
+moment price reached them - the agent never saw them, which is why `NotFresh` logged zero times
+while 80,422 candidates were rejected as never-reached. Confirmation is inherently a first-pullback
+action, so it now accepts `Tested` with `TestCount <= 1`. (2) The touch test was written against
+`bar.Prices.Low/High`, but the agent triggers on the lower interval and sees a sampled bar, so
+touches between samples were invisible; the baseline is unaffected because the broker evaluates a
+resting limit continuously. Fixed by reading the zone engine's own `State == Tested`. Both are the
+replay-harness error again: deriving state outside the system that owns it and getting a different
+answer.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,

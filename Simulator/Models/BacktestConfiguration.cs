@@ -746,6 +746,9 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-candidate-log PATH. Decision-time candidate CSV, or null for none.</summary>
     public string? AlfonsoCandidateLogPath { get; init; }
 
+    /// <summary>--alfonso-confirm-entry. Enter on a close back out of the zone, not on first touch.</summary>
+    public bool AlfonsoRequireReversalConfirmation { get; init; }
+
     /// <summary>
     /// Classifier options taken from the loaded model artifact. The agent's feature engine and the
     /// model must agree on groups, horizon and label geometry — defaulting them independently makes
@@ -947,6 +950,7 @@ public sealed record BacktestRequest
                     MinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
                     MinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
                     CandidateLogPath = AlfonsoCandidateLogPath,
+                    RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
                     MinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
                     MaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
                     Zones = defaultAlfonso.Zones with
