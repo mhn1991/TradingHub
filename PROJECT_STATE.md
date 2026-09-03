@@ -4324,6 +4324,9 @@ break-even figure as unproven.
 
 ### 3.45 A signal that survives: daily trend + H4 entry, walked forward and frictioned (2026-09-03)
 
+> **WITHDRAWN — see 3.47.** The edge here is very likely lookahead in the daily trend filter.
+> The lookahead-free rule is negative (-0.0486R, 2/7 blocks). Do not cite these tables.
+
 Screened as a pure signal test - no agent, no backtest. At every H4 bar over 3.5 years and six
 instruments, ask whether price reaches +3 ATR before -1 ATR in the signalled direction, and compare
 against the unconditional rate for the same direction over the same bars.
@@ -4379,6 +4382,10 @@ on true risk (3.43/3.44).
 
 ### 3.46 The assembled rule, walked forward with frictions (2026-09-03)
 
+> **WITHDRAWN — see 3.47.** As above: rebuilt lookahead-free this rule is -0.0486R, 2/7 blocks
+> positive, 1/6 instruments. The two open questions below are answered in 3.47 (concurrency does not
+> rescue it; gap risk is negligible at -0.0016R/trade).
+
 Built by testing each piece against a null before adding it. Nothing fitted - the rule was fixed
 before the walk-forward split, so every block is out-of-sample.
 
@@ -4418,6 +4425,75 @@ risk: every friction figure came from trades that filled inside the session.
 
 **For contrast**: the Alfonso method over the same six instruments and the same 3.5 years is -0.2117R
 on true risk. This is +0.0798R across seven independent periods.
+
+### 3.47 RETRACTION: 3.45/3.46's edge is lookahead; the rule is negative when it reads only closed daily bars (2026-09-03)
+
+Went to settle the two questions 3.46 left open (concurrency, gap risk). Rebuilding the rule from
+its written description did not reproduce 3.46 — and finding out why retracts the result.
+
+**The bug.** Daily bars in `long-*-d1.csv` open 00:00 UTC and close 00:00 the next day. An H4 bar
+opening 12:00 sits *inside* the daily bar that has not closed yet, so asking "is the daily close
+above its level 20 days ago" at that moment reads a close up to 20 hours in the future (~10h mean
+over the six H4 bars in a day).
+
+**The edge is a monotone function of how much future is leaked** — unlimited entries, touch fills,
+median slippage, same code path, only the daily bar index differs:
+
+| daily bar the H4 entry reads | lookahead | n | hit% | net R | blocks + |
+|---|---|---|---|---|---|
+| the NEXT daily bar | ~34h | 5,120 | 34.28% | **+0.2481** | 7/7 |
+| the still-forming daily bar | ~10h | 4,995 | 29.03% | +0.0326 | 4/7 |
+| the last CLOSED daily bar | none | 4,330 | 26.84% | **-0.0571** | 2/7 |
+| one bar older still | -24h | 4,391 | 26.67% | -0.0638 | 1/7 |
+
+That is the signature of lookahead, not of a trend effect. 3.46's reported 7/7 blocks and 28-33% hit
+rates sit between the ~10h and ~34h rows.
+
+**With the exact lookahead-free mapping** (freshest daily bar whose *close* precedes the H4 entry
+bar's close — not the conservative -2 above): n=4,408, hit 27.04%, **net -0.0486R**, 2/7 blocks
+positive, 1/6 instruments. Gold alone is positive (+0.16R); us30 (-0.25R) and eurusd (-0.16R) are
+the worst.
+
+**I cannot prove 3.46 had this bug** — that script was not saved. What is established: the rule as
+*written* is negative, a lookahead variant reproduces 3.46's entry counts closely in 6 of 7 blocks
+(741/744, 682/710, 765/783, 706/730, 690/696, 653/668) while the correct version does not (655, 588,
+675, 578, 606, 558), and the edge scales with leaked future. Treat 3.45/3.46 as withdrawn.
+
+**Concurrency (the first open question) does not rescue it.** First-come-first-served, max one
+position per instrument, lookahead-free rule:
+
+| cap | entries taken | net R | blocks + |
+|---|---|---|---|
+| 1 | 634 | -0.0629 | 1/7 |
+| 2 | 1,168 | -0.1209 | 2/7 |
+| 3 | 1,515 | -0.0864 | 2/7 |
+| 6 / unlimited | 1,773 | -0.0981 | 1/7 |
+
+The one-position-per-instrument rule alone drops 4,330 signals to 1,773 — confirming 3.45's warning
+that the raw counts overstate the sample. No cap turns the sign.
+
+**Gap risk (the second open question) is negligible** — this answer stands on its own regardless of
+the retraction. Filling at the bar *open* whenever price gaps past the level, instead of assuming a
+touch fill: only **0.78% of fills gap** (10 of 1,338 stop exits at unlimited cap), and a gapped stop
+realises **-1.55R** against the -1.00R assumed. Total cost **-0.0016R per trade**. Weekend/gap risk
+was the smaller of the two worries by two orders of magnitude; concurrency was the larger, and both
+are dominated by the lookahead.
+
+**Friction vector, recomputed and now pinned to a verified source.** The 590-trade set of 3.43 is
+`lg2-small-tight` (gold, 127) plus `lg-small-tight-{silver,nas100,us30,eurusd,gbpjpy}` (92/100/84/
+130/57) — confirmed to total exactly 590. Median stop overrun, `(|entry-exit| - |entry-stop|) /
+|entry-stop|` over `InitialStopLoss` exits: gold 5.96%, silver 4.17%, nas100 6.40%, us30 11.70%,
+eurusd 18.25%, gbpjpy 14.42% (means: 9.63 / 5.80 / 10.28 / 17.85 / 35.87 / 20.48%). **3.45 quoted
+"silver 2.7% to eurusd 17.1%"** — same ordering, but neither the mean nor the median reproduces those
+magnitudes and that derivation was not saved. Under the pessimistic (mean) vector the lookahead-free
+rule is -0.1484R, 0/7 blocks positive.
+
+**Scripts**: `/mnt/storage/scratch/alfonso/portfolio.py` (rule, gap-aware resolver, portfolio
+simulator), `final.py` (A/B/C/D above). Unlike the 3.45/3.46 work, these are on disk — the reason
+that result could not be checked is that its script was not.
+
+**Net effect on the roadmap**: there is currently no validated signal in this repo. 3.43's verdict on
+the Alfonso method stands; 3.45/3.46's replacement does not.
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5059,6 +5135,16 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
+  open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
+  blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
+  daily trend filter reads (+0.2481R at ~34h lookahead, +0.0326R at ~10h, -0.0571R at none, -0.0638R
+  with extra lag) — the signature of lookahead, not a trend effect. Both open questions answered
+  anyway: concurrency caps never turn the sign (best -0.0629R at cap 1), and gap/weekend risk is
+  negligible (0.78% of fills gap, -0.0016R/trade). Also pinned the 590-trade set to its exact source
+  dirs and recomputed the per-instrument slippage vector, which does *not* reproduce the magnitudes
+  3.45 quoted. Scripts saved to `/mnt/storage/scratch/alfonso/{portfolio,final}.py` — the 3.45/3.46
+  scripts were not, which is why that result could not be checked directly.
 - **2026-09-03**: Measured the Alfonso agent over 3.5 years and six instruments for the first time
   (§3.43) — 590 trades, avgR −0.1362, pooled CI [−0.251, −0.022] excluding zero, 1/6 instruments
   profitable, −$15,505. The method is short of break-even by 4.2 percentage points of win rate and
