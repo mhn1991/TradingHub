@@ -64,7 +64,9 @@ public sealed class AlfonsoAgent : ITradingAgent
     /// The bracket owns the exit. Entry, protection and target are decided together and never
     /// revised - that is what "set and forget" means.
     /// </summary>
-    public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.Bracket;
+    public AgentExitManagementMode ExitManagementMode => _options.AllowPositionManagement
+        ? AgentExitManagementMode.ProtectiveStopAndStrategyExit
+        : AgentExitManagementMode.Bracket;
 
     public Task<AgentDecision> EvaluateAsync(
         AgentMarketContext context,

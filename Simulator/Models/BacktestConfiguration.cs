@@ -764,6 +764,9 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-with-drift. Only trade the side the top-timeframe drift favours.</summary>
     public bool AlfonsoRequireDriftAlignment { get; init; }
 
+    /// <summary>--alfonso-manage-position. Let the platform trail or break-even the stop.</summary>
+    public bool AlfonsoAllowPositionManagement { get; init; }
+
     /// <summary>--alfonso-drift-lookback N. Top-timeframe bars used to measure drift.</summary>
     public int AlfonsoDriftLookbackCandles { get; init; } = 60;
 
@@ -973,6 +976,7 @@ public sealed record BacktestRequest
                     RestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
                     RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
                     RequireDriftAlignment = AlfonsoRequireDriftAlignment,
+                    AllowPositionManagement = AlfonsoAllowPositionManagement,
                     DriftLookbackCandles = AlfonsoDriftLookbackCandles,
                     MinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
                     MaximumAtrPercentile = AlfonsoMaximumAtrPercentile,

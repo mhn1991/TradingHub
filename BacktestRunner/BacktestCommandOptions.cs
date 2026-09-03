@@ -144,6 +144,11 @@ internal sealed record BacktestCommandOptions
 
     public bool AlfonsoRequireReversalConfirmation { get; init; }
 
+    public bool AlfonsoAllowPositionManagement { get; init; }
+
+    public PositionManagementOptions AlfonsoPositionManagement { get; init; } =
+        PositionManagementOptions.BracketOnlyDefaults;
+
     public bool AlfonsoRequireDriftAlignment { get; init; }
 
     public int AlfonsoDriftLookbackCandles { get; init; } = 60;
@@ -357,7 +362,8 @@ internal sealed record BacktestCommandOptions
                 "alfonso-confirmation-trades" or
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
                 "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
-                "alfonso-with-drift" or "alfonso-structural-agreement" or
+                "alfonso-with-drift" or
+                "alfonso-manage-position" or "alfonso-structural-agreement" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -541,6 +547,20 @@ internal sealed record BacktestCommandOptions
             entryInterval,
             structureDefault: 2m,
             preserveTarget: true);
+        // Alfonso is bracket-only unless --alfonso-manage-position is given, so its trailing mode
+        // defaults to disabled rather than to the structure-atr default the other stacks use.
+        bool alfonsoManaged = values.ContainsKey("alfonso-manage-position");
+        PositionManagementOptions alfonsoManagement = alfonsoManaged
+            ? ParsePositionManagement(
+                values.ContainsKey("alfonso-trailing-mode")
+                    ? values
+                    : new Dictionary<string, string?>(values) { ["alfonso-trailing-mode"] = "break-even" },
+                "alfonso",
+                entryInterval,
+                structureDefault: 2m,
+                preserveTarget: true)
+            : PositionManagementOptions.BracketOnlyDefaults;
+
         PositionManagementOptions structuralManagement = PositionManagementOptions.StructuralDefaults;
         if (strategies.Any(item => string.Equals(item, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase)))
         {
@@ -652,6 +672,8 @@ internal sealed record BacktestCommandOptions
                 values.GetValueOrDefault("alfonso-replace-resting-atr"), 0m, 0m,
                 "alfonso-replace-resting-atr", allowZero: true),
             AlfonsoRequireReversalConfirmation = values.ContainsKey("alfonso-confirm-entry"),
+            AlfonsoAllowPositionManagement = alfonsoManaged,
+            AlfonsoPositionManagement = alfonsoManagement,
             AlfonsoRequireDriftAlignment = values.ContainsKey("alfonso-with-drift"),
             AlfonsoDriftLookbackCandles = ParseInt(
                 values.GetValueOrDefault("alfonso-drift-lookback"), 60, 0, 10_000,
@@ -822,6 +844,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoMaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
         AlfonsoRestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
         AlfonsoRequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
+        AlfonsoAllowPositionManagement = AlfonsoAllowPositionManagement,
         AlfonsoRequireDriftAlignment = AlfonsoRequireDriftAlignment,
         AlfonsoDriftLookbackCandles = AlfonsoDriftLookbackCandles,
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
@@ -880,6 +903,9 @@ internal sealed record BacktestCommandOptions
             RefreshCache = RefreshCache,
             NoCache = NoCache,
             LegacyPositionManagement = LegacyPositionManagement,
+            // Alfonso's stack was parsed and stored but never copied into the runtime options, so
+            // --alfonso-manage-position ran as a silent no-op: zero stop-amendment requests.
+            AlfonsoPositionManagement = AlfonsoPositionManagement,
             ImprovedPositionManagement = ImprovedPositionManagement,
             StructuralPositionManagement = StructuralPositionManagement,
             PositionSizing = PositionSizing,

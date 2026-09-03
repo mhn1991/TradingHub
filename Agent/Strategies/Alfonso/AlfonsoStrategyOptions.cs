@@ -183,6 +183,23 @@ public sealed record AlfonsoStrategyOptions
     public decimal RestingOrderReplacementAtr { get; init; }
 
     /// <summary>
+    /// Whether the platform may manage an open position - move the stop to break-even, or trail it -
+    /// instead of leaving the bracket untouched.
+    /// <para>
+    /// Off by default, and off is what the book asks for. Module 11: "Do not move the stop loss to
+    /// breakeven. It's either a win or a loss." Turning it on is a deliberate departure.
+    /// </para>
+    /// <para>
+    /// The reason to test it: of 97 losing trades, 32 reached an average of +2.02R before returning
+    /// to a full loss, and another 38 were stopped within six minutes by noise that immediately
+    /// reversed. Replaying the price path over those trades, a break-even stop at +1R raised gross
+    /// expectancy from +0.0709R to +0.1654R, and trailing 1R behind the peak raised the win rate
+    /// from 26.8% to 48.0%. Both figures are in-sample and need confirming in a real run.
+    /// </para>
+    /// </summary>
+    public bool AllowPositionManagement { get; init; }
+
+    /// <summary>
     /// Whether an entry waits for the level to prove it held, instead of resting a limit at the
     /// proximal that fills on first touch.
     /// <para>
