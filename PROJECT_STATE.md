@@ -4624,10 +4624,60 @@ placement-cap figures rest on fill rates that are generous in level. **It does n
 verdict** — a strategy that still loses under more-generous-than-real fills would only lose harder
 under real ones, so the negative conclusion is robust and arguably understated.
 
-**Still not claimed.** Four axes audited: unclosed higher-timeframe bars, unconfirmed fractal pivots,
-ML feature/label alignment, and intrabar fill assumptions. Not audited: whether the cached historical
-data is itself point-in-time correct (i.e. whether OANDA has since revised bars these backtests
-consumed), and the financing/swap model.
+**Cached historical data, audited (2026-09-03, follow-up).** Fifth axis, and the only one with a
+directly *measurable* answer rather than a code-reading one.
+
+**Integrity: verified, all six research files.** Each `_1m_20221211_20260723_` dataset (the 3.5-year
+series behind 3.43-3.47) was re-hashed and compared against its `.meta.json`: **content hash matches,
+`candleCount` matches, `firstCandle`/`lastCandle` match, and there are zero duplicate timestamps, zero
+non-monotonic timestamps and zero OHLC violations** (`high >= max(o,c)`, `low <= min(o,c)`,
+`high >= low`) across 1.25-1.34M rows each. Of 91 cached datasets, 91 have meta sidecars and **none**
+has an orphaned `.tmp` — consistent with the write path, which streams to `path + ".tmp"` and only
+`File.Move`s it into place after the stream closes (`StreamingCandleCache.cs:139-198`), so a killed
+fetch cannot leave a half-valid entry. The fetch path filters incomplete (still-forming) candles at
+source, bounds them to the requested range, orders them, and drops duplicates/out-of-order rows
+(`OandaHistoricalCandleSource.cs:52-66`).
+
+**Revisions: measured at zero.** The cache holds multiple overlapping snapshots of the same
+instrument fetched days or weeks apart, which permits a direct test. Comparing each instrument's
+earliest and latest snapshot on their shared timestamps:
+
+| instrument | fetches | apart | overlapping bars | revised |
+|---|---|---|---|---|
+| XAU/USD | 2026-07-28 -> 09-03 | 37d | 214,947 | **0** |
+| EUR/USD | 2026-07-15 -> 09-03 | 50d | 35,799 | **0** |
+| XAG/USD | 2026-07-28 -> 09-03 | 36d | 214,930 | **0** |
+| NAS100 | 2026-09-01 -> 09-03 | 1d | 27,360 | **0** |
+| US30 | 2026-09-01 -> 09-03 | 1d | 27,349 | **0** |
+| GBP/JPY | 2026-09-01 -> 09-03 | 1d | 245,500 | **0** |
+
+**766,000+ overlapping bars, byte-identical OHLC.** (The 1,376 "only in old" rows on the metals are
+the extra tail day, 2026-07-23, that the newer range excludes — not a discrepancy.) OANDA mid OHLC is
+stable over these horizons as a measured fact, not an assumption.
+
+**What that does and does not establish.** The overlaps cover bars 1-9 months old at fetch time, re-read
+1-50 days later. It does **not** establish that a 2023 bar served in 2026 matches what OANDA served in
+2023 — no 2023-era snapshot exists to compare against, and none can be manufactured. Every research
+file was fetched on 2026-09-03, so **the data is a current snapshot, not a point-in-time archive.**
+The measured stability makes silent revision unlikely; it does not exclude it.
+
+**Two things worth knowing, neither a defect.** (1) **The recorded hash is never verified on read** —
+`TryValidateAsync` checks only header fields (schema version, data-source version, instrument,
+interval, from, to) and never opens the `.meta.json` (`StreamingCandleCache.cs:57-85`). Provenance is
+*recorded* but not *enforced*; the verification above was done by hand, and nothing in the pipeline
+would notice post-write corruption. (2) **Prices are mid only** (`dataSourceVersion: "oanda-mid-v1"`,
+`priceComponents: "mid"`), so every spread and slippage figure in §3 is a model output from the
+execution layer, never an observed quote — which is the same caveat 3.48's fill-model audit reaches
+from the other direction.
+
+**The gap counts confirm the aggregator hazard empirically.** Gaps longer than an hour: 192-193 for
+the FX pairs (weekends only) against 932-935 for metals and CFDs (weekends *plus* a daily maintenance
+break). That is the concrete mechanism behind the `gapToleranceFraction` warning in
+`MultiTimeframeAggregator.cs:38-46` — a daily bucket on gold always spans a break, so with zero
+tolerance it can never complete.
+
+**Still not claimed.** Five axes audited. Not audited: the financing/swap model, and whether OANDA's
+mid series itself matches what a real account would have been filled against.
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5288,9 +5338,14 @@ into `docs/`; Docker packaging.
   in any research run, all of which used 1m execution frames), gap-through-stop fills at the open,
   market orders fill at the open, and an order cannot fill in the frame it was submitted. The one
   optimistic assumption is that limit orders fill on touch, making modelled fill rates an upper bound
-  — relevant to 3.40/3.41, but it cannot rescue 3.43's negative verdict. **Four axes audited, no
-  defect outside 3.45/3.46**; the contaminated result was the one written outside the repo's
-  harnesses rather than inside them.
+  — relevant to 3.40/3.41, but it cannot rescue 3.43's negative verdict. Last, audited the cached
+  historical data: re-hashed all six 3.5-year files against their meta sidecars (**all match**, zero
+  duplicate/non-monotonic timestamps, zero OHLC violations, no orphaned `.tmp` among 91 datasets), and
+  ran a direct revision test across overlapping snapshots fetched up to 50 days apart — **766k+
+  overlapping bars, zero revisions**. Caveats: the data is a current snapshot rather than a
+  point-in-time archive, the recorded content hash is never verified on read, and prices are mid only.
+  **Five axes audited, no defect outside 3.45/3.46**; the contaminated result was the one written
+  outside the repo's harnesses rather than inside them.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
