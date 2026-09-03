@@ -4934,6 +4934,44 @@ needs live fill data compared against the historical mid series, which requires 
 every fill-quality figure in §3 rests on the execution model audited in axis 4, whose one optimistic
 assumption (limit orders filling on touch) is recorded there.
 
+### 3.49 The method checklist vs the implementation: what Alfonso actually covers (2026-09-03)
+
+Checked the user's Persian method checklist (چک لیست) item by item against
+`Agent/Strategies/Alfonso`. **Roughly two thirds is implemented; the gaps are concentrated in zone
+scoring and candle reading.**
+
+| checklist item | status | evidence |
+|---|---|---|
+| MTA chain D1/H4/H1, trend per timeframe | **done** | `TimeframeSequence` Top/Middle/Lower; `AlfonsoTrendDetector` per role, each fed only its own closed bars |
+| Consolidation marker (-BC / +BC) | **missing** | trend vocabulary is only Unknown/Uptrend/Downtrend/OutOfAlignment (`Trend/AlfonsoTrendState.cs:14-21`) |
+| Realignment scenarios 1 / 2 / 3 | **done, matches the table exactly** | `Sequence/ScenarioMatrix.cs:46-112` - all-aligned -> lower zones; lower OOA -> nested in middle; middle+lower OOA -> nested in top; top OOA -> no trade |
+| SET&FORGET / Confirmation / position management | **all three exist** | default `ExitManagementMode = Bracket`; `RequireReversalConfirmation:221`, `AllowConfirmationEntries:69`, `AllowPositionManagement:200` |
+| Journaling | **done** | `ITradeJournal` plus `AlfonsoCandidateLog`, which records every *rejected* candidate and its reason |
+| Location - SD Range permits long/short | **done** | `SupplyDemandRange.AllowsBuying/AllowsSelling`, enforced for **every** timeframe (`Sequence/AlfonsoSequenceAnalyzer.cs:139-147`) |
+| Location - ZIC (zone in control) | **implemented, off by default** | `ZoneInControl` behind `_requireControlAgreement` (`:155-168`) |
+| Zone score: Fresh | **done** | `ImbalanceState.Fresh` + `FreshLevelsOnly` |
+| Zone score: impulse strength | **done** | `ImpulseStrength` Weak/Strong/Gap |
+| Zone score: base structure | **done** | `BaseCandleCount` |
+| Zone score: accomplishment | **done** | `Accomplishment` flags: TrendlineBreak / OpposingImbalanceEliminated / ExtremeBroken / SwingBroken |
+| Zone score: RR 2:1 | **done** | `MeetsTradeabilityCriteria` encodes exactly this rule |
+| Zone score: CA (curve) | **partial** | location exists as a *gate* (SD Range) but is never *scored* |
+| Zone score: original vs reaction | **missing** | `IsContinuationPattern` is continuation-vs-reversal, a different axis |
+| Zone score: arrival | **missing** | "arrival" exists only for control transfer (`AlfonsoTimeframeAnalyzer.cs:79`), not as a zone score |
+| Composite score per timeframe (strong/medium/weak) | **missing** | only a per-*zone* confidence from `ImpulseStrength` (Gap 90 / Strong 75 / else 50); no aggregate of the eight criteria |
+| Candle reading (technique 1 / 2 / mix) | **missing entirely** | no candlestick logic anywhere under `Agent/Strategies/Alfonso`; `ChartAnnotator`'s `PriceActionAnalyzer` is not consumed by this agent |
+
+**Reading of the gap.** Everything that decides *whether* a setup exists - the timeframe chain, the
+three realignment scenarios, location permission, control - is built. What is missing is the
+*grading* layer: the checklist scores a zone on eight criteria and rolls that into a strong/medium/weak
+verdict per timeframe, whereas the agent applies a handful of the criteria as hard pass/fail filters
+and never aggregates them. Candle reading is absent outright.
+
+**Whether that matters is an open question, not an assumption.** 3.30 measured the trend layer and
+found no usable directional edge, and 3.43's verdict is that the method as implemented has none
+either. Adding the missing grading could change that or could simply add parameters to fit; nothing
+here establishes which. Any build should be measured against a null the way 3.45/3.46 tried to and
+3.47 shows must be done lookahead-free.
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
