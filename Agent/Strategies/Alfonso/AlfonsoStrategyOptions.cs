@@ -246,6 +246,27 @@ public sealed record AlfonsoStrategyOptions
     /// </summary>
     public bool RequireDriftAlignment { get; init; }
 
+    /// <summary>
+    /// Lowest grade module 7's scoring may return for a zone still to be traded.
+    /// <para>
+    /// Defaults to <see cref="ZoneGrade.Weak"/>, i.e. no gate, so the scoring is measured before it
+    /// is trusted. Module 7 asks for exactly this instrument - "If the particular trade gets a
+    /// passing score, it must be traded" - but never states where the pass mark sits, and 3.27 in
+    /// PROJECT_STATE.md is the record of what happens in this strategy when a threshold is chosen to
+    /// suit a sample. Raising it also tightens which higher-timeframe zones may host a nested entry,
+    /// which is the second half of module 7's negation rule.
+    /// </para>
+    /// </summary>
+    public ZoneGrade MinimumZoneGrade { get; init; } = ZoneGrade.Weak;
+
+    /// <summary>
+    /// Whether a nested entry requires its higher-timeframe host to be a valid imbalance rather than
+    /// merely a tracked structure. Module 7: "A bigger timeframe impulse that doesn't become an
+    /// imbalance negates lower timeframe imbalances." On by default - the alternative admits an entry
+    /// leaning on something module 4 does not consider an imbalance at all.
+    /// </summary>
+    public bool RequireValidHost { get; init; } = true;
+
     public IReadOnlySet<BarInterval> RequiredIntervals =>
         new HashSet<BarInterval> { TopInterval, MiddleInterval, LowerInterval };
 

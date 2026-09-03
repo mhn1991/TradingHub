@@ -46,6 +46,19 @@ public sealed record AlfonsoTrendOptions
     public decimal ExtendedRangeBodyRatio { get; init; } = 0.80m;
 
     /// <summary>
+    /// Whether the aggressive over-extension trendline of module 3 may be drawn: "In over-extension
+    /// with three or more consecutive CPs, the trendlines can be drawn more aggressively connecting
+    /// the last three CPs."
+    /// <para>
+    /// Off by default because the module offers it rather than requiring it - "can be drawn" - and
+    /// because it is not inert: a line that exists is a line that can be broken, and a break both
+    /// ends the trend it opposes and creates a new imbalance at the origin of the move. It applies
+    /// only while the timeframe is over-extended, and only where no ordinary line is available.
+    /// </para>
+    /// </summary>
+    public bool OverExtensionTrendlines { get; init; }
+
+    /// <summary>
     /// Whether a trendline break needs a candle to CLOSE beyond the line, rather than the whole
     /// candle to sit beyond it. Defaults to the close, which is how the rule is taught.
     /// </summary>
@@ -125,6 +138,13 @@ public sealed class AlfonsoTrendDetector
     private readonly List<DateTimeOffset> _times = [];
     private readonly List<SwingPoint> _valleys = [];
     private readonly List<SwingPoint> _peaks = [];
+
+    /// <summary>
+    /// Continuation patterns, kept separately from the swings. They are barred from ordinary
+    /// trendlines and are only ever read by the over-extension line.
+    /// </summary>
+    private readonly List<SwingPoint> _continuationValleys = [];
+    private readonly List<SwingPoint> _continuationPeaks = [];
     private readonly HashSet<Trendline> _brokenLines = [];
     private readonly Queue<Trendline> _brokenLineOrder = [];
 
@@ -176,6 +196,7 @@ public sealed class AlfonsoTrendDetector
 
         Trendline? bullish = TrendlineBuilder.Bullish(_valleys, _highs, _lows, _times, index);
         Trendline? bearish = TrendlineBuilder.Bearish(_peaks, _highs, _lows, _times, index);
+        (bullish, bearish) = WithOverExtensionLines(bullish, bearish, index);
 
         BreakTrendlines(bar, index, bullish, bearish);
         if (bullish is not null && _brokenLines.Contains(bullish))
@@ -218,8 +239,31 @@ public sealed class AlfonsoTrendDetector
             _valleys, _highs, _lows, _times, previousIndex);
         Trendline? bearish = TrendlineBuilder.Bearish(
             _peaks, _highs, _lows, _times, previousIndex);
+        (bullish, bearish) = WithOverExtensionLines(bullish, bearish, previousIndex);
 
         BreakTrendlines(bar, _highs.Count, bullish, bearish);
+    }
+
+    /// <summary>
+    /// Supplies module 3's aggressive continuation-pattern line where an ordinary one cannot be
+    /// drawn and the timeframe is over-extended. An ordinary line always wins: the module offers the
+    /// CP line as what to do when the market prints no peaks or valleys to connect, not as a
+    /// replacement for the ones it does print.
+    /// </summary>
+    private (Trendline? Bullish, Trendline? Bearish) WithOverExtensionLines(
+        Trendline? bullish, Trendline? bearish, int index)
+    {
+        if (!_options.OverExtensionTrendlines || !IsOverExtended || index < 0)
+            return (bullish, bearish);
+
+        bullish ??= TrendlineBuilder.OverExtended(
+            _continuationValleys, _lows, _times, index, TrendlineDirection.Bullish,
+            _options.OverExtensionContinuationPatterns);
+        bearish ??= TrendlineBuilder.OverExtended(
+            _continuationPeaks, _highs, _times, index, TrendlineDirection.Bearish,
+            _options.OverExtensionContinuationPatterns);
+
+        return (bullish, bearish);
     }
 
     private bool IsOverExtended =>
@@ -269,7 +313,9 @@ public sealed class AlfonsoTrendDetector
     {
         foreach (Imbalance zone in update.Created)
         {
-            if (zone.IsContinuationPattern)
+            // Continuation patterns are only ever read by the over-extension line, so when that is
+            // off they are not worth the index lookup - which is a linear scan of every bar seen.
+            if (zone.IsContinuationPattern && !_options.OverExtensionTrendlines)
                 continue;
 
             int index = _times.FindLastIndex(time => time == zone.BaseEnd);
@@ -284,14 +330,21 @@ public sealed class AlfonsoTrendDetector
                 Kind = zone.Kind
             };
 
-            if (zone.Kind == ImbalanceKind.Demand)
-                _valleys.Add(swing);
-            else
-                _peaks.Add(swing);
+            List<SwingPoint> store = (zone.IsContinuationPattern, zone.Kind) switch
+            {
+                (true, ImbalanceKind.Demand) => _continuationValleys,
+                (true, _) => _continuationPeaks,
+                (false, ImbalanceKind.Demand) => _valleys,
+                _ => _peaks
+            };
+
+            store.Add(swing);
         }
 
         Cap(_valleys);
         Cap(_peaks);
+        Cap(_continuationValleys);
+        Cap(_continuationPeaks);
     }
 
     private static void Cap(List<SwingPoint> swings)

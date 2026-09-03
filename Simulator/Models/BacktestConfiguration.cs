@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Strategies;
 using Agent.Strategies.Alfonso;
+using Agent.Strategies.Alfonso.Zones;
 using Agent.Strategies.BreakoutDetector;
 using Agent.Strategies.TrendTactical;
 using Agent.Strategies.DivergenceReversal;
@@ -761,6 +762,18 @@ public sealed record BacktestRequest
     /// </summary>
     public bool AlfonsoRequireStructuralAgreement { get; init; }
 
+    /// <summary>--alfonso-half-entry: module 10's "use half the width of the original imbalance".</summary>
+    public bool AlfonsoHalfZoneEntry { get; init; }
+
+    /// <summary>--alfonso-allow-invalid-hosts disables module 7's negation rule for nested entries.</summary>
+    public bool AlfonsoRequireValidHost { get; init; } = true;
+
+    /// <summary>--alfonso-overextension-trendlines: module 3's aggressive line across three CPs.</summary>
+    public bool AlfonsoOverExtensionTrendlines { get; init; }
+
+    /// <summary>--alfonso-min-grade: lowest module 7 grade a zone may carry and still be traded.</summary>
+    public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
+
     /// <summary>--alfonso-candidate-log PATH. Decision-time candidate CSV, or null for none.</summary>
     public string? AlfonsoCandidateLogPath { get; init; }
 
@@ -1020,20 +1033,26 @@ public sealed record BacktestRequest
                     DriftLookbackCandles = AlfonsoDriftLookbackCandles,
                     MinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
                     MaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
+                    MinimumZoneGrade = AlfonsoMinimumZoneGrade,
+                    RequireValidHost = AlfonsoRequireValidHost,
                     Zones = defaultAlfonso.Zones with
                     {
                         RewardMultiple = AlfonsoRewardMultiple ?? defaultAlfonso.Zones.RewardMultiple,
                         StopPaddingFraction = AlfonsoStopPadding ?? defaultAlfonso.Zones.StopPaddingFraction,
                         EliminationRequiresClose = AlfonsoEliminationRequiresClose,
                         SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
-                        TreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation
+                        TreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation,
+                        EntryPlacement = AlfonsoHalfZoneEntry
+                            ? ZoneEntryPlacement.Midpoint
+                            : ZoneEntryPlacement.Proximal
                     },
                     Trend = defaultAlfonso.Trend with
                     {
                         TrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
                         RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
                         RequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
-                        RequireStructuralAgreement = AlfonsoRequireStructuralAgreement
+                        RequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
+                        OverExtensionTrendlines = AlfonsoOverExtensionTrendlines
                     }
                 };
                 return new TradingAgentDefinition { Kind = kind, Alfonso = alfonso };

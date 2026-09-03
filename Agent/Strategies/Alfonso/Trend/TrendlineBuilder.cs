@@ -65,6 +65,58 @@ public static class TrendlineBuilder
     }
 
     /// <summary>
+    /// The aggressive line module 3 permits once a timeframe is over-extended: "In over-extension
+    /// with three or more consecutive CPs, the trendlines can be drawn more aggressively connecting
+    /// the last three CPs."
+    /// <para>
+    /// This is the one place continuation patterns may anchor a line. Everywhere else module 3
+    /// forbids it - "Continuation Patterns (CPs) will not be used to connect trendlines" - because a
+    /// CP is not the origin of an impulse; in over-extension there is nothing else to connect, since
+    /// a market running without correction prints no new peaks or valleys to draw from.
+    /// </para>
+    /// <para>
+    /// Two conditions the ordinary builders impose are dropped deliberately. The three anchors must
+    /// run monotonically the way the line does, which is what makes them a line rather than three
+    /// unrelated pauses; but the "price has extended beyond the pair" test is not applied, because
+    /// over-extension is that condition - a market with three consecutive continuation patterns has
+    /// by definition kept going. The line is then fitted to the outer two anchors and pulled back off
+    /// any candle it would cut, exactly as elsewhere.
+    /// </para>
+    /// </summary>
+    public static Trendline? OverExtended(
+        IReadOnlyList<SwingPoint> continuations,
+        IReadOnlyList<decimal> constraint,
+        IReadOnlyList<DateTimeOffset> times,
+        int currentIndex,
+        TrendlineDirection direction,
+        int anchors = 3)
+    {
+        ArgumentNullException.ThrowIfNull(continuations);
+
+        if (anchors < 2 || continuations.Count < anchors)
+            return null;
+
+        bool bullish = direction == TrendlineDirection.Bullish;
+
+        for (int back = anchors; back > 1; back--)
+        {
+            SwingPoint earlier = continuations[^back];
+            SwingPoint later = continuations[^(back - 1)];
+            bool ordered = bullish ? later.Price > earlier.Price : later.Price < earlier.Price;
+            if (!ordered)
+                return null;
+        }
+
+        SwingPoint first = continuations[^anchors];
+        SwingPoint last = continuations[^1];
+
+        if (last.Index >= currentIndex)
+            return null;
+
+        return Fit(first, last, constraint, times, direction);
+    }
+
+    /// <summary>
     /// Whether price has pushed past the range spanned by the two swings, which is what turns a pair
     /// of swings into a drawable trendline.
     /// </summary>

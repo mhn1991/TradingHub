@@ -1,5 +1,6 @@
 using System.Globalization;
 using Agent.Strategies;
+using Agent.Strategies.Alfonso.Zones;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Engine;
@@ -156,6 +157,10 @@ internal sealed record BacktestCommandOptions
 
     public int AlfonsoDriftLookbackCandles { get; init; } = 60;
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
+    public bool AlfonsoHalfZoneEntry { get; init; }
+    public bool AlfonsoRequireValidHost { get; init; } = true;
+    public bool AlfonsoOverExtensionTrendlines { get; init; }
+    public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
     public bool AlfonsoRequireNestedEntries { get; init; }
     public bool AlfonsoRequireControlAgreement { get; init; } = true;
     public bool AlfonsoAllowConfirmationEntries { get; init; }
@@ -367,6 +372,8 @@ internal sealed record BacktestCommandOptions
                 "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
                 "alfonso-with-drift" or
                 "alfonso-manage-position" or "alfonso-structural-agreement" or
+                "alfonso-half-entry" or "alfonso-allow-invalid-hosts" or
+                "alfonso-overextension-trendlines" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -683,6 +690,10 @@ internal sealed record BacktestCommandOptions
                 values.GetValueOrDefault("alfonso-drift-lookback"), 60, 0, 10_000,
                 "alfonso-drift-lookback"),
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
+            AlfonsoHalfZoneEntry = values.ContainsKey("alfonso-half-entry"),
+            AlfonsoRequireValidHost = !values.ContainsKey("alfonso-allow-invalid-hosts"),
+            AlfonsoOverExtensionTrendlines = values.ContainsKey("alfonso-overextension-trendlines"),
+            AlfonsoMinimumZoneGrade = ParseZoneGrade(values.GetValueOrDefault("alfonso-min-grade")),
             AlfonsoRequireNestedEntries = values.ContainsKey("alfonso-nested-only"),
             AlfonsoRequireControlAgreement = !values.ContainsKey("alfonso-ignore-control"),
             AlfonsoAllowConfirmationEntries = values.ContainsKey("alfonso-confirmation-trades"),
@@ -853,6 +864,10 @@ internal sealed record BacktestCommandOptions
         AlfonsoRequireDriftAlignment = AlfonsoRequireDriftAlignment,
         AlfonsoDriftLookbackCandles = AlfonsoDriftLookbackCandles,
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
+        AlfonsoHalfZoneEntry = AlfonsoHalfZoneEntry,
+        AlfonsoRequireValidHost = AlfonsoRequireValidHost,
+        AlfonsoOverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
+        AlfonsoMinimumZoneGrade = AlfonsoMinimumZoneGrade,
         AlfonsoRequireNestedEntries = AlfonsoRequireNestedEntries,
         AlfonsoRequireControlAgreement = AlfonsoRequireControlAgreement,
         AlfonsoAllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
@@ -1375,6 +1390,25 @@ internal sealed record BacktestCommandOptions
         }
 
         return parsed;
+    }
+
+    /// <summary>
+    /// Parses --alfonso-min-grade. Absent means no gate, which is module 7's scoring measured rather
+    /// than trusted; the module never states a pass mark.
+    /// </summary>
+    private static ZoneGrade ParseZoneGrade(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return ZoneGrade.Weak;
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "weak" or "none" or "any" => ZoneGrade.Weak,
+            "medium" => ZoneGrade.Medium,
+            "strong" => ZoneGrade.Strong,
+            _ => throw new ArgumentException(
+                $"--alfonso-min-grade must be weak, medium or strong; got '{value}'.")
+        };
     }
 
     private static int ParseInt(string? value, int fallback, int minimum, int maximum, string name)

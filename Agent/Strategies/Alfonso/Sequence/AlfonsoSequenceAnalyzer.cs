@@ -50,6 +50,9 @@ public sealed class AlfonsoSequenceAnalyzer
     private readonly bool _allowConfirmationEntries;
     private readonly decimal _minimumProfitMargin;
     private readonly decimal _stopPadding;
+    private readonly ImbalanceOptions _zoneOptions;
+    private readonly ZoneGrade _minimumGrade;
+    private readonly bool _requireValidHost;
 
     public AlfonsoSequenceAnalyzer(
         TimeframeSequence sequence,
@@ -61,7 +64,9 @@ public sealed class AlfonsoSequenceAnalyzer
         bool allowConfirmationEntries = false,
         decimal minimumProfitMarginMultiple = 0m,
         decimal stopPaddingFraction = 0.25m,
-        bool confirmationEntryMode = false)
+        bool confirmationEntryMode = false,
+        ZoneGrade minimumGrade = ZoneGrade.Weak,
+        bool requireValidHost = true)
     {
         ArgumentNullException.ThrowIfNull(sequence);
         sequence.Validate();
@@ -72,6 +77,9 @@ public sealed class AlfonsoSequenceAnalyzer
         _allowConfirmationEntries = allowConfirmationEntries;
         _minimumProfitMargin = minimumProfitMarginMultiple;
         _stopPadding = stopPaddingFraction;
+        _zoneOptions = zoneOptions ?? new ImbalanceOptions();
+        _minimumGrade = minimumGrade;
+        _requireValidHost = requireValidHost;
 
         foreach ((SequenceRole role, TimeSpan interval) in sequence.All())
             _timeframes[role] = new AlfonsoTimeframeAnalyzer(interval, zoneOptions, trendOptions, rangeOptions);
@@ -220,7 +228,7 @@ public sealed class AlfonsoSequenceAnalyzer
                 Imbalance? host = null;
                 if (entry.NestedIn is SequenceRole hostRole)
                 {
-                    host = Nesting.FindHost(zone, _timeframes[hostRole].Zones);
+                    host = Nesting.FindHost(zone, EligibleHosts(_timeframes[hostRole].Zones));
                     if (host is null)
                     {
                         tally.NoHost++;
@@ -263,6 +271,12 @@ public sealed class AlfonsoSequenceAnalyzer
                 if (!HasRoomToTarget(zone, side, timeframe.Zones))
                 {
                     tally.NoRoom++;
+                    continue;
+                }
+
+                if (ZoneScorer.Grade(zone, _zoneOptions) < _minimumGrade)
+                {
+                    tally.GradeTooLow++;
                     continue;
                 }
 
@@ -327,6 +341,34 @@ public sealed class AlfonsoSequenceAnalyzer
             return true;
 
         return Math.Abs(level - zone.Proximal) >= risk * _minimumProfitMargin;
+    }
+
+    /// <summary>
+    /// The higher-timeframe zones a nested entry may lean on.
+    /// <para>
+    /// Module 7's closing rule: "If any of the three timeframes stops creating impulses that
+    /// consolidate away or the newly created imbalance doesn't score high, it will negate lower
+    /// timeframe imbalances nested at those HTF impulses that do not consolidate away. Remember that
+    /// not all impulses become correct imbalances, but all imbalances are made of impulses."
+    /// </para>
+    /// <para>
+    /// So the host has to be a real imbalance, not merely a structure the engine is tracking. That
+    /// distinction is not cosmetic here: the zone engine deliberately keeps every base it finds,
+    /// accomplished or not, because trendlines are drawn from valleys and peaks rather than from
+    /// validated imbalances - which meant a nested entry could previously be admitted by a
+    /// higher-timeframe structure that never accomplished anything and is not an imbalance under
+    /// module 4 at all. When a minimum grade is configured, the second half of the rule - "doesn't
+    /// score high" - applies to the host as well.
+    /// </para>
+    /// </summary>
+    private IEnumerable<Imbalance> EligibleHosts(IEnumerable<Imbalance> zones)
+    {
+        if (!_requireValidHost)
+            return zones;
+
+        return zones.Where(host =>
+            host.Accomplished != Accomplishment.None &&
+            ZoneScorer.Grade(host, _zoneOptions) >= _minimumGrade);
     }
 
     internal static bool AcceptsLevel(Imbalance zone, bool freshLevelsOnly) =>

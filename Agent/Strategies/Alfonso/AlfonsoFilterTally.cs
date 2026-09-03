@@ -59,11 +59,14 @@ public sealed class AlfonsoFilterTally
     /// <summary>Module 7's profit-margin rule found no room to the opposing level.</summary>
     public long NoRoom { get; set; }
 
+    /// <summary>Module 7's grade fell below the configured minimum.</summary>
+    public long GradeTooLow { get; set; }
+
     /// <summary>Survived every gate and became a candidate.</summary>
     public long Passed { get; set; }
 
     public long Considered =>
-        NotTradeable + NoHost + NotAccepted + NotLive + NoRoom + Passed;
+        NotTradeable + NoHost + NotAccepted + NotLive + NoRoom + GradeTooLow + Passed;
 }
 
 /// <summary>One cumulative tally snapshot for one side.</summary>

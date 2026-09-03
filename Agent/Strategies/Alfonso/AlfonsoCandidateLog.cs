@@ -53,6 +53,7 @@ public static class AlfonsoCandidateLog
             "at,instrument,outcome,side,entryTimeframe,topTrend,middleTrend,lowerTrend," +
             "proximal,distal,stop,target,risk,marketPrice,nested,continuationPattern,state," +
             "strength,accomplished,impulseToBaseRatio,impulseDisplacement,baseCandles," +
+            "grade,scoreTotal," +
             "costToRisk,stopAtrMultiple,atrPercentile,rangePosition,scenario";
 
         private readonly Lock _gate = new();
@@ -97,6 +98,10 @@ public static class AlfonsoCandidateLog
                 Number(record.ImpulseToBaseRatio),
                 Number(record.ImpulseDisplacement),
                 record.BaseCandleCount.ToString(CultureInfo.InvariantCulture),
+                Quote(Text(record.Score?.Grade)),
+                record.Score is null
+                    ? string.Empty
+                    : record.Score.Total.ToString(CultureInfo.InvariantCulture),
                 Number(record.CostToRisk),
                 Number(record.StopAtrMultiple),
                 Number(record.AtrPercentile),

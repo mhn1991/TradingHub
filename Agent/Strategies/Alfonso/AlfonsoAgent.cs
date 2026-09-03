@@ -150,7 +150,10 @@ public sealed class AlfonsoAgent : ITradingAgent
                 IReadOnlyList<TradeCandidate> live = state.Analyzer.Candidates(bar.Prices.Close);
                 TradeCandidate? held = live.FirstOrDefault(candidate =>
                     Key(candidate) == planned &&
-                    IsAheadOfPrice(candidate.Side, candidate.Zone.Proximal, bar.Prices.Close));
+                    IsAheadOfPrice(
+                        candidate.Side,
+                        candidate.Zone.EntryPrice(_options.Zones.EntryPlacement),
+                        bar.Prices.Close));
 
                 if (held is not null)
                 {
@@ -161,8 +164,10 @@ public sealed class AlfonsoAgent : ITradingAgent
                         atr is decimal unit && unit > 0m &&
                         live.Count > 0)
                     {
-                        decimal heldAway = Math.Abs(bar.Prices.Close - held.Zone.Proximal);
-                        decimal bestAway = Math.Abs(bar.Prices.Close - live[0].Zone.Proximal);
+                        decimal heldAway = Math.Abs(
+                            bar.Prices.Close - held.Zone.EntryPrice(_options.Zones.EntryPlacement));
+                        decimal bestAway = Math.Abs(
+                            bar.Prices.Close - live[0].Zone.EntryPrice(_options.Zones.EntryPlacement));
                         if ((heldAway - bestAway) / unit >= _options.RestingOrderReplacementAtr)
                         {
                             state.PendingOrder = null;
@@ -242,9 +247,13 @@ public sealed class AlfonsoAgent : ITradingAgent
                     continue;
                 }
 
+                // Module 10's two ways into the same imbalance: at the proximal line, or "half the
+                // width of the original imbalance". Protection does not move with the entry.
+                decimal entryPrice = zone.EntryPrice(_options.Zones.EntryPlacement);
+
                 if (_options.MaximumPlacementDistanceAtr > 0m &&
                     atr is decimal reach && reach > 0m &&
-                    Math.Abs(bar.Prices.Close - zone.Proximal) / reach >
+                    Math.Abs(bar.Prices.Close - entryPrice) / reach >
                         _options.MaximumPlacementDistanceAtr)
                 {
                     LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.TooFarToFill);
@@ -252,11 +261,11 @@ public sealed class AlfonsoAgent : ITradingAgent
                 }
 
                 decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
-                decimal reference = zone.Proximal;
+                decimal reference = entryPrice;
 
                 if (!_options.RequireReversalConfirmation)
                 {
-                    if (!IsAheadOfPrice(candidate.Side, zone.Proximal, bar.Prices.Close))
+                    if (!IsAheadOfPrice(candidate.Side, entryPrice, bar.Prices.Close))
                     {
                         LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
                         continue;
@@ -294,7 +303,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                         ? reference + (_options.Zones.RewardMultiple * risk)
                         : reference - (_options.Zones.RewardMultiple * risk))
                     : zone.TargetPrice(
-                        _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple);
+                        _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple,
+                        _options.Zones.EntryPlacement);
                 decimal? costToRisk = context.RoundTripCostEstimate is decimal cost && risk > 0m
                     ? cost / risk
                     : null;
@@ -353,7 +363,7 @@ public sealed class AlfonsoAgent : ITradingAgent
                     OrderType = _options.RequireReversalConfirmation
                         ? StandardOrderType.Market
                         : StandardOrderType.Limit,
-                    LimitPrice = _options.RequireReversalConfirmation ? null : zone.Proximal,
+                    LimitPrice = _options.RequireReversalConfirmation ? null : entryPrice,
                     ReferencePrice = reference,
                     StopLossPrice = stop,
                     TakeProfitPrice = target,
@@ -467,6 +477,7 @@ public sealed class AlfonsoAgent : ITradingAgent
             ImpulseToBaseRatio = zone.ImpulseToBaseRatio,
             ImpulseDisplacement = zone.ImpulseDisplacement,
             BaseCandleCount = zone.BaseCandleCount,
+            Score = ZoneScorer.Score(zone, _options.Zones),
             CostToRisk = costToRisk,
             StopAtrMultiple = stopAtr,
             AtrPercentile = atrPercentile,
@@ -485,8 +496,11 @@ public sealed class AlfonsoAgent : ITradingAgent
         Imbalance zone = candidate.Zone;
         decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
         Log(context, candidate, bar, stop,
-            zone.TargetPrice(_options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple),
-            Math.Abs(zone.Proximal - stop), null, null, atrPercentile, outcome);
+            zone.TargetPrice(
+                _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple,
+                _options.Zones.EntryPlacement),
+            Math.Abs(zone.EntryPrice(_options.Zones.EntryPlacement) - stop),
+            null, null, atrPercentile, outcome);
     }
 
     private static Task<AgentDecision> Observe(AgentMarketContext context, string reason) =>
@@ -537,7 +551,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                 options.Sequence, options.Zones, options.Trend, options.Range, options.FreshLevelsOnly,
                 options.RequireControlAgreement, options.AllowConfirmationEntries,
                 options.MinimumProfitMarginMultiple, options.Zones.StopPaddingFraction,
-                options.RequireReversalConfirmation);
+                options.RequireReversalConfirmation, options.MinimumZoneGrade,
+                options.RequireValidHost);
 
             Intervals =
             [

@@ -72,6 +72,18 @@ public enum ImbalanceState
 }
 
 /// <summary>
+/// Where inside a zone the entry is planned. Module 10 gives both as options on the same imbalance.
+/// </summary>
+public enum ZoneEntryPlacement
+{
+    /// <summary>"Take the full imbalance based on your entry timeframe." Entry at the proximal line.</summary>
+    Proximal,
+
+    /// <summary>"Use half the width of the original imbalance." Entry half way to the distal line.</summary>
+    Midpoint
+}
+
+/// <summary>
 /// A supply or demand imbalance, as module 4 defines it: a basing structure bounded by a proximal
 /// line (nearest current price) and a distal line (furthest), created by an impulse that
 /// accomplished something and consolidated away.
@@ -190,15 +202,27 @@ public sealed record Imbalance
     }
 
     /// <summary>
-    /// Target at <paramref name="rewardMultiple"/> times the risk, measured from the proximal entry
-    /// to the padded stop. Module 11: "Exit at a fixed target of 3:1, three times the width of the
+    /// Where the entry is planned inside the zone. Module 10: the full imbalance is entered at the
+    /// proximal line, the half entry "around" the middle of the level.
+    /// </summary>
+    public decimal EntryPrice(ZoneEntryPlacement placement) => placement == ZoneEntryPlacement.Midpoint
+        ? (Proximal + Distal) / 2m
+        : Proximal;
+
+    /// <summary>
+    /// Target at <paramref name="rewardMultiple"/> times the risk, measured from the entry to the
+    /// padded stop. Module 11: "Exit at a fixed target of 3:1, three times the width of the
     /// imbalance including the padding."
     /// </summary>
-    public decimal TargetPrice(decimal paddingFraction, decimal rewardMultiple)
+    public decimal TargetPrice(
+        decimal paddingFraction,
+        decimal rewardMultiple,
+        ZoneEntryPlacement placement = ZoneEntryPlacement.Proximal)
     {
-        decimal risk = Math.Abs(Proximal - StopPrice(paddingFraction));
+        decimal entry = EntryPrice(placement);
+        decimal risk = Math.Abs(entry - StopPrice(paddingFraction));
         return Kind == ImbalanceKind.Demand
-            ? Proximal + (risk * rewardMultiple)
-            : Proximal - (risk * rewardMultiple);
+            ? entry + (risk * rewardMultiple)
+            : entry - (risk * rewardMultiple);
     }
 }

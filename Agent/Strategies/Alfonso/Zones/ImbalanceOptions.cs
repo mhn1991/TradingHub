@@ -198,6 +198,30 @@ public sealed record ImbalanceOptions
     /// <summary>Peaks and valleys retained for the swing-break test.</summary>
     public int SwingMemory { get; init; } = 16;
 
+    /// <summary>
+    /// Where inside the zone the entry is planned. Module 10 offers both on the same worked example:
+    /// "Take the full imbalance based on your entry timeframe ... We would plan the entry at weekly
+    /// demand proximal line at $46.25" or "Use half the width of the original imbalance. The entry
+    /// would be around $45.15", and module 11 repeats the pair for an IPO with no history behind it -
+    /// "Buy the whole imbalance or half of it."
+    /// <para>
+    /// Protection does not move with it: the stop stays beyond the distal line by
+    /// <see cref="StopPaddingFraction"/>, so a half entry is a smaller risk and a nearer target, at
+    /// the cost of the fills where price turns in the first half of the zone.
+    /// </para>
+    /// </summary>
+    public ZoneEntryPlacement EntryPlacement { get; init; } = ZoneEntryPlacement.Proximal;
+
+    /// <summary>
+    /// Points at which <see cref="ZoneScorer"/> calls a zone strong. Not a course figure - module 7
+    /// names the qualifiers and the two extremes but never totals them - so it is a convention, and
+    /// it gates nothing unless a minimum grade is configured.
+    /// </summary>
+    public int StrongGradePoints { get; init; } = 8;
+
+    /// <summary>Points at which a zone is graded medium rather than weak. Also a convention.</summary>
+    public int MediumGradePoints { get; init; } = 5;
+
     public void Validate()
     {
         if (MaximumBasingBodyRatio is <= 0m or > 1m)
@@ -237,5 +261,16 @@ public sealed record ImbalanceOptions
             throw new InvalidOperationException("MaximumTests must be at least 1.");
         if (MaximumTrackedZones < 1)
             throw new InvalidOperationException("MaximumTrackedZones must be at least 1.");
+        if (MediumGradePoints < 1 || MediumGradePoints > ZoneScorer.MaximumPoints)
+        {
+            throw new InvalidOperationException(
+                $"MediumGradePoints must be within [1, {ZoneScorer.MaximumPoints}].");
+        }
+
+        if (StrongGradePoints < MediumGradePoints || StrongGradePoints > ZoneScorer.MaximumPoints)
+        {
+            throw new InvalidOperationException(
+                $"StrongGradePoints must be within [MediumGradePoints, {ZoneScorer.MaximumPoints}].");
+        }
     }
 }

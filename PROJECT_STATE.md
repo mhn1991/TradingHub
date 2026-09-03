@@ -4936,6 +4936,11 @@ assumption (limit orders filling on touch) is recorded there.
 
 ### 3.49 The method checklist vs the implementation: what Alfonso actually covers (2026-09-03)
 
+> **Partly superseded by §3.50**, which audited the eleven source PDFs rather than the checklist and
+> then built the four rules that were genuinely missing. The composite score and the arrival/original-
+> versus-reaction gaps below read worse than they are: the checklist's eight criteria are not the
+> book's five, and three of the "missing" rows are things the PDFs never state.
+
 Checked the user's Persian method checklist (چک لیست) item by item against
 `Agent/Strategies/Alfonso`. **Roughly two thirds is implemented; the gaps are concentrated in zone
 scoring and candle reading.**
@@ -4971,6 +4976,130 @@ found no usable directional edge, and 3.43's verdict is that the method as imple
 either. Adding the missing grading could change that or could simply add parameters to fit; nothing
 here establishes which. Any build should be measured against a null the way 3.45/3.46 tried to and
 3.47 shows must be done lookahead-free.
+
+### 3.50 The eleven course PDFs read end to end against the code; four rules were missing and are now built (2026-09-03)
+
+§3.49 audited the user's Persian checklist. This audits **the source material itself** - all eleven
+PDFs in `Books/alfonso`, extracted with `pdftotext -layout` and read module by module against
+`Agent/Strategies/Alfonso`. The headline: **the method is implemented far more completely than §3.49
+implied - §3.49 was reading a checklist, not the book - but four mechanical rules stated in the PDFs
+had no code at all.** All four are now built.
+
+#### What was missing, and what was done about it
+
+| module | rule in the book | was | now |
+|---|---|---|---|
+| 7 | The whole chapter is "Scoring imbalances - how to grade an imbalance to qualify it as a tradeable zone". Five qualifiers, "a mechanical and straightforward scoring system", "If the particular trade gets a passing score, it must be traded." | the five qualifiers existed as independent pass/fail gates; **no score and no grade existed anywhere** | `Zones/ZoneScore.cs`: `ZoneScorer` grades a zone 0-10 over accomplishment / impulse / base / freshness / 2:1, and returns Weak, Medium or Strong. Written to every candidate-log row (`grade`, `scoreTotal`). Optional gate `--alfonso-min-grade weak\|medium\|strong`, **default weak = no gate** |
+| 7 | "A bigger timeframe impulse that doesn't become an imbalance negates lower timeframe imbalances nested at those HTF impulses ... not all impulses become correct imbalances" | **absent.** `Nesting.FindHost` accepted any live structure, including ones that accomplished nothing and are therefore not imbalances under module 4 at all | `AlfonsoSequenceAnalyzer.EligibleHosts`: a nested entry now needs a host that accomplished something, and that also clears the minimum grade when one is set. **Default on**; `--alfonso-allow-invalid-hosts` restores the old behaviour |
+| 10 | "Use half the width of the original imbalance. The entry would be around $45.15" - one of four entry options module 10 gives on the same zone, repeated in module 11 for an IPO: "Buy the whole imbalance or half of it." | only the proximal-line entry existed | `Imbalance.EntryPrice(ZoneEntryPlacement)`; the stop stays beyond the distal so the half entry risks less and needs less travel for the same 3:1. `--alfonso-half-entry`, **default proximal** |
+| 3 | "In over-extension with three or more consecutive CPs, the trendlines can be drawn more aggressively connecting the last three CPs." | absent - continuation patterns were excluded from trendlines everywhere, which is right everywhere else | `TrendlineBuilder.OverExtended` plus CP swing tracking in `AlfonsoTrendDetector`. Applies only while the timeframe is over-extended and only where no ordinary line is drawable. `--alfonso-overextension-trendlines`, **default off** ("can be drawn", not must) |
+
+Also added: module 8's quarterly (3M/M/W) and monthly (M/W/D) sequences as named presets on
+`TimeframeSequence`, which previously carried only three of the course's five. This is cosmetic -
+any sequence was already expressible through `--alfonso-top/middle/lower`.
+
+**Why three of the four default to off.** Only the host-validity rule changes behaviour by default,
+because it is the only one of the four the book states as a rule rather than an option, and the
+behaviour it replaces admits an entry leaning on something module 4 does not call an imbalance. The
+scoring's *pass mark* is not in the book - module 7 names the qualifiers and two anchors ("very low
+score = 0" for a weak departure, "an extra point if you like" for a gap) and never totals them - so
+choosing a threshold now would be exactly the in-sample fitting §3.27 records. The grade is
+therefore **measured first**: it is logged on every candidate so the population it would filter can
+be studied before it filters anything.
+
+#### What the book says that the code deliberately does not do
+
+These are departures, each already argued in the source where it lives; listed here so the audit is
+honest rather than flattering:
+
+- **"No indicators or oscillators ... except the 20 EMA"** (module 1). ATR is used - for impulse
+  strength, the placement-distance cap and the optional regime band. It never creates, prices or
+  times a trade; it supplies the scale that makes "a strong departure" mean the same thing on M15
+  and H4. A literal reading would forbid it.
+- **"It also has to be made of at least two ERCs"** (module 7). Implemented as an ATR distance
+  within a speed window instead. The literal count fails on real candles: two *consecutive* extended
+  range candles occurred 4 times in 1,018 H4 gold bars.
+- **"When you are in doubt, consider them as a CP"** (module 2). `TreatAmbiguousBaseAsContinuation`
+  defaults off; on, it cut trades 127 -> 40 and pooled avgR -0.239 -> -0.474.
+- **"Each successive peak and trough is higher"** (module 5). `RequireStructuralAgreement` defaults
+  off on statistical-power grounds - see the option's own comment.
+
+#### What is still not implemented, with the reason
+
+- **Module 4's second zone from a trendline break.** "Up to two imbalances can be created when the
+  trendline is broken: 1. At the origin of the move 2. At the basing structure, if the structure
+  intersects with the TL." The origin zone is found. The zone at the trendline intersection is found
+  only if that base independently forms with its own consolidation away; there is no rule keyed on
+  the intersection. Partial, and left so - it needs the trend layer to hand geometry back to the
+  zone layer, which is the inverse of the current dependency.
+- **Module 11's money management.** The plan specifies 1% risk per trade, 5% total exposure, at most
+  5 open trades, at most 2 correlated instruments, "max of 2 losses in the same asset" for a month,
+  and monthly goal/drawdown stops. The first four have generic homes in the platform
+  (`PortfolioRiskModels.MaximumOpenPositions`, the risk-percent sizing path, `RollingCorrelationClusters`);
+  the agent itself sizes at a fixed `Quantity`. **The two-losses-per-asset rule and the monthly
+  goal/drawdown stops have no home anywhere, and the agent cannot supply them**: `AgentMarketContext`
+  carries positions and open orders but no closed-trade history, so the agent cannot see that it
+  lost twice. That is a plumbing change to the agent contract, not an Alfonso change.
+- **Module 11's "close before the 3:1 if strong obstacles have formed"**. Discretionary by the
+  book's own framing, and partly pre-empted by the 3:1 profit-margin gate, which refuses such trades
+  up front rather than abandoning them later.
+
+#### Verification
+
+`Simulator.Tests/AlfonsoScoringAndEntryTests.cs` (16 tests) pins the scoring anchors the book does
+state, the half-entry arithmetic, the host rule and the over-extension line, including that the
+three opt-in switches are off by default. Alfonso suite 104 green.
+
+#### Measured: the one change that is on by default
+
+The host-validity rule is the only default-on change, so it is the only one that needs an A/B.
+Same six instruments, same 2025-11-24 to 2026-07-23 window and same flags as the §3.40-3.43 runs
+(`--alfonso-ignore-control --alfonso-profit-margin 0`), differing only in
+`--alfonso-allow-invalid-hosts`. True R throughout, per §3.44.
+
+| instrument | A: hosts unchecked | | B: hosts must be imbalances | |
+|---|---|---|---|---|
+| | n | avgR | n | avgR |
+| gbpjpy | 19 | -0.0051 | 19 | -0.0051 |
+| nas100 | 24 | -0.3483 | 23 | -0.3155 |
+| us30 | 21 | -0.7062 | 15 | -0.8097 |
+| gold | 37 | +0.2591 | 35 | +0.2239 |
+| silver | 23 | -0.1923 | 22 | -0.1543 |
+| eurusd | 18 | -0.0525 | 18 | -0.0525 |
+| **pooled** | **142** | **-0.1343** | **132** | **-0.1212** |
+
+Pooled 95% CI: A [-0.423, +0.154], B [-0.422, +0.180]. **Difference +0.0131R, 95% CI
+[-0.404, +0.430]** - indistinguishable from zero. Net loss falls from -5,051 to -3,320, which is
+inside the same noise. 1 of 6 instruments positive either way.
+
+**Read it as fidelity, not edge.** The rule removes 7% of trades (10 of 142) and changes nothing
+measurable. Two instruments are byte-identical, meaning the rule never bound there at all. It is
+adopted because the book states it and the previous behaviour admitted entries leaning on
+structures module 4 does not call imbalances - not because it improves anything, and this run does
+not show that it does.
+
+#### The grade barely discriminates on the population that reaches it
+
+52 days of gold with the candidate log on and no grade gate (`--alfonso-candidate-log`, no
+`--alfonso-min-grade`): **1,111 candidates, scoring 9/10 (950), 8/10 (65) and 7/10 (96). Nothing
+scored below 7 and nothing graded Weak.** All 1,111 were Fresh; 1,109 of 1,111 had a Strong
+departure and 2 gapped. The only qualifiers that varied at all were base structure and how many
+accomplishments the impulse had.
+
+That is the expected consequence of where the gate sits, and it is worth stating bluntly:
+**`--alfonso-min-grade medium` would remove nothing on this sample, and `--alfonso-min-grade strong`
+would remove 8.6% (96 of 1,111).** By the time a zone reaches the candidate list it has already
+cleared the hard gates - it accomplished something, it made 2:1, its departure was not weak, and
+freshness had already selected it - so four of the five qualifiers are pinned at or near full marks
+before the score is computed. The score is measuring a population the gates have already made
+uniform.
+
+**So the grading, as wired, is close to a no-op, and that is the finding rather than a disappointment
+in it.** It says the discrimination the course expects from scoring is already being done upstream by
+the pass/fail gates. For the grade to earn its place it has to be scored on zones those gates
+currently reject - `--alfonso-allow-invalid-zones`, a relaxed 2:1 - and shown to order that wider
+population by outcome. That is a real experiment and it has not been run.
+
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5623,6 +5752,16 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-03 (latest)**: Read all eleven `Books/alfonso` PDFs end to end against
+  `Agent/Strategies/Alfonso` (§3.50). **Four mechanical rules the book states had no code**: module
+  7's zone scoring, module 7's rule that a bigger-timeframe impulse which never became an imbalance
+  negates what nests at it, module 10's half-the-imbalance entry, and module 3's over-extension
+  trendline across three CPs. All four built; only the host rule defaults on, and its six-instrument
+  A/B is +0.0131R with a CI containing zero, so it is adopted on fidelity not edge. Measured the new
+  grading on an ungated 1,111-candidate log: **nothing scores below 7/10 and nothing grades Weak**,
+  because the hard gates upstream have already made the population uniform — so the grade as wired is
+  close to a no-op, which is itself the answer to "is the method missing its scoring layer".
+  Suite 1,380 green.
 - **2026-09-03 (later still)**: Audited every other research section for 3.47's lookahead bug (§3.48).
   **3.45/3.46 is the only violation.** The engine cannot express it — `MultiTimeframeAggregator`
   completes a bucket only on close, `GetCandles` returns completed bars only, and analysis snapshots

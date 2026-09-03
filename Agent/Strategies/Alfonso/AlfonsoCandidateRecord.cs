@@ -79,6 +79,12 @@ public sealed record AlfonsoCandidateRecord
     public required decimal ImpulseDisplacement { get; init; }
     public required int BaseCandleCount { get; init; }
 
+    /// <summary>
+    /// Module 7's grade for this zone as of the decision. Null on records written before the scoring
+    /// existed; the agent always populates it.
+    /// </summary>
+    public ZoneScore? Score { get; init; }
+
     /// <summary>Round-trip cost as a fraction of planned risk, when the platform supplied an estimate.</summary>
     public decimal? CostToRisk { get; init; }
 
