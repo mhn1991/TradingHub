@@ -4848,15 +4848,39 @@ event type on certainty as well would close it.
 
 ### Both defects fixed (2026-09-03)
 
-**1. The currency mismatch is now visible in the output.** `SimulationManifest` gained
-`BaseCurrency` (`Simulator/Replay/ChunkedReplayWriter.cs:1084-1090`), populated at both write sites
-(`StreamingComparativeEngine.cs:275,1257`). The root default is deliberately **unchanged** —
-`ResolveBaseCurrency()` still derives the account currency from the instrument when
-`--base-currency` is absent, because changing it would silently alter the semantics of every existing
-run script. What was actually broken is that the choice was invisible: the manifest recorded no
-currency at all, so a JPY-denominated run looked identical to a USD one and their P&L summed without
-complaint. Now any cross-run aggregation can detect the mismatch.
-Test: `Simulator.Tests/ManifestBaseCurrencyTests.cs`.
+**1. The currency mismatch is visible in the output, and the default that caused it is gone.**
+
+*Visibility:* `SimulationManifest` gained `BaseCurrency`
+(`Simulator/Replay/ChunkedReplayWriter.cs:1084-1090`), populated at both write sites
+(`StreamingComparativeEngine.cs:275,1257`), so a run's denomination is now recorded rather than
+implied. Test: `Simulator.Tests/ManifestBaseCurrencyTests.cs`.
+
+*The default (changed on request, 2026-09-03):* the account currency **no longer derives from the
+instrument's quote currency**. `BacktestRequest.DefaultBaseCurrency` is `"USD"`, applied by both
+resolvers — the CLI's `BacktestCommandOptions.ResolveBaseCurrency()` and the service-side one in
+`BacktestApplicationService` (whose private `ResolveBaseCurrency(InstrumentKey)` is deleted; it was
+the one that actually built `SimulationOptions`, and having two was part of why this went unnoticed).
+
+*Because that makes crosses unconvertible, two things were added rather than left to fail at the
+first fill:* a `--quote-rate JPY=0.0067,CHF=1.12` flag populating
+`BacktestRequest.QuoteToBaseCurrencyRates` (previously unreachable from the CLI and therefore always
+empty), and a **startup preflight** in `BacktestRequest.Validate()` that refuses an instrument whose
+quote currency is neither the account currency, nor an explicitly supplied rate, nor derivable from
+the pair's own price (`USD/JPY` on USD is derivable; `GBP/JPY` is not). Without it a USD-denominated
+GBP/JPY run would have thrown from `GetQuoteToBaseCurrencyRate` on the first commission calculation,
+mid-run.
+
+*Verified end to end:* `--instrument FX:GBP/JPY` without a rate now fails immediately with
+"No USD conversion is available for FX:GBP/JPY. Supply a rate (for example --quote-rate JPY=0.0067),
+or denominate the run in the instrument's own quote currency with --base-currency."; the same run
+with `--quote-rate JPY=0.0067` proceeds; `FX:EUR/USD` is unaffected.
+
+**Consequence for existing scripts.** The old behaviour is still available as `--base-currency JPY`,
+but it must now be asked for, and the manifest records it. **Any script trading a cross will fail at
+startup until updated** — in `/mnt/storage/scratch/alfonso` that is the GBP/JPY leg only; the other
+five instruments are USD-quoted and unaffected. A suite that adds `--quote-rate` gets what 3.43
+needed all along: six runs in one currency whose dollar results can legitimately be summed.
+Test: `Simulator.Tests/BaseCurrencyDefaultTests.cs` (7 tests).
 
 **2. Broker quantity granularity now reaches both sizing paths, from one definition.**
 `PositionSizingOptions.WithBrokerConstraints(InstrumentTradingMetadata?)`
@@ -4872,8 +4896,17 @@ do not implement it fall back to the previous behaviour, so the change is non-br
 Test: `Simulator.Tests/BrokerQuantityConstraintTests.cs` (7 tests; the 3 sizer tests were verified to
 **fail** against the pre-fix behaviour, the other 4 assert the rule itself).
 
-**Suites after the fixes**: `Simulator.Tests` 1353/1353, `LiveTrading.Tests` 119/119,
-`TradingCore.Tests` 24/24, `TradingHub.UnitTests` 60/60.
+**Suites after the fixes**: `Simulator.Tests` 1360/1360, `LiveTrading.Tests` 119/119,
+`TradingCore.Tests` 24/24, `TradingHub.UnitTests` 60/60, `QuantResearchRunner.Tests` **73/73** — the
+two failures recorded against that suite earlier in this file
+(`Merger_CombinesBucketsAndCohortsByStrategy`,
+`RunAndProposeAsync_DerivesAgentOptions_FromTrainingRuntime_NotBareDefaults`) no longer reproduce;
+not investigated, and not attributable to this work.
+
+**Environment note**: the test host and MSBuild child nodes crashed sporadically during this session
+(three times, at different points, with ~19GB disk and ~113GB RAM free). A `--blame-crash` run
+completed 1360/1360 cleanly and a subsequent plain run did too, so it is infrastructure flakiness
+rather than a code fault — but a single aborted run here is not evidence of a regression.
 
 **Still not claimed.** Nine axes audited. The one remaining item — whether OANDA's mid series matches
 what a real account would actually have been filled against — **cannot be settled from this repo**: it
@@ -5582,9 +5615,11 @@ into `docs/`; Docker packaging.
   **Nine axes audited, two defects found outside 3.45/3.46**, both accounting/operational rather than
   leakage. The remaining question — whether OANDA mid matches real fills — cannot be settled without
   live trading. **Then fixed both defects.** The manifest now records the run's account currency, so
-  the JPY/USD mismatch behind 3.43's corrected figure is detectable in the output (the derive-from-
-  instrument default is left alone deliberately — it was invisibility, not derivation, that caused the
-  error). Broker quantity granularity now reaches the `ExecutionCoordinator` path too, from a single
+  the JPY/USD mismatch behind 3.43's corrected figure is detectable in the output, and **on request
+  the derive-from-instrument default was then removed too**: the account currency now defaults to USD
+  in both resolvers, a new `--quote-rate` flag supplies conversions for crosses, and a startup
+  preflight refuses an unconvertible instrument with an actionable message instead of throwing at the
+  first fill. Existing GBP/JPY scripts must add `--quote-rate JPY=...` or `--base-currency JPY`. Broker quantity granularity now reaches the `ExecutionCoordinator` path too, from a single
   `WithBrokerConstraints` definition that `LiveOpportunityCoordinator` also delegates to, supplied via
   a new cached-lookup broker capability. **Also corrected my own overstatement**: the quantity gap was
   confined to `ExecutionCoordinator`; the opportunity path had always handled it correctly. Suites

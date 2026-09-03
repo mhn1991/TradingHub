@@ -61,6 +61,9 @@ internal sealed record BacktestCommandOptions
     public int PageSize { get; init; } = 5_000;
     public decimal StartingBalance { get; init; } = 100_000m;
     public string? BaseCurrency { get; init; }
+    /// <summary>Quote-currency to account-currency rates, e.g. "JPY=0.0067,CHF=1.12".</summary>
+    public IReadOnlyDictionary<string, decimal> QuoteRates { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
     public decimal Quantity { get; init; } = 1_000m;
     public PositionSizingOptions PositionSizing { get; init; } =
         RecommendedSimulationDefaults.PositionSizing;
@@ -620,6 +623,7 @@ internal sealed record BacktestCommandOptions
             PageSize = ParseInt(values.GetValueOrDefault("page-size"), 5_000, 1, 5_000, "page-size"),
             StartingBalance = ParseDecimal(values.GetValueOrDefault("starting-balance"), 100_000m, 0m, "starting-balance"),
             BaseCurrency = values.GetValueOrDefault("base-currency")?.Trim().ToUpperInvariant(),
+            QuoteRates = ParseQuoteRates(values.GetValueOrDefault("quote-rate")),
             Quantity = quantity,
             PositionSizing = positionSizing,
             Leverage = leverage,
@@ -810,6 +814,7 @@ internal sealed record BacktestCommandOptions
         StrategyAssignments = StrategyAssignments,
         StartingBalance = StartingBalance,
         BaseCurrency = BaseCurrency ?? ResolveBaseCurrency(),
+        QuoteToBaseCurrencyRates = QuoteRates,
         Quantity = Quantity,
         Leverage = Leverage,
         CommissionRate = CommissionRate,
@@ -1069,17 +1074,16 @@ internal sealed record BacktestCommandOptions
         };
     }
 
-    public string ResolveBaseCurrency()
-    {
-        if (!string.IsNullOrWhiteSpace(BaseCurrency))
-        {
-            return BaseCurrency;
-        }
-
-        string pair = Instrument.Value[(Instrument.Value.IndexOf(':') + 1)..];
-        int slash = pair.LastIndexOf('/');
-        return slash >= 0 && slash + 1 < pair.Length ? pair[(slash + 1)..] : "USD";
-    }
+    /// <summary>
+    /// The account currency. Defaults to <see cref="Simulator.Models.BacktestRequest.DefaultBaseCurrency"/>
+    /// rather than the instrument's quote currency: deriving it meant a GBP/JPY run banked a yen
+    /// account while its USD-quoted siblings banked dollars, and nothing in the output said so.
+    /// Pass <c>--base-currency</c> to denominate a run in something else.
+    /// </summary>
+    public string ResolveBaseCurrency() =>
+        string.IsNullOrWhiteSpace(BaseCurrency)
+            ? Simulator.Models.BacktestRequest.DefaultBaseCurrency
+            : BaseCurrency;
 
     private static Simulator.Models.StrategyExecutionMode ParseExecutionMode(string value) =>
         value.Trim().ToLowerInvariant() switch
@@ -1104,6 +1108,34 @@ internal sealed record BacktestCommandOptions
             "independent" or "independentperstrategy" => Simulator.Models.AnalysisSharingMode.IndependentPerStrategy,
             _ => throw new ArgumentException($"Unknown --analysis-sharing '{value}'.")
         };
+
+    /// <summary>
+    /// Parses <c>--quote-rate JPY=0.0067,CHF=1.12</c> into quote-currency to account-currency rates.
+    /// </summary>
+    private static IReadOnlyDictionary<string, decimal> ParseQuoteRates(string? value)
+    {
+        var rates = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+            return rates;
+
+        foreach (string entry in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string[] parts = entry.Split('=', StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 ||
+                string.IsNullOrWhiteSpace(parts[0]) ||
+                !decimal.TryParse(parts[1], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal rate) ||
+                rate <= 0m)
+            {
+                throw new ArgumentException(
+                    $"Unknown --quote-rate entry '{entry}'. Use CURRENCY=RATE with a positive rate, " +
+                    "for example JPY=0.0067.");
+            }
+
+            rates[parts[0].ToUpperInvariant()] = rate;
+        }
+
+        return rates;
+    }
 
     private static Simulator.Models.AmbiguousIntrabarPolicy ParseAmbiguousPolicy(string value) =>
         value.Trim().ToLowerInvariant() switch

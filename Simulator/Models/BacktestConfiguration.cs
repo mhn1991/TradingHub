@@ -661,7 +661,25 @@ public sealed record BacktestRequest
     /// </summary>
     public IReadOnlyList<StrategyInstrumentAssignment>? StrategyAssignments { get; init; }
     public decimal StartingBalance { get; init; } = 100_000m;
+    /// <summary>
+    /// Account currency for the run. Null means <see cref="DefaultBaseCurrency"/>.
+    /// </summary>
     public string? BaseCurrency { get; init; }
+
+    /// <summary>
+    /// Quote-currency to account-currency rates, keyed by quote currency (e.g. "JPY" -> 0.0067).
+    /// Required when an instrument's quote currency is neither the account currency nor derivable
+    /// from the pair's own price, which is the case for a cross such as GBP/JPY on a USD account.
+    /// </summary>
+    public IReadOnlyDictionary<string, decimal> QuoteToBaseCurrencyRates { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The account currency a run uses when none is given. Was previously derived from the
+    /// instrument's quote currency, which silently produced runs denominated in different
+    /// currencies within one suite - see 3.48 axis 7 and 3.43's corrected dollar figure.
+    /// </summary>
+    public const string DefaultBaseCurrency = "USD";
     public decimal Quantity { get; init; } = 1_000m;
     public decimal Leverage { get; init; } = 20m;
     public decimal CommissionRate { get; init; } = 0.00002m;
@@ -834,6 +852,28 @@ public sealed record BacktestRequest
     /// Every distinct instrument this request actually trades - <see cref="StrategyAssignments"/>'s
     /// instruments when set (§7 multi-instrument clock), otherwise just <see cref="Instrument"/>.
     /// </summary>
+    /// <summary>
+    /// Whether an instrument's quote currency can reach the account currency. True when they match,
+    /// when an explicit rate is configured, or when the pair's own base currency is the account
+    /// currency - a USD/JPY price is itself the USD-per-JPY rate, so the simulator derives it. A
+    /// cross such as GBP/JPY on a USD account satisfies none of these and needs an explicit rate.
+    /// </summary>
+    private bool CanConvertQuoteToAccount(InstrumentKey instrument, string accountCurrency)
+    {
+        string value = instrument.Value;
+        int prefix = value.IndexOf(':');
+        string pair = prefix >= 0 ? value[(prefix + 1)..] : value;
+        int separator = pair.LastIndexOfAny(['/', '_', '-']);
+        if (separator <= 0 || separator >= pair.Length - 1)
+            return true; // not a parseable pair; the broker layer reports this in its own terms
+
+        string baseCurrency = pair[..separator].Trim();
+        string quoteCurrency = pair[(separator + 1)..].Trim();
+        return string.Equals(quoteCurrency, accountCurrency, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(baseCurrency, accountCurrency, StringComparison.OrdinalIgnoreCase) ||
+            QuoteToBaseCurrencyRates.ContainsKey(quoteCurrency);
+    }
+
     public IReadOnlyList<InstrumentKey> TradedInstruments() =>
         StrategyAssignments is { Count: > 0 }
             ? StrategyAssignments.Select(assignment => assignment.Instrument).Distinct().ToArray()
@@ -1111,6 +1151,23 @@ public sealed record BacktestRequest
             ? assigned.Count
             : Strategies.Count;
         runtime.Validate(selectedStrategyCount);
+        string accountCurrency = string.IsNullOrWhiteSpace(BaseCurrency)
+            ? DefaultBaseCurrency
+            : BaseCurrency.Trim();
+        InstrumentKey[] unconvertible = TradedInstruments()
+            .Where(instrument => !CanConvertQuoteToAccount(instrument, accountCurrency))
+            .ToArray();
+        if (unconvertible.Length > 0)
+        {
+            throw new ArgumentException(
+                $"No {accountCurrency} conversion is available for " +
+                string.Join(", ", unconvertible.Select(instrument => instrument.Value)) +
+                ". Supply a rate (for example --quote-rate JPY=0.0067), or denominate the run in the " +
+                "instrument's own quote currency with --base-currency. Deriving the account currency " +
+                "from the instrument is no longer the default: it produced runs in different " +
+                "currencies within one suite whose results could not be summed.");
+        }
+
         if (runtime.Financing.Enabled)
         {
             InstrumentKey[] missingRates = TradedInstruments()

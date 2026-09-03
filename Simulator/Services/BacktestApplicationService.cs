@@ -468,12 +468,15 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             // Do not claim historical bid/ask until broker path supports it.
             UseHistoricalBidAsk = false
         };
-        string baseCurrency = request.BaseCurrency ??
-                              ResolveBaseCurrency(request.Instrument);
+        // Deliberately NOT derived from the instrument's quote currency. That default silently
+        // denominated a GBP/JPY run in yen while its USD-quoted siblings ran in dollars, and summing
+        // their profit and loss produced 3.43's overstated -15,505 (see 3.48 axis 7).
+        string baseCurrency = request.BaseCurrency ?? Models.BacktestRequest.DefaultBaseCurrency;
 
         var simulationOptions = new SimulationOptions
         {
             BaseCurrency = baseCurrency,
+            QuoteToBaseCurrencyRates = request.QuoteToBaseCurrencyRates,
             StartingBalance = request.StartingBalance,
             Leverage = request.Leverage,
             CommissionRate = request.CommissionRate,
@@ -898,15 +901,6 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
     private static string NormalizeStrategyId(string name) =>
         TradingAgentTypeIds.Format(TradingAgentTypeIds.Parse(name));
-
-    private static string ResolveBaseCurrency(InstrumentKey instrument)
-    {
-        string value = instrument.Value;
-        int slash = value.LastIndexOf('/');
-        if (slash > 0 && slash < value.Length - 1)
-            return value[(slash + 1)..].Trim().ToUpperInvariant();
-        return "USD";
-    }
 
     private static Uri ResolveBinanceMarketDataBaseAddress()
     {

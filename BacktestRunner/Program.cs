@@ -940,7 +940,9 @@ Options:
   --maximum-account-margin-percent 30
   --maximum-position-margin-percent 10
   --starting-balance 100000
-  --base-currency USD
+  --base-currency USD           account currency (default USD; NOT derived from the instrument)
+  --quote-rate JPY=0.0067       quote->account rates, comma separated; needed for crosses
+                                such as GBP/JPY on a USD account
   --leverage 20
   --commission-rate 0.00002
   --spread-bps 1
