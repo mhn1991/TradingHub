@@ -4377,6 +4377,48 @@ risk. Do not build an agent on it before those are settled.
 **For contrast**: the Alfonso method over the same six instruments and the same 3.5 years is -0.2117R
 on true risk (3.43/3.44).
 
+### 3.46 The assembled rule, walked forward with frictions (2026-09-03)
+
+Built by testing each piece against a null before adding it. Nothing fitted - the rule was fixed
+before the walk-forward split, so every block is out-of-sample.
+
+**The rule.** Daily close above its level 20 days earlier AND that move at least 2 daily ATR (so the
+trend is strong, not merely present) -> wait for an H4 close beyond the previous bar's high (or low
+for shorts) -> enter, stop 1 ATR, target 3 ATR. Mirror for shorts.
+
+**How each piece was chosen.** Sharpening the signal beat every exit-side change: requiring a strong
+trend lifted accuracy 28.22% -> 29.55% and stayed 6/6; adding 100-day agreement or a 3-ATR threshold
+lifted it further (to 31.69%) but dropped to 3/6 after frictions, so they were rejected. Of five entry
+triggers tested, "close beyond the prior bar" was the only one that improved on no-trigger while
+keeping 6/6 (a 20-bar breakout fell to 4/6 - it enters too late). Entering on a pullback *against* the
+trend was worse than no filter at all, consistent with everything else measured this session.
+
+**Walk-forward, seven consecutive 6-month blocks, frictions applied:**
+
+| test period | entries | hit% | base% | edge | net R | instruments + |
+|---|---|---|---|---|---|---|
+| 2023 H1 | 359 | 25.91% | 25.04% | +0.86% | **-0.089** | 2/6 |
+| 2023 H2 | 744 | 33.33% | 26.81% | +6.52% | +0.221 | 6/6 |
+| 2024 H1 | 710 | 28.87% | 24.71% | +4.17% | +0.036 | 5/6 |
+| 2024 H2 | 783 | 28.61% | 26.36% | +2.25% | +0.027 | 4/6 |
+| 2025 H1 | 730 | 29.86% | 24.94% | +4.93% | +0.082 | 4/6 |
+| 2025 H2 | 696 | 31.32% | 25.79% | +5.53% | +0.145 | 4/6 |
+| 2026 H1 | 668 | 31.29% | 25.16% | +6.13% | +0.136 | 4/6 |
+
+**7/7 blocks positive on edge, 6/7 positive after frictions.** Mean edge +4.34%, mean net +0.0798R,
+about 700 entries per half-year across six instruments. The one losing block (2023 H1) had a thin
++0.86% edge and only 2/6 instruments.
+
+**Frictions used** are the per-instrument slippage measured from the 590 real Alfonso trades (silver
+2.7% of risk to eurusd 17.1%) plus 0.057R commission - not assumptions.
+
+**Still untested, and both could move this materially.** (1) Concurrency: the barrier races overlap,
+several entries fire within a few bars, and a real account cannot take them all. (2) Gap and weekend
+risk: every friction figure came from trades that filled inside the session.
+
+**For contrast**: the Alfonso method over the same six instruments and the same 3.5 years is -0.2117R
+on true risk. This is +0.0798R across seven independent periods.
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
