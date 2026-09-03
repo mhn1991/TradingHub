@@ -4791,9 +4791,61 @@ live.
 `InstrumentTradingMetadata` carries no multiplier field, so nothing is being discarded — correct for
 OANDA's per-unit instruments, and the same "units model" limitation noted in axis 7.
 
-**Still not claimed.** Eight axes audited. Not audited: whether OANDA's mid series matches what a real
-account would have been filled against, and the live order-submission path downstream of sizing
-(whether a broker-rejected order is retried, resized, or dropped).
+**Order submission downstream of sizing, audited (2026-09-03, follow-up).** Ninth axis, answering
+axis 8's open question. **No defect found. This is the most carefully built path in the repo** — the
+ambiguous-submission problem, which is the hardest thing in live trading, is modelled explicitly
+rather than assumed away.
+
+**Answering axis 8 directly: a broker-rejected order is dropped, not retried or resized.** It is
+journaled `OrderRejected` and returned (`ExecutionCoordinator.cs:388-397`); nothing re-enters sizing.
+So the quantity-metadata gap from axis 8 manifests as **lost trades, not wrongly-sized ones** — the
+safer of the two failure modes.
+
+**Idempotency is deterministic.** `CreateClientOrderId` is
+`prefix-createdAtMs-SHA256(DecisionId or instrument|action|quantity|prices)[..16]`, so the same
+decision always produces the same client order id and a resubmission cannot create a second order
+where the broker enforces uniqueness.
+
+**Journaling is write-ahead.** `OrderSubmitted` is appended *before* `PlaceOrderAsync`, the outcome
+after (`:379-397`), so a crash in flight leaves an `OrderSubmitted` with no terminal event — a
+detectable state rather than an invisible one.
+
+**Failures are neither retried nor swallowed.** An exception journals `Error`, optionally trips the
+safety switch (`TripSafetyOnExecutionFailure`), and **rethrows** (`:403-417`).
+
+**The ambiguous case is a first-class state, and certainty dominates status.**
+`ExecutionCertainty {NotSent, Rejected, Accepted, Unknown}` — the OANDA client returns `Unknown` for
+timeouts *and* for inconclusive responses, explicitly distinguishing "no error message but no
+confirmation" from an outright rejection (`OandaClients.cs:321,354,408-411,445`).
+`LiveOrderPositionRegistry.cs:266-277` then switches on **certainty first**
+(`Unknown => LiveOrderState.SubmissionUnknown`) and only consults status when certainty is Accepted,
+so an ambiguous submission is never collapsed into Accepted or Rejected.
+
+**Ambiguity halts activity instead of guessing.** A reduction returning `Unknown` **pauses the safety
+switch** — "entries are paused pending reconciliation" — and returns *without* advancing local state
+(`LivePositionManagementService.cs:426-432`); the flat-all loop **breaks** on the first `Unknown`
+rather than firing further commands into an uncertain broker state
+(`LiveTradingRuntimeCoordinator.cs:614-615`).
+
+**And reconciliation actually runs**, so "pending reconciliation" is not a dead end:
+`LiveEngineHostedService.RunPeriodicReconciliationAsync` (`:780-795`) drives
+`ReconcileAsync(ReconciliationTrigger.Periodic)` on a `PeriodicTimer` at
+`hostOptions.ReconciliationInterval` and flags REST reachability on failure, with manual triggers from
+the deployment processor and the status API.
+
+**One minor inconsistency, not a defect.** The post-submission journal picks its event type from
+`Status` alone — `Status == Rejected ? OrderRejected : OrderAccepted` (`:388-391`) — so an
+`Unknown`-certainty submission is typed **`OrderAccepted`** in the journal even though the registry
+correctly records `SubmissionUnknown`. The certainty is present in the message *text* ("Broker
+returned {Status} with certainty {Certainty}"), so nothing is lost, but the typed audit field
+disagrees with the authoritative registry at exactly the moment accuracy matters most. Branching the
+event type on certainty as well would close it.
+
+**Still not claimed.** Nine axes audited. The one remaining item — whether OANDA's mid series matches
+what a real account would actually have been filled against — **cannot be settled from this repo**: it
+needs live fill data compared against the historical mid series, which requires trading. Until then
+every fill-quality figure in §3 rests on the execution model audited in axis 4, whose one optimistic
+assumption (limit orders filling on touch) is recorded there.
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5487,8 +5539,15 @@ into `docs/`; Docker packaging.
   (`MinimumQuantity`/`QuantityStep`/`MaximumOrderQuantity`) is fetched but never used for sizing**,
   which uses global options instead, with a third hardcoded definition in the management/shadow
   services — a live order can be sized off-step and rejected at the broker. No backtest result is
-  affected. **Eight axes audited, two defects found outside 3.45/3.46**, both accounting/operational
-  rather than leakage.
+  affected. Last, audited the order-submission path: **no defect** — deterministic client-order-id,
+  write-ahead journaling, no retry and no swallow, `ExecutionCertainty.Unknown` as a first-class state
+  that the registry ranks above status, ambiguity pausing the safety switch, and periodic
+  reconciliation genuinely wired. A rejected order is **dropped, not retried or resized**, so axis 8's
+  gap costs trades rather than mis-sizing them. One cosmetic inconsistency: the journal types an
+  `Unknown` submission as `OrderAccepted` though the registry records `SubmissionUnknown`.
+  **Nine axes audited, two defects found outside 3.45/3.46**, both accounting/operational rather than
+  leakage. The remaining question — whether OANDA mid matches real fills — cannot be settled without
+  live trading.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
