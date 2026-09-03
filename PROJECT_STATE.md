@@ -4740,9 +4740,60 @@ USD); mean loser -1.29 / -1.13 / -1.46R. The JPY-denominated run sits in the sam
 ones. **Every R-based, win-rate-based and percentage-based conclusion in §3 stands.** Only
 cross-instrument *dollar* aggregation is invalid.
 
-**Still not claimed.** Seven axes audited. Not audited: whether OANDA's mid series matches what a real
-account would have been filled against; and the live-trading sizing path, which shares
-`InstrumentRiskSpec` but not `ResolveBaseCurrency`, so the currency defect may or may not reach it.
+**Live-trading sizing path, audited (2026-09-03, follow-up).** Eighth axis, answering the question
+axis 7 left open. **The currency defect does not reach live trading** — the live path is the more
+careful of the two.
+
+**Account currency comes from the broker, not from the instrument.** `LiveAccountStateService.cs:180`
+resolves against `account.Account.Currency` — the authoritative account snapshot — where the backtest
+runner defaults it to the instrument's own quote currency. That is exactly the difference that makes
+axis 7's defect a backtest-only problem.
+
+**Conversion is genuinely resolved, and fails closed.** `LiveAccountStateService.ResolveQuoteToAccountRate`
+(`:283-309`) returns 1 when quote == account, otherwise **builds a currency graph from live quotes**
+— stale, non-tradeable and non-positive quotes excluded — and BFS's to depth 3 multiplying edge rates,
+adding both directions per pair. `ExecutionCoordinator` (`:856-866`) prefers the broker's own
+`IAccountCurrencyConversionProvider` when it offers one. When no path exists both return the sentinel
+**`0m`**, and risk-based sizing rejects on it *before any division*
+(`PositionSizing.cs:273-277`, `MissingCurrencyConversion`), with
+`InstrumentRiskSpec.EstimateStopLossAccountCurrency` independently throwing on a non-positive rate
+(`:75-81`).
+
+**The arithmetic direction is right.** `perUnitLoss = riskDistance x multiplier x quoteToAccountRate`
+— quote to account is a *multiply* — then `quantity = riskBudget / perUnitLoss`
+(`PositionSizing.cs:317-336`): an account-currency budget over an account-currency per-unit loss,
+dimensionally sound. The division is wrapped and fails closed on overflow (`UnboundedQuantity`), the
+result is **rounded down** so rounding can never exceed the risk budget (`:388`, `:187`), and
+single-position and account-level margin caps are enforced per unit.
+
+**Finding: broker-supplied quantity metadata is fetched and then ignored.** `OandaMappings.cs:179-180`
+populates `MinimumQuantity` and `MaximumOrderQuantity`, and `InstrumentTradingMetadata` also carries
+`QuantityStep`, `PriceIncrement` and `QuantityPrecision`. But `PositionSizing` rounds and floors
+against its **own global** `_options.QuantityStep` and `_options.MinimumQuantity` (both defaulting to
+1) and never consults the metadata; `LiveAccountStateService.cs:182-190` reads only `PipSize` and
+`MarginRate` from it. **There are three independent definitions of quantity granularity in the repo**:
+the sizer's global options, the broker's per-instrument metadata (unused in the order path), and a
+hardcoded `MinimumQuantityIncrement()` helper (`FX:` -> 1, everything else -> 1e-8) duplicated in
+`LiveShadowOutcomeService.cs:782` and `LivePositionManagementService.cs:243`. Consequence for live:
+an order can be sized off an instrument's true step, or below its true minimum, and be **rejected by
+OANDA at submission** — fail-loud at the broker rather than silent, but the intended risk would not be
+taken and the sizer never checked the condition. **No backtest result is affected** (the simulated
+broker enforces the same global options, so runs are self-consistent).
+
+**Second finding, lower severity: fixed-quantity mode can trade with no monetary risk check.** When
+the conversion is unavailable, fixed-quantity sizing falls through to an approval whose own reason
+string says "monetary risk was not estimated because live-risk inputs were incomplete"
+(`PositionSizing.cs:265-270`) — so no margin cap and no open-risk projection is applied on that path.
+It is explicit and reason-coded rather than silent, and only matters if fixed-quantity mode is used
+live.
+
+`ContractMultiplier = 1m` is hardcoded at `LiveAccountStateService.cs:186`, but
+`InstrumentTradingMetadata` carries no multiplier field, so nothing is being discarded — correct for
+OANDA's per-unit instruments, and the same "units model" limitation noted in axis 7.
+
+**Still not claimed.** Eight axes audited. Not audited: whether OANDA's mid series matches what a real
+account would have been filled against, and the live order-submission path downstream of sizing
+(whether a broker-rejected order is retried, resized, or dropped).
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5429,8 +5480,15 @@ into `docs/`; Docker packaging.
   currency-invariant, but each run defaults its account currency to the instrument's own quote
   currency, so **3.43's -$15,505 adds JPY to USD** — GBP/JPY's -5,879 was yen (~-$39). Corrected total
   about **-$9,665**; the verdict itself is unaffected because every R-based figure is invariant.
-  **Seven axes audited, one defect found outside 3.45/3.46** (a dollar-aggregation error, not a
-  leakage one).
+  Finally audited the live-trading sizing path: **the currency defect does not reach it** — live
+  resolves against the broker's real account currency, builds a currency graph from live quotes,
+  and fails closed with `MissingCurrencyConversion` before any division; the formula direction and
+  round-down are correct. Found instead that **broker-supplied per-instrument quantity metadata
+  (`MinimumQuantity`/`QuantityStep`/`MaximumOrderQuantity`) is fetched but never used for sizing**,
+  which uses global options instead, with a third hardcoded definition in the management/shadow
+  services — a live order can be sized off-step and rejected at the broker. No backtest result is
+  affected. **Eight axes audited, two defects found outside 3.45/3.46**, both accounting/operational
+  rather than leakage.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
