@@ -425,31 +425,12 @@ public sealed class LiveOpportunityCoordinator : ILiveOpportunityCoordinator
         };
     }
 
+    // Delegates to the single definition of the rule on PositionSizingOptions so this path and the
+    // ExecutionCoordinator path cannot drift apart.
     private static PositionSizingOptions ApplyBrokerExecutionConstraints(
         PositionSizingOptions configured,
-        InstrumentTradingMetadata? metadata)
-    {
-        if (metadata is null)
-            return configured;
-        metadata.Validate();
-        decimal? maximum = configured.MaximumQuantity;
-        if (metadata.MaximumOrderQuantity is decimal brokerMaximum)
-            maximum = maximum is decimal configuredMaximum
-                ? Math.Min(configuredMaximum, brokerMaximum)
-                : brokerMaximum;
-        decimal minimum = Math.Max(configured.MinimumQuantity, metadata.MinimumQuantity);
-        if (maximum is decimal effectiveMaximum && effectiveMaximum < minimum)
-        {
-            throw new InvalidOperationException(
-                $"Broker maximum quantity {effectiveMaximum} is below the effective minimum {minimum} for {metadata.Instrument}.");
-        }
-        return configured with
-        {
-            MinimumQuantity = minimum,
-            MaximumQuantity = maximum,
-            QuantityStep = Math.Max(configured.QuantityStep, metadata.QuantityStep)
-        };
-    }
+        InstrumentTradingMetadata? metadata) =>
+        configured.WithBrokerConstraints(metadata);
 
     private static AgentDecision NormalizeDecisionForBroker(
         AgentDecision decision,

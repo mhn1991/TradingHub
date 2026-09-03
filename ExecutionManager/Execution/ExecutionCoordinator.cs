@@ -314,6 +314,7 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
                             Positions = positions,
                             QuoteToAccountCurrencyRate = quoteToAccountRate,
                             InstrumentSpec = instrumentSpec,
+                            BrokerQuantitySpec = ResolveBrokerQuantitySpec(decision, broker),
                             RiskBudgetMultiplier = riskBudget.CombinedMultiplier,
                             RiskBudgetDecision = riskBudget
                         });
@@ -852,6 +853,19 @@ public sealed class ExecutionCoordinator : IExecutionCoordinator
             Message = message
         });
     }
+
+    /// <summary>
+    /// Per-instrument quantity granularity, when the broker caches it. Without this the sizer falls
+    /// back to its configured global step and minimum, which can emit a quantity the broker refuses
+    /// at submission - and a rejected order is dropped rather than resized, so the trade is lost.
+    /// </summary>
+    private static InstrumentTradingMetadata? ResolveBrokerQuantitySpec(
+        AgentDecision decision,
+        ITradingBrokerClient broker) =>
+        broker is IInstrumentQuantitySpecProvider provider &&
+        provider.TryGetInstrumentQuantitySpec(decision.Instrument, out InstrumentTradingMetadata? metadata)
+            ? metadata
+            : null;
 
     private static decimal ResolveQuoteToAccountRate(
         AgentDecision decision,

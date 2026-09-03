@@ -1081,6 +1081,13 @@ public sealed record SimulationManifest
     public PositionManagementOptions? LegacyPositionManagement { get; init; }
     public PositionManagementOptions? ImprovedPositionManagement { get; init; }
     public TradingSafetyOptions? SafetyOptions { get; init; }
+    /// <summary>
+    /// Account currency this run was denominated in. Recorded because it is *derived* from the
+    /// instrument's quote currency when `--base-currency` is not given, so two runs of the same
+    /// suite can be denominated differently and their profit and loss cannot be summed. Without this
+    /// field on the manifest that mismatch is invisible in the output.
+    /// </summary>
+    public string? BaseCurrency { get; init; }
     public decimal? SpreadBasisPoints { get; init; }
     public decimal? SlippageBasisPoints { get; init; }
     public decimal? CommissionRate { get; init; }

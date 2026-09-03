@@ -4766,19 +4766,24 @@ dimensionally sound. The division is wrapped and fails closed on overflow (`Unbo
 result is **rounded down** so rounding can never exceed the risk budget (`:388`, `:187`), and
 single-position and account-level margin caps are enforced per unit.
 
-**Finding: broker-supplied quantity metadata is fetched and then ignored.** `OandaMappings.cs:179-180`
-populates `MinimumQuantity` and `MaximumOrderQuantity`, and `InstrumentTradingMetadata` also carries
-`QuantityStep`, `PriceIncrement` and `QuantityPrecision`. But `PositionSizing` rounds and floors
-against its **own global** `_options.QuantityStep` and `_options.MinimumQuantity` (both defaulting to
-1) and never consults the metadata; `LiveAccountStateService.cs:182-190` reads only `PipSize` and
-`MarginRate` from it. **There are three independent definitions of quantity granularity in the repo**:
-the sizer's global options, the broker's per-instrument metadata (unused in the order path), and a
-hardcoded `MinimumQuantityIncrement()` helper (`FX:` -> 1, everything else -> 1e-8) duplicated in
-`LiveShadowOutcomeService.cs:782` and `LivePositionManagementService.cs:243`. Consequence for live:
-an order can be sized off an instrument's true step, or below its true minimum, and be **rejected by
-OANDA at submission** — fail-loud at the broker rather than silent, but the intended risk would not be
-taken and the sizer never checked the condition. **No backtest result is affected** (the simulated
-broker enforces the same global options, so runs are self-consistent).
+**Finding: broker-supplied quantity metadata reached one sizing path but not the other.**
+> **SCOPE CORRECTED (2026-09-03, while fixing it).** This was first written as "fetched and then
+> ignored", which overstated it. `LiveOpportunityCoordinator` **already** folded the metadata in via
+> `ApplyBrokerExecutionConstraints`, and did it correctly — larger minimum, smaller maximum, coarser
+> step, throwing on a contradiction. The gap was confined to the **`ExecutionCoordinator`** path,
+> which built its `PositionSizingContext` with no metadata access at all.
+
+`OandaMappings.cs:179-180` populates `MinimumQuantity` and `MaximumOrderQuantity`, and
+`InstrumentTradingMetadata` also carries `QuantityStep`, `PriceIncrement` and `QuantityPrecision`.
+`ExecutionCoordinator` rounded and floored against its **own global** `_options.QuantityStep` and
+`_options.MinimumQuantity` (both defaulting to 1). Consequence for live: an order could be sized off
+an instrument's true step, or below its true minimum, and be **rejected by OANDA at submission** —
+fail-loud at the broker rather than silent, but the intended risk would not be taken and the sizer
+never checked the condition. **No backtest result is affected** (the simulated broker enforces the
+same global options, so runs are self-consistent). A third definition of the same concept exists in
+the hardcoded `MinimumQuantityIncrement()` helper (`FX:` -> 1, else 1e-8) duplicated in
+`LiveShadowOutcomeService.cs:782` and `LivePositionManagementService.cs:243`; left alone, since those
+services only size *reductions* of existing positions.
 
 **Second finding, lower severity: fixed-quantity mode can trade with no monetary risk check.** When
 the conversion is unavailable, fixed-quantity sizing falls through to an approval whose own reason
@@ -4840,6 +4845,35 @@ correctly records `SubmissionUnknown`. The certainty is present in the message *
 returned {Status} with certainty {Certainty}"), so nothing is lost, but the typed audit field
 disagrees with the authoritative registry at exactly the moment accuracy matters most. Branching the
 event type on certainty as well would close it.
+
+### Both defects fixed (2026-09-03)
+
+**1. The currency mismatch is now visible in the output.** `SimulationManifest` gained
+`BaseCurrency` (`Simulator/Replay/ChunkedReplayWriter.cs:1084-1090`), populated at both write sites
+(`StreamingComparativeEngine.cs:275,1257`). The root default is deliberately **unchanged** —
+`ResolveBaseCurrency()` still derives the account currency from the instrument when
+`--base-currency` is absent, because changing it would silently alter the semantics of every existing
+run script. What was actually broken is that the choice was invisible: the manifest recorded no
+currency at all, so a JPY-denominated run looked identical to a USD one and their P&L summed without
+complaint. Now any cross-run aggregation can detect the mismatch.
+Test: `Simulator.Tests/ManifestBaseCurrencyTests.cs`.
+
+**2. Broker quantity granularity now reaches both sizing paths, from one definition.**
+`PositionSizingOptions.WithBrokerConstraints(InstrumentTradingMetadata?)`
+(`RiskManager/Risk/PositionSizing.cs:108-134`) is now the single implementation of the stricter-wins
+rule; `LiveOpportunityCoordinator.ApplyBrokerExecutionConstraints` delegates to it instead of holding
+its own copy. `PositionSizingContext.BrokerQuantitySpec` carries the metadata, `PositionSizer` folds
+it in and **rejects rather than throws** on a contradiction (`BrokerQuantityConstraintConflict`),
+keeping the sizer fail-closed like every other path in it. `ExecutionCoordinator` supplies it through
+a new optional broker capability, `IInstrumentQuantitySpecProvider`, mirroring the existing
+`IAccountCurrencyConversionProvider` idiom — a **synchronous cached lookup**, because
+`GetInstrumentMetadataAsync` is a live network call and the order path must not make one. Brokers that
+do not implement it fall back to the previous behaviour, so the change is non-breaking.
+Test: `Simulator.Tests/BrokerQuantityConstraintTests.cs` (7 tests; the 3 sizer tests were verified to
+**fail** against the pre-fix behaviour, the other 4 assert the rule itself).
+
+**Suites after the fixes**: `Simulator.Tests` 1353/1353, `LiveTrading.Tests` 119/119,
+`TradingCore.Tests` 24/24, `TradingHub.UnitTests` 60/60.
 
 **Still not claimed.** Nine axes audited. The one remaining item — whether OANDA's mid series matches
 what a real account would actually have been filled against — **cannot be settled from this repo**: it
@@ -5547,7 +5581,15 @@ into `docs/`; Docker packaging.
   `Unknown` submission as `OrderAccepted` though the registry records `SubmissionUnknown`.
   **Nine axes audited, two defects found outside 3.45/3.46**, both accounting/operational rather than
   leakage. The remaining question — whether OANDA mid matches real fills — cannot be settled without
-  live trading.
+  live trading. **Then fixed both defects.** The manifest now records the run's account currency, so
+  the JPY/USD mismatch behind 3.43's corrected figure is detectable in the output (the derive-from-
+  instrument default is left alone deliberately — it was invisibility, not derivation, that caused the
+  error). Broker quantity granularity now reaches the `ExecutionCoordinator` path too, from a single
+  `WithBrokerConstraints` definition that `LiveOpportunityCoordinator` also delegates to, supplied via
+  a new cached-lookup broker capability. **Also corrected my own overstatement**: the quantity gap was
+  confined to `ExecutionCoordinator`; the opportunity path had always handled it correctly. Suites
+  green: `Simulator.Tests` 1353/1353, `LiveTrading.Tests` 119/119, `TradingCore.Tests` 24/24,
+  `TradingHub.UnitTests` 60/60.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
