@@ -4322,6 +4322,51 @@ Without the gap tolerance daily bars never close and the agent takes no trades a
 Gold is cached back to 2022 (`METAL_XAU_USD_1m_20221212_20260724`). Until that runs, treat the
 break-even figure as unproven.
 
+### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
+
+**What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
+`(|entry - stop| + entryPrice * estimatedRoundTripCostBasisPoints / 10_000) * quantity` - risk PLUS
+an assumed round-trip cost, not risk. It is a deliberate design (profit per unit of risk-and-cost),
+not a bug, and it penalises tight stops heavily: on a gold trade with 0.381 price units of risk the
+assumed cost term was about 0.46, so the denominator was 2.2x the money actually risked and a real
++2.80R was reported as +1.27R. Do not read `rMultiple` as profit-per-risk. For economic questions use
+`netProfitLoss / (|entry - stop| * quantity)`, or dollars.
+
+**Cost was overstated roughly 6x throughout this session.** Measured from 590 trade records,
+commission is **0.057R per trade** (median 0.036R), not the 0.34R quoted in 3.35, 3.41 and 3.42. The
+0.34 figure came from a decomposition that lumped commission together with entry-bar reversals and
+stop slippage and then called the total "cost".
+
+**The real leak is stop slippage.** On true risk:
+
+| | value |
+|---|---|
+| winner pays | +2.935R (the bracket delivers essentially its full 3R) |
+| loser costs | **-1.228R** (23% worse than the stop specifies) |
+| commission | 0.057R |
+
+At a 75.6% loss rate the slippage overrun costs **0.172R per trade - three times commission.** Tight
+stops sit inside ordinary noise, so price gaps through them rather than touching them, which is the
+same mechanism the failure-mode analysis found (39% of losses stopped within six minutes).
+
+**The verdict in 3.43 is unchanged and slightly worse on true risk:**
+
+| | reported R | true R |
+|---|---|---|
+| pooled avgR | -0.1362 | **-0.2117** |
+| 95% CI | [-0.251, -0.022] | **[-0.359, -0.064]** |
+| instruments positive | 1/6 | 1/6 |
+| net | -15,505 | -15,505 |
+
+Break-even needs a 29.5% win rate against 24.4% achieved. Dollar P&L is unaffected by the R
+definition, so 3.43's conclusion stands on its own terms.
+
+**What this invalidates.** The "cost dominates" explanation offered in 3.40-3.42 for why bigger
+targets, higher timeframes and wider stops all help. Those improvements are real and measured, but
+the mechanism was mis-stated: commission is negligible, and what those changes actually reduce is
+slippage as a fraction of risk. Any future reasoning that starts from "cost is 0.34R" is building on
+a corrupted figure.
+
 ### 3.43 VERDICT: the Alfonso method has no edge - 590 trades, 3.5 years, CI excludes zero (2026-09-03)
 
 Six instruments, 2023-01-01 to 2026-07-23, current default settings (3 ATR placement cap on,
