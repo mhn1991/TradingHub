@@ -4282,6 +4282,46 @@ still losing money and still 1/6 instruments positive, and every CI overlaps the
 a defect repair rather than an edge. Keep `--alfonso-replace-resting-atr` for the record but prefer
 the cap.
 
+### 3.42 Higher timeframes remove almost all the cost drag (2026-09-03)
+
+Ran the sequence on D1/H4/H1 instead of H4/H1/M15, six instruments, same 8-month window, with the
+3 ATR placement cap active in both arms.
+
+| | small (H4/H1/M15) | big (D1/H4/H1) |
+|---|---|---|
+| trades | 142 | 24 |
+| avgR | -0.1681 | **+0.0044** |
+| 95% CI | [-0.409, +0.072] | [-0.679, +0.688] |
+| win rate | 24.6% | 25.0% |
+| **winners realise** | **+2.247R** | **+2.901R** |
+| net P&L | -5,051 | -129 |
+
+**The cost prediction was correct and is the whole story.** 3.35 measured round-trip cost at 12.6% of
+R on 15m against 2.9% on 4h, and the leak decomposition showed winners keeping only 2.247R of a
+nominal 3.0. On the bigger stack winners keep **2.901R** - the drag is essentially gone. Win rate is
+unchanged at 25%, so selection did not improve; what changed is that the account now keeps what it
+wins.
+
+**Not a result yet.** 24 trades. The CI spans -0.68 to +0.69, so a single trade moves the headline.
+US30 produced zero trades. Per instrument: gold +1.36 (n=5), silver +0.13 (7), nas100 -0.03 (4),
+eurusd -0.92 (3), gbpjpy -0.94 (5). Break-even on 24 trades is not evidence of an edge; it is
+evidence that the cost explanation was right.
+
+**Configuration needed to run this at all** - it is why the D1 stack was previously written off as
+taking zero trades. `ProgressiveStrategyOptions.Validate()` runs even when only alfonso is active and
+enforces entry < confirmation < setup < trend with all intervals distinct, while
+`AlfonsoPositionManagement` uses `BracketOnlyDefaults` whose intervals are all null, so `fast` falls
+back to the agent's trigger and `main` to the global confirmation. Raising the alfonso stack without
+raising the global one always fails. Working set:
+`--alfonso-top 1d --alfonso-middle 4h --alfonso-lower 1h --confirmation-interval 1h
+--setup-intervals 2h --trend-interval 4h --secondary-trend-intervals 3h
+--analysis-intervals 1m,15m,1h,2h,3h,4h,1d --aggregation-gap-tolerance 0.5`.
+Without the gap tolerance daily bars never close and the agent takes no trades at all.
+
+**Next test.** The same stack over 3-4 years rather than 8 months, to reach a few hundred trades.
+Gold is cached back to 2022 (`METAL_XAU_USD_1m_20221212_20260724`). Until that runs, treat the
+break-even figure as unproven.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,
