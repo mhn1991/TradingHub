@@ -4495,6 +4495,49 @@ that result could not be checked is that its script was not.
 **Net effect on the roadmap**: there is currently no validated signal in this repo. 3.43's verdict on
 the Alfonso method stands; 3.45/3.46's replacement does not.
 
+### 3.48 Lookahead audit of every other research section: the pipeline is structurally immune (2026-09-03)
+
+Asked whether 3.47's bug — reading a higher-timeframe bar that has not closed yet — contaminates any
+other result. Audited by tracing how each section got its bars, not by reading its prose. **3.45/3.46
+is the only violation found.**
+
+**The engine cannot express the bug.** `MultiTimeframeAggregator` completes a bucket only when it
+actually closes (`ChartAnnotator/MarketData/MultiTimeframeAggregator.cs:330-338`), `GetCandles`
+returns `state.Completed` and nothing else (`:240-248`), and the only route to a partial bar is
+`Flush(includeIncomplete: true)`, whose sole callers are two assertions in
+`Simulator.Tests/AggregatorTests.cs:253,259`. Strategies never touch the aggregator directly: analysis
+snapshots are built from a `CandleClosedEvent` (`Simulator/Engine/StreamingComparativeEngine.cs:
+700-705`) and agents read the resulting `context.Analysis` (`Agent/Strategies/Alfonso/AlfonsoAgent.cs:
+87-110`). **Every pipeline-derived result inherits this** — 3.2-3.4, 3.6-3.11, 3.14-3.29, 3.31-3.44,
+including 3.42 (a BacktestRunner run, not a script) and 3.43/3.44 (real trade records).
+
+**Standalone harnesses, checked individually:**
+
+| harness | sections | multi-timeframe? | verdict |
+|---|---|---|---|
+| `ZZAlfonsoAttributeStudy.cs:73-76` | zone/attribute study | h4+h1+m15 merged | **correct** — each bar enters the stream at `OpenTime + interval`, i.e. its close, then sorted and applied in that order |
+| `ZZAlfonsoTrendLayerDiagnostic.cs:126-143` | 3.30 | no — one TF per loop | not exposed; analyzer and race share one bar array |
+| `ZZAlfonsoRealDataDiagnostic.cs:59-69` | 3.26 | no — one file per TestCase | not exposed |
+| `CandleSources.Resample:165-214` | 3.12e/f/g | no — separate model per TF | **correct** — `CeilingTo` stamps by close, trailing bucket kept only if a source candle closes it |
+| scratch `Program.cs` drivers | 3.5-3.11 | via the engine | drive `SimulationRunner`/`MultiTimeframeAggregator`, no hand-rolled bar math |
+| 3.45/3.46 driver | 3.45, 3.46 | d1 -> h4 | **the bug** (3.47); script not saved |
+
+`ZZAlfonsoAttributeStudy` is worth noting: it is the same pattern 3.45/3.46 needed and it gets it
+right. The discipline existed in this repo; the retracted work just did not use it.
+
+**Two completeness defects found, neither of them lookahead.** `export_bars.py` buckets by
+`t - (t % period)` with no completeness rule, so a bucket missing members is written as if whole —
+already recorded in 3.30's caveat, and the reason that harness does not reproduce the agent.
+`CandleSources.Resample` drops only the *trailing* partial bucket; an interior bucket with a data gap
+is folded and emitted as complete (`:177-188`). Both understate bar quality; neither leaks the future.
+
+**Deliberately not claimed.** This audit covers one axis: reading an unclosed higher-timeframe bar.
+It is not a general leakage audit. `SwingDetector` confirms a pivot only after its right-side candles
+close and carries `PivotTime` and `ConfirmedAt` separately
+(`ChartAnnotator/Structure/SwingDetector.cs:8-9,79`), which is the right design — but **I did not
+check every consumer** for whether it uses `PivotTime` as though the swing were known then. That is
+the most likely place for the next bug of this family, and it is unaudited.
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
@@ -5135,6 +5178,14 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-03 (later still)**: Audited every other research section for 3.47's lookahead bug (§3.48).
+  **3.45/3.46 is the only violation.** The engine cannot express it — `MultiTimeframeAggregator`
+  completes a bucket only on close, `GetCandles` returns completed bars only, and analysis snapshots
+  are built from `CandleClosedEvent` — so all pipeline results (3.2-3.4, 3.6-3.11, 3.14-3.29,
+  3.31-3.44) are structurally immune. Of the four standalone harnesses, three read one timeframe at a
+  time and the fourth (`ZZAlfonsoAttributeStudy`) keys bars by close time, which is exactly right.
+  Found two completeness defects (`export_bars.py` and `CandleSources.Resample` interior buckets),
+  neither of them lookahead. Flagged `SwingDetector` consumers as the unaudited next-most-likely spot.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
