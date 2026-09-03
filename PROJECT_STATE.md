@@ -4322,6 +4322,61 @@ Without the gap tolerance daily bars never close and the agent takes no trades a
 Gold is cached back to 2022 (`METAL_XAU_USD_1m_20221212_20260724`). Until that runs, treat the
 break-even figure as unproven.
 
+### 3.45 A signal that survives: daily trend + H4 entry, walked forward and frictioned (2026-09-03)
+
+Screened as a pure signal test - no agent, no backtest. At every H4 bar over 3.5 years and six
+instruments, ask whether price reaches +3 ATR before -1 ATR in the signalled direction, and compare
+against the unconditional rate for the same direction over the same bars.
+
+**The rule:** if the daily close is above its level 20 days earlier, take only longs on H4; if below,
+only shorts. Stop 1 ATR, target 3 ATR. Nothing else - no zones, no grading, no patterns.
+
+**Walk-forward, seven consecutive 6-month blocks, nothing fitted (the rule is fixed):**
+
+| test period | signals | hit% | base% | edge | instruments + |
+|---|---|---|---|---|---|
+| 2023 H1 | 4,718 | 29.59% | 25.31% | +4.28% | 6/6 |
+| 2023 H2 | 4,796 | 30.05% | 26.81% | +3.23% | 5/6 |
+| 2024 H1 | 4,782 | 25.70% | 24.71% | +0.99% | 3/6 |
+| 2024 H2 | 4,870 | 28.11% | 26.36% | +1.76% | 5/6 |
+| 2025 H1 | 4,744 | 27.66% | 24.94% | +2.72% | 5/6 |
+| 2025 H2 | 4,861 | 28.47% | 25.79% | +2.68% | 4/6 |
+| 2026 H1 | 4,750 | 28.80% | 25.16% | +3.64% | 5/6 |
+
+**7 of 7 blocks positive**, mean edge +2.76%, gross EV +0.133R. Also 6/6 instruments in each half of a
+simple two-way split. This is the only thing measured in this repo this session that passes the
+consistency bar everything else failed.
+
+**With measured frictions it is much thinner.** Applying the per-instrument slippage measured from the
+590 real Alfonso trades (2.7% of risk on silver to 17.1% on eurusd) plus 0.057R commission:
+
+| stop | slippage fixed in price | slippage proportional to stop | instruments + |
+|---|---|---|---|
+| 1.0x | +0.016R | +0.016R | 5/6 both |
+| 1.5x | +0.035R | +0.001R | 4/6 |
+| 2.0x | +0.031R | -0.021R | 3/6 |
+| 3.0x | +0.029R | -0.040R | 2/6 |
+
+**Frictions consume about 80% of the gross edge.** Net is roughly +0.016R per trade at a 1 ATR stop -
+positive and consistent, but thin.
+
+**Wider stops are NOT established as helpful.** They only pay if slippage is a fixed price amount.
+Measured correlation between stop size and slippage size is 0.38 - genuinely between fixed and
+proportional - so under the pessimistic reading wider stops are harmful. The 1 ATR stop is the only
+setting positive under both models. This also retracts the enthusiasm for wider stops in 3.41/3.42.
+
+**EUR/USD should be excluded**: negative in every configuration, and it carries the worst slippage at
+17.1% of risk.
+
+**Caveats.** The barrier races overlap heavily - consecutive H4 bars give near-identical races - so
+the effective sample is far below the raw counts, and the 7/7 block consistency is what carries the
+evidence rather than the counts. This is a signal, not a strategy: no position sizing, no cap on
+concurrent trades, no rule for when several instruments fire together, and no test of weekend or gap
+risk. Do not build an agent on it before those are settled.
+
+**For contrast**: the Alfonso method over the same six instruments and the same 3.5 years is -0.2117R
+on true risk (3.43/3.44).
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
