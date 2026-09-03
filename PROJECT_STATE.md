@@ -4724,13 +4724,24 @@ nothing in the simulator path sets otherwise (`LiveAccountStateService.cs:186` h
 1 euro — but the model is structurally a "units" model with no way to express a futures-style contract
 size. A gap only if it is ever pointed at a futures broker.
 
-**P&L carries no multiplier and no FX conversion.** Verified empirically rather than by reading:
-`grossProfitLoss / ((exit - entry) x quantity)` is **exactly 1.00000** on sampled gold, EUR/USD *and*
-GBP/JPY trades. The reason conversion is absent is `BacktestCommandOptions.ResolveBaseCurrency()`
-(`:1072-1082`): **absent `--base-currency`, the account currency defaults to the instrument's own
-quote currency.** The GBP/JPY run therefore banked a **JPY** account, `quoteCurrency == BaseCurrency`,
-and the conversion returns 1 by its first branch (`SimulatedBrokerState.cs:198-204`). Each
-single-instrument backtest is internally consistent; there is no conversion bug *within* a run.
+**P&L carries no multiplier. It DOES carry an FX conversion** — corrected below.
+
+> **CORRECTION (2026-09-03, while fixing this).** This section first said P&L "carries no multiplier
+> and no FX conversion", citing `grossProfitLoss / ((exit - entry) x quantity) == 1.00000` on sampled
+> gold, EUR/USD and GBP/JPY trades. That measurement was real but could not distinguish *no
+> conversion* from *conversion by a rate of exactly 1* — and the rate was 1 in every run sampled,
+> for the very reason the section goes on to give. **Conversion exists and is applied consistently**:
+> realised P&L multiplies by the rate (`SimulatedBrokerState.cs:472-476`), so does unrealised
+> (`CalculateUnrealisedUnsafe`), and so does commission (`:425-427`,
+> `SimulatedBrokerRuntime.cs:328-331`). The defect was never a missing conversion.
+
+**The defect is that the account currency itself was per-instrument.**
+`BacktestCommandOptions.ResolveBaseCurrency()` and a second copy in `BacktestApplicationService`
+both defaulted the account currency to **the instrument's own quote currency** absent
+`--base-currency`. The GBP/JPY run therefore banked a **JPY** account, so
+`quoteCurrency == BaseCurrency`, the conversion returned 1 by its first branch
+(`SimulatedBrokerState.cs:198-204`), and the run's results came out in yen. Each single-instrument
+backtest is internally consistent — the error appears only when their outputs are summed.
 
 **R is invariant to all of this, and that is what protects §3.** R is
 `netProfit / (|entry - stop| x quantity)` — numerator and denominator share the quote currency and
@@ -4880,7 +4891,13 @@ but it must now be asked for, and the manifest records it. **Any script trading 
 startup until updated** — in `/mnt/storage/scratch/alfonso` that is the GBP/JPY leg only; the other
 five instruments are USD-quoted and unaffected. A suite that adds `--quote-rate` gets what 3.43
 needed all along: six runs in one currency whose dollar results can legitimately be summed.
-Test: `Simulator.Tests/BaseCurrencyDefaultTests.cs` (7 tests).
+Tests: `Simulator.Tests/BaseCurrencyDefaultTests.cs` (7) and
+`Simulator.Tests/QuoteCurrencyConversionTests.cs` (4). The latter exists because axis 7's original
+"no FX conversion" claim rested on a ratio of exactly 1.0, which could not distinguish *no conversion*
+from *conversion by 1*; it now pins the behaviour with a rate that is **not** 1, asserting that 1,000
+JPY of profit is reported as about 6.32 USD. An end-to-end GBP/JPY backtest was attempted first and
+was killed during warm-up by the disk problem noted below, so this deterministic test is what
+actually establishes the claim.
 
 **2. Broker quantity granularity now reaches both sizing paths, from one definition.**
 `PositionSizingOptions.WithBrokerConstraints(InstrumentTradingMetadata?)`
@@ -4896,17 +4913,20 @@ do not implement it fall back to the previous behaviour, so the change is non-br
 Test: `Simulator.Tests/BrokerQuantityConstraintTests.cs` (7 tests; the 3 sizer tests were verified to
 **fail** against the pre-fix behaviour, the other 4 assert the rule itself).
 
-**Suites after the fixes**: `Simulator.Tests` 1360/1360, `LiveTrading.Tests` 119/119,
+**Suites after the fixes**: `Simulator.Tests` 1364/1364, `LiveTrading.Tests` 119/119,
 `TradingCore.Tests` 24/24, `TradingHub.UnitTests` 60/60, `QuantResearchRunner.Tests` **73/73** — the
 two failures recorded against that suite earlier in this file
 (`Merger_CombinesBucketsAndCohortsByStrategy`,
 `RunAndProposeAsync_DerivesAgentOptions_FromTrainingRuntime_NotBareDefaults`) no longer reproduce;
 not investigated, and not attributable to this work.
 
-**Environment note**: the test host and MSBuild child nodes crashed sporadically during this session
-(three times, at different points, with ~19GB disk and ~113GB RAM free). A `--blame-crash` run
-completed 1360/1360 cleanly and a subsequent plain run did too, so it is infrastructure flakiness
-rather than a code fault — but a single aborted run here is not evidence of a regression.
+**Environment note, with the cause found.** The test host and MSBuild child nodes crashed sporadically
+during this session. First recorded as unexplained flakiness; the actual cause surfaced later as
+**ENOSPC on the agent's task-output directory under `/tmp`**, filled by a backgrounded backtest whose
+continuously-redrawing progress bar was captured to a log. This is the same `/tmp` hazard this file
+already warns about, in a new guise: **redirect a long-running run's stdout to `/mnt/storage`, and do
+not let a progress-bar-emitting process write to a captured stream.** Re-runs after clearing space
+were clean, so no result here rests on a crashed run.
 
 **Still not claimed.** Nine axes audited. The one remaining item — whether OANDA's mid series matches
 what a real account would actually have been filled against — **cannot be settled from this repo**: it
