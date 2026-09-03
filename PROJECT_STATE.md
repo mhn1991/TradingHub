@@ -4590,9 +4590,44 @@ The single contaminated result came from an ad-hoc script written outside all of
 3.47 is not that the repo leaks; it is that work done outside its harnesses does not inherit their
 guarantees.
 
-**Still not claimed.** Three axes are audited: unclosed higher-timeframe bars, unconfirmed fractal
-pivots, and ML feature/label alignment. Not audited: the execution/fill model's intrabar assumptions
-(3.39 touches this), and whether cached historical data is itself point-in-time correct.
+**Execution/fill intrabar assumptions, audited (2026-09-03, follow-up).** Fourth axis. **Conservative
+throughout, with one known-optimistic assumption that is worth stating precisely.**
+
+Intrabar ambiguity is a first-class named concept here, not an accident: `AmbiguousIntrabarPolicy`
+{`ConservativeStopFirst`, `OptimisticTargetFirst`, `NearestToOpenFirst`}
+(`Simulator/Models/BacktestConfiguration.cs:51-56`). **The default is `ConservativeStopFirst` at every
+layer** — `BacktestConfiguration.cs:143`, `SimulationModels.cs:29`, CLI `"stop-first"`
+(`BacktestCommandOptions.cs:199,750`), DashboardLive `:1446` — and **no research script in
+`/mnt/storage/scratch/alfonso` ever passed `--ambiguous-policy`**, so every recorded run resolved a
+bar spanning both stop and target as a loss. All 32 also ran `--execution-interval 1m`, so the
+ambiguity window is a one-minute bar rather than the analysis timeframe. Even `NearestToOpenFirst`
+breaks exact ties toward the stop (`SimulatedBrokerState.cs:904-905`).
+
+Also correct: **gap-through-stop is already modelled** — `Trigger` sets `gap = open > stop` and fills
+at the *open*, not the stop, plus a gap-proportional slippage term
+(`Simulator/Execution/SimulationExecutionModels.cs:187-192,137`); this is the same treatment 3.47 had
+to hand-roll, and the engine had it all along. **Market orders fill at the bar's open, never its
+close** (`:182`), so there is no decide-at-close/fill-at-close shortcut. **An order cannot fill in the
+frame it was submitted** (`SimulatedBrokerState.cs:326`, `SubmittedMarketSequence < MarketSequence`),
+and StopLimit is two-phase — trigger in one frame, fill in a later one. Adverse selection always
+*worsens* the fill (`executable = raw ± (halfSpread + slippage)`, `:141-143`), with slippage carrying
+base-bps, a fraction of bar range, a gap term and an order-size term. Malformed OHLC is rejected
+outright (`SimulatedBrokerRuntime.cs:387-393`).
+
+**The one optimistic assumption: limit orders fill on touch.** `Limit when buy && low <= limit` fills
+at the limit price (`:183-186`), and `Math.Min(executable, limit)` clamps the adverse term away
+(`:144-146`). Real fills need trade-through and queue priority, so **modelled fill rates on resting
+limit orders are an upper bound.** This is a standard simplification, not a defect, but it matters
+here specifically: 3.32/3.35 established that only 4.9% of placed orders ever fill and that *fill
+selection* governs what the Alfonso method actually trades, so 3.40/3.41's slot-occupancy and
+placement-cap figures rest on fill rates that are generous in level. **It does not threaten 3.43's
+verdict** — a strategy that still loses under more-generous-than-real fills would only lose harder
+under real ones, so the negative conclusion is robust and arguably understated.
+
+**Still not claimed.** Four axes audited: unclosed higher-timeframe bars, unconfirmed fractal pivots,
+ML feature/label alignment, and intrabar fill assumptions. Not audited: whether the cached historical
+data is itself point-in-time correct (i.e. whether OANDA has since revised bars these backtests
+consumed), and the financing/swap model.
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5248,8 +5283,14 @@ into `docs/`; Docker packaging.
   `AvailableAt` and gates on the last. Then audited ML feature/label alignment (§3.12-3.24): **also
   clean** — features stream, labels are strictly forward, splits embargo the horizon, training strides
   to non-overlapping labels, the higher-timeframe trend join uses only closed buckets, and nothing is
-  fitted on test. **Three axes audited, no defect outside 3.45/3.46**; the contaminated result was the
-  one written outside the repo's harnesses rather than inside them.
+  fitted on test. Finally audited the execution model's intrabar assumptions: **conservative
+  throughout** — ambiguity is a named policy defaulting to `ConservativeStopFirst` (never overridden
+  in any research run, all of which used 1m execution frames), gap-through-stop fills at the open,
+  market orders fill at the open, and an order cannot fill in the frame it was submitted. The one
+  optimistic assumption is that limit orders fill on touch, making modelled fill rates an upper bound
+  — relevant to 3.40/3.41, but it cannot rescue 3.43's negative verdict. **Four axes audited, no
+  defect outside 3.45/3.46**; the contaminated result was the one written outside the repo's
+  harnesses rather than inside them.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
