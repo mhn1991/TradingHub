@@ -4556,9 +4556,43 @@ identity string; neither gates on it. All three `SwingDetector` uses in
 `ZZLiquiditySweepDiagnostic.cs:96,219,328` stream bar-by-bar and accumulate only `confirmed` — and
 that harness backs no recorded result in this file.
 
-**Still not claimed.** These two audits cover two axes — unclosed higher-timeframe bars, and
-unconfirmed fractal pivots. They are not a general leakage audit; label construction in the ML
-research (§3.12-3.24) was checked only for its timeframe stamping, not for feature/label alignment.
+**ML feature/label alignment, audited (2026-09-03, follow-up).** The third axis, covering §3.12-3.24.
+**No leakage found**, and this path is the most carefully guarded code in the repo on this question:
+
+- **Features ≤ t, label > t.** `FeatureEngine.Update` is a streaming fold over arriving candles;
+  `LabelGenerator` is documented and implemented as "labels the candle at index using candles
+  strictly after it" — entry at `candles[index].Close`, excursion loop `cursor = index + 1 ..
+  index + horizon` (`TradingClassifier/Labels/LabelGenerator.cs:10,89,121`). The ATR that sets the
+  label threshold is the *feature* ATR at t (`DatasetBuilder.cs:89`), not a future one.
+- **Horizon embargo across every split boundary.** `Chronological` and `WalkForward` both drop the
+  last `horizon` rows of train and validation (`DatasetSplits.cs:44-45,89-90`) so a training label
+  cannot reach into validation. Test is deliberately not embargoed — nothing follows it.
+- **Overlapping labels handled.** Consecutive rows share `horizon-1` label bars; `TrainingStride`
+  defaults to the horizon, decimating training to non-overlapping labels. `SampleUniqueness` even
+  documents why uniqueness *weighting* is not the fix for uniformly-spaced rows (it is uniform and
+  cancels) and that striding is.
+- **The higher-timeframe trend join is causal.** `AnnotationDatasetBuilder.cs:152-186` buckets as the
+  series streams and calls the detector only when a bucket has closed, so "a row sees the state as of
+  the last CLOSED higher-timeframe bar, never the bar it sits inside" — with the backfill hazard
+  named explicitly in the comment. **This is exactly the discipline 3.45/3.46 lacked, implemented
+  correctly, in the same repo.**
+- **Nothing is fitted on test.** `NormalizeMeanVariance` sits inside a pipeline fitted on the train
+  slice (`ModelTrainers.cs:236-252`); thresholds are tuned on `split.Validation`
+  (`ExperimentRunners.cs:145`); Platt/Isotonic calibrators are fitted on validation and say so in
+  their own output (`TradingClassifierRunner/Program.cs:800-809`).
+- **Known and already flagged, not leakage:** overlapping labels in the *test* set mean up to
+  `horizon` concurrent positions, inflating trade counts — the runner warns about `--allow-overlap`
+  at `Program.cs:74-75` and §3.14 records the policy unification.
+
+**The pattern across all three audits.** Every engineered research path in this repo — the engine, the
+annotation layer, the classifier dataset builder — enforces causality explicitly and documents why.
+The single contaminated result came from an ad-hoc script written outside all of them. The lesson of
+3.47 is not that the repo leaks; it is that work done outside its harnesses does not inherit their
+guarantees.
+
+**Still not claimed.** Three axes are audited: unclosed higher-timeframe bars, unconfirmed fractal
+pivots, and ML feature/label alignment. Not audited: the execution/fill model's intrabar assumptions
+(3.39 touches this), and whether cached historical data is itself point-in-time correct.
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5211,7 +5245,11 @@ into `docs/`; Docker packaging.
   structurally** — the detector's output is the only thing appended to the swing buffer that becomes
   `snapshot.Swings`, so an unconfirmed pivot never enters the system and no downstream `PivotTime` use
   can reach back before confirmation. `LiquidityAnalyzer` separates `PivotTime`/`ConfirmedAt`/
-  `AvailableAt` and gates on the last. No defect found on either axis outside 3.45/3.46.
+  `AvailableAt` and gates on the last. Then audited ML feature/label alignment (§3.12-3.24): **also
+  clean** — features stream, labels are strictly forward, splits embargo the horizon, training strides
+  to non-overlapping labels, the higher-timeframe trend join uses only closed buckets, and nothing is
+  fitted on test. **Three axes audited, no defect outside 3.45/3.46**; the contaminated result was the
+  one written outside the repo's harnesses rather than inside them.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
