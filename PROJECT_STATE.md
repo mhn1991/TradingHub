@@ -4531,12 +4531,34 @@ already recorded in 3.30's caveat, and the reason that harness does not reproduc
 `CandleSources.Resample` drops only the *trailing* partial bucket; an interior bucket with a data gap
 is folded and emitted as complete (`:177-188`). Both understate bar quality; neither leaks the future.
 
-**Deliberately not claimed.** This audit covers one axis: reading an unclosed higher-timeframe bar.
-It is not a general leakage audit. `SwingDetector` confirms a pivot only after its right-side candles
-close and carries `PivotTime` and `ConfirmedAt` separately
-(`ChartAnnotator/Structure/SwingDetector.cs:8-9,79`), which is the right design — but **I did not
-check every consumer** for whether it uses `PivotTime` as though the swing were known then. That is
-the most likely place for the next bug of this family, and it is unaudited.
+**Swing/fractal confirmation, audited (2026-09-03, follow-up).** Flagged above as the likeliest next
+bug and now checked: **no defect found, and the reason is structural rather than case-by-case.**
+
+`SwingDetector.Update` returns a pivot only once its right-side candles have closed
+(`ChartAnnotator/Structure/SwingDetector.cs:35-40,70`). There is exactly one production
+instantiation, `ChartAnnotator/Engine/ChartAnnotationEngine.cs:459`, and its output is the *only*
+thing ever appended to the swing buffer (`:134-137`), which is what becomes `snapshot.Swings`
+(`:310`). **An unconfirmed swing therefore never enters the system at all**, so every downstream
+`PivotTime` use is provenance over an already-confirmed set and cannot reach back before confirmation.
+The indicator states are handed `confirmed` directly rather than a raw list (`:141-149`), so the
+`TryFindRsi(swing.PivotTime)`-style lookups in `RsiAnalysisState.cs:109`,
+`CciAnalysisState.cs:95` and `StochRsiAnalysisState.cs:96` are historical reads of a past bar's
+indicator value, which is legitimate.
+
+`LiquidityAnalyzer` is the strongest case: it carries three separate stamps — `PivotTime`
+(provenance), `ConfirmedAt`, and `AvailableAt`, the latter set to the *current* candle's close
+(`:80,141`) — and consumers gate on `AvailableAt`. Its `PivotTime` uses are a pool's age in bars
+(`:443`, a magnitude about a real past event) and identity keys, not availability tests.
+`StructuralGeometryBuilder.cs:44` — the exact line flagged as risky — filters
+`Swings.Where(item => item.ConfirmedAt <= evidence.AvailableAt)` before using `PivotTime` as a label
+on :48. `ImprovedProgressiveAgent.cs:192` orders by `PivotTime`; `TargetMapBuilder.cs:435` builds an
+identity string; neither gates on it. All three `SwingDetector` uses in
+`ZZLiquiditySweepDiagnostic.cs:96,219,328` stream bar-by-bar and accumulate only `confirmed` — and
+that harness backs no recorded result in this file.
+
+**Still not claimed.** These two audits cover two axes — unclosed higher-timeframe bars, and
+unconfirmed fractal pivots. They are not a general leakage audit; label construction in the ML
+research (§3.12-3.24) was checked only for its timeframe stamping, not for feature/label alignment.
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -5185,7 +5207,11 @@ into `docs/`; Docker packaging.
   3.31-3.44) are structurally immune. Of the four standalone harnesses, three read one timeframe at a
   time and the fourth (`ZZAlfonsoAttributeStudy`) keys bars by close time, which is exactly right.
   Found two completeness defects (`export_bars.py` and `CandleSources.Resample` interior buckets),
-  neither of them lookahead. Flagged `SwingDetector` consumers as the unaudited next-most-likely spot.
+  neither of them lookahead. Then audited the `SwingDetector` consumers flagged there: **also clean,
+  structurally** — the detector's output is the only thing appended to the swing buffer that becomes
+  `snapshot.Swings`, so an unconfirmed pivot never enters the system and no downstream `PivotTime` use
+  can reach back before confirmation. `LiquidityAnalyzer` separates `PivotTime`/`ConfirmedAt`/
+  `AvailableAt` and gates on the last. No defect found on either axis outside 3.45/3.46.
 - **2026-09-03 (later)**: Retracted 3.45/3.46 (§3.47). Went to answer the two questions 3.46 left
   open and could not reproduce it: the rule rebuilt from its written description is **-0.0486R, 2/7
   blocks positive, 1/6 instruments**. The reported edge scales monotonically with how much future the
