@@ -3727,7 +3727,7 @@ history; and `AlfonsoCandidateRecord`, an optional decision-time sink capturing 
 agent considered with the reason it was not traded. That last one closes a real gap - a research
 harness counted 49 entries where the agent took 87 and the divergence was found by accident.
 
-**Standing position (SUPERSEDED 2026-09-01 - see 3.30).** This previously read "Direction works
+**Standing position (SUPERSEDED - see 3.43 for the verdict, and 3.30 for the trend-layer note).** This previously read "Direction works
 ... the remaining explanation is entry quality and cost, not the trend layer and not zone drawing."
 Direct measurement of the trend layer on 2026-09-01 contradicts it: the trend state carries no
 usable directional edge on any of six instruments. Do not rely on the old wording.
@@ -4322,6 +4322,60 @@ Without the gap tolerance daily bars never close and the agent takes no trades a
 Gold is cached back to 2022 (`METAL_XAU_USD_1m_20221212_20260724`). Until that runs, treat the
 break-even figure as unproven.
 
+### 3.43 VERDICT: the Alfonso method has no edge - 590 trades, 3.5 years, CI excludes zero (2026-09-03)
+
+Six instruments, 2023-01-01 to 2026-07-23, current default settings (3 ATR placement cap on,
+structural agreement off, control gate off, profit margin 0). This is the largest sample the strategy
+has ever been measured on - 4.6x the 8-month window every earlier conclusion rested on.
+
+| instrument | trades | win | avgR | net $ |
+|---|---|---|---|---|
+| gold | 127 | 27.6% | +0.0144 | +1,491 |
+| nas100 | 100 | 27.0% | -0.0336 | -1,405 |
+| silver | 92 | 23.9% | -0.0952 | -3,060 |
+| us30 | 84 | 26.2% | -0.1188 | -2,600 |
+| eurusd | 130 | 24.6% | -0.2129 | -4,052 |
+| gbpjpy | 57 | 10.5% | -0.5688 | -5,879 |
+| **TOTAL** | **590** | **24.4%** | **-0.1362** | **-15,505** |
+
+**Pooled 95% CI [-0.2509, -0.0215] - it does not contain zero.** 1 of 6 instruments profitable.
+-2.58% on $600,000 over 3.5 years.
+
+**The arithmetic.** A winner pays +2.314R and a loser costs -0.927R, so break-even needs a 28.6% win
+rate. The method delivers 24.4%. It is short by 4.2 percentage points, consistently, across six
+markets and three and a half years.
+
+**This supersedes the near-break-even readings in 3.40-3.42.** Every lever found this session -
+the 3 ATR placement cap, bigger targets (6:1 reached -0.0499), higher timeframes (+0.0044), wider
+stops - is real but works the same way: it makes each trade larger relative to a fixed cost. None
+improves selection. On 8 months they stacked to roughly zero and looked close. On 3.5 years the
+selection deficit is clear and no exit tuning covers 4.2 points.
+
+**Gold is not a counter-example.** +0.0144R over 127 trades is flat, and gold is the instrument that
+looked best in every configuration all session - which is what the best of six draws looks like when
+the true edge is negative.
+
+**Two 8-month findings that did NOT survive the longer window:**
+- Wider stops. The replay predicted an improvement; the real run gives 100 trades at -0.0013 against
+  127 at +0.0144 for the tight stop. The replay held the trade population fixed; widening the stop
+  actually changes which trades are taken.
+- The near-break-even trajectory generally. -0.1681 on 8 months read as "almost there"; the same
+  configuration over 3.5 years is -0.1362 with a CI excluding zero.
+
+**Recommendation: stop developing this method.** The evidence is now strong rather than suggestive.
+Further work on stops, targets, timeframes, filters or ML cannot close a selection gap of this size -
+and 3.38/3.39 already established that nothing the agent records about a zone predicts its outcome.
+
+**What is worth keeping** is the instrumentation, which is agent-agnostic: decision-time candidate
+logging (3.32), zone-inventory snapshots (3.36), per-filter drop tallies (3.37/3.38), the placement
+cap (3.40), optional position management (a6935a8), and the failure-mode analysis method - classify
+losses by what price actually did, then test each fix against a null. That method is what found the
+order-slot defect and what refuted four separate single-cause explanations.
+
+**Still pending:** the D1/H4/H1 stack over the same 3.5 years (two runs, rerunning after a shell
+quoting error). It will not change the verdict - the 8-month big-stack result was +0.0044 on 24
+trades, which is the same flat reading.
+
 ### 3.31 Module-audit changes measured; the 127 -> 38 collapse traced to structural agreement (2026-09-01)
 
 Three switches were implemented and A/B'd on the six-instrument window (2025-11-24 -> 2026-07-23,
@@ -4863,6 +4917,15 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-03**: Measured the Alfonso agent over 3.5 years and six instruments for the first time
+  (§3.43) — 590 trades, avgR −0.1362, pooled CI [−0.251, −0.022] excluding zero, 1/6 instruments
+  profitable, −$15,505. The method is short of break-even by 4.2 percentage points of win rate and
+  the verdict is that it has no edge. Trade-level forensics found the real defects along the way
+  (§3.40 order-slot occupancy, §3.41 far placements losing twice over) and the failure-mode analysis
+  showed 39% of losses are six-minute noise stop-outs and 33% are 2R givebacks. Bigger targets,
+  higher timeframes and wider stops each help but all work by diluting a fixed cost, not by picking
+  better. Added optional position management (a6935a8) after finding the flag was a silent no-op
+  through three layers.
 - **2026-09-01/02**: Found the root cause of the Alfonso long/short skew (§3.32). Wired
   `AlfonsoCandidateRecord` through BacktestRunner (`--alfonso-candidate-log`) after establishing that
   the standalone replay harness does not reproduce the agent (§3.30 caveat: EUR/USD, 14 trades on
