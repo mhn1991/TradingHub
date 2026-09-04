@@ -5043,12 +5043,17 @@ recovers +0.18R gross and hands back more than that in cost.
 
 #### Strategy level, on held-out instruments
 
-The zone study is a counterfactual; this is the real pipeline. Arm R2 = the book's 2:1 default,
-arm R5 = `--alfonso-min-impulse-ratio 5`, nothing else different, on the six FX pairs of held-out
-axis B. **Axis A could not be run at strategy level**: the 2022-12 to 2025-11 window is not in the
-candle cache under a matching key, so it needs a fresh 1.26M-candle download per instrument and
-OANDA returned HTTP 401 partway. So this half of the test covers new instruments only, not a new
-period.
+The zone study is a counterfactual; this is the real pipeline. Arm R2/P2 = the book's 2:1 default,
+arm R5/P5 = `--alfonso-min-impulse-ratio 5`, nothing else different. **Both held-out axes were run.**
+
+*(Corrected 2026-09-04: an earlier version of this section said axis A could not be run because the
+window missed the candle cache and OANDA 401'd on the re-download. The cache miss had a cause -
+**the runner extends the requested `from` backwards by 21 days for warmup**, so `--from 2023-01-01`
+is what maps to the cached `*_1m_20221211_20260723` series, not `--from 2022-12-11`. With the right
+start date all ten runs read cache and downloaded nothing. Worth remembering: a cache key is built
+from the request the runner makes, not the dates on the command line.)*
+
+**Axis B - held-out instruments** (six FX pairs, 2025-11-24 to 2026-07-23):
 
 | | R2 (2:1, the book) | R5 (5:1) |
 |---|---|---|
@@ -5058,16 +5063,58 @@ period.
 | net | -5,891 | -1,110 |
 | instruments net-positive | 1/6 | 2/6 |
 
-**R5 - R2 = +0.0534R, 95% CI [-0.4546, +0.5614].** The win-rate difference is +3.3 points against a
-standard error of 6.5, i.e. nothing. At 68 and 120 trades this test cannot resolve an effect of the
-size the zone study measured, and it does not.
+**R5 - R2 = +0.0534R, 95% CI [-0.4546, +0.5614].**
 
-**Scoring the third registered prediction honestly: it is violated as literally worded.** It said
-"should NOT flip any instrument positive on net R"; R5 has two net-positive instruments (audusd +80,
-nzdusd +838) against R2's one. But those rest on 17 and 9 trades and a few hundred dollars, and
-pooled expectancy stays negative, so the prediction's actual point - "if a test of it comes back
-showing a profitable strategy, suspect the test" - is not in doubt. Recorded as a miss rather than
-argued away.
+**Axis A - held-out period** (the five §3.51 instruments, trades opened 2023-01-01 to 2025-11-24;
+the runs cover to 2026-07-23 and are split by trade open date, which is equivalent to stopping them
+at the cutoff since no trade can depend on later candles):
+
+| | P2 (2:1, the book) | P5 (5:1) |
+|---|---|---|
+| trades | 336 | 234 |
+| win rate | 22.0% | 24.8% |
+| avgR (true R) | -0.2092 [-0.3958, -0.0226] | -0.1191 [-0.3582, +0.1200] |
+| net | -16,183 | -4,638 |
+| instruments net-positive | 1/5 | 1/5 |
+
+**P5 - P2 = +0.0901R, 95% CI [-0.2133, +0.3934]**, trade count down 30.4%. Per instrument P5 is
+ahead on four of five on avgR (gbpjpy -0.0070 -> -0.0077 is the exception, and eurusd is worse on R
+while better in dollars).
+
+**Pooled over both independent held-out tests: +0.0805R, 95% CI [-0.1800, +0.3409]**, on 456 against
+302 trades. Still contains zero.
+
+**The same runs give the in-sample period as a contrast, and it points the reassuring way.** Over
+2025-11-24 to 2026-07-23 - the window that produced the hypothesis - P5 - P2 is **+0.0144R**
+[-0.5534, +0.5822], i.e. *smaller* than out-of-sample. An overfitted threshold shows a large
+in-sample effect that decays out of sample; this shows the opposite, which is evidence the 5:1 line
+was not fitted to that window. It is equally evidence that at strategy level both figures are noise.
+
+#### The structural reason this test cannot settle it
+
+At the observed dispersion of true R (sd around 1.7), resolving a +0.08R effect at 95% confidence
+needs roughly **3,500 trades per arm.** Every strategy-level run in this file put together has a few
+hundred. **The Alfonso method cannot generate enough trades to measure an effect of the size its own
+best zone attribute produces** - not in 3.5 years, not across six instruments.
+
+That is why the zone-level counterfactual was the right instrument and should be the default for
+questions of this kind: it produced 30,640 and then 77,645 observations from the same candles that
+yield a few hundred trades, because it is not throttled by the single order slot, the scenario gate
+or the position limit. **For any future question about zone or setup quality worth less than about
+0.2R, measure it at the zone level; a trade-count A/B will return "CI contains zero" whatever the
+truth is.**
+
+Note also that the trade-count reduction is nothing like the candidate reduction: >=5 is a third of
+zones, but trades fall only 30.4% here and 43.3% on axis B. Removing zones frees the single resting-
+order slot for others, which is §3.39-3.41's occupancy mechanism showing up again.
+
+**Scoring the third registered prediction honestly: it fails on axis B and holds on axis A.** It
+said "should NOT flip any instrument positive on net R". On axis B, R5 has two net-positive
+instruments (audusd +80, nzdusd +838) against R2's one - a miss, recorded as such rather than argued
+away, though those rest on 17 and 9 trades and a few hundred dollars. On axis A, which has four times
+the trades, both arms have exactly 1 of 5 net-positive and it is the same instrument in each, so
+nothing flipped. Pooled expectancy stays negative on both axes, so the prediction's actual point -
+"if a test of it comes back showing a profitable strategy, suspect the test" - was never in doubt.
 
 The second prediction also needs a caveat. It held exactly at the zone level (>=5 is 33-34% of
 zones), but at strategy level trades fell 43.3%, not two thirds, and the candidate-log row count
@@ -5076,7 +5123,7 @@ rested, the agent re-considers the same zones on more subsequent bars, so rows i
 read candidate-log row counts as a population size.**
 
 **One real disagreement between the two levels, and it is informative.** The zone study says net R
-gets *worse* as the ratio rises; the strategy run says slightly better. The zone study charges a flat
+gets *worse* as the ratio rises; both strategy runs say slightly better. The zone study charges a flat
 2.4 basis points of price, which is roughly right for CFDs and far too harsh for FX majors, and it is
 precisely the tightest-risk zones - the high-ratio ones - that such a model over-penalises. So on
 realistic FX costs some of the gross edge does survive into net. That does not rescue anything here,
@@ -5995,6 +6042,15 @@ into `docs/`; Docker packaging.
   bucket. At strategy level on held-out instruments R5-R2 is +0.0534R with a CI of [-0.455, +0.561]
   — nothing, at 68 vs 120 trades. One registered prediction missed (two instruments did flip
   net-positive, on 9 and 17 trades); recorded as a miss. Default stays at 2.0.
+- **2026-09-04 (later still)**: Ran the held-out PERIOD at strategy level too, after finding why it
+  missed the candle cache — the runner extends `from` back 21 days for warmup, so `--from
+  2023-01-01` is the key for the cached 2022-12-11 series. P5-P2 = **+0.0901R [-0.2133, +0.3934]** on
+  336 vs 234 trades, trade count down 30.4%, and P5 still loses (-0.1191R, net -4,638). Pooled with
+  the instrument axis: **+0.0805R [-0.1800, +0.3409]** on 456 vs 302 trades. The effect is *larger*
+  out-of-sample than in-sample (+0.0901 vs +0.0144), which is the opposite of the overfitting
+  signature. **Resolving +0.08R needs ~3,500 trades per arm and this method produces a few hundred**,
+  so no strategy-level A/B can settle it — the zone-level counterfactual is the right instrument for
+  anything under ~0.2R. Default stays at 2.0.
 - **2026-09-04**: Ran module 7's grading against the zones the hard gates reject (§3.51), using a new
   zone-level harness over 30,640 zone touches instead of 142 trades. **The composite grade does not
   order that population** — no monotone relation in either of two independent samples, Spearman
