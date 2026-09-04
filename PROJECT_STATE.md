@@ -4489,9 +4489,10 @@ eurusd 18.25%, gbpjpy 14.42% (means: 9.63 / 5.80 / 10.28 / 17.85 / 35.87 / 20.48
 magnitudes and that derivation was not saved. Under the pessimistic (mean) vector the lookahead-free
 rule is -0.1484R, 0/7 blocks positive.
 
-**Scripts**: `/mnt/storage/scratch/alfonso/portfolio.py` (rule, gap-aware resolver, portfolio
-simulator), `final.py` (A/B/C/D above). Unlike the 3.45/3.46 work, these are on disk — the reason
-that result could not be checked is that its script was not.
+**Scripts**: now in the repo as `tools/alfonso_portfolio.py` (rule, gap-aware resolver, portfolio
+simulator) and `tools/alfonso_lookahead_report.py` (A/B/C/D above), moved out of scratch on
+2026-09-04 and re-verified to reproduce every number in this section. Unlike the 3.45/3.46 work,
+these are on disk — the reason that result could not be checked is that its script was not.
 
 **Net effect on the roadmap**: there is currently no validated signal in this repo. 3.43's verdict on
 the Alfonso method stands; 3.45/3.46's replacement does not.
@@ -5351,9 +5352,25 @@ Two things that verification caught, both of which would have silently changed r
   and 3.52 unreproducible while appearing to reproduce them, so the docstring says so in capitals
   and any fix must be a new opt-in path.
 
+The analysis scripts are in the repo too, and each was verified by reproducing a published table
+rather than by inspection:
+
+| tool | reproduces | verified against |
+|---|---|---|
+| `tools/alfonso_grade_report.py` | 3.51/3.52 zone tables | the four-sample ratio table exactly: +0.1621, +0.1363, +0.1685, +0.2340 |
+| `tools/alfonso_ab_report.py` | 3.50/3.52 strategy A/B | all three experiments exactly, incl. P5-P2 +0.0901R and B-A +0.0131R |
+| `tools/alfonso_lookahead_report.py` + `alfonso_portfolio.py` | 3.47's retraction | `doff=-1` n=4,995 hit 29.03% +0.0326R and `doff=-2` n=4,330 hit 26.84% -0.0571R, plus caps 1/2/3 at 634/1,168/1,515 |
+
+`alfonso_portfolio.py` keeps the `doff` switch that IS the 3.47 bug (-1 reads the still-forming daily
+bar, -2 the last closed one) reachable on purpose: the comparison between them is the result, so
+"fixing" it would delete the finding.
+
+The remaining ad-hoc scripts are preserved unmaintained under `tools/archive/alfonso/` with a README
+recording which still run and which are dead. They are kept for the reason 3.47 exists: 3.45/3.46 had
+to be retracted partly because its script was never saved.
+
 What is still NOT reproducible from the repo: the cached OANDA candles themselves (~360 GB under
-`.cache/historical`, gitignored) and the per-study analysis scripts that turn the harness CSV output
-into the tables above, which were written ad hoc in a session scratch directory.
+`.cache/historical`, gitignored). The tools need a warm cache.
 
 #### Verification
 
