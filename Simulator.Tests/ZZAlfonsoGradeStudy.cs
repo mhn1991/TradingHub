@@ -80,6 +80,19 @@ public sealed class ZZAlfonsoGradeStudy
     [TestCase("gbpjpy")]
     [TestCase("nas100")]
     [TestCase("us30")]
+    // §3.52's held-out sets, neither of which contributed to the finding under test: the same five
+    // instruments over the 2.9 years BEFORE §3.51's window, and six FX pairs never studied at all.
+    [TestCase("hold5-silver")]
+    [TestCase("hold5-eurusd")]
+    [TestCase("hold5-gbpjpy")]
+    [TestCase("hold5-nas100")]
+    [TestCase("hold5-us30")]
+    [TestCase("newfx-audusd")]
+    [TestCase("newfx-gbpusd")]
+    [TestCase("newfx-nzdusd")]
+    [TestCase("newfx-usdcad")]
+    [TestCase("newfx-usdchf")]
+    [TestCase("newfx-usdjpy")]
     public void DoesTheGradeOrderTheZonesTheGatesReject(string prefix)
     {
         List<AlfonsoBar> h4 = Load($"{prefix}-h4.csv");

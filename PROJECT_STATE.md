@@ -4977,6 +4977,119 @@ either. Adding the missing grading could change that or could simply add paramet
 here establishes which. Any build should be measured against a null the way 3.45/3.46 tried to and
 3.47 shows must be done lookahead-free.
 
+### 3.52 The 5:1 hypothesis tested forward on candles that did not produce it: it replicates, and it is still not tradeable (2026-09-04)
+
+§3.51 registered a hypothesis and its predictions **in git before any held-out candle was read**
+(commit `1b2c22d`). This is the test. Two held-out axes, chosen so a failure on either would localise
+the fault:
+
+| | what is held out | span | n |
+|---|---|---|---|
+| **A - new period** | the same five non-XAU instruments, over the 2.9 years BEFORE §3.51's window | 2022-12-11 -> 2025-11-23 | 61,224 zone touches |
+| **B - new instruments** | six FX pairs never studied at all (AUD/USD, GBP/USD, NZD/USD, USD/CAD, USD/CHF, USD/JPY) | 2025-11-24 -> 2026-07-22 | 16,421 zone touches |
+
+XAU/USD is excluded entirely: §3.51 consumed 2023-01 to 2026-07 of it, so there is nothing left of it
+to hold out. Method, exporter and harness are byte-identical to §3.51 - only the candles changed.
+
+#### The registered predictions, scored
+
+| prediction, as written in §3.51 | held out A | held out B | verdict |
+|---|---|---|---|
+| ">=5:1 lifts gross expectancy by roughly +0.15R" | **+0.1685** [+0.1384, +0.1986] | **+0.2340** [+0.1752, +0.2928] | **held** |
+| "should cut candidate count by roughly two thirds" (>=5 was 33.0%/33.4% in sample) | **34.0%** | **33.0%** | **held** |
+| "should NOT flip any instrument positive on net R" | net R *falls* as the ratio rises | same | **held** |
+
+For comparison the in-sample figures were +0.1621 and +0.1363. **Eleven of eleven held-out
+instruments are positive** (A: +0.1185 to +0.2473; B: +0.1431 to +0.3020), both chronological halves
+of both sets are positive, and the effect survives inside every stop-width quartile:
+
+| risk quartile | held out A | held out B |
+|---|---|---|
+| Q1 tightest | +0.2440 | +0.2716 |
+| Q2 | +0.1889 | +0.2528 |
+| Q3 | +0.1154 | +0.1459 |
+| Q4 widest | +0.0262 | +0.1884 |
+
+That last table is the control that matters: a high ratio means a narrow zone, and narrow zones have
+tighter stops, so "ratio" could have been "stop width" wearing a disguise. It is not - the effect is
+present at every width, and it points the opposite way to the noise-stopping mechanism a width
+artefact would produce.
+
+**§3.51's other answer also replicates**: the composite score still fails to order either held-out
+set. Held out A runs 3 -> -0.1795, 5 -> +0.0301, 6 -> **+0.1173**, 8 -> +0.0855, 10 -> -0.1156, with
+score 6 beating scores 8 and 9 and score 10 negative. So the grade is not rescued by a bigger sample.
+
+#### Why it is still not tradeable, quantified
+
+The gross edge is real. It is also uncollectable at the modelled cost, and the reason is that **the
+same property that produces the edge produces the cost**:
+
+| ratio bucket | held out A: gross / median costR / net | held out B: gross / median costR / net |
+|---|---|---|
+| < 2 | +0.0004 / 0.178 / **-0.2526** | -0.0150 / 0.290 / **-0.3836** |
+| 2 - 3 | -0.0088 / 0.255 / -0.3668 | +0.0075 / 0.415 / -0.5107 |
+| 3 - 5 | +0.0655 / 0.300 / -0.3706 | -0.0003 / 0.479 / -0.6229 |
+| **>= 5** | **+0.1845** / 0.346 / **-0.4024** | **+0.2289** / 0.567 / **-0.6474** |
+
+A high impulse-to-base ratio *is* a narrow zone: median risk falls from 0.2275 to 0.1437 price units
+across the ladder in A. Cost per unit of R is inversely proportional to risk, so it climbs 0.178 ->
+0.346 over the same ladder while gross climbs +0.000 -> +0.184. **Cost climbs at least as fast as the
+edge, so the best gross bucket is the worst net bucket in both held-out sets.**
+
+This is §3.44's diagnosis arriving from a completely different direction. The binding constraint is
+not zone selection. The single most robust zone attribute found anywhere in this work - replicated
+across two independent held-out samples, eleven of eleven instruments, every stop-width quartile -
+recovers +0.18R gross and hands back more than that in cost.
+
+#### Strategy level, on held-out instruments
+
+The zone study is a counterfactual; this is the real pipeline. Arm R2 = the book's 2:1 default,
+arm R5 = `--alfonso-min-impulse-ratio 5`, nothing else different, on the six FX pairs of held-out
+axis B. **Axis A could not be run at strategy level**: the 2022-12 to 2025-11 window is not in the
+candle cache under a matching key, so it needs a fresh 1.26M-candle download per instrument and
+OANDA returned HTTP 401 partway. So this half of the test covers new instruments only, not a new
+period.
+
+| | R2 (2:1, the book) | R5 (5:1) |
+|---|---|---|
+| trades | 120 | 68 |
+| win rate | 21.7% | 25.0% |
+| avgR (true R) | -0.3974 [-0.6810, -0.1138] | -0.3440 [-0.7654, +0.0775] |
+| net | -5,891 | -1,110 |
+| instruments net-positive | 1/6 | 2/6 |
+
+**R5 - R2 = +0.0534R, 95% CI [-0.4546, +0.5614].** The win-rate difference is +3.3 points against a
+standard error of 6.5, i.e. nothing. At 68 and 120 trades this test cannot resolve an effect of the
+size the zone study measured, and it does not.
+
+**Scoring the third registered prediction honestly: it is violated as literally worded.** It said
+"should NOT flip any instrument positive on net R"; R5 has two net-positive instruments (audusd +80,
+nzdusd +838) against R2's one. But those rest on 17 and 9 trades and a few hundred dollars, and
+pooled expectancy stays negative, so the prediction's actual point - "if a test of it comes back
+showing a profitable strategy, suspect the test" - is not in doubt. Recorded as a miss rather than
+argued away.
+
+The second prediction also needs a caveat. It held exactly at the zone level (>=5 is 33-34% of
+zones), but at strategy level trades fell 43.3%, not two thirds, and the candidate-log row count
+went *up* 11%. That last figure is not a candidate count: when the tighter gate stops orders being
+rested, the agent re-considers the same zones on more subsequent bars, so rows inflate. **Do not
+read candidate-log row counts as a population size.**
+
+**One real disagreement between the two levels, and it is informative.** The zone study says net R
+gets *worse* as the ratio rises; the strategy run says slightly better. The zone study charges a flat
+2.4 basis points of price, which is roughly right for CFDs and far too harsh for FX majors, and it is
+precisely the tightest-risk zones - the high-ratio ones - that such a model over-penalises. So on
+realistic FX costs some of the gross edge does survive into net. That does not rescue anything here,
+but it means the zone study's net column should be read as an upper bound on cost, not a measurement
+of it.
+
+#### What was changed
+
+Nothing. `MinimumImpulseToBaseRatio` remains at the book's 2.0. The hypothesis passed its
+out-of-sample test as a *statement about zones* and failed as a *reason to trade differently*, and
+those are different claims. `--alfonso-min-impulse-ratio` remains available for anyone who wants to
+re-open it against a cost model materially better than the one measured here.
+
 ### 3.51 The grade run against the zones the gates reject: it does not order them, but the 2:1 rule is in the wrong place (2026-09-04)
 
 §3.50 could not tell whether module 7's grading is useless or merely censored: it is computed after
@@ -5872,6 +5985,16 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-04 (later)**: Tested §3.51's 5:1 hypothesis forward on candles that did not produce it
+  (§3.52), with the predictions committed in git beforehand. **It replicates**: +0.1685 on a new
+  2.9-year period for the same five instruments and +0.2340 on six FX pairs never studied, against
+  +0.15 predicted, with 11/11 held-out instruments positive and the effect surviving every
+  stop-width quartile. The composite score still fails to order either held-out set. **It is still
+  not tradeable**: a high ratio *is* a narrow zone, so cost per R climbs 0.178 -> 0.346 across the
+  same ladder on which gross climbs +0.000 -> +0.184, and the best gross bucket is the worst net
+  bucket. At strategy level on held-out instruments R5-R2 is +0.0534R with a CI of [-0.455, +0.561]
+  — nothing, at 68 vs 120 trades. One registered prediction missed (two instruments did flip
+  net-positive, on 9 and 17 trades); recorded as a miss. Default stays at 2.0.
 - **2026-09-04**: Ran module 7's grading against the zones the hard gates reject (§3.51), using a new
   zone-level harness over 30,640 zone touches instead of 142 trades. **The composite grade does not
   order that population** — no monotone relation in either of two independent samples, Spearman
