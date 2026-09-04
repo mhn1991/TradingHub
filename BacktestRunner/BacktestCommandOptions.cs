@@ -161,6 +161,8 @@ internal sealed record BacktestCommandOptions
     public bool AlfonsoRequireValidHost { get; init; } = true;
     public bool AlfonsoOverExtensionTrendlines { get; init; }
     public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
+    public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
+        new ImbalanceOptions().MinimumImpulseToBaseRatio;
     public bool AlfonsoRequireNestedEntries { get; init; }
     public bool AlfonsoRequireControlAgreement { get; init; } = true;
     public bool AlfonsoAllowConfirmationEntries { get; init; }
@@ -694,6 +696,9 @@ internal sealed record BacktestCommandOptions
             AlfonsoRequireValidHost = !values.ContainsKey("alfonso-allow-invalid-hosts"),
             AlfonsoOverExtensionTrendlines = values.ContainsKey("alfonso-overextension-trendlines"),
             AlfonsoMinimumZoneGrade = ParseZoneGrade(values.GetValueOrDefault("alfonso-min-grade")),
+            AlfonsoMinimumImpulseToBaseRatio = ParseDecimal(
+                values.GetValueOrDefault("alfonso-min-impulse-ratio"),
+                new ImbalanceOptions().MinimumImpulseToBaseRatio, 0m, "alfonso-min-impulse-ratio"),
             AlfonsoRequireNestedEntries = values.ContainsKey("alfonso-nested-only"),
             AlfonsoRequireControlAgreement = !values.ContainsKey("alfonso-ignore-control"),
             AlfonsoAllowConfirmationEntries = values.ContainsKey("alfonso-confirmation-trades"),
@@ -868,6 +873,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoRequireValidHost = AlfonsoRequireValidHost,
         AlfonsoOverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
         AlfonsoMinimumZoneGrade = AlfonsoMinimumZoneGrade,
+        AlfonsoMinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,
         AlfonsoRequireNestedEntries = AlfonsoRequireNestedEntries,
         AlfonsoRequireControlAgreement = AlfonsoRequireControlAgreement,
         AlfonsoAllowConfirmationEntries = AlfonsoAllowConfirmationEntries,

@@ -774,6 +774,15 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-min-grade: lowest module 7 grade a zone may carry and still be traded.</summary>
     public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
 
+    /// <summary>
+    /// --alfonso-min-impulse-ratio N. Module 7's "twice as wide as the basing structure", exposed so
+    /// §3.51's finding - that the discrimination sits at 5:1, not at the book's 2:1 - can be tested
+    /// in a real run. Default is the book's 2.0 and is deliberately NOT moved: 3.51 measured that on
+    /// the same candles a change would be fitted to.
+    /// </summary>
+    public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
+        new ImbalanceOptions().MinimumImpulseToBaseRatio;
+
     /// <summary>--alfonso-candidate-log PATH. Decision-time candidate CSV, or null for none.</summary>
     public string? AlfonsoCandidateLogPath { get; init; }
 
@@ -1042,6 +1051,7 @@ public sealed record BacktestRequest
                         EliminationRequiresClose = AlfonsoEliminationRequiresClose,
                         SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
                         TreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation,
+                        MinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,
                         EntryPlacement = AlfonsoHalfZoneEntry
                             ? ZoneEntryPlacement.Midpoint
                             : ZoneEntryPlacement.Proximal

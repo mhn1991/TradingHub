@@ -4977,6 +4977,126 @@ either. Adding the missing grading could change that or could simply add paramet
 here establishes which. Any build should be measured against a null the way 3.45/3.46 tried to and
 3.47 shows must be done lookahead-free.
 
+### 3.51 The grade run against the zones the gates reject: it does not order them, but the 2:1 rule is in the wrong place (2026-09-04)
+
+§3.50 could not tell whether module 7's grading is useless or merely censored: it is computed after
+the hard gates, on a population those gates have already made uniform. This removes the censoring.
+
+**Harness**: `Simulator.Tests/ZZAlfonsoGradeStudy.cs` (Explicit). It ignores the gates, the scenario
+and the one-order-slot entirely and treats **every structure the detector builds** as an observation:
+when price first reaches a zone's proximal, plan the book's own trade there (limit at the proximal,
+stop 25% beyond the distal, fixed 3:1) and resolve it on the m15 path. **30,640 resolved zone
+touches** against 142 trades in §3.50's A/B. Bars are merged by close time and zones are snapshotted
+*before* the bar that touches them - a zone that one bar both reaches and eliminates is gone from the
+live list afterwards, and those are precisely the losses.
+
+#### The measurement has to be read on win rate, not on R
+
+Mean cost drag in this study is **0.351R**, against a gross edge of +0.059R. Cost scales as 1/risk,
+and risk correlates with zone width, which correlates with the very attributes under test - so net R
+manufactures orderings that are pure cost. Two examples found and discarded here: base candle count
+looked cleanly monotone on net R (1 candle -0.3835 rising to 6 candles -0.1241) and is flat on gross;
+the Top timeframe looked far better than the Lower (+0.0498 vs -0.2321 on `full-xauusd`) and is
+flat on gross. Median costR runs 0.458 at a one-candle base against 0.176 at six, and 0.068 on Top
+against 0.311 on Lower. **Those two "findings" were cost, not quality.** Everything below is
+therefore stated as gross R = 4·(win rate) - 1, which is cost-free.
+
+#### Two genuinely independent samples
+
+Five instruments with no XAU exposure (silver, eurusd, gbpjpy, nas100, us30; 2025-11-24 to
+2026-07-22; n=13,258) against XAU/USD over 3.5 years (2023-01-03 to 2026-07-23; n=14,526). Different
+instruments, mostly different period.
+
+#### Answer 1: the composite grade does not order the population
+
+| score | five non-XAU | XAU/USD 3.5y |
+|---|---|---|
+| 3 | +0.0323 | +0.1765 |
+| 4 | -0.0279 | +0.0309 |
+| 5 | +0.0609 | +0.0086 |
+| 6 | +0.0621 | +0.1092 |
+| 7 | +0.0539 | +0.1096 |
+| 8 | **+0.2308** | +0.1020 |
+| 9 | +0.0320 | +0.1021 |
+| 10 | **-0.3000** | **+0.2000** |
+
+No monotone relationship in either, and the buckets that look strong in one are noise in the other -
+score 10 is the worst bucket in one sample and the best in the other, on n=40 and n=50. Spearman over
+the pooled six instruments is **-0.0524**, i.e. nil and if anything the wrong way.
+
+#### Answer 2: the gates modestly earn their keep
+
+| | five non-XAU | XAU/USD 3.5y |
+|---|---|---|
+| passes the gates | +0.1008 (n=2,242) | +0.1131 (n=2,616) |
+| rejected by the gates | +0.0534 (n=11,016) | +0.0690 (n=11,910) |
+| difference | **+0.047** | **+0.044** |
+
+Same sign, near-identical size in both samples, though the confidence intervals overlap in each. So
+the gates are not throwing away good trades - they are just not doing much, and what they do is worth
+roughly +0.045R gross, an eighth of the cost drag.
+
+#### Answer 3 (the real finding): the 2:1 line separates nothing; 5:1 does
+
+| impulse:base | five non-XAU | XAU/USD 3.5y |
+|---|---|---|
+| < 2 *(the gate rejects these)* | +0.0166 | +0.0257 |
+| 2 - 3 *(the gate admits these)* | +0.0065 | -0.0068 |
+| 3 - 5 | -0.0062 | +0.0739 |
+| **>= 5** | **+0.1701** | **+0.1677** |
+
+Two independent samples, point estimates agreeing to within 0.0024R, both CIs excluding every lower
+bucket. **The zones the gate rejects for missing 2:1 perform the same as the ones it admits at
+2-3:1** - the book's threshold is drawn where nothing separates. The discrimination is at 5:1, and it
+is worth about +0.15R gross, roughly 3.5 points of win rate.
+
+It survives every control:
+
+| control | five non-XAU | XAU/USD |
+|---|---|---|
+| risk quartile 1 (tightest stops) | +0.1697 | +0.1832 |
+| risk quartile 2 | +0.1775 | +0.1748 |
+| risk quartile 3 | +0.0871 | +0.1410 |
+| risk quartile 4 (widest) | +0.0982 | +0.0049 |
+| first half of period | +0.2023 | +0.1453 |
+| second half of period | +0.1219 | +0.1275 |
+| every individual instrument | +0.1055 to +0.1913, 5 of 5 positive | n/a |
+
+Note the direction rules out the obvious artefact: a high ratio means a narrow zone means a tighter
+stop, and tighter stops should be hit by noise MORE often. The win rate goes the other way.
+
+#### Why the composite destroyed the one real signal
+
+The score spends one point of ten on the 2:1 test, as pass/fail, **at exactly the threshold that
+does not discriminate** - and spends the other nine on attributes that do not replicate (base
+structure, the gap bonus, accomplishment count) plus freshness, which is a constant at the first
+pullback. The signal is diluted nine to one by noise and then thresholded in the wrong place. That
+is a sufficient explanation for answer 1, and it is a criticism of the composition rather than of
+module 7's qualifiers.
+
+#### What was and was not changed
+
+**The default is NOT moved.** `MinimumImpulseToBaseRatio` stays at the book's 2.0. Adopting 5.0 here
+would be fitting a threshold on the candles that suggested it, which is §3.27 in this file. What was
+done instead: the threshold is now reachable from a run
+(`--alfonso-min-impulse-ratio N`, `BacktestConfiguration.AlfonsoMinimumImpulseToBaseRatio`) - it had
+no CLI flag at all, so the hypothesis could not previously be tested end to end.
+
+**Registered hypothesis, for a forward test on candles not used here**: raising the tradeability
+threshold to 5:1 lifts gross expectancy by roughly +0.15R without a compensating loss of sample.
+Prediction to check against: it should cut candidate count by roughly two thirds (>=5 is 4,369 of
+13,258 and 4,854 of 14,526 here) and it should NOT flip any instrument positive on net R, because
++0.15R gross does not cover 0.35R of cost drag. **If a test of it comes back showing a profitable
+strategy, suspect the test.**
+
+#### What this does not say
+
+It does not rehabilitate the method. Every bucket in every table above is a gross figure; net of the
+measured 0.351R cost drag, the best bucket found (>=5:1) is still around -0.18R. §3.43's verdict
+stands, and §3.44's diagnosis - that the leak is cost and stop slippage rather than selection - is
+reinforced rather than displaced: the best zone attribute discovered here recovers less than half of
+what cost removes.
+
 ### 3.50 The eleven course PDFs read end to end against the code; four rules were missing and are now built (2026-09-03)
 
 §3.49 audited the user's Persian checklist. This audits **the source material itself** - all eleven
@@ -5097,8 +5217,8 @@ uniform.
 **So the grading, as wired, is close to a no-op, and that is the finding rather than a disappointment
 in it.** It says the discrimination the course expects from scoring is already being done upstream by
 the pass/fail gates. For the grade to earn its place it has to be scored on zones those gates
-currently reject - `--alfonso-allow-invalid-zones`, a relaxed 2:1 - and shown to order that wider
-population by outcome. That is a real experiment and it has not been run.
+currently reject, and shown to order that wider population by outcome. **That experiment is §3.51,
+and the answer is no** - though it found something else that does replicate.
 
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
@@ -5752,6 +5872,16 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-04**: Ran module 7's grading against the zones the hard gates reject (§3.51), using a new
+  zone-level harness over 30,640 zone touches instead of 142 trades. **The composite grade does not
+  order that population** — no monotone relation in either of two independent samples, Spearman
+  -0.05. The gates themselves are worth +0.045R gross, replicated. The real finding is that
+  **the book's 2:1 threshold is drawn where nothing separates**: sub-2:1 zones perform the same as
+  the 2-3:1 zones the gate admits, and the discrimination sits at 5:1 (+0.170 vs +0.168 gross in two
+  independent samples, surviving risk quartile, instrument and period splits). Default left at 2.0 —
+  moving it would fit the candles that suggested it — but `--alfonso-min-impulse-ratio` now exists so
+  it can be tested. Also had to discard two apparent findings that were cost artefacts (base-candle
+  and timeframe orderings), which is why everything in §3.51 is stated on win rate.
 - **2026-09-03 (latest)**: Read all eleven `Books/alfonso` PDFs end to end against
   `Agent/Strategies/Alfonso` (§3.50). **Four mechanical rules the book states had no code**: module
   7's zone scoring, module 7's rule that a bigger-timeframe impulse which never became an imbalance
