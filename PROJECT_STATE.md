@@ -3737,7 +3737,8 @@ usable directional edge on any of six instruments. Do not rely on the old wordin
 
 > **CAVEAT ADDED SAME DAY - READ FIRST.** Everything in this section below the caveat was measured
 > with a standalone replay harness (`ZZAlfonsoTrendLayerDiagnostic`) that feeds CSVs aggregated by
-> `/mnt/storage/scratch/alfonso/export_bars.py` into the production analyzer classes. That harness
+> `/mnt/storage/scratch/alfonso/export_bars.py` (since moved into the repo as
+> `tools/alfonso_export_bars.py`) into the production analyzer classes. That harness
 > **does not reproduce the agent's trend states.** The check that caught it: on EUR/USD the agent
 > took 14 trades whose `setupReason` says "All three timeframes ...", while the replay finds exactly
 > **1** aligned bar in 16,420. Silver: 15 trades vs 125 bars; gold: 21 vs 297.
@@ -3759,7 +3760,7 @@ usable directional edge on any of six instruments. Do not rely on the old wordin
 > rejection reason from the real pipeline.
 
 Six-instrument window 2025-11-24 -> 2026-07-23, bars exported from the simulator's own 1m cache
-(`/mnt/storage/scratch/alfonso/export_bars.py`). New diagnostic:
+(`/mnt/storage/scratch/alfonso/export_bars.py`, now `tools/alfonso_export_bars.py`). New diagnostic:
 `Simulator.Tests/ZZAlfonsoTrendLayerDiagnostic.cs` (Explicit).
 
 **Method.** A barrier race from every bar with the geometry the agent actually trades - 1xATR stop,
@@ -5323,6 +5324,36 @@ honest rather than flattering:
 - **Module 11's "close before the 3:1 if strong obstacles have formed"**. Discretionary by the
   book's own framing, and partly pre-empted by the 3:1 profit-margin gate, which refuses such trades
   up front rather than abandoning them later.
+
+#### Reproducing 3.51 and 3.52 from a clone
+
+The bar exporter these studies read was a loose script in a scratch directory; it is now
+`tools/alfonso_export_bars.py`, which regenerates every dataset the two sections use:
+
+```
+./tools/alfonso_export_bars.py --list              # what each dataset resolves to
+./tools/alfonso_export_bars.py --dataset study     # 3.51: six instruments + full-xauusd
+./tools/alfonso_export_bars.py --dataset holdout   # 3.52: hold5-* and newfx-*
+```
+
+**Verified faithful, not merely tidied**: regenerating all 18 datasets reproduces the 54 CSVs the
+published numbers were measured on with **zero content differences** - 51 byte-identical and 3
+(`full-xauusd-*`) identical apart from the originals' CRLF line endings.
+
+Two things that verification caught, both of which would have silently changed results:
+
+- **`full-xauusd` does not come from the same XAU cache entry as `gold`.** It needs
+  `METAL_XAU_USD_1m_20221212_20260724` *plus* a 2023-01-01 from-filter. The neighbouring
+  `..._20221211_20260723` entry stops a day earlier and yields a shorter series that looks
+  perfectly reasonable.
+- **The bucketing defect is preserved on purpose.** `t - (t % period)` with no completeness rule
+  writes a partial bucket as whole (3.30, 3.48). Fixing it would leave every figure in 3.30, 3.51
+  and 3.52 unreproducible while appearing to reproduce them, so the docstring says so in capitals
+  and any fix must be a new opt-in path.
+
+What is still NOT reproducible from the repo: the cached OANDA candles themselves (~360 GB under
+`.cache/historical`, gitignored) and the per-study analysis scripts that turn the harness CSV output
+into the tables above, which were written ad hoc in a session scratch directory.
 
 #### Verification
 

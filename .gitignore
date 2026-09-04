@@ -37,3 +37,7 @@ artifacts/*.zip.sha256
 resume
 resume~
 *~
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
