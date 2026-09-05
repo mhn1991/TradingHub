@@ -49,6 +49,12 @@ INSTRUMENTS = {
 ZONE = re.compile(r"Zone [\d.]+/([\d.]+) \(([A-Za-z]+), ([\d.]+):1, ([^)]*)\)")
 STATED = re.compile(r"distal ([\d.]+) padded")
 
+# The agent's timeframe sequence. The 3.53/3.54 runs passed no --alfonso-top/middle/lower, so these
+# are AlfonsoStrategyOptions' defaults - module 8's scalping sequence. The zone an order rests on
+# belongs to one of these, which is NOT the interval the chart is drawn at: that is chosen per trade
+# to fit the window. Pass --sequence when a run used a different one.
+DEFAULT_SEQUENCE = "4h,1h,15m"
+
 
 def repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,6 +78,18 @@ def read_trades(root, arm, tag):
         return None
     with open(path) as handle:
         return {t["setupId"]: t for t in json.load(handle)["strategies"][0]["trades"]}
+
+
+def entry_role(reason):
+    """Which timeframe's zone the order was planned at, read from the scenario's action sentence."""
+    action = reason.split(".")[1] if reason.count(".") >= 1 else reason
+    if "at the middle timeframe" in action:
+        return "middle"
+    if "at lower" in action:
+        return "lower"
+    if "at top" in action:
+        return "top"
+    return None
 
 
 def parse(trade, tag, arm, label, digits):
@@ -112,6 +130,7 @@ def parse(trade, tag, arm, label, digits):
         "strength": strength, "ratio": ratio, "accs": accs,
         "scenario": reason.split(".")[0].strip() if reason else "",
         "nested": "nested at" in reason,
+        "entryRole": entry_role(reason),
     }
 
 
@@ -130,8 +149,63 @@ def load_candles(stem):
     return bars
 
 
+def bollinger(closes, n=20, mult=2.0):
+    """20-period SMA with +/- 2 population standard deviations."""
+    out = [None] * len(closes)
+    for i in range(n - 1, len(closes)):
+        window = closes[i - n + 1:i + 1]
+        mean = sum(window) / n
+        var = sum((v - mean) ** 2 for v in window) / n
+        sd = var ** 0.5
+        out[i] = (mean + mult * sd, mean, mean - mult * sd)
+    return out
+
+
+def rsi(closes, n=14):
+    """Wilder's RSI. Seeded on the first n changes, then smoothed."""
+    out = [None] * len(closes)
+    if len(closes) <= n:
+        return out
+    gains = losses = 0.0
+    for i in range(1, n + 1):
+        change = closes[i] - closes[i - 1]
+        gains += max(change, 0.0)
+        losses += max(-change, 0.0)
+    avg_gain, avg_loss = gains / n, losses / n
+    out[n] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    for i in range(n + 1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        avg_gain = (avg_gain * (n - 1) + max(change, 0.0)) / n
+        avg_loss = (avg_loss * (n - 1) + max(-change, 0.0)) / n
+        out[i] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    return out
+
+
+def cci(highs, lows, closes, n=20, constant=0.015):
+    """Commodity Channel Index over the typical price, with mean absolute deviation."""
+    typical = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))]
+    out = [None] * len(closes)
+    for i in range(n - 1, len(typical)):
+        window = typical[i - n + 1:i + 1]
+        mean = sum(window) / n
+        dev = sum(abs(v - mean) for v in window) / n
+        out[i] = 0.0 if dev == 0 else (typical[i] - mean) / (constant * dev)
+    return out
+
+
+# Longest indicator lookback plus room for Wilder's smoothing to settle. Bars this far before the
+# displayed window are fetched, used for the maths, then dropped - so every candle drawn has values
+# rather than a blank leading run.
+WARMUP = 60
+
+
 def slice_window(bars, start, end, digits, target_bars=260):
-    """Candle window around a trade, aggregated so the chart lands near `target_bars`."""
+    """Candle window around a trade, aggregated so the chart lands near `target_bars`.
+
+    Indicators (Bollinger 20/2, RSI 14, CCI 20) are computed on the aggregated series, i.e. on the
+    interval the chart actually shows. They are NOT used by the agent - module 1 prohibits exactly
+    these - and are carried only as a separate analysis layer the page can toggle.
+    """
     span = max(end - start, 900)
     lo, hi = start - span * 0.6, end + span * 0.6
     step = 14400
@@ -142,7 +216,7 @@ def slice_window(bars, start, end, digits, target_bars=260):
 
     buckets = {}
     for t, o, h, l, c in bars:
-        if t < lo or t > hi:
+        if t < lo - WARMUP * step or t > hi:
             continue
         key = int(t // step) * step
         cur = buckets.get(key)
@@ -156,11 +230,31 @@ def slice_window(bars, start, end, digits, target_bars=260):
     keys = sorted(buckets)
     if not keys:
         return None
-    return {
-        "step": step,
-        "t0": keys[0],
-        "bars": [[int((k - keys[0]) // step)] + [round(v, digits) for v in buckets[k]] for k in keys],
-    }
+
+    highs = [buckets[k][1] for k in keys]
+    lows = [buckets[k][2] for k in keys]
+    closes = [buckets[k][3] for k in keys]
+    bands, strength, channel = bollinger(closes), rsi(closes), cci(highs, lows, closes)
+
+    shown = [i for i, k in enumerate(keys) if k >= lo]
+    if not shown:
+        shown = list(range(len(keys)))
+    base = keys[shown[0]]
+
+    rows, ind = [], []
+    for i in shown:
+        k = keys[i]
+        rows.append([int((k - base) // step)] + [round(v, digits) for v in buckets[k]])
+        band = bands[i]
+        ind.append([
+            round(band[0], digits) if band else None,
+            round(band[1], digits) if band else None,
+            round(band[2], digits) if band else None,
+            round(strength[i], 1) if strength[i] is not None else None,
+            round(channel[i], 1) if channel[i] is not None else None,
+        ])
+
+    return {"step": step, "t0": base, "bars": rows, "ind": ind}
 
 
 def build(root, arms, quiet=False):
@@ -192,6 +286,10 @@ def main():
     parser.add_argument("--arms", default="a,b", help="two comma-separated output-directory prefixes")
     parser.add_argument("--out", default="alfonso-trades.html", help="page to write")
     parser.add_argument("--json", help="also write the raw payload here")
+    parser.add_argument("--sequence", default=DEFAULT_SEQUENCE,
+                        help="top,middle,lower intervals the run used (default: the agent's own)")
+    parser.add_argument("--execution", default="1m",
+                        help="the run's --execution-interval, i.e. where fills actually resolve")
     args = parser.parse_args()
 
     arms = tuple(args.arms.split(","))
@@ -201,6 +299,10 @@ def main():
     payload = build(args.root, arms)
     if not payload["trades"]:
         raise SystemExit(f"no runs found under {args.root}")
+
+    top, middle, lower = (v.strip() for v in args.sequence.split(","))
+    payload["sequence"] = {"top": top, "middle": middle, "lower": lower,
+                           "execution": args.execution}
 
     template = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "alfonso_trade_viz.template.html")

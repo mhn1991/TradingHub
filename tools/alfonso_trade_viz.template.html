@@ -13,6 +13,7 @@
   --win:#0ca30c; --loss:#d03b3b; --wintext:#006300;
   --zone:#4a3aa7; --zone-fill:rgba(74,58,167,.13);
   --candle:#52514e;
+  --ind:#6b6a66; --ind-fill:rgba(107,106,102,.10);
   --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
 }
@@ -25,6 +26,7 @@
   --win:#0ca30c; --loss:#d03b3b; --wintext:#0ca30c;
   --zone:#9085e9; --zone-fill:rgba(144,133,233,.16);
   --candle:#c3c2b7;
+  --ind:#8d8c86; --ind-fill:rgba(141,140,134,.12);
 }}
 :root[data-theme="dark"]{
   color-scheme: dark;
@@ -35,6 +37,7 @@
   --win:#0ca30c; --loss:#d03b3b; --wintext:#0ca30c;
   --zone:#9085e9; --zone-fill:rgba(144,133,233,.16);
   --candle:#c3c2b7;
+  --ind:#8d8c86; --ind-fill:rgba(141,140,134,.12);
 }
 
 *{box-sizing:border-box}
@@ -145,6 +148,7 @@ table.data td{padding:6px 9px 6px 0;border-bottom:1px solid var(--grid);white-sp
   <p>Every trade both arms of the swing-anchor A/B produced, with the imbalance each one leaned on.
      Built to check the trades against the course rules, not to re-litigate whether the method has an
      edge &mdash; §3.43 already settled that.</p>
+  <div class="armkey" id="seqkey"></div>
   <div class="armkey">
     <span><i class="dot" style="background:var(--arm-a)"></i> <b>Arm A</b> &mdash; swing anchored at the base end (the old reading)</span>
     <span><i class="dot" style="background:var(--arm-b)"></i> <b>Arm B</b> &mdash; anchored at the extreme (shipped default)</span>
@@ -235,6 +239,15 @@ const px = (p, d) => p.toFixed(d);
 const dt = s => new Date(s * 1000).toISOString().slice(0, 16).replace('T', ' ');
 const SVG = 'http://www.w3.org/2000/svg';
 const el = (n, a = {}) => { const e = document.createElementNS(SVG, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+const SEQ = DATA.sequence || { top: '4h', middle: '1h', lower: '15m', execution: '1m' };
+// The chart's candle interval is a display choice - it is picked per trade to fit the window. The
+// timeframe that actually matters is the one the zone belongs to, which is fixed by the sequence.
+const zoneTf = t => SEQ[t.entryRole] || SEQ.lower;
+document.getElementById('seqkey').innerHTML =
+  `<span>Sequence <b>${SEQ.top}</b> direction &middot; <b>${SEQ.middle}</b> intermediate &middot; ` +
+  `<b>${SEQ.lower}</b> execution &mdash; orders rest on ${SEQ.lower} zones, and fills resolve at ` +
+  `${SEQ.execution}. Chart intervals below are a display choice, not the trade's timeframe.</span>`;
 
 const inArm = (t, arm) => t.arm === 'both' || t.arm === arm;
 const armTrades = arm => T.filter(t => inArm(t, arm));
@@ -452,7 +465,8 @@ function renderInspect() {
       <div><span class="eyebrow">${t.label} &middot; ${t.side}</span>
         <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">${fmtR(t.r)}
           <span class="pill" style="color:${win ? 'var(--wintext)' : 'var(--loss)'};margin-left:8px">${win ? '▲ Target reached' : '▼ Stopped out'}</span></div></div>
-      <div class="num" style="font-size:12px;color:var(--muted);text-align:right">${dt(t.open)} &rarr; ${dt(t.close)}<br>${t.dur < 60 ? Math.round(t.dur) + ' min' : (t.dur / 60).toFixed(1) + ' h'} &middot; ${w ? stepName[w.step] : '—'} candles</div>
+      <div class="num" style="font-size:12px;color:var(--muted);text-align:right">${dt(t.open)} &rarr; ${dt(t.close)}<br>${t.dur < 60 ? Math.round(t.dur) + ' min' : (t.dur / 60).toFixed(1) + ' h'}
+        &middot; <b style="color:var(--ink2)">${zoneTf(t)} zone</b> &middot; chart ${w ? stepName[w.step] : '—'}</div>
     </div>
     <div class="chartbox"><svg id="tchart" role="img" aria-label="Price around the trade"></svg></div>
     <div class="legend">
@@ -460,9 +474,17 @@ function renderInspect() {
       <span><i class="dot" style="background:var(--ink2);height:2px;border-radius:0"></i> Entry</span>
       <span><i class="dot" style="background:var(--loss);height:2px;border-radius:0"></i> Stop</span>
       <span><i class="dot" style="background:var(--win);height:2px;border-radius:0"></i> Target 3:1</span>
+      <span><i class="dot" style="background:var(--ind-fill);border:1px solid var(--ind)"></i> Bollinger 20 / 2&sigma;</span>
+      <button class="f" id="indtoggle" aria-pressed="true"
+        style="border:1px solid var(--hair);border-radius:7px;margin-left:auto">Indicators</button>
     </div>
+    <p class="note" style="margin-top:-4px">Bollinger, RSI and CCI are computed here for reference only.
+      The agent never reads them &mdash; module 1 prohibits these three by name &mdash; so nothing below
+      the price pane took part in any of these decisions.</p>
     <dl class="kv">
       <dt>Scenario</dt><dd>${t.scenario}${t.nested ? ' &middot; nested entry' : ''}</dd>
+      <dt>Timeframes</dt><dd>zone drawn on <b>${zoneTf(t)}</b> (${t.entryRole || '?'} timeframe)
+        &middot; chart aggregated to ${w ? stepName[w.step] : '—'} &middot; fills resolved at ${SEQ.execution}</dd>
       <dt>Zone</dt><dd class="num">proximal ${px(t.proximal, t.digits)} &middot; distal ${px(t.distal, t.digits)}
         &middot; width ${px(Math.abs(t.proximal - t.distal), t.digits)}</dd>
       <dt>Grade</dt><dd>${t.strength || '—'} departure &middot; impulse ${t.ratio ? t.ratio.toFixed(2) + ':1' : '—'}</dd>
@@ -473,32 +495,71 @@ function renderInspect() {
     </dl>`;
   drawTrade(t);
 }
+let showInd = true;
 function drawTrade(t) {
-  const svg = document.getElementById('tchart');
+  let svg = document.getElementById('tchart');
   const w = C[t.id];
-  const W = 760, H = 330, padL = 12, padR = 112, padT = 14, padB = 26;
+  // Price pane, then RSI and CCI stacked beneath it on a shared x-axis.
+  const W = 760, padL = 12, padR = 112, padT = 14;
+  const priceH = 250, paneH = 62, paneGap = 10, padB = 22;
+  const H = showInd ? padT + priceH + (paneH + paneGap) * 2 + padB : padT + priceH + padB;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', '100%'); svg.setAttribute('height', H);
   svg.textContent = '';
   if (!w) return;
-  const bars = w.bars, n = bars.length;
-  const prices = bars.flatMap(b => [b[2], b[3]])
-    .concat([t.entry, t.stop, t.target, t.proximal, t.distal]);
+
+  const bars = w.bars, ind = w.ind || [], n = bars.length;
+  // The y-domain deliberately ignores the Bollinger envelope. On a short window a 20-period band is
+  // far wider than the trade, and including it squashed the candles and the zone into a sliver -
+  // losing the thing the chart exists to show. The envelope is clipped to the pane instead.
+  const prices = bars.flatMap(b => [b[2], b[3]]).concat([t.entry, t.stop, t.target, t.proximal, t.distal]);
   let lo = Math.min(...prices), hi = Math.max(...prices);
   const pad = (hi - lo) * .07 || 1; lo -= pad; hi += pad;
-  const y = v => padT + (hi - v) / (hi - lo) * (H - padT - padB);
+  const y = v => padT + (hi - v) / (hi - lo) * priceH;
   const idxMax = bars[n - 1][0];
   const x = i => padL + (i / Math.max(idxMax, 1)) * (W - padL - padR);
   const tx2i = ts => (ts - w.t0) / w.step;
   const bw = Math.max(1.6, Math.min(7, (W - padL - padR) / Math.max(idxMax, 1) * .68));
+  const line = (pts, col, width, dash) => {
+    const runs = []; let cur = [];
+    pts.forEach(p => { if (p === null) { if (cur.length > 1) runs.push(cur); cur = []; } else cur.push(p); });
+    if (cur.length > 1) runs.push(cur);
+    runs.forEach(run => svg.appendChild(el('path', {
+      d: 'M ' + run.map(p => `${p[0]} ${p[1]}`).join(' L '), fill: 'none', stroke: col,
+      'stroke-width': width, 'stroke-dasharray': dash || '', 'stroke-linejoin': 'round' })));
+  };
 
-  // zone band first, so candles read on top of it
+  // imbalance band first, so candles read on top of it
   const zTop = Math.max(t.proximal, t.distal), zBot = Math.min(t.proximal, t.distal);
   svg.appendChild(el('rect', { x: padL, y: y(zTop), width: W - padL - padR,
     height: Math.max(1.5, y(zBot) - y(zTop)), fill: css('--zone-fill') }));
   [zTop, zBot].forEach(v => svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v),
     stroke: css('--zone'), 'stroke-width': 1, 'stroke-opacity': .75 })));
 
-  // candles, hollow for bullish and filled for bearish - module 1's own white/black vocabulary,
+  // Bollinger envelope, under the candles and in a recessive ink so the rule layer stays dominant
+  if (showInd && ind.length) {
+    const col = css('--ind');
+    const clipId = 'pricepane';
+    const defs = el('defs');
+    const clip = el('clipPath', { id: clipId });
+    clip.appendChild(el('rect', { x: padL, y: padT, width: W - padL - padR, height: priceH }));
+    defs.appendChild(clip); svg.appendChild(defs);
+    const up = [], mid = [], dn = [];
+    bars.forEach((b, i) => {
+      const v = ind[i];
+      const ok = v && v[0] != null;
+      up.push(ok ? [x(b[0]), y(v[0])] : null);
+      mid.push(ok ? [x(b[0]), y(v[1])] : null);
+      dn.push(ok ? [x(b[0]), y(v[2])] : null);
+    });
+    // Lines only, no fill: the pane already carries the imbalance wash, and a second large fill
+    // competed with it on every window where the band is wide relative to the trade.
+    const band = el('g', { 'clip-path': `url(#${clipId})` });
+    const host = svg; svg = band;
+    line(up, col, 1); line(dn, col, 1); line(mid, col, 1, '4 3');
+    svg = host; svg.appendChild(band);
+  }
+
+  // candles: hollow for bullish, filled for bearish - module 1's own white/black vocabulary,
   // which keeps green and red reserved for the trade's outcome
   const ink = css('--candle');
   bars.forEach(b => {
@@ -509,17 +570,15 @@ function drawTrade(t) {
       fill: up ? css('--surface') : ink, stroke: ink, 'stroke-width': 1, 'stroke-opacity': .85 }));
   });
 
-  // levels
-  const lines = [[t.target, css('--win'), 'Target'], [t.stop, css('--loss'), 'Stop'], [t.entry, css('--ink2'), 'Entry']];
-  lines.forEach(([v, col, label]) => {
-    svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: col,
-      'stroke-width': 1.4, 'stroke-dasharray': label === 'Entry' ? '' : '5 4' }));
-    const tt = el('text', { x: W - padR + 7, y: y(v) + 3.5, class: 'ax' });
-    tt.style.fill = col; tt.style.fontWeight = '600';
-    tt.textContent = `${label} ${px(v, t.digits)}`; svg.appendChild(tt);
-  });
+  [[t.target, css('--win'), 'Target'], [t.stop, css('--loss'), 'Stop'], [t.entry, css('--ink2'), 'Entry']]
+    .forEach(([v, col, label]) => {
+      svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: col,
+        'stroke-width': 1.4, 'stroke-dasharray': label === 'Entry' ? '' : '5 4' }));
+      const tt = el('text', { x: W - padR + 7, y: y(v) + 3.5, class: 'ax' });
+      tt.style.fill = col; tt.style.fontWeight = '600';
+      tt.textContent = `${label} ${px(v, t.digits)}`; svg.appendChild(tt);
+    });
 
-  // fill and exit
   const mark = (ts, price, col, glyph) => {
     if (ts == null) return;
     const cx = x(tx2i(ts));
@@ -532,18 +591,70 @@ function drawTrade(t) {
   mark(t.close, t.exit, t.exitReason === 'TakeProfit' ? css('--win') : css('--loss'), 'out');
   if (t.mfeAt) mark(t.mfeAt, t.mfeR != null ? t.entry + (t.side === 'Buy' ? 1 : -1) * Math.abs(t.entry - t.stop) * t.mfeR : t.entry, css('--muted'), 'best');
 
-  // hover band
+  // --- oscillator panes ---
+  if (showInd && ind.length) {
+    const col = css('--ind');
+    const pane = (top, title, values, domain, refs, fmt) => {
+      const vals = values.filter(v => v != null);
+      if (!vals.length) return;
+      const [dlo, dhi] = domain || [Math.min(...vals) * 1.1, Math.max(...vals) * 1.1];
+      const py = v => top + (dhi - v) / (dhi - dlo) * paneH;
+      svg.appendChild(el('rect', { x: padL, y: top, width: W - padL - padR, height: paneH,
+        fill: 'none', stroke: css('--grid'), 'stroke-width': 1 }));
+      // Reference lines are always drawn. Labels are walked strictly top-to-bottom - the refs
+      // themselves arrive in value order, which is not screen order - and one is dropped only if it
+      // would sit on top of the last one placed. `label:false` marks a line that never gets one
+      // (CCI's zero, which on a wide scale sits between +/-100 with no room).
+      let lastLabelY = -Infinity;
+      refs.slice()
+        .sort((p, q) => q.v - p.v)
+        .forEach(ref => {
+          if (ref.v < dlo || ref.v > dhi) return;
+          const ry = py(ref.v);
+          svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: ry, y2: ry,
+            stroke: css('--grid'), 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+          if (ref.label === false || ry - lastLabelY < 9) return;
+          lastLabelY = ry;
+          const rt = el('text', { x: W - padR + 7, y: ry + 3.5, class: 'ax' });
+          rt.textContent = fmt(ref.v); svg.appendChild(rt);
+        });
+      line(values.map((v, i) => v == null ? null : [x(bars[i][0]), py(v)]), col, 1.4);
+      const lt = el('text', { x: padL + 6, y: top + 12, class: 'ax' });
+      lt.style.fill = css('--ink2'); lt.style.fontWeight = '600'; lt.textContent = title;
+      svg.appendChild(lt);
+    };
+    const rsiTop = padT + priceH + paneGap;
+    pane(rsiTop, 'RSI 14', ind.map(v => v[3]), [0, 100],
+      [{ v: 70 }, { v: 30 }], v => String(v));
+    const cciVals = ind.map(v => v[4]);
+    const bound = Math.max(120, ...cciVals.filter(v => v != null).map(Math.abs)) * 1.05;
+    pane(rsiTop + paneH + paneGap, 'CCI 20', cciVals, [-bound, bound],
+      [{ v: 100 }, { v: 0, label: false }, { v: -100 }], v => (v > 0 ? '+' : '') + v);
+  }
+
   const hit = el('rect', { x: padL, y: padT, width: W - padL - padR, height: H - padT - padB, fill: 'transparent' });
   hit.style.cursor = 'crosshair';
   hit.addEventListener('mousemove', ev => {
     const r = svg.getBoundingClientRect();
     const rel = (ev.clientX - r.left) / r.width * W;
     const idx = Math.round((rel - padL) / (W - padL - padR) * Math.max(idxMax, 1));
-    const b = bars.reduce((best, cur) => Math.abs(cur[0] - idx) < Math.abs(best[0] - idx) ? cur : best, bars[0]);
-    showTip(`${dt(w.t0 + b[0] * w.step)}<br>O ${px(b[1], t.digits)} H ${px(b[2], t.digits)}<br>L ${px(b[3], t.digits)} C ${px(b[4], t.digits)}`, ev);
+    let best = 0;
+    bars.forEach((cur, i) => { if (Math.abs(cur[0] - idx) < Math.abs(bars[best][0] - idx)) best = i; });
+    const b = bars[best], v = ind[best];
+    let html = `${dt(w.t0 + b[0] * w.step)}<br>O ${px(b[1], t.digits)} H ${px(b[2], t.digits)}<br>L ${px(b[3], t.digits)} C ${px(b[4], t.digits)}`;
+    if (v && v[0] != null) {
+      html += `<br><span style="color:var(--muted)">BB ${px(v[2], t.digits)} / ${px(v[1], t.digits)} / ${px(v[0], t.digits)}` +
+              `<br>RSI ${v[3].toFixed(1)} &middot; CCI ${v[4].toFixed(1)}</span>`;
+    }
+    showTip(html, ev);
   });
   hit.addEventListener('mouseleave', hideTip);
   svg.appendChild(hit);
+
+  const toggle = document.getElementById('indtoggle');
+  if (toggle) toggle.addEventListener('click', () => {
+    showInd = !showInd; toggle.setAttribute('aria-pressed', String(showInd)); drawTrade(t);
+  });
 }
 
 /* ---------- table ---------- */
@@ -551,13 +662,14 @@ function renderTable() {
   const rows = T.slice().sort((a, b) => a.open - b.open);
   document.getElementById('datatable').innerHTML =
     `<tr><th>Instrument</th><th>Opened</th><th>Side</th><th>Arm</th><th>Entry</th><th>Stop</th><th>Exit</th>
-     <th>Outcome</th><th>R</th><th>Impulse</th><th>Created by</th></tr>` +
+     <th>Zone TF</th><th>Outcome</th><th>R</th><th>Impulse</th><th>Created by</th></tr>` +
     rows.map(t => {
       const win = t.exitReason === 'TakeProfit';
       return `<tr><td style="font-weight:600">${t.label}</td><td class="num">${dt(t.open)}</td>
       <td>${t.side}</td><td>${t.arm === 'both' ? 'both' : t.arm.toUpperCase() + ' only'}</td>
       <td class="num">${px(t.entry, t.digits)}</td><td class="num">${px(t.stop, t.digits)}</td>
       <td class="num">${px(t.exit, t.digits)}</td>
+      <td class="num">${zoneTf(t)}</td>
       <td style="color:${win ? 'var(--wintext)' : 'var(--loss)'}">${win ? 'Target' : 'Stopped'}</td>
       <td class="num" style="color:${win ? 'var(--wintext)' : 'var(--loss)'}">${fmtR(t.r)}</td>
       <td class="num">${t.ratio ? t.ratio.toFixed(2) : '—'}</td>
