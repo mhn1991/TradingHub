@@ -158,6 +158,39 @@ def load_candles(stem):
     return bars
 
 
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def interval_seconds(text):
+    match = re.fullmatch(r"(\d+)([smhd])", text.strip())
+    if not match:
+        raise SystemExit(f"cannot read interval {text!r}; use forms like 15m, 1h, 4h")
+    return int(match.group(1)) * UNITS[match.group(2)]
+
+
+def fixed_window(bars, step, first, last, digits):
+    """Candles on a FIXED interval spanning [first, last] - used for the context panes, where the
+    interval is the agent's own (top / lower) rather than one chosen to fit the trade."""
+    buckets = {}
+    for t, o, h, l, c in bars:
+        if t < first or t > last:
+            continue
+        key = int(t // step) * step
+        cur = buckets.get(key)
+        if cur is None:
+            buckets[key] = [o, h, l, c]
+        else:
+            cur[1] = max(cur[1], h)
+            cur[2] = min(cur[2], l)
+            cur[3] = c
+    keys = sorted(buckets)
+    if not keys:
+        return None
+    return {"step": step, "t0": keys[0],
+            "bars": [[int((k - keys[0]) // step)] + [round(v, digits) for v in buckets[k]]
+                     for k in keys]}
+
+
 def bollinger(closes, n=20, mult=2.0):
     """20-period SMA with +/- 2 population standard deviations."""
     out = [None] * len(closes)
@@ -266,8 +299,12 @@ def slice_window(bars, start, end, digits, target_bars=260):
     return {"step": step, "t0": base, "bars": rows, "ind": ind}
 
 
-def build(root, arms, quiet=False):
-    trades, candles = [], {}
+def build(root, arms, sequence, quiet=False):
+    """`sequence` supplies the top and lower intervals the run used, so the context panes are drawn
+    on the timeframes the agent actually read rather than on a display-derived one."""
+    top_step = interval_seconds(sequence["top"])
+    zone_step = interval_seconds(sequence["lower"])
+    trades, candles, context, zonepane = [], {}, {}, {}
     for tag, (label, stem, digits) in INSTRUMENTS.items():
         a, b = read_trades(root, arms[0], tag), read_trades(root, arms[1], tag)
         if a is None and b is None:
@@ -281,10 +318,24 @@ def build(root, arms, quiet=False):
             window = slice_window(bars, record["open"], record["close"], digits)
             if window:
                 candles[record["id"]] = window
+
+            # Top timeframe: enough history for a trend to be visible, since that is the claim the
+            # scenario text makes and the execution pane is far too short to show it.
+            ctx = fixed_window(bars, top_step, record["open"] - 56 * top_step,
+                               record["close"] + 8 * top_step, digits)
+            if ctx:
+                context[record["id"]] = ctx
+
+            # The zone's own timeframe - where the imbalance was actually drawn.
+            zp = fixed_window(bars, zone_step, record["open"] - 80 * zone_step,
+                              record["close"] + 16 * zone_step, digits)
+            if zp:
+                zonepane[record["id"]] = zp
+
             trades.append(record)
         if not quiet:
             print(f"{tag}: {len(set(a) | set(b))} distinct trades")
-    return {"trades": trades, "candles": candles}
+    return {"trades": trades, "candles": candles, "context": context, "zonepane": zonepane}
 
 
 def main():
@@ -305,13 +356,13 @@ def main():
     if len(arms) != 2:
         parser.error("--arms takes exactly two comma-separated prefixes")
 
-    payload = build(args.root, arms)
+    top, middle, lower = (v.strip() for v in args.sequence.split(","))
+    sequence = {"top": top, "middle": middle, "lower": lower, "execution": args.execution}
+    payload = build(args.root, arms, sequence)
     if not payload["trades"]:
         raise SystemExit(f"no runs found under {args.root}")
 
-    top, middle, lower = (v.strip() for v in args.sequence.split(","))
-    payload["sequence"] = {"top": top, "middle": middle, "lower": lower,
-                           "execution": args.execution}
+    payload["sequence"] = sequence
 
     template = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "alfonso_trade_viz.template.html")
@@ -329,8 +380,9 @@ def main():
             handle.write(blob)
 
     size = os.path.getsize(args.out) / 1e6
-    print(f"\n{len(payload['trades'])} trades, {len(payload['candles'])} charts "
-          f"-> {args.out} ({size:.2f} MB)")
+    print(f"\n{len(payload['trades'])} trades, {len(payload['candles'])} execution charts, "
+          f"{len(payload['context'])} {sequence['top']} context, {len(payload['zonepane'])} "
+          f"{sequence['lower']} zone panes -> {args.out} ({size:.2f} MB)")
 
 
 if __name__ == "__main__":
