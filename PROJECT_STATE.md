@@ -5628,6 +5628,16 @@ requirement. **The change rests on correctness, not on this number.** The direct
 favourable where 3.53's was not; at this sample size that difference is noise and should not be read
 as one fix being better than the other.
 
+**Run-output convention worth knowing before reading any trade record.** `openedAt`, `closedAt` and
+the excursion timestamps are bar **close** times - the simulator stamps an event with the moment the
+bar became available (`openTime + interval`, as the replay chunks show). A fill inside the 14:36 bar
+is therefore recorded as 14:37. Checked over all 135 arm-B trades: every entry price sits inside the
+bar at `openedAt` **or** the bar one execution-interval earlier, and **none outside both** - so no
+fill is at an impossible price, but reading a stamp as an open time puts the event one bar late, on a
+bar whose range need not contain the fill. This produced a visible defect in the trade page (markers
+one candle right of the event) before it was found; `tools/alfonso_trade_viz.py` now shifts by the
+execution interval.
+
 **Sharper than the interval: the arms share 130 setups with identical R.** Matching trades by setup
 id, 130 of them appear in both arms and **not one has a different R-multiple**; the entire
 -0.0208R -> +0.0354R swing comes from **8 marginal trades** (4 EUR/USD and 1 XAU/USD present only in
@@ -6788,6 +6798,16 @@ into `docs/`; Docker packaging.
   A/B that `CLAUDE.md` requires for zone-creation changes. Also found that neither the drop/rally
   base nor the swing-vs-CP classification has any unit test. New tool:
   `tools/alfonso_droprally_distal.py`.
+- **2026-09-05 (visualisation, later)**: Added Bollinger/RSI/CCI to the trade page as a clearly
+  separate reference layer (module 1 prohibits all three by name; the agent never reads them), and
+  fixed three defects the review surfaced. (1) Trade timestamps are bar **close** times, so markers
+  were being drawn one candle late - verified across all 135 trades that every entry price lies inside
+  the bar at `openedAt` or one execution-interval earlier and none outside both, then corrected the
+  offset; noted in §3.54 because it will mislead any future reader of these records. (2) The page was
+  showing the JSON's `rMultiple`, which §3.44 records is not profit-per-risk; it now computes true R
+  and reproduces §3.54's published table exactly (A -0.1420, B -0.1066). (3) The chart now names the
+  **zone's** timeframe (15m for 133 of 138 trades, 1h for 5) separately from the chart's own
+  aggregation interval, which is a display choice.
 - **2026-09-05 (visualisation)**: Built `tools/alfonso_trade_viz.py` + `alfonso_trade_viz.template.html`,
   which turn a two-arm A/B into a self-contained inspection page: population stats, the differing
   trades, R by instrument, cumulative R, and a per-trade candle chart carrying the imbalance band,

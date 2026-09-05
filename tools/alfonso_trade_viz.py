@@ -80,6 +80,12 @@ def read_trades(root, arm, tag):
         return {t["setupId"]: t for t in json.load(handle)["strategies"][0]["trades"]}
 
 
+def true_r(trade):
+    """netProfitLoss / (|entry - stop| * quantity) - profit per unit of risk actually taken."""
+    risk = abs(trade["entryPrice"] - trade["stopLossPrice"]) * trade["quantity"]
+    return trade["netProfitLoss"] / risk if risk else 0.0
+
+
 def entry_role(reason):
     """Which timeframe's zone the order was planned at, read from the scenario's action sentence."""
     action = reason.split(".")[1] if reason.count(".") >= 1 else reason
@@ -122,7 +128,10 @@ def parse(trade, tag, arm, label, digits):
         "target": trade["takeProfitPrice"], "exit": trade["exitPrice"],
         "proximal": entry, "distal": distal,
         "exitReason": trade["exitReason"],
-        "r": trade["rMultiple"], "net": trade["netProfitLoss"],
+        # TRUE R, not the JSON's rMultiple. 3.44: that field divides by risk PLUS an assumed
+        # round-trip cost, so it is not profit-per-risk and understates the magnitude. This matches
+        # tools/alfonso_ab_report.py, so the page's tiles reproduce 3.54's published table.
+        "r": true_r(trade), "net": trade["netProfitLoss"],
         "mfeR": trade.get("maximumFavourableExcursionR"),
         "mfeAt": ts(trade["maximumFavourableExcursionAt"]) if trade.get("maximumFavourableExcursionAt") else None,
         "maeR": trade.get("maximumAdverseExcursionR"),

@@ -223,7 +223,9 @@ table.data td{padding:6px 9px 6px 0;border-bottom:1px solid var(--grid);white-sp
 <p class="note">Zone lines are recovered from each trade&rsquo;s entry and padded stop rather than from
 the logged setup text, which rounds to two decimals and is unusable on FX. Candles are aggregated from
 the 1&#8209;minute cache to roughly 240 bars per window, so the interval differs per trade and is stated
-on each chart.</p>
+on each chart. Trade timestamps in the run output are bar <em>close</em> times, so the in/out/best
+markers are drawn on the bar that ends at the stamp &mdash; placing them by the stamp itself puts them
+one candle late, on a bar whose range need not contain the fill price.</p>
 
 </div>
 <div class="tip" id="tip" role="status"></div>
@@ -244,6 +246,16 @@ const SEQ = DATA.sequence || { top: '4h', middle: '1h', lower: '15m', execution:
 // The chart's candle interval is a display choice - it is picked per trade to fit the window. The
 // timeframe that actually matters is the one the zone belongs to, which is fixed by the sequence.
 const zoneTf = t => SEQ[t.entryRole] || SEQ.lower;
+// Trade timestamps are bar CLOSE times - the simulator stamps an event with the moment the bar
+// became available, so a fill inside the 14:36 bar is recorded as 14:37. Verified across all 135
+// trades: every entry price sits inside the bar at `openedAt` or the one an execution-interval
+// earlier, and none outside both. Markers are therefore placed on the bar that ENDS at the stamp,
+// otherwise they land one candle to the right - on a candle whose range may not contain the price.
+const EXEC_SECONDS = (() => {
+  const m = /^(\d+)([smhd])$/.exec(SEQ.execution || '1m');
+  if (!m) return 60;
+  return +m[1] * { s: 1, m: 60, h: 3600, d: 86400 }[m[2]];
+})();
 document.getElementById('seqkey').innerHTML =
   `<span>Sequence <b>${SEQ.top}</b> direction &middot; <b>${SEQ.middle}</b> intermediate &middot; ` +
   `<b>${SEQ.lower}</b> execution &mdash; orders rest on ${SEQ.lower} zones, and fills resolve at ` +
@@ -517,7 +529,8 @@ function drawTrade(t) {
   const y = v => padT + (hi - v) / (hi - lo) * priceH;
   const idxMax = bars[n - 1][0];
   const x = i => padL + (i / Math.max(idxMax, 1)) * (W - padL - padR);
-  const tx2i = ts => (ts - w.t0) / w.step;
+  // Shift back to the bar the event actually occurred in - see EXEC_SECONDS above.
+  const tx2i = ts => (ts - EXEC_SECONDS - w.t0) / w.step;
   const bw = Math.max(1.6, Math.min(7, (W - padL - padR) / Math.max(idxMax, 1) * .68));
   const line = (pts, col, width, dash) => {
     const runs = []; let cur = [];
