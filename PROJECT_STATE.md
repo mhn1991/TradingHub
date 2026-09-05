@@ -6231,6 +6231,108 @@ first.
 Both are now filterable in the trade page (`Target printed after the stop`), and each stopped trade
 shows how far beyond its own stop it exited.
 
+### 3.64 The trend state latches: module 5's structural condition is checked once and never again (2026-09-05)
+
+Found by reading the trade page: a GBP/JPY short labelled "All three timeframes Downtrend" whose 15m
+pane was visibly rising. It was rising - **12 of the last 15 15m bars printed higher highs AND higher
+lows**, 206.78 -> 207.53 - and the 4h was choppy with a strongly bullish final bar. The agent sold
+into it.
+
+#### The mechanism
+
+`AlfonsoTrendDetector.Resolve` gives a running trend exactly two exits:
+
+1. the **opposite** case fully made (eliminations plus a trendline), or
+2. `_undermined` - its own trendline broken by a full candle, or an opposing zone eliminated
+
+Neither fires on a rally that breaks no line and takes out no zone, so the label survives however far
+price runs the other way. That much is faithful: module 5's OOA triggers are a trendline break and an
+imbalance elimination, not price direction.
+
+**But module 5 also states a structural condition, and states it as a standing one:** an uptrend is
+demand created and respected with supply eliminated, *"in the context of new bullish impulses where
+each successive peak and trough is higher than the ones found earlier"*. The code has that test -
+`StructureAgrees` - and consults it **only when establishing a trend**. While one runs it is never
+re-evaluated. The book's continuous condition is implemented as an entry test.
+
+Note this is *not* fixed by turning `RequireStructuralAgreement` on (3.50's departure). That switch
+gates establishment only; an already-latched trend is not released by it.
+
+#### How often the label contradicts its own timeframe
+
+Over the 94 trades whose scenario claims all three timeframes trending, scoring the last 12 bars of
+15m structure (fraction of bars making a higher high and a higher low):
+
+| | n | |
+|---|---|---|
+| 15m structure **agrees** with the claim | 13 | 14% |
+| 15m structure **contradicts** it | 14 | 15% |
+| mixed, no clear structure | 67 | 71% |
+
+Agreement and contradiction are equal, so the lower-timeframe trend label is **uncorrelated with that
+timeframe's own recent structure**. This is 3.30's "the trend state carries no usable information"
+reached by a third independent route - after 3.30's direct edge measurement and 3.63a's slope check.
+
+Worth noting the trade that exposed it is weak twice over: it also qualified on `SwingBroken` alone,
+the creation route absent from all eleven PDFs (3.55).
+
+#### The change, and what it is measured against
+
+`AlfonsoTrendOptions.MaintainStructuralAgreement` (**default off**, `--alfonso-maintain-structure`)
+re-checks the structural condition while a trend runs and sends it out of alignment when its own peaks
+and troughs have turned. `AlfonsoTrendDetectorTests.RisingStructureEndsADowntrendWhenTheConditionIsMaintained`
+and `...LeavesTheDowntrendStandingByDefault` pin both directions.
+
+#### A/B: REFUTED, and it is the first result in this file whose interval excludes zero
+
+Same protocol as 3.53/3.54 - six instruments, 2025-11-24 to 2026-07-23, one Release binary, one flag.
+Reproduce with `tools/alfonso_structure_ab.sh`.
+
+| instrument | A: latched (default) | | B: structure maintained | |
+|---|---|---|---|---|
+| | n | avgR | n | avgR |
+| gold | 35 | +0.2285 | **1** | -1.0740 |
+| silver | 21 | -0.1123 | 3 | -1.0252 |
+| eurusd | 22 | +0.0586 | 4 | -1.2887 |
+| gbpjpy | 21 | -0.4317 | 12 | -1.3251 |
+| nas100 | 23 | -0.3155 | 3 | +0.2627 |
+| us30 | 13 | -1.0768 | 7 | -0.9865 |
+| **pooled** | **135** | **-0.1733** | **30** | **-1.0441** |
+
+**B - A = -0.8708R, 95% CI [-1.5188, -0.2229]** - the interval **excludes zero**, and arm B's own CI
+[-1.6030, -0.4852] excludes it too. Trade count falls 78%, win rate 26.7% -> 10.0%, and 0 of 6
+instruments end net-positive. At an avgR of -1.04 with a 10% win rate, almost every surviving trade is
+a full stop-out.
+
+**Integrity**: arm A reproduces 3.54's arm B exactly - n=135, avgR -0.1733, net -2,456 - confirming
+the new flag is inert when off and that both arms share a binary.
+
+#### Why the refutation is narrower than it looks
+
+The change does **not** filter the same population; it moves the agent to different scenario rows
+entirely:
+
+| scenario | arm A | arm B |
+|---|---|---|
+| all three timeframes trending (row 1) | **70%** | 20% |
+| middle and lower both out of alignment (rows 3/4) | 14% | **63%** |
+
+With the condition maintained, the lower and middle timeframes drop to OOA constantly, so entries stop
+being "at lower-timeframe zones in an aligned trend" and become "nested at top-timeframe zones". That
+is a different strategy, not a cleaned-up version of the same one - which is why the trade count
+collapses rather than trimming.
+
+**So what is refuted is this implementation of the standing condition, not module 5's sentence.** The
+latch is still a genuine departure from the book's wording, and it is still true that the trend label
+is uncorrelated with its own timeframe's structure. What the A/B establishes is that releasing the
+latch *this way* is decisively worse over this window, on n=30.
+
+This is the second literal reading of the book to be measured and rejected, after
+`TreatAmbiguousBaseAsContinuation` (3.50: trades 127 -> 40, avgR -0.239 -> -0.474). Both point the
+same way: the course's wording applied mechanically is worse than the looser reading the code already
+had. That is worth holding onto as a prior, not as proof - both were measured on a few hundred trades
+at most.
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
@@ -6892,6 +6994,17 @@ into `docs/`; Docker packaging.
   A/B that `CLAUDE.md` requires for zone-creation changes. Also found that neither the drop/rally
   base nor the swing-vs-CP classification has any unit test. New tool:
   `tools/alfonso_droprally_distal.py`.
+- **2026-09-05 (latching)**: Recorded §3.64 - the trend state **latches**. Module 5 states its
+  structural condition as standing ("each successive peak and trough is higher"), but `StructureAgrees`
+  is consulted only at establishment, so a downtrend survives any rally that breaks no trendline and
+  eliminates no zone. Found from a GBP/JPY short labelled Downtrend whose 15m had printed 12 higher
+  highs and higher lows out of 15. Measured: across 94 all-three-trending trades the 15m structure
+  agrees 14% and contradicts 15% - uncorrelated. Added `--alfonso-maintain-structure` (default off)
+  with tests both ways. **A/B REFUTES it**: 135 -> 30 trades, avgR -0.1733 -> -1.0441,
+  B-A -0.8708R CI [-1.5188, -0.2229] - **the first interval in this file to exclude zero**. But the
+  scenario mix inverts (row 1 70% -> 20%, rows 3/4 14% -> 63%), so it is a different strategy rather
+  than a filtered one; what is refuted is this implementation, not module 5's sentence. Second literal
+  reading of the book to be measured and rejected, after `TreatAmbiguousBaseAsContinuation`.
 - **2026-09-05 (correction)**: **`true_r` never converted the quote currency** (§3.63). Risk was
   computed in the quote currency and divided into an account-currency P&L, so GBP/JPY's R was
   understated ~158x and it contributed essentially nothing to any pooled average. Fixed in

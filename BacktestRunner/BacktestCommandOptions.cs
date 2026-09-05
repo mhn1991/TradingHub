@@ -165,6 +165,9 @@ internal sealed record BacktestCommandOptions
 
     /// <summary>--alfonso-swing-anchor-at-base-end restores the pre-2026-09-05 swing anchoring.</summary>
     public bool AlfonsoAnchorSwingsAtExtreme { get; init; } = true;
+
+    /// <summary>--alfonso-maintain-structure re-checks module 5's structural condition while a trend runs.</summary>
+    public bool AlfonsoMaintainStructuralAgreement { get; init; }
     public bool AlfonsoOverExtensionTrendlines { get; init; }
     public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
     public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
@@ -382,7 +385,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-manage-position" or "alfonso-structural-agreement" or
                 "alfonso-half-entry" or "alfonso-allow-invalid-hosts" or
                 "alfonso-single-candle-drop-rally" or
-                "alfonso-swing-anchor-at-base-end" or
+                "alfonso-swing-anchor-at-base-end" or "alfonso-maintain-structure" or
                 "alfonso-overextension-trendlines" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
@@ -706,6 +709,7 @@ internal sealed record BacktestCommandOptions
                 !values.ContainsKey("alfonso-single-candle-drop-rally"),
             AlfonsoAnchorSwingsAtExtreme =
                 !values.ContainsKey("alfonso-swing-anchor-at-base-end"),
+            AlfonsoMaintainStructuralAgreement = values.ContainsKey("alfonso-maintain-structure"),
             AlfonsoOverExtensionTrendlines = values.ContainsKey("alfonso-overextension-trendlines"),
             AlfonsoMinimumZoneGrade = ParseZoneGrade(values.GetValueOrDefault("alfonso-min-grade")),
             AlfonsoMinimumImpulseToBaseRatio = ParseDecimal(
@@ -885,6 +889,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoRequireValidHost = AlfonsoRequireValidHost,
         AlfonsoDropRallyBaseSpansBothCandles = AlfonsoDropRallyBaseSpansBothCandles,
         AlfonsoAnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
+        AlfonsoMaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,
         AlfonsoOverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
         AlfonsoMinimumZoneGrade = AlfonsoMinimumZoneGrade,
         AlfonsoMinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,

@@ -56,6 +56,25 @@ public sealed record AlfonsoTrendOptions
     public bool AnchorSwingsAtExtreme { get; init; } = true;
 
     /// <summary>
+    /// Whether the structural condition is re-checked while a trend RUNS, not only when one is
+    /// established.
+    /// <para>
+    /// Module 5 states it as a standing condition, not an entry test: an uptrend is demand created
+    /// and respected and supply eliminated, "in the context of new bullish impulses where each
+    /// successive peak and trough is higher than the ones found earlier". The state machine
+    /// otherwise latches - once established, a trend survives any rally that neither breaks its
+    /// trendline nor eliminates an opposing zone, so a 15m downtrend can stand through twelve
+    /// consecutive higher highs and higher lows (3.64).
+    /// </para>
+    /// <para>
+    /// Off by default: it is a real behaviour change and needs its own A/B, exactly as 3.53 and 3.54
+    /// did. Note this is independent of <see cref="RequireStructuralAgreement"/>, which gates only
+    /// establishment - turning that on does not release an already-latched trend.
+    /// </para>
+    /// </summary>
+    public bool MaintainStructuralAgreement { get; init; }
+
+    /// <summary>
     /// Body-to-range ratio at which a candle counts as an ERC for over-extension. Defaulted from
     /// <see cref="AlfonsoBar.ExtendedRangeBodyRatio"/>, module 1's definition, which the zone layer
     /// defaults from too.
@@ -502,11 +521,17 @@ public sealed class AlfonsoTrendDetector
     /// explicit that it is "each successive peak AND trough".
     /// </para>
     /// </summary>
-    private bool StructureAgrees(AlfonsoTrend candidate)
-    {
-        if (!_options.RequireStructuralAgreement)
-            return true;
+    /// <summary>Establish-time gate: the structural test, applied only when it is switched on.</summary>
+    private bool StructureAgrees(AlfonsoTrend candidate) =>
+        !_options.RequireStructuralAgreement || StructureMatches(candidate);
 
+    /// <summary>
+    /// Module 5's structural condition itself, independent of which switch is asking. "Each
+    /// successive peak and trough is higher than the ones found earlier" for an uptrend, and the
+    /// mirror for a downtrend.
+    /// </summary>
+    private bool StructureMatches(AlfonsoTrend candidate)
+    {
         // Too little structure to read is not a disagreement.
         if (_peaks.Count < 2 || _valleys.Count < 2)
             return true;
@@ -540,6 +565,15 @@ public sealed class AlfonsoTrendDetector
             if (opposite)
             {
                 Establish(_trend == AlfonsoTrend.Uptrend, downByLine, upByLine);
+                return;
+            }
+
+            // Module 5 states the structural condition as a standing one. Without this the trend
+            // latches: it survives any move that neither breaks its trendline nor eliminates an
+            // opposing zone, however far price runs the other way (3.64).
+            if (_options.MaintainStructuralAgreement && !StructureMatches(_trend))
+            {
+                EnterOutOfAlignment($"Structure no longer agrees with {_trend}.");
                 return;
             }
 

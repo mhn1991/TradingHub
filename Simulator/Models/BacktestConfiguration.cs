@@ -772,6 +772,8 @@ public sealed record BacktestRequest
 
     public bool AlfonsoAnchorSwingsAtExtreme { get; init; } = true;
 
+    public bool AlfonsoMaintainStructuralAgreement { get; init; }
+
     /// <summary>--alfonso-overextension-trendlines: module 3's aggressive line across three CPs.</summary>
     public bool AlfonsoOverExtensionTrendlines { get; init; }
 
@@ -1068,7 +1070,8 @@ public sealed record BacktestRequest
                         RequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
                         RequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
                         OverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
-                        AnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme
+                        AnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
+                        MaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement
                     }
                 };
                 return new TradingAgentDefinition { Kind = kind, Alfonso = alfonso };

@@ -524,6 +524,73 @@ public sealed class AlfonsoTrendDetectorTests
             "the old reading anchors on the base-end bar, whose own low is 93 rather than 90");
     }
 
+    /// <summary>
+    /// Module 5 states the structural condition as a standing one - a trend runs "in the context of
+    /// new bullish impulses where each successive peak and trough is higher than the ones found
+    /// earlier". Without re-checking it the state machine latches: a downtrend survives any rally
+    /// that neither breaks its trendline nor eliminates a supply zone. Measured on real 15m data, a
+    /// downtrend stood through twelve consecutive higher highs and higher lows (3.64).
+    /// </summary>
+    [Test]
+    public void RisingStructureEndsADowntrendWhenTheConditionIsMaintained()
+    {
+        AlfonsoTrendDetector detector = new(new AlfonsoTrendOptions { MaintainStructuralAgreement = true });
+        AlfonsoTrendSnapshot state = EstablishedDowntrendThenRisingSwings(detector);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(new AlfonsoTrendOptions().MaintainStructuralAgreement, Is.False,
+                "off by default - it is a behaviour change and carries its own A/B");
+            Assert.That(state.Trend, Is.EqualTo(AlfonsoTrend.OutOfAlignment));
+            Assert.That(state.Reason, Does.Contain("Structure no longer agrees"));
+        });
+    }
+
+    /// <summary>The same swings leave the trend latched when the condition is not maintained.</summary>
+    [Test]
+    public void RisingStructureLeavesTheDowntrendStandingByDefault()
+    {
+        AlfonsoTrendDetector detector = new();
+        AlfonsoTrendSnapshot state = EstablishedDowntrendThenRisingSwings(detector);
+        Assert.That(state.Trend, Is.EqualTo(AlfonsoTrend.Downtrend));
+    }
+
+    private static AlfonsoTrendSnapshot EstablishedDowntrendThenRisingSwings(AlfonsoTrendDetector detector)
+    {
+        // Two demand eliminations establish a downtrend with no trendline needed (module 5's
+        // second definition).
+        detector.Apply(new AlfonsoBar(Start, 110m, 112m, 108m, 109m),
+            new ImbalanceDetectorUpdate { Eliminated = [Zone(ImbalanceKind.Demand), Zone(ImbalanceKind.Demand)] });
+
+        AlfonsoTrendSnapshot state = detector.Snapshot;
+        Assert.That(state.Trend, Is.EqualTo(AlfonsoTrend.Downtrend), "precondition");
+
+        // Now price prints a HIGHER peak and a HIGHER valley - structure has turned up.
+        for (int step = 1; step <= 4; step++)
+        {
+            DateTimeOffset at = Start.AddHours(step);
+            decimal lift = step * 2m;
+            state = detector.Apply(
+                new AlfonsoBar(at, 109m + lift, 113m + lift, 107m + lift, 112m + lift),
+                new ImbalanceDetectorUpdate
+                {
+                    Created =
+                    [
+                        Zone(ImbalanceKind.Supply) with
+                        {
+                            BaseEnd = at, DistalAt = at, ConfirmedAt = at, Distal = 112m + lift
+                        },
+                        Zone(ImbalanceKind.Demand) with
+                        {
+                            BaseEnd = at, DistalAt = at, ConfirmedAt = at, Distal = 107m + lift
+                        }
+                    ]
+                });
+        }
+
+        return state;
+    }
+
     private static Imbalance Zone(ImbalanceKind kind, bool continuation = false) => new()
     {
         Interval = TimeSpan.FromHours(4),
