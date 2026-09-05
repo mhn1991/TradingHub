@@ -241,120 +241,16 @@ def fixed_window(bars, step, first, last, digits):
                      for k in keys]}
 
 
-def bollinger(closes, n=20, mult=2.0):
-    """20-period SMA with +/- 2 population standard deviations."""
-    out = [None] * len(closes)
-    for i in range(n - 1, len(closes)):
-        window = closes[i - n + 1:i + 1]
-        mean = sum(window) / n
-        var = sum((v - mean) ** 2 for v in window) / n
-        sd = var ** 0.5
-        out[i] = (mean + mult * sd, mean, mean - mult * sd)
-    return out
-
-
-def rsi(closes, n=14):
-    """Wilder's RSI. Seeded on the first n changes, then smoothed."""
-    out = [None] * len(closes)
-    if len(closes) <= n:
-        return out
-    gains = losses = 0.0
-    for i in range(1, n + 1):
-        change = closes[i] - closes[i - 1]
-        gains += max(change, 0.0)
-        losses += max(-change, 0.0)
-    avg_gain, avg_loss = gains / n, losses / n
-    out[n] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
-    for i in range(n + 1, len(closes)):
-        change = closes[i] - closes[i - 1]
-        avg_gain = (avg_gain * (n - 1) + max(change, 0.0)) / n
-        avg_loss = (avg_loss * (n - 1) + max(-change, 0.0)) / n
-        out[i] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
-    return out
-
-
-def cci(highs, lows, closes, n=20, constant=0.015):
-    """Commodity Channel Index over the typical price, with mean absolute deviation."""
-    typical = [(highs[i] + lows[i] + closes[i]) / 3 for i in range(len(closes))]
-    out = [None] * len(closes)
-    for i in range(n - 1, len(typical)):
-        window = typical[i - n + 1:i + 1]
-        mean = sum(window) / n
-        dev = sum(abs(v - mean) for v in window) / n
-        out[i] = 0.0 if dev == 0 else (typical[i] - mean) / (constant * dev)
-    return out
-
-
-# Longest indicator lookback plus room for Wilder's smoothing to settle. Bars this far before the
-# displayed window are fetched, used for the maths, then dropped - so every candle drawn has values
-# rather than a blank leading run.
-WARMUP = 60
-
-
-def slice_window(bars, start, end, digits, target_bars=260):
-    """Candle window around a trade, aggregated so the chart lands near `target_bars`.
-
-    Indicators (Bollinger 20/2, RSI 14, CCI 20) are computed on the aggregated series, i.e. on the
-    interval the chart actually shows. They are NOT used by the agent - module 1 prohibits exactly
-    these - and are carried only as a separate analysis layer the page can toggle.
-    """
-    span = max(end - start, 900)
-    lo, hi = start - span * 0.6, end + span * 0.6
-    step = 14400
-    for candidate in (60, 300, 900, 3600, 14400):
-        if (hi - lo) / candidate <= target_bars:
-            step = candidate
-            break
-
-    buckets = {}
-    for t, o, h, l, c in bars:
-        if t < lo - WARMUP * step or t > hi:
-            continue
-        key = int(t // step) * step
-        cur = buckets.get(key)
-        if cur is None:
-            buckets[key] = [o, h, l, c]
-        else:
-            cur[1] = max(cur[1], h)
-            cur[2] = min(cur[2], l)
-            cur[3] = c
-
-    keys = sorted(buckets)
-    if not keys:
-        return None
-
-    highs = [buckets[k][1] for k in keys]
-    lows = [buckets[k][2] for k in keys]
-    closes = [buckets[k][3] for k in keys]
-    bands, strength, channel = bollinger(closes), rsi(closes), cci(highs, lows, closes)
-
-    shown = [i for i, k in enumerate(keys) if k >= lo]
-    if not shown:
-        shown = list(range(len(keys)))
-    base = keys[shown[0]]
-
-    rows, ind = [], []
-    for i in shown:
-        k = keys[i]
-        rows.append([int((k - base) // step)] + [round(v, digits) for v in buckets[k]])
-        band = bands[i]
-        ind.append([
-            round(band[0], digits) if band else None,
-            round(band[1], digits) if band else None,
-            round(band[2], digits) if band else None,
-            round(strength[i], 1) if strength[i] is not None else None,
-            round(channel[i], 1) if channel[i] is not None else None,
-        ])
-
-    return {"step": step, "t0": base, "bars": rows, "ind": ind}
-
-
 def build(root, arms, sequence, quiet=False):
     """`sequence` supplies the top and lower intervals the run used, so the context panes are drawn
     on the timeframes the agent actually read rather than on a display-derived one."""
-    top_step = interval_seconds(sequence["top"])
     zone_step = interval_seconds(sequence["lower"])
-    trades, candles, context, zonepane = [], {}, {}, {}
+    global PANES
+    PANES = [(sequence["top"], interval_seconds(sequence["top"])),
+             (sequence["middle"], interval_seconds(sequence["middle"])),
+             (sequence["lower"], zone_step),
+             (sequence["execution"], interval_seconds(sequence["execution"]))]
+    trades, candles = [], {}
     for tag, (label, stem, digits) in INSTRUMENTS.items():
         a, b = read_trades(root, arms[0], tag), read_trades(root, arms[1], tag)
         if a is None and b is None:
@@ -366,27 +262,47 @@ def build(root, arms, sequence, quiet=False):
             arm = "both" if key in a and key in b else (arms[0] if key in a else arms[1])
             arm = {arms[0]: "a", arms[1]: "b", "both": "both"}[arm]
             record = parse(b.get(key) or a[key], tag, arm, label, digits, bars, times)
-            window = slice_window(bars, record["open"], record["close"], digits)
-            if window:
-                candles[record["id"]] = window
-
-            # Top timeframe: enough history for a trend to be visible, since that is the claim the
-            # scenario text makes and the execution pane is far too short to show it.
-            ctx = fixed_window(bars, top_step, record["open"] - 56 * top_step,
-                               record["close"] + 8 * top_step, digits)
-            if ctx:
-                context[record["id"]] = ctx
-
-            # The zone's own timeframe - where the imbalance was actually drawn.
-            zp = fixed_window(bars, zone_step, record["open"] - 80 * zone_step,
-                              record["close"] + 16 * zone_step, digits)
-            if zp:
-                zonepane[record["id"]] = zp
+            # One window per timeframe the agent reads, plus the execution interval. The page
+            # switches between them; indicators are computed client-side so four windows do not
+            # cost four copies of the indicator arrays.
+            panes = {}
+            for label, step in PANES:
+                before, after = (132, 28) if step >= zone_step else (150, 40)
+                w = fixed_window(bars, step, record["open"] - before * step,
+                                 record["close"] + after * step, digits)
+                if w:
+                    panes[label] = w
+            if panes:
+                candles[record["id"]] = panes
 
             trades.append(record)
         if not quiet:
             print(f"{tag}: {len(set(a) | set(b))} distinct trades")
-    return {"trades": trades, "candles": candles, "context": context, "zonepane": zonepane}
+    return {"trades": trades, "candles": candles}
+
+
+def load_structure(path, sequence):
+    """The agent's own trendlines and live zones at each decision, from ZZAlfonsoStructureDump.
+
+    The trendlines are never serialised by a run - `AlfonsoTrendSnapshot.Line` lives on the analyzer -
+    so they are recovered by replaying the production classes over the same candles. Without them the
+    page cannot show module 3's construct at all, which is most of what makes a trade checkable.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    suffix = {"m15": sequence["lower"], "h1": sequence["middle"], "h4": sequence["top"]}
+    out = {}
+    with open(path) as handle:
+        for line in handle:
+            row = json.loads(line)
+            label = suffix.get(row["tf"], row["tf"])
+            out.setdefault((row["inst"], row["at"]), {})[label] = {
+                "trend": row["trend"],
+                "overExtended": row["overExtended"],
+                "line": row["line"],
+                "zones": row["zones"],
+            }
+    return out
 
 
 def main():
@@ -399,6 +315,8 @@ def main():
     parser.add_argument("--json", help="also write the raw payload here")
     parser.add_argument("--sequence", default=DEFAULT_SEQUENCE,
                         help="top,middle,lower intervals the run used (default: the agent's own)")
+    parser.add_argument("--structure",
+                        help="JSONL from ZZAlfonsoStructureDump: the agent's trendlines and zones")
     parser.add_argument("--execution", default="1m",
                         help="the run's --execution-interval, i.e. where fills actually resolve")
     args = parser.parse_args()
@@ -410,6 +328,15 @@ def main():
     top, middle, lower = (v.strip() for v in args.sequence.split(","))
     sequence = {"top": top, "middle": middle, "lower": lower, "execution": args.execution}
     payload = build(args.root, arms, sequence)
+    structure = load_structure(args.structure, sequence)
+    if structure:
+        joined = 0
+        for record in payload["trades"]:
+            found = structure.get((record["inst"], int(record["open"])))
+            if found:
+                record["structure"] = found
+                joined += 1
+        print(f"structure joined onto {joined}/{len(payload['trades'])} trades")
     if not payload["trades"]:
         raise SystemExit(f"no runs found under {args.root}")
 
@@ -431,9 +358,9 @@ def main():
             handle.write(blob)
 
     size = os.path.getsize(args.out) / 1e6
-    print(f"\n{len(payload['trades'])} trades, {len(payload['candles'])} execution charts, "
-          f"{len(payload['context'])} {sequence['top']} context, {len(payload['zonepane'])} "
-          f"{sequence['lower']} zone panes -> {args.out} ({size:.2f} MB)")
+    panes = sum(len(v) for v in payload["candles"].values())
+    print(f"\n{len(payload['trades'])} trades, {panes} panes across "
+          f"{', '.join(label for label, _ in PANES)} -> {args.out} ({size:.2f} MB)")
 
 
 if __name__ == "__main__":

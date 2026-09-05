@@ -6333,6 +6333,63 @@ same way: the course's wording applied mechanically is worse than the looser rea
 had. That is worth holding onto as a prior, not as proof - both were measured on a few hundred trades
 at most.
 
+### 3.65 The agent's trendlines, recovered and drawn: 26% exist, and 39% of those slope the wrong way (2026-09-05)
+
+The trade page could not show module 3's central construct because a run never serialises it -
+`AlfonsoTrendSnapshot.Line` lives on the analyzer and dies with it. `Simulator.Tests/ZZAlfonsoStructureDump.cs`
+(`[Explicit]`) recovers it by replaying the production classes over the same candles, the pattern
+`ZZAlfonsoTrendLayerDiagnostic` established, feeding each timeframe only its own closed bars. It dumps,
+at each of the 138 decision moments and for each of 15m/1h/4h, the trend state, the live trendline and
+every live imbalance. The page now draws all three.
+
+Two facts fell out of the dump itself.
+
+#### The agent usually has no trendline at all
+
+| | rows with a live trendline |
+|---|---|
+| 15m | 33 / 138 (24%) |
+| 1h | 35 / 138 (25%) |
+| 4h | 41 / 138 (30%) |
+| **all** | **109 / 414 (26%)** |
+
+So on roughly three quarters of decision-timeframe rows there is no line to draw, and the trend was
+established by module 5's elimination-only route ("two supply zones have been eliminated and without
+the possibility of drawing a trendline"). 3.29 put trendline availability at "about 50% of the time";
+at the decision moments that actually produced trades it is half that. Module 4 calls the trendline
+break the first of its three creation routes and 3.55 already found it the rarest in practice
+(~2,700 of 53,578 accomplishments) - this is the same scarcity seen upstream.
+
+#### 39% of the lines that do exist slope against their own direction
+
+Of the 109 live trendlines, **43 (39%)** are bullish with a negative slope or bearish with a positive
+one. Examples from gold m15: bullish lines at -0.0275, -0.2562 and -7.4967 per bar.
+
+The mechanism is in `TrendlineBuilder`. `Bullish` correctly requires the second valley to be higher
+than the first, so the anchors rise - but `Fit` then takes the **flattest slope that clears every
+intervening bar**, and if any bar between the anchors dips below the first anchor, that slope is
+negative. The line is drawn under the candles as module 3 demands, and stops being an ascending line.
+
+This is not cosmetic. `Trendline.IsBrokenBy` tests a full candle **below** a bullish line, so a
+bullish line that slopes *down* runs away from price and becomes progressively harder to break. Since
+a broken trendline is one of only two routes out of a latched trend (3.64), a wrong-signed line makes
+the latch stickier - the two defects compound.
+
+**Not fixed.** The candidate repair is to reject a fitted line whose slope contradicts its direction,
+which would reduce trendline availability below the 26% measured here and change trend establishment,
+so it needs its own A/B exactly as 3.53/3.54/3.64 did. Recorded first.
+
+#### The page
+
+The three stacked panes are replaced by **one chart with a 4h / 1h / 15m / 1m switcher**, since the
+timeframe is the thing being interrogated. It draws the traded imbalance, every other live imbalance
+faintly, the agent's trendline with its two anchors and its forward extension, entry / stop / target,
+the fill and exit, and Bollinger / RSI / CCI on the selected timeframe. Indicators moved to the client
+so four windows cost one copy of the candles. The prose annotations are gone.
+
+The trendline is deliberately excluded from the y-domain: with 39% of lines running away from price,
+including one squashes the candles to a sliver - the same reasoning that clips the Bollinger envelope.
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
@@ -6994,6 +7051,15 @@ into `docs/`; Docker packaging.
   A/B that `CLAUDE.md` requires for zone-creation changes. Also found that neither the drop/rally
   base nor the swing-vs-CP classification has any unit test. New tool:
   `tools/alfonso_droprally_distal.py`.
+- **2026-09-05 (trendlines)**: Recovered the agent's own trendlines (§3.65) with a new
+  `ZZAlfonsoStructureDump` replay, since runs never serialise them, and rebuilt the trade page around
+  **one chart with a 4h/1h/15m/1m switcher** drawing the trendline, its anchors, every live imbalance
+  and the indicators. **Two findings from the dump**: the agent has a live trendline on only **26%** of
+  decision-timeframe rows (24% on 15m), so most trends come from the elimination-only route; and
+  **39% of the lines that exist slope against their own direction** - `Fit` takes the flattest slope
+  clearing every intervening bar, which goes negative on a bullish line whenever a bar dips below the
+  first anchor. That makes such a line harder to break, which compounds §3.64's latch. Not fixed;
+  needs its own A/B.
 - **2026-09-05 (latching)**: Recorded §3.64 - the trend state **latches**. Module 5 states its
   structural condition as standing ("each successive peak and trough is higher"), but `StructureAgrees`
   is consulted only at establishment, so a downtrend survives any rally that breaks no trendline and
