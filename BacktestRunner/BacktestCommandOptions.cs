@@ -159,6 +159,12 @@ internal sealed record BacktestCommandOptions
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
     public bool AlfonsoHalfZoneEntry { get; init; }
     public bool AlfonsoRequireValidHost { get; init; } = true;
+
+    /// <summary>--alfonso-single-candle-drop-rally restores the pre-2026-09-05 one-candle base.</summary>
+    public bool AlfonsoDropRallyBaseSpansBothCandles { get; init; } = true;
+
+    /// <summary>--alfonso-swing-anchor-at-base-end restores the pre-2026-09-05 swing anchoring.</summary>
+    public bool AlfonsoAnchorSwingsAtExtreme { get; init; } = true;
     public bool AlfonsoOverExtensionTrendlines { get; init; }
     public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
     public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
@@ -375,6 +381,8 @@ internal sealed record BacktestCommandOptions
                 "alfonso-with-drift" or
                 "alfonso-manage-position" or "alfonso-structural-agreement" or
                 "alfonso-half-entry" or "alfonso-allow-invalid-hosts" or
+                "alfonso-single-candle-drop-rally" or
+                "alfonso-swing-anchor-at-base-end" or
                 "alfonso-overextension-trendlines" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
@@ -694,6 +702,10 @@ internal sealed record BacktestCommandOptions
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
             AlfonsoHalfZoneEntry = values.ContainsKey("alfonso-half-entry"),
             AlfonsoRequireValidHost = !values.ContainsKey("alfonso-allow-invalid-hosts"),
+            AlfonsoDropRallyBaseSpansBothCandles =
+                !values.ContainsKey("alfonso-single-candle-drop-rally"),
+            AlfonsoAnchorSwingsAtExtreme =
+                !values.ContainsKey("alfonso-swing-anchor-at-base-end"),
             AlfonsoOverExtensionTrendlines = values.ContainsKey("alfonso-overextension-trendlines"),
             AlfonsoMinimumZoneGrade = ParseZoneGrade(values.GetValueOrDefault("alfonso-min-grade")),
             AlfonsoMinimumImpulseToBaseRatio = ParseDecimal(
@@ -871,6 +883,8 @@ internal sealed record BacktestCommandOptions
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
         AlfonsoHalfZoneEntry = AlfonsoHalfZoneEntry,
         AlfonsoRequireValidHost = AlfonsoRequireValidHost,
+        AlfonsoDropRallyBaseSpansBothCandles = AlfonsoDropRallyBaseSpansBothCandles,
+        AlfonsoAnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
         AlfonsoOverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
         AlfonsoMinimumZoneGrade = AlfonsoMinimumZoneGrade,
         AlfonsoMinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,

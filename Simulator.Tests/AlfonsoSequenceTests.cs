@@ -21,6 +21,7 @@ public sealed class AlfonsoSequenceTests
         Distal = distal,
         BaseStart = Start,
         BaseEnd = Start,
+        DistalAt = Start,
         ConfirmedAt = Start,
         BaseCandleCount = 2,
         Strength = ImpulseStrength.Strong,

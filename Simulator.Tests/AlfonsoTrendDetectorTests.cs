@@ -220,7 +220,7 @@ public sealed class AlfonsoTrendDetectorTests
             new AlfonsoBar(Start, 95m, 100m, 90m, 98m),
             new ImbalanceDetectorUpdate
             {
-                Created = [Zone(ImbalanceKind.Demand) with { BaseEnd = Start, Distal = 90m }]
+                Created = [Zone(ImbalanceKind.Demand) with { BaseEnd = Start, DistalAt = Start, Distal = 90m }]
             });
         detector.Apply(
             new AlfonsoBar(Start.AddHours(1), 100m, 105m, 95m, 103m),
@@ -237,6 +237,7 @@ public sealed class AlfonsoTrendDetectorTests
                     {
                         BaseStart = Start.AddHours(1),
                         BaseEnd = Start.AddHours(1),
+                        DistalAt = Start.AddHours(1),
                         ConfirmedAt = confirmation,
                         Distal = 95m
                     }
@@ -364,8 +365,8 @@ public sealed class AlfonsoTrendDetectorTests
                 {
                     Created =
                     [
-                        Zone(ImbalanceKind.Demand) with { BaseEnd = at, ConfirmedAt = at, Distal = valley },
-                        Zone(ImbalanceKind.Supply) with { BaseEnd = at, ConfirmedAt = at, Distal = peak }
+                        Zone(ImbalanceKind.Demand) with { BaseEnd = at, DistalAt = at, ConfirmedAt = at, Distal = valley },
+                        Zone(ImbalanceKind.Supply) with { BaseEnd = at, DistalAt = at, ConfirmedAt = at, Distal = peak }
                     ]
                 });
         }
@@ -410,6 +411,119 @@ public sealed class AlfonsoTrendDetectorTests
         Assert.That(state.Trend, Is.EqualTo(AlfonsoTrend.Uptrend));
     }
 
+    /// <summary>
+    /// Module 3 connects trendlines through the valleys and peaks themselves, so a swing has to be
+    /// anchored on the bar that printed its extreme. Before 2026-09-05 the anchor was the base's LAST
+    /// bar while the price was the extreme over the whole base, which on real H4 data named different
+    /// bars in about 36% of bases (3.54) - and no trendline test could see it, because every one of
+    /// them used a single-candle base.
+    /// </summary>
+    [Test]
+    public void MultiCandleBaseAnchorsItsSwingOnTheExtremeNotTheLastBaseCandle()
+    {
+        AlfonsoTrendDetector detector = new();
+
+        // The valley low prints on bar 0; the base runs on to bar 2 without going lower.
+        detector.Apply(new AlfonsoBar(Start, 95m, 100m, 90m, 98m), ImbalanceDetectorUpdate.Empty);
+        detector.Apply(new AlfonsoBar(Start.AddHours(1), 98m, 101m, 94m, 99m), ImbalanceDetectorUpdate.Empty);
+        detector.Apply(
+            new AlfonsoBar(Start.AddHours(2), 99m, 102m, 93m, 101m),
+            new ImbalanceDetectorUpdate
+            {
+                Created =
+                [
+                    Zone(ImbalanceKind.Demand) with
+                    {
+                        BaseStart = Start,
+                        BaseEnd = Start.AddHours(2),
+                        DistalAt = Start,          // the low is on bar 0, not on the base-end bar
+                        Distal = 90m
+                    }
+                ]
+            });
+
+        // A second, higher valley so a bullish line can be drawn through the pair.
+        detector.Apply(new AlfonsoBar(Start.AddHours(3), 101m, 106m, 96m, 104m), ImbalanceDetectorUpdate.Empty);
+        AlfonsoTrendSnapshot state = detector.Apply(
+            new AlfonsoBar(Start.AddHours(4), 104m, 112m, 103m, 110m),
+            new ImbalanceDetectorUpdate
+            {
+                Created =
+                [
+                    Zone(ImbalanceKind.Demand) with
+                    {
+                        BaseStart = Start.AddHours(3),
+                        BaseEnd = Start.AddHours(3),
+                        DistalAt = Start.AddHours(3),
+                        Distal = 96m
+                    }
+                ],
+                Eliminated = [Zone(ImbalanceKind.Supply)]
+            });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(new AlfonsoTrendOptions().AnchorSwingsAtExtreme, Is.True,
+                "module 3 draws through the extreme, so that is the default");
+            Assert.That(state.Line, Is.Not.Null);
+            Assert.That(state.Line!.FromIndex, Is.EqualTo(0),
+                "the line starts on the bar that printed the 90 low, not on base-end bar 2");
+            Assert.That(state.Line.FromTime, Is.EqualTo(Start));
+            Assert.That(state.Line.FromPrice, Is.EqualTo(90m));
+        });
+    }
+
+    /// <summary>
+    /// The opt-out is not inert: anchoring at the base end moves the line's origin two bars later,
+    /// onto a bar whose own low is 93 while the anchor price stays 90 - a point that bar never
+    /// traded. Pins the default in both directions so it cannot be flipped back silently.
+    /// </summary>
+    [Test]
+    public void AnchoringAtTheBaseEndIsOptInAndMovesTheLinesOrigin()
+    {
+        AlfonsoTrendDetector detector = new(new AlfonsoTrendOptions { AnchorSwingsAtExtreme = false });
+
+        detector.Apply(new AlfonsoBar(Start, 95m, 100m, 90m, 98m), ImbalanceDetectorUpdate.Empty);
+        detector.Apply(new AlfonsoBar(Start.AddHours(1), 98m, 101m, 94m, 99m), ImbalanceDetectorUpdate.Empty);
+        detector.Apply(
+            new AlfonsoBar(Start.AddHours(2), 99m, 102m, 93m, 101m),
+            new ImbalanceDetectorUpdate
+            {
+                Created =
+                [
+                    Zone(ImbalanceKind.Demand) with
+                    {
+                        BaseStart = Start,
+                        BaseEnd = Start.AddHours(2),
+                        DistalAt = Start,
+                        Distal = 90m
+                    }
+                ]
+            });
+
+        detector.Apply(new AlfonsoBar(Start.AddHours(3), 101m, 106m, 96m, 104m), ImbalanceDetectorUpdate.Empty);
+        AlfonsoTrendSnapshot state = detector.Apply(
+            new AlfonsoBar(Start.AddHours(4), 104m, 112m, 103m, 110m),
+            new ImbalanceDetectorUpdate
+            {
+                Created =
+                [
+                    Zone(ImbalanceKind.Demand) with
+                    {
+                        BaseStart = Start.AddHours(3),
+                        BaseEnd = Start.AddHours(3),
+                        DistalAt = Start.AddHours(3),
+                        Distal = 96m
+                    }
+                ],
+                Eliminated = [Zone(ImbalanceKind.Supply)]
+            });
+
+        Assert.That(state.Line, Is.Not.Null);
+        Assert.That(state.Line!.FromIndex, Is.EqualTo(2),
+            "the old reading anchors on the base-end bar, whose own low is 93 rather than 90");
+    }
+
     private static Imbalance Zone(ImbalanceKind kind, bool continuation = false) => new()
     {
         Interval = TimeSpan.FromHours(4),
@@ -418,6 +532,7 @@ public sealed class AlfonsoTrendDetectorTests
         Distal = kind == ImbalanceKind.Demand ? 98m : 112m,
         BaseStart = Start,
         BaseEnd = Start,
+        DistalAt = Start,
         ConfirmedAt = Start,
         BaseCandleCount = 2,
         Strength = ImpulseStrength.Strong,
@@ -436,7 +551,7 @@ public sealed class AlfonsoTrendDetectorTests
             new AlfonsoBar(Start, 95m, 100m, 90m, 98m),
             new ImbalanceDetectorUpdate
             {
-                Created = [Zone(ImbalanceKind.Demand) with { BaseEnd = Start, Distal = 90m }]
+                Created = [Zone(ImbalanceKind.Demand) with { BaseEnd = Start, DistalAt = Start, Distal = 90m }]
             });
         detector.Apply(
             new AlfonsoBar(Start.AddHours(1), 100m, 105m, 95m, 103m),
@@ -451,6 +566,7 @@ public sealed class AlfonsoTrendDetectorTests
                     {
                         BaseStart = Start.AddHours(1),
                         BaseEnd = Start.AddHours(1),
+                        DistalAt = Start.AddHours(1),
                         ConfirmedAt = Start.AddHours(2),
                         Distal = 95m
                     }

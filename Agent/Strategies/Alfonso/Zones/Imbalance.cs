@@ -116,6 +116,18 @@ public sealed record Imbalance
     public required DateTimeOffset BaseEnd { get; init; }
 
     /// <summary>Open time of the candle that confirmed the zone, i.e. completed consolidation away.</summary>
+    /// <summary>
+    /// The bar that actually printed <see cref="Distal"/> - the valley's low or the peak's high.
+    /// <para>
+    /// Distinct from <see cref="BaseEnd"/> whenever the base spans more than one candle and its
+    /// extreme did not land on the last one, which on real H4 data is about 63% of multi-candle bases
+    /// (3.54). Module 3 connects trendlines through the swing extremes, so the trend layer needs the
+    /// bar the extreme is on; anchoring at <see cref="BaseEnd"/> instead put the anchor price on a
+    /// bar that never traded it and shortened the span the slope divides by.
+    /// </para>
+    /// </summary>
+    public required DateTimeOffset DistalAt { get; init; }
+
     public required DateTimeOffset ConfirmedAt { get; init; }
 
     /// <summary>How many candles formed the base. Module 7 caps this at 4-6.</summary>

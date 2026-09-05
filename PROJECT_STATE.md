@@ -39,6 +39,20 @@ corrections noted below).
   confirmed via `git stash` to fail identically on unmodified code, unrelated to any change made
   this session. `TradingHub.UnitTests`: 60/60. `QuantResearchRunner.Tests`: 71/73 (2 pre-existing,
   unrelated failures in `PreRunCalibrationTests`).
+- **Suite state re-verified 2026-09-04** (whole solution, on `alfonso-fill-selection-diagnosis`):
+  `Simulator.Tests` **1,380/1,380**, `LiveTrading.Tests` 119/119, `TradingCore.Tests` 24/24,
+  `TradingHub.UnitTests` 60/60, `QuantResearchRunner.Tests` **73/73**, `TrendStatistics.Tests`
+  36/36 — **1,692 passing, 0 failing, 0 skipped**. Note the two counts above are a 2026-08-02
+  snapshot: the 8 `Simulator.Tests` failures were fixed (§2.7) and `QuantResearchRunner.Tests` is
+  no longer 71/73, so that "2 pre-existing failures" baseline no longer applies. `DBManager.Tests`
+  builds and discovers 7 tests but all 7 error at startup — `Testcontainers` cannot reach a Docker
+  daemon (`/var/run/docker.sock` absent, `systemctl is-active docker` = inactive). That is
+  environmental, not a code failure, and matches the caveat recorded on 2026-08-25; the NU1903
+  build blocker noted in the 2026-08-19 log entry is gone. `Brokers.IntegrationTests` was not run:
+  it resolves live broker credentials and calls real OANDA/IG/Binance endpoints.
+  **Updated 2026-09-05**: `Simulator.Tests` is now **1,390/1,390** - the module 2 and module 3 audits
+  (§3.53, §3.54) added 10 tests. The other five suites were not re-run that day, so the 1,692 total
+  above remains a 2026-09-04 figure.
 - Test count has grown steadily: 290 (2026-07-13) → 593 (2026-07-16) → 832 (2026-07-20, per
   `TradingHub_Simulator_Audit_Report_2026-07-20.md`) → 1,036 (now). Treat this as a real, tracked
   trend, not a one-off number.
@@ -4942,6 +4956,14 @@ assumption (limit orders filling on touch) is recorded there.
 > then built the four rules that were genuinely missing. The composite score and the arrival/original-
 > versus-reaction gaps below read worse than they are: the checklist's eight criteria are not the
 > book's five, and three of the "missing" rows are things the PDFs never state.
+>
+> **The candle-reading row is withdrawn outright (2026-09-05)** - see its cell below. Module 1 tells
+> the reader to ignore named candlestick patterns, so having no engulfing/harami code is compliance,
+> not a gap. That row was scoring the implementation against the checklist's vocabulary, not the
+> book's. **Narrowed by 3.55**: that holds for candle *classification*, which is all module 1 is
+> about, but module 4 does use the engulfing pattern as a base-drawing template with its own
+> proximal/distal rules, and that part genuinely is missing. "No engulfing code is needed anywhere"
+> was too broad a claim.
 
 Checked the user's Persian method checklist (چک لیست) item by item against
 `Agent/Strategies/Alfonso`. **Roughly two thirds is implemented; the gaps are concentrated in zone
@@ -4955,7 +4977,7 @@ scoring and candle reading.**
 | SET&FORGET / Confirmation / position management | **all three exist** | default `ExitManagementMode = Bracket`; `RequireReversalConfirmation:221`, `AllowConfirmationEntries:69`, `AllowPositionManagement:200` |
 | Journaling | **done** | `ITradeJournal` plus `AlfonsoCandidateLog`, which records every *rejected* candidate and its reason |
 | Location - SD Range permits long/short | **done** | `SupplyDemandRange.AllowsBuying/AllowsSelling`, enforced for **every** timeframe (`Sequence/AlfonsoSequenceAnalyzer.cs:139-147`) |
-| Location - ZIC (zone in control) | **implemented, off by default** | `ZoneInControl` behind `_requireControlAgreement` (`:155-168`) |
+| Location - ZIC (zone in control) | **implemented, ON by default** - this row previously read "off by default"; corrected 2026-09-05, see 3.57 | `ZoneInControl` behind `_requireControlAgreement` (`:155-168`); `RequireControlAgreement = true` since `8bc113a`. Research runs disable it with `--alfonso-ignore-control` |
 | Zone score: Fresh | **done** | `ImbalanceState.Fresh` + `FreshLevelsOnly` |
 | Zone score: impulse strength | **done** | `ImpulseStrength` Weak/Strong/Gap |
 | Zone score: base structure | **done** | `BaseCandleCount` |
@@ -4965,13 +4987,14 @@ scoring and candle reading.**
 | Zone score: original vs reaction | **missing** | `IsContinuationPattern` is continuation-vs-reversal, a different axis |
 | Zone score: arrival | **missing** | "arrival" exists only for control transfer (`AlfonsoTimeframeAnalyzer.cs:79`), not as a zone score |
 | Composite score per timeframe (strong/medium/weak) | **missing** | only a per-*zone* confidence from `ImpulseStrength` (Gap 90 / Strong 75 / else 50); no aggregate of the eight criteria |
-| Candle reading (technique 1 / 2 / mix) | **missing entirely** | no candlestick logic anywhere under `Agent/Strategies/Alfonso`; `ChartAnnotator`'s `PriceActionAnalyzer` is not consumed by this agent |
+| Candle reading (technique 1 / 2 / mix) | **WITHDRAWN 2026-09-05 - not a gap** | Module 1 reduces the entire vocabulary to four things and then says so explicitly: "All candlestick pattern formations with fancy names like engulfing, dark cloud cover, harami, etcetera, are a combination of these two types of candlesticks ... That's all we need to pay attention to." All four are implemented - `Zones/AlfonsoBar.cs` `IsBullish`/`IsBearish`/`BodyRatio`, `MaximumBasingBodyRatio = 0.50m` (module 7), `ExtendedRangeBodyRatio = 0.80m` (module 1). `grep -ril engulf` over the repo returns nothing, and per module 1 that is correct. What is genuinely absent is the *checklist's* candle techniques, which are not in the PDFs |
 
 **Reading of the gap.** Everything that decides *whether* a setup exists - the timeframe chain, the
 three realignment scenarios, location permission, control - is built. What is missing is the
 *grading* layer: the checklist scores a zone on eight criteria and rolls that into a strong/medium/weak
 verdict per timeframe, whereas the agent applies a handful of the criteria as hard pass/fail filters
-and never aggregates them. Candle reading is absent outright.
+and never aggregates them. (The sentence that stood here - "candle reading is absent outright" - is
+withdrawn with the row above.)
 
 **Whether that matters is an open question, not an assumption.** 3.30 measured the trend layer and
 found no usable directional edge, and 3.43's verdict is that the method as implemented has none
@@ -5428,6 +5451,672 @@ the pass/fail gates. For the grade to earn its place it has to be scored on zone
 currently reject, and shown to order that wider population by outcome. **That experiment is §3.51,
 and the answer is no** - though it found something else that does replicate.
 
+
+### 3.53 Module 2 audited against the code: one real geometry deviation on the drop/rally base (2026-09-05)
+
+Read `02-Types of Imbalances` line by line against `Agent/Strategies/Alfonso/Zones/`. **Module 2 is
+implemented, and its harder half - telling a swing from a continuation pattern - is implemented
+well.** One mechanical deviation is real and measured, and one departure is already on record.
+
+| module 2 statement | code | verdict |
+|---|---|---|
+| "There are only two types" - swings, and CPs | one bool, `Imbalance.IsContinuationPattern`; no third category anywhere | correct |
+| valley = leg in (bearish) + base + leg out (bullish), at the origin of a bullish impulse | base `TryFindBase`, leg out `MeasureImpulse` + `TryConfirmConsolidation`, leg in `IsContinuation` | correct |
+| peak = the inverted mirror | `ImbalanceKind.Supply`; pinned by `AlfonsoImbalanceDetectorTests.SupplyZoneMirrorsDemandExactly` | correct |
+| alternative base "made of only a bearish ERC and a bullish ERC (drop/rally)" | `ImbalanceDetector.cs:412-418` detected the ERC pair correctly but set `baseStart == baseEnd` | **was a deviation; fixed this session, see below** |
+| CP = "a pause in the market before price resumes the underlying trend", complete "after price breaks out" | `IsContinuation` (`:645-666`) asks whether the approach traded beyond the distal; `TryConfirmConsolidation` is the breakout | correct, and a sound operationalisation - if a demand base was approached from *below* its own distal, price came up, paused and continued up, which is exactly a bullish CP; if it was not, the base turned price and it is a valley |
+| "When you are in doubt, consider them as a CP" | `TreatAmbiguousBaseAsContinuation`, **default off** | departure already recorded in 3.50, with the measurement (on: 127 -> 40 trades, pooled avgR -0.239 -> -0.474) |
+| CPs excluded from trendlines (module 3) | `AlfonsoTrendDetector.RecordSwings` routes CPs to `_continuationValleys`/`_continuationPeaks`, separate from the swing stores | correct |
+
+#### The deviation: the drop/rally base is one candle in code and two in the book
+
+Module 2 says the basing structure *is* the two ERCs. Module 4 then says the distal "must always
+include the lowest low in the basing structure when drawing a demand level and the highest high when
+drawing a supply level". `TryFindBase`'s fallback returns with `baseStart == baseEnd`, so `Lines()`
+(`:430`) spans the turning candle alone and the opposing ERC's extreme falls outside the zone.
+
+**Measured** with `tools/alfonso_droprally_distal.py`, which replicates the fallback condition
+exactly, over 26 exported H4 files (~75,000 bars, 12 instruments):
+
+| | |
+|---|---|
+| drop/rally bases found | **384** (~0.5% of bars - the path is rare) |
+| where the two readings give a different distal | **186, or 48%** |
+| omitted extreme beyond the code's distal, as a fraction of zone width | median **0.14**, mean 0.59, p90 1.86, max 5.05 |
+| share of those where it exceeds 0.25 zone widths | **42%** |
+
+The bias has a direction: a bearish ERC closes within 20% of its range of its low by definition, so
+its low usually sits *below* the following bullish ERC's low. The code's distal is therefore
+systematically **too tight** on this path - the stop sits inside the structure the book draws, and a
+wick the book still counts as inside the base eliminates the zone (module 4: "eliminated if the
+lowest low ... has been penetrated through by as little as a tick"). `BaseCandleCount` also reports
+1 rather than 2, which feeds `ZoneScorer`'s base-structure criterion.
+
+#### Fixed, behind a flag, and A/B'd
+
+`ImbalanceOptions.DropRallyBaseSpansBothCandles` (**default true**, the book's reading) puts both
+ERCs inside the base; `--alfonso-single-candle-drop-rally` restores the one-candle reading every
+result before 2026-09-05 was measured under. It is a flag rather than a changed default *because*
+3.50's process rule says an A/B is only trustworthy when both arms run from one binary and differ by
+one flag - toggling a default and rebuilding is exactly what produced three false conclusions that
+session.
+
+Six instruments, 2025-11-24 to 2026-07-23, `--alfonso-ignore-control --alfonso-profit-margin 0`,
+one Release binary, true R per 3.44. Reproduce with `tools/alfonso_droprally_ab.sh` then
+`tools/alfonso_ab_report.py --root <out> --arms a,b --instruments gold,silver,eurusd,gbpjpy,nas100,us30`.
+
+| instrument | A n | A avgR | B n | B avgR |
+|---|---|---|---|---|
+| gold | 35 | +0.2239 | 35 | +0.2239 |
+| silver | 22 | -0.1543 | 22 | -0.1543 |
+| eurusd | 18 | -0.0525 | 18 | -0.0525 |
+| gbpjpy | 19 | -0.0051 | **21** | **-0.0028** |
+| nas100 | 23 | -0.3155 | 23 | -0.3155 |
+| us30 | 15 | -0.8097 | **14** | **-1.0764** |
+| **pooled** | **132** | **-0.1212** | **133** | **-0.1420** |
+
+**B - A: -0.0208R, 95% CI [-0.4426, +0.4010]. Trade count 132 -> 133.** The interval contains zero
+by a wide margin, and it was always going to: `alfonso_ab_report.py`'s own docstring puts the
+sample needed to resolve a 0.08R effect at ~3,500 trades per arm, and this has 132. **So this A/B
+does not justify the change on performance grounds and cannot.** Its job is the one `CLAUDE.md`
+asks for - confirm a zone-creation change does not silently wreck the engine - and it passes: trade
+count is flat and four of the six instruments are bit-identical, which is what a rule touching ~0.5%
+of bars should look like. The justification for the change is correctness: the book states the rule
+and the geometry deviation was measured directly on candles above.
+
+**The flag is live, not inert** - the failure mode that produced 3.50's three false conclusions.
+All six candidate logs differ between arms (gold 119 differing lines, silver 502, eurusd 124,
+gbpjpy 12,736, nas100 654, us30 47), so the arms really did run different code. Candidate logs move
+on all six while trades move on only two because the log records every evaluated candidate,
+including the rejected ones whose geometry changed without changing fill selection.
+
+#### Test coverage gap found while auditing - now closed
+
+Neither of module 2's two distinctive mechanics had a unit test: **the drop/rally two-ERC base** and
+**the swing-vs-CP classification** (`IsContinuation`, plus `TreatAmbiguousBaseAsContinuation`) were
+exercised only by `ZZAlfonsoRealDataDiagnostic`, which is `[Explicit]` and does not run in the suite.
+
+`Simulator.Tests/AlfonsoModuleTwoTests.cs` (8 tests) now pins both: that the ERC pair forms a zone
+with no basing candle, that the distal takes the opposing ERC's extreme and `BaseCandleCount` is 2,
+the rally/drop mirror, that a same-direction ERC pair is *not* a base, that the one-candle reading is
+opt-in and moves the distal, and the three CP cases (approach from below -> CP, approach from above
+-> swing, no readable approach -> follows the switch, pinned in both directions).
+
+**Mutation-checked rather than trusted green**: reverting the default to the one-candle reading fails
+3 of the 8. Alfonso suite 112 green (104 + 8).
+
+### 3.54 Module 3 audited against the code: the trendline rules are right; the swing anchor they read is not (2026-09-05)
+
+Read `03-Drawing Trendlines` against `Agent/Strategies/Alfonso/Trend/`. **`TrendlineBuilder` is the
+most faithful part of this agent - every drawing rule module 3 states is implemented, including the
+two activation conditions and the no-cutting rule.** The defect is upstream: the swing points it is
+handed have an index and a price that describe different bars.
+
+| module 3 rule | code | verdict |
+|---|---|---|
+| bullish connects the latest two valleys; bearish the latest two peaks | `valleys[^2]`/`valleys[^1]`, `peaks[^2]`/`peaks[^1]` | correct |
+| "When a new peak is printed, we'll have to adjust the trendline and connect peak [P2] with new peak [P3]" | rebuilt from the live lists on every bar (`AlfonsoTrendDetector.cs:201-202`), so the roll is automatic | correct |
+| "The low of Valley V[2] always has to be higher than the low of V[1]" | `if (second.Price <= first.Price) return null` | correct |
+| "The high of the second peak at [P2] should not be higher than the high of the first peak at [P1]" | `if (second.Price >= first.Price) return null` | correct |
+| bullish activation: "can be connected once the high of V[2] makes a high higher than [4]" | `ExtendedBeyond(highs, ..., higher: true)` - max over [V1..V2], then a later bar must exceed it | correct |
+| bearish activation: "Once price makes a low lower than [L1], a bearish trendline can connect peaks [P1] and [P2]" | `ExtendedBeyond(lows, ..., higher: false)` | correct, and the index spans were checked specifically: the min over [P1..P2] **is** L1, because L2 falls after P2 and is outside the span |
+| "Never cut through candles ... neither wicks nor candlestick bodies" | `Fit` takes the steepest slope that still clears every bar between the anchors, constrained on `lows`/`highs`, i.e. wick extremes not bodies | correct; pinned by `AlfonsoTrendDetectorTests.TrendlineNeverCutsThroughACandle` |
+| "Continuation Patterns (CPs) will not be used to connect trendlines" | `RecordSwings` routes CPs to `_continuationValleys`/`_continuationPeaks` | correct; pinned by `ContinuationPatternsNeverBecomeSwingsForTrendlines` |
+| "Each timeframe has its own trendline independent from other timeframes" | one detector per timeframe role | correct |
+| "sometimes you won't be able to draw a trendline ... Use the elimination of imbalances to locate a potential imbalance instead" | builders return null; `EliminationsWithoutTrendline = 2` is that route | correct |
+| over-extension: "with three or more consecutive CPs, the trendlines can be drawn more aggressively connecting the last three CPs" | `OverExtended`, `--alfonso-overextension-trendlines`, default off | built in 3.50; off because the book says "can", not "must" |
+| "These valleys and peaks must be clear and obvious, if they are not, consider them as pauses or CPs" | no notion of "obvious" anywhere | **no code equivalent** - the criterion is discretionary by the book's own framing, and the nearest mechanical proxy is `TreatAmbiguousBaseAsContinuation` (3.50, off) |
+
+#### The defect: `SwingPoint.Index` and `SwingPoint.Price` refer to different bars
+
+`SwingPoint.Index` documents itself as "Bar index of the swing extreme, used for slope arithmetic"
+(`Trend/SwingPoint.cs`). `AlfonsoTrendDetector.RecordSwings` sets it from `zone.BaseEnd` - the base's
+**last** candle - while `Price` is `zone.Distal`, the extreme over the **whole** base. Whenever the
+base spans more than one candle and its extreme did not land on the last one, the anchor is a point
+below (bullish) or above (bearish) the candle at that index: a price that bar never traded.
+
+**Measured** with `tools/alfonso_swing_anchor.py`, replicating `TryFindBase`'s ordinary basing branch
+over 26 exported H4 files (~75,000 bars, 12 instruments):
+
+| | |
+|---|---|
+| candidate bases | 19,282 - of which **10,929 (57%) span more than one candle** |
+| multi-candle bases whose extreme is not on the base-end bar | **6,876, or 63%** - so **~36% of all bases** |
+| anchor index wrong by | median **1** bar, mean 1.78, max 5 |
+| anchor price below the base-end bar's own low | median **0.29** of base height, mean 0.32, p90 0.60 |
+
+This feeds `Fit` directly: the initial slope is `(second.Price - first.Price) / (second.Index -
+first.Index)`, so a denominator short by a median of one bar makes the line steeper than the two
+swings warrant, and every candidate slope in the constraint loop is measured from an anchor that sits
+below the candle it is named after. **The net effect on where a line ends up has not been measured
+end to end** - `Fit` re-fits the slope against the intervening bars, so the two errors partly offset,
+and the direction is not obvious from inspection. What is established is that the input is wrong in
+about a third of cases and that the arithmetic consumes it.
+
+**Harmless in the zone layer, material only in the trend layer.** `ImbalanceDetector.Detect` builds
+its own `_peaks`/`_valleys` the same way, but uses them only for the swing-break accomplishment,
+which compares prices and never touches the index.
+
+#### Fixed, behind a flag, and A/B'd
+
+`Imbalance.DistalAt` now carries the bar that printed the distal (`Lines()` reports its index, keeping
+the **earliest** bar on ties - a later equal extreme is the same price retested, not a new swing), and
+`AlfonsoTrendOptions.AnchorSwingsAtExtreme` (**default true**) anchors swings there.
+`--alfonso-swing-anchor-at-base-end` restores the old reading, so both arms run from one binary.
+
+The zone layer's own `_peaks`/`_valleys` were deliberately **left on `BaseEnd`**: that index is a
+recency filter for the swing-break test ("only swings that existed before the impulse began"), where
+the base's last bar is the defensible reading, and moving it would only loosen the gate with no
+module-3 justification.
+
+Same protocol as 3.53. Reproduce with `tools/alfonso_swing_anchor_ab.sh`.
+
+| instrument | A n | A avgR | B n | B avgR |
+|---|---|---|---|---|
+| gold | 35 | +0.2239 | 35 | +0.2285 |
+| silver | 22 | -0.1543 | **21** | **-0.1123** |
+| eurusd | 18 | -0.0525 | **22** | **+0.0586** |
+| gbpjpy | 21 | -0.0028 | 21 | -0.0028 |
+| nas100 | 23 | -0.3155 | 23 | -0.3155 |
+| us30 | 14 | -1.0764 | **13** | **-1.0768** |
+| **pooled** | **133** | **-0.1420** | **135** | **-0.1066** |
+
+**B - A: +0.0354R, 95% CI [-0.3848, +0.4556]. Trade count 133 -> 135; net -3,171 -> -2,456.** The
+interval contains zero, exactly as in 3.53 and for the same reason - n=133 against a ~3,500-per-arm
+requirement. **The change rests on correctness, not on this number.** The direction happens to be
+favourable where 3.53's was not; at this sample size that difference is noise and should not be read
+as one fix being better than the other.
+
+**Two integrity checks passed.** The flag is live - all six candidate logs differ between arms (gold
+2,398 lines, eurusd 918, us30 682). And arm A here reproduces 3.53's arm B **exactly** - n=133,
+avgR -0.1420, net -3,171 in both - which is what it should do, because the only thing separating those
+two configurations is the swing anchor that arm A switches off. An A/B whose control arm reproduces
+the previous experiment's treatment arm to the digit is one where the harness is doing what it claims.
+
+#### Coverage - now closed
+
+Two tests in `AlfonsoTrendDetectorTests` build a **multi-candle base** whose low prints on the first
+bar: `MultiCandleBaseAnchorsItsSwingOnTheExtremeNotTheLastBaseCandle` pins `FromIndex`/`FromTime`/
+`FromPrice` on the extreme, and `AnchoringAtTheBaseEndIsOptInAndMovesTheLinesOrigin` pins the opt-out
+and the default in both directions. Mutation-checked: reverting the default fails one of them.
+
+Adding them exposed a fixture problem worth recording. Five test factories and four `with` blocks
+construct `Imbalance` by hand; adding a required `DistalAt` left four of those `with` blocks
+overriding `BaseEnd` while inheriting a stale `DistalAt`, which collapsed both swings onto bar 0 and
+failed two **existing** tests. Every one of those bases is single-candle, where `DistalAt == BaseEnd`
+by definition, so setting them equal restored the original semantics rather than masking a
+regression - but a hand-built fixture that can silently disagree with itself is the same hazard
+`CLAUDE.md` warns about for this subsystem.
+
+#### Coverage
+
+Module 3 is the best-tested part of the agent - six dedicated tests in `AlfonsoTrendDetectorTests`
+cover the second-swing rule, the extension gate, the no-cut rule, the bearish mirror, break
+semantics and the CP exclusion. **None of them uses a multi-candle base**, which is why the anchor
+mismatch is invisible to the suite: every trendline test builds zones with `BaseStart == BaseEnd`.
+
+### 3.55 Module 4 audited against the code: a fourth creation route that is not in the book, and the engulfing base is missing (2026-09-05)
+
+Read `04_The_Creation_of_Imbalances` against `Agent/Strategies/Alfonso/Zones/`. Module 4 is the
+densest module so far - it owns zone creation, elimination, lookback and line drawing. **Most of it is
+implemented correctly.** Two things are not, and the first is the most consequential finding of the
+module-by-module audit so far.
+
+| module 4 rule | code | verdict |
+|---|---|---|
+| three creation scenarios: TL break with a full candle, opposing imbalance eliminated, ATH/ATL taken out | `Accomplishment.TrendlineBreak` / `OpposingImbalanceEliminated` / `ExtremeBroken` | correct - and "All three scenarios can happen at the same time" holds, they are `[Flags]` OR'd in `Achievements` |
+| "the break of a trendline with at least a full OCHL candlestick" | `TrendlineBreakRequiresClose` | correct |
+| "Up to two imbalances can be created when the trendline is broken: 1. At the origin of the move 2. At the basing structure, if the structure intersects with the TL" | origin only - `grep -i intersect` over `Agent/Strategies/Alfonso` returns **nothing** | **not implemented**, re-confirming 3.50's "partial" |
+| "Consolidation away is mandatory"; "not confirmed if price returns to the origin of the move in the very next candlestick" | `TryConfirmConsolidation` | correct |
+| ATH/ATL needs an impulse "twice as wide as the basing structure, or 2:1" plus consolidation away | `MinimumImpulseToBaseRatio = 2.0` and the confirmation, applied to **every** zone | correct in substance. Module 4 scopes 2:1 to the ATH/ATL case; module 7 states it generally, so the global application follows module 7. (3.51's "wrong place" is about the threshold's *value*, 2 vs 5 - a different point) |
+| "eliminated if the lowest low or the highest high of the basing structure has been penetrated through by as little as a tick" | wick-based elimination, `EliminationRequiresClose = false` | correct; pinned by `AWickThroughTheDistalEliminatesByDefault` |
+| "go as far back as you need to in order to look for imbalances" | `MaximumTrackedZones = 5,000`; `Trim()` bounds the bar history | correct, and the ATH/ATL interaction was checked specifically: `Trim` drops the front of `_highWater`/`_lowWater`, but those are **cumulative** maxima, so the retained entries still carry the true all-time extreme. Trimming cannot silently turn "all-time high" into "high of the last 76 bars" |
+| proximal = "the price closest to the current price", distal = "the price furthest away"; distal "must always include the lowest low in the basing structure" | `Lines()` | correct - and 3.53 fixed the drop/rally case where it was not |
+| proximal may cover the shadows when there is "a single candle at the base" or bases are "tight and small" | `ProximalCoversWicks`, a global flag | minor simplification: the book makes Option 2 *conditional* on the base's shape, the code makes it an unconditional toggle. Default false = the book's Option 1, so the default is right |
+| "the chain" - TL breaks creating imbalances whose eliminations create further imbalances | `TrendlineBreakLookup` wires the trend layer back into the zone layer | correct |
+| engulfing / piercing patterns as base-drawing templates | absent | **gap - see below** |
+| **a fourth creation route: an impulse that broke a prior peak or valley** | `SwingBreakIsAnAccomplishment`, **default on** | **not in the book at all - see below** |
+
+#### The fourth creation route is not in the source material
+
+`ImbalanceOptions.SwingBreakIsAnAccomplishment` (`:185`) justifies itself with a quoted rule: *"A valid
+zone is one that 'itself eliminated a prior opposing zone, or whose move broke a trendline or a peak /
+valley'."* **That sentence is in none of the eleven PDFs.** All eleven were extracted with
+`pdftotext -layout` and searched; module 4 enumerates exactly three scenarios and a peak/valley break
+is not among them. The quote almost certainly comes from the user's Persian checklist (the artefact
+3.49 audited), not from the course.
+
+It is not a marginal addition. Counting the `accomplished` column over the six-instrument candidate
+logs from 3.53's arm B:
+
+| accomplishment set | candidates |
+|---|---|
+| `OpposingImbalanceEliminated, SwingBroken` | 30,301 |
+| **`SwingBroken` alone** | **14,261** |
+| `TrendlineBreak, OpposingImbalanceEliminated, SwingBroken` | 2,497 |
+| `OpposingImbalanceEliminated, ExtremeBroken, SwingBroken` | 2,093 |
+| `OpposingImbalanceEliminated` alone | 2,009 |
+| `ExtremeBroken` alone | 1,170 |
+| `TrendlineBreak` alone | 185 |
+
+**27% of all accomplished candidates (14,261 of 53,578) are valid *only* because of the swing-break
+route.** Turn it off and every one of them stops being a zone. Worth noting alongside it: the
+trendline break - which module 4 presents first, and which module 3 exists to support - is the
+**rarest** route in the implementation, appearing in about 2,700 of 53,578.
+
+This is not proposed as a bug to fix silently. The option exists and defaults on, every result in
+this file was measured with it on, and turning it off is a large behaviour change that needs its own
+A/B. What is established here is that **the default is not the book's rule**, which was not recorded
+anywhere before.
+
+#### Module 4's engulfing base has no code
+
+Module 4 gives mechanical drawing rules for engulfing and piercing bases, not just prose: "Find a
+bullish ERC candle that closes above basing bars ... The proximal line will be right at the open/close
+of the first engulfed candle ... The distal line will be at the lowest low of the engulfing pattern",
+and decisively **"The engulfed candle can be either a 50% candle or a non 50% candle."**
+
+`TryFindBase` has exactly two routes - a run of <=50% basing candles, or module 2's opposing ERC pair.
+An engulfed candle whose body is between 50% and 80% of its range satisfies neither, so no base forms
+where module 4 says one should. Measured over 26 H4 files (78,836 bars):
+
+| module 4 engulfing shape | n | |
+|---|---|---|
+| engulfed candle <= 50% | 1,239 | already caught by the basing branch |
+| engulfed candle >= 80% | 106 | already caught by the drop/rally pair |
+| **engulfed candle 50-80%** | **535** | **no base forms** |
+| total | 1,880 | |
+
+So 72% of the shape is already covered incidentally and **28% is missed** - about 535 bases over
+78,836 bars, or 0.7% of bars. Bounded, but real, and it is a whole third base-formation route rather
+than an edge case.
+
+**This corrects the module 1 note in 3.49.** That note said the absence of engulfing code is
+"compliance, not a gap", on the strength of module 1's "All candlestick pattern formations with fancy
+names like engulfing ... are a combination of these two types of candlesticks". That reading is right
+about candle *classification* and wrong as a general claim: module 4 uses the engulfing pattern as a
+*base-drawing template* with its own proximal and distal rules. Module 1 says you need not name
+patterns to read candles; module 4 does use one to draw a zone.
+
+### 3.56 Module 5 audited against the code: clean, no new findings (2026-09-05)
+
+Read `05-The Trend` against `Agent/Strategies/Alfonso/Trend/`. **Every rule module 5 states is
+implemented, correctly scoped, and already tested.** This is the first module of the five audited
+that produced no new finding.
+
+| module 5 rule | code | verdict |
+|---|---|---|
+| "an uptrend requires at least one supply level eliminated and two new bullish impulses connecting a bullish trendline" | `upByLine = bullish is not null && _supplyEliminated >= EliminationsWithTrendline(1)`; the line itself needs two valleys, i.e. two bullish impulses | correct |
+| "An uptrend is also created when two supply zones have been eliminated and without the possibility of drawing a trendline" | `EliminationsWithoutTrendline = 2` gated by `FallbackRequiresNoTrendline` | correct - and the "AND WITHOUT" clause is genuinely enforced, not treated as a co-equal second path (3.29) |
+| downtrend is the mirror | same code paths with the sides swapped | correct |
+| "An asset can only be in either one of three stages" | `AlfonsoTrend` adds `Unknown` for a detector started mid-stream, which the book has no need to name. It is not a fourth *market* state: `CanTrade` is false for it, and `ScenarioMatrix` refuses it, so it behaves exactly as OOA does | correct |
+| OOA trigger 1: "A trendline ... is solidly broken with at least one full OCHL candle" | `BreakTrendlines` -> `Undermine`, gated on `TrendlineBreakRequiresClose` | correct |
+| OOA trigger 2: "An imbalance is eliminated" | `ApplyEliminations` -> `Undermine`, **scoped to the trend's own side** | correct. The book's sentence is unqualified, but its worked example (FB monthly) is about the uptrend's own demand being eliminated, and the code's comment makes the same reading explicitly - an uptrend eliminating supply is the uptrend working |
+| "Over-extension is defined as the creation of three or more consecutive CPs, and/or three or more large ERCs" | `OverExtensionContinuationPatterns = 3`, `OverExtensionExtendedRangeCandles = 3` | correct |
+| "Once a certain timeframe is over-extended, that timeframe can no longer be used to place a trade" | `AlfonsoTrendSnapshot.CanTrade => IsTrending && !IsOverExtended`, enforced at `AlfonsoSequenceAnalyzer.cs:187` and counted in `AlfonsoFilterTally.OverExtended` | correct - this is a hard trading prohibition and it is actually wired, not just modelled |
+| "A trendline that connects two impulses does not necessarily mean there is a trend" | `upByLine` requires the line **and** the elimination | correct; pinned by `ATrendlineAloneIsNotATrend` |
+| "each successive peak and trough is higher than the ones found earlier" | `RequireStructuralAgreement`, default **false** | departure already recorded in 3.50, on statistical-power grounds |
+
+#### One nuance checked and dismissed
+
+Module 5 says three or more **large** ERCs, and `ExtendedRangeBodyRatio` measures body-to-range
+*shape* with no size criterion at all - so a small candle with an 80% body counts. Measured over 26 H4
+files (78,836 bars): the 3-ERC route fires **23 times in total**, and in **none** of them were all
+three candles smaller than ATR(14); the mean ERC range at the trigger is 1.34x ATR (p10 1.02).
+**Adding an explicit "large" test would change nothing**, because an 80%-body candle is already an
+outsized one in practice. Recorded so the question is not reopened.
+
+Worth noting incidentally: that route fires 23 times in 78,836 bars, so over-extension in this
+implementation is almost entirely the consecutive-CP route.
+
+### 3.57 Module 6 audited against the code: faithful, and 3.49's "control off by default" was wrong (2026-09-05)
+
+Read `06-The Range. Too low Too high` against `Agent/Strategies/Alfonso/Ranges/` and the sequence
+analyzer. **Module 6 is implemented closely enough that the book's worked example reproduces exactly.**
+
+| module 6 rule | code | verdict |
+|---|---|---|
+| "We must use two opposing imbalances, one above the current price (supply) and another below the current price (demand) in the same timeframe" | `RangeCalculator.Compute` requires both, over one timeframe's zones | correct |
+| the span is measured between the **proximal** lines | `zone.Proximal` for both bounds | correct - and it matters; distal would give a different span |
+| "we will use 20% and 80%", each edge moved inward | `edge = span * 0.20`; `top - edge`, `bottom + edge` | correct, and it **reproduces the book's worked example exactly**: a 7.5 span under a 113.50 supply proximal and over a 106 demand proximal gives 112 and 107.50 |
+| "Each timeframe has its own range" | one `SupplyDemandRange` per `AlfonsoTimeframeAnalyzer` | correct |
+| "In all-time highs and all-time lows scenarios, we will not be able to calculate the range" | `SupplyDemandRange.Unavailable`, with distinct reasons for the missing side | correct |
+| "If the price is too low in the range, stop selling into it using lower timeframes. If the price is too high ... stop buying" | `AllowsBuying` / `AllowsSelling`, checked on **every** timeframe in the sequence, not just the entry one | correct - this is module 6's "The bigger timeframe always comes first", and the loop enforces it |
+| "An imbalance in control is an imbalance that has been tested (any number of times) and remains unbroken" | `ZoneInControl` + `UpdateControl`: taken on touch, lost on elimination, handed to the opposing side when price reaches it - the book's "without an opposing zone gaining control" | correct |
+| "When an imbalance on timeframe X has gained control, trading at timeframes smaller than X will not be allowed" | checked on Top and Middle, skipping Lower, blocking when `held.Kind != side` | correct |
+| untradeable zones may still bound the range | `BoundWithUntradeableZones = true`, justified from module 7's "does not negate the level as a valid imbalance" | correct |
+
+#### Correction to 3.49
+
+3.49's table says the zone-in-control rule is **"implemented, off by default"**. That is wrong, and
+was wrong when written. `AlfonsoStrategyOptions.RequireControlAgreement` has defaulted to **true**
+since commit `8bc113a` (2026-09-01), two days before 3.49; the CLI opt-out is `--alfonso-ignore-control`.
+The shipped default follows the book.
+
+What is true, and is the more useful statement: **every research run in this file disables it.**
+`--alfonso-ignore-control` sits in the `COMMON` flags of the 3.40-3.43 runs, 3.50's A/B and 3.53/3.54's.
+So the published Alfonso numbers were measured with a rule that the book states and the code ships on
+switched off. That is defensible - 3.29 pre-registered a test of the gate and it failed 2 of 6 - but
+it should be stated rather than left implicit in a flag list.
+
+#### One small gap, not measured
+
+At all-time highs the book still claims one-sided knowledge: "We will only know when price is too low
+or too high, but not both at the same time." The code returns `Unavailable` and permits both
+directions, reasoning that a missing range is an absence of information rather than a prohibition
+(module 11 does trade ATH/ATL scenarios). The one-sided case is mostly recovered by the control gate
+- price sitting in the lone demand zone blocks selling through `InControl` - but control requires a
+**touch**, whereas the range band triggers 20% before price arrives. So on an ATH/ATL approach there
+is a window the book would call "too low" and the code calls nothing. **Not measured**; noted because
+it is the only part of module 6 with no code path.
+
+### 3.58 Module 7 audited against the code: the accomplishment score counts a rule the book does not have, and sub-2:1 zones lose their confirmation route (2026-09-05)
+
+Read `07-Scoring imbalances` against `Zones/ZoneScore.cs`, `ImbalanceDetector` and the sequence
+analyzer. Module 7 is the module 3.50 built `ZoneScorer` from, and **the scorer is a faithful reading
+of it**. Two findings, both about what feeds the score rather than the score itself.
+
+| module 7 rule | code | verdict |
+|---|---|---|
+| five qualifiers: accomplishments, consolidation away, impulse strength, basing structure, freshness | `ZoneScorer` scores four of them plus the 2:1; consolidation away is structural (no zone exists without it) and the 3:1 margin is a decision-time property | correct, and both omissions are argued in the source rather than silent |
+| "a mechanical and straightforward scoring system ... If the particular trade gets a passing score, it must be traded" | `ZoneScorer` grades 0-10 into Weak/Medium/Strong | built in 3.50. The **pass mark is a convention** (`StrongGradePoints = 8`, `MediumGradePoints = 5`), not the book's - module 7 never totals its qualifiers - and it gates nothing unless `--alfonso-min-grade` is raised |
+| consolidation away: "at least one or more full OCHL candles ... should, by no means, have tested the potential imbalance" | `ConsolidationAwayCandles = 1`; `TryConfirmConsolidation` fails any bar after the first that touches the proximal | correct |
+| impulse tiers - gap ("an extra point if you like"), strong, weak ("Very low score = 0") | `Gap 3 / Strong 2 / Weak 0`, and a weak departure **floors** the grade rather than merely losing points | correct, including both anchors the module actually states |
+| "twice as wide as the basing structure **measured from the proximal line to the distal line**" | `ratio = |extreme - proximal| / |proximal - distal|`; `MinimumImpulseToBaseRatio = 2.0` | correct - measured between exactly the two lines the book names |
+| "It also has to be made of at least two ERCs" | replaced with an ATR distance inside a speed window | documented departure (3.50): two *consecutive* ERCs occurred 4 times in 1,018 H4 bars, so the literal rule fails on real candles |
+| base: "a maximum of 4-6 candlesticks", "bodies <= 50% of the candle range" | `MaximumBaseCandles = 6`, `MaximumBasingBodyRatio = 0.50`; scorer awards 2 at <=4 and 1 at <=6 | correct, and the scorer's band tracks the configured maximum instead of a hard-coded six |
+| freshness: first pullback only; second "skip ... and wait for confirmation"; "a third pullback to a level is not allowed" | `Fresh` / `Tested` / `UsedUp`; `IsTradeable` requires Fresh or Tested; `AllowConfirmationEntries` covers the second | correct - the three-stage lifecycle is exactly the book's |
+| "tested if the price retraces to its proximal line and consolidates away with at least a full OHCL candle" | test completes only on a full candle back away from the proximal | correct; pinned by `TestIsCompletedOnlyAfterAFullCandleBackAwayFromProximal` |
+| "3:1 profit margin or more to the opposing level" | `HasRoomToTarget`, `MinimumProfitMarginMultiple = 3.0`, measured to the **first opposing zone on the same timeframe** | correct |
+| "A bigger timeframe impulse that doesn't become an imbalance negates lower timeframe imbalances nested at those HTF impulses" | `AlfonsoSequenceAnalyzer.EligibleHosts` | built in 3.50, default on |
+| "An accomplishment = trendline break or opposing imbalance taken out" | `ZoneScorer.CountFlags` counts **all four** flags, `SwingBroken` included | **inflated - see below** |
+| "If the imbalance has not accomplished a minimum 2:1 R/R, it will be considered as non-tradeable and **confirmation will be needed**" | sub-2:1 zones never become candidates at all | **gap - see below** |
+
+#### The accomplishment score counts a route the book does not have
+
+3.55 established that `SwingBreakIsAnAccomplishment` is a fourth zone-creation route absent from all
+eleven PDFs. Module 7 makes that sharper: it defines the qualifier as **"An accomplishment =
+trendline break or opposing imbalance taken out"** - only **two** routes, narrower even than module
+4's three, and it repeats the point under the 2:1 rule ("The only compulsory factors necessary for an
+imbalance are consolidation away, taking out opposing zone and/or breaking a trendline").
+
+`ZoneScorer` scores 0/1/2 by counting set flags, so `SwingBroken` does not merely create zones - it
+**raises their grade**. Recomputed over the same 53,578 accomplished candidates from 3.53's arm B,
+scoring the book's routes only:
+
+| | |
+|---|---|
+| accomplishment score **inflated** by `SwingBroken` | **45,622 (85%)** |
+| would score **zero** on the book's routes, flooring the grade to Weak | **14,261 (27%)** |
+
+So the grade 3.51 measured and found unable to order zones was computed with one of its five
+components inflated for 85% of the population by a rule that is not in the course. **That is not
+offered as the explanation for 3.51's null** - 3.51 already gives a sufficient one (nine points of
+ten spent on attributes that do not replicate, and the 2:1 threshold drawn where nothing separates) -
+but it is a second defect in the same component, and it was not known when 3.51 was written.
+
+#### Sub-2:1 zones lose the confirmation route the book grants them
+
+Module 7 is explicit that failing 2:1 is **not** disqualifying: "The imbalance will be valid but
+non-tradable (confirmation needed), do not confuse these terms ... It does not negate the level as a
+valid imbalance."
+
+The code honours the first half and drops the second. `Imbalance.IsTradeable` requires
+`MeetsTradeabilityCriteria`, which includes `ratio >= 2.0`, and `TradeableZones` filters on
+`IsTradeable` - so a sub-2:1 zone is never returned as a candidate and **no confirmation path can
+reach it**. `AllowConfirmationEntries` exists but governs the *freshness* case (a second pullback),
+which is a different sentence in the same module.
+
+The zone still counts as valid elsewhere, correctly: `BoundWithUntradeableZones = true` lets it bound
+a range, and it can still be eliminated. What is missing is only the trade route.
+
+**This population is already characterised, and it is not junk.** 3.51 measured zones below 2:1 at
+**+0.0166R** (five non-XAU) and **+0.0257R** (XAU 3.5y), against the 2-3:1 band the gate *admits* at
++0.0065 and -0.0068 - and 3.52 replicated it on held-out candles. The zones the code discards
+performed no worse than the ones it trades.
+
+**Not built.** Adding a confirmation route for sub-2:1 zones is a new entry path, not a repair, and
+3.51's own warning applies: its 5:1 finding was not adopted as a threshold because fitting a number
+on the candles that suggested it is 3.27. The same caution applies to acting on the sub-2:1 bucket's
+positive point estimate. Recorded so the choice is explicit rather than accidental.
+
+### 3.59 Module 8 audited against the code: clean; the calendar-timeframe path holds up (2026-09-05)
+
+Read `08-Multiple Timeframe Analysis` against `Sequence/TimeframeSequence.cs`, `ScenarioMatrix` and
+the agent's interval plumbing. Most of module 8 is guidance on trader personality and time
+management with no code counterpart. **Everything mechanical in it is implemented.**
+
+| module 8 rule | code | verdict |
+|---|---|---|
+| "at least three different timeframes ... Using fewer than this can result in a considerable loss of data while using more typically provides redundant analysis and indecision" | `TimeframeSequence` has exactly Top/Middle/Lower - three, not a list | correct |
+| the sequence must run largest to smallest | `Validate()` requires `Top > Middle > Lower` strictly, and is reached from `AlfonsoStrategyOptions.Validate()` | correct |
+| the five sequences: quarterly 3M/M/W, monthly M/W/D, weekly W/D/H4, daily D/H4/H1, scalping H4/H1/M15-M5 | all five present as presets (3.50 added the first two) | correct. The book's scalping row offers "M15/M5"; the preset takes M15, one of the two it names |
+| top timeframe gives direction - "We will only trade in the direction of this chart" | `ScenarioMatrix.Resolve` returns no-trade unless the top is Uptrend/Downtrend, and `side` is derived from it alone | correct |
+| lower timeframe is the execution timeframe | every scenario row carries an entry at `SequenceRole.Lower` | correct |
+| middle timeframe gives intermediate direction, and "can also be used as the execution timeframe" | Middle appears as an `EntryTimeframe` in rows 3/4 only, not in row 1 (all three aligned) | **carried to module 9** - module 8 states this permissively ("can also be"), and module 9's realignment table is what actually governs which entries each alignment offers. 3.49 verified the matrix matches that table exactly, so this is a question about module 9's table, not a defect against module 8 |
+
+#### The calendar-timeframe path, checked because it could quietly not work
+
+Module 8's two recommended sequences for someone with a job are **M/W/D** and **W/D/H4**, so weekly
+and monthly bars have to be real. They are:
+
+- `BarInterval` carries `BarUnit.Week` and `BarUnit.Month` as first-class units, not as durations.
+- `ChartAnnotator/MarketData/IntervalMath.cs:25-39` buckets them with real calendar arithmetic -
+  `StartOfMonth` / `AddMonths`, `StartOfWeek` - rather than by fixed spans.
+- OANDA, IG and Binance all map them natively (`OandaMappings.cs:32-33` and equivalents).
+- The agent is configured in `BarInterval` throughout (`AlfonsoStrategyOptions.TopInterval` etc., set
+  from `--alfonso-top/middle/lower`).
+
+The one place a month is approximated as 30 days is `AlfonsoStrategyOptions.ToTimeSpan` (`:291-292`),
+which exists **only** to build the `TimeframeSequence` used for role ordering and `Validate()`. There
+it is harmless: 30 > 7 > 1 orders identically to a real month/week/day. It never reaches bucketing.
+
+**`TimeframeSequence`'s five presets are decorative**, confirming 3.50's "cosmetic" note by reference
+count: they appear only in `AlfonsoSequenceTests` and the two `ZZ` research harnesses, never in the
+production path, which is CLI-driven. So the 30-day figure inside `TimeframeSequence.Monthly` cannot
+reach a run either.
+
+This is recorded as a **negative result**: the obvious failure mode - a "monthly" sequence that is
+really a rolling 30-day bucket - does not exist here. The `hcand-w1d1h4-*` datasets in scratch confirm
+a weekly sequence has actually been run.
+
+### 3.60 Module 9 audited against the code, slides included: the matrix matches, but "down" and "out of alignment" may not be the same thing (2026-09-05)
+
+Read `09_The_Realignment` against `Sequence/ScenarioMatrix.cs` and `Nesting.cs`. Module 9's three
+scenario slides are **images**, so `pdftotext` never saw them and 3.49's claim that the matrix
+"matches the table exactly" had never actually been checked against the table. Extracted with
+`pdfimages -png` and read directly this time.
+
+| module 9 rule | code | verdict |
+|---|---|---|
+| "Choose three timeframes ... Don't add more. If you add more you will always find a reason not to take a trade" | Top/Middle/Lower and nothing else | correct |
+| "Each timeframe will have its trend and imbalances, completely independent from other timeframes" | one `AlfonsoTimeframeAnalyzer` per role, advanced only by its own closed candles | correct, and the source names the exact failure it prevents |
+| "Draw last bullish and bearish trendlines on all the three timeframes" | both directions built per timeframe on every bar | correct |
+| **slide 1**: "All timeframes are up, we plan our trades at demand imbalances in our entry timeframe, the Daily" - arrow on D alone | row 1 emits a single entry at `SequenceRole.Lower` | correct - **and this settles 3.59's carry-over.** Module 8's "the middle timeframe can also be used as the execution timeframe" is about how a sequence is *chosen*, not about adding a middle entry to the all-aligned row. The slide's single arrow on D confirms the code |
+| **slide 2**: "Monthly and weekly are up, Daily down out of alignment. We plan our trades at demand imbalances nested at Weekly imbalances" - arrow on W | row 2: `EntryTimeframe = Lower, NestedIn = Middle` | correct |
+| **slide 3**: "Monthly is up, weekly and daily are down and out of alignment. We plan our trades at demand imbalances nested at monthly imbalances" - arrow on M | rows 3/4: Lower nested in Top, **plus** Middle nested in Top | correct |
+| nesting: "the D1 DZ may have its proximal line slightly above the proximal line of the W DZ, subject to the D1 DZ having its distal line within the W DZ" | `IsNested` tests `outer.Contains(inner.Distal)` and nothing else | correct |
+| "Multiple sequences can coexist. You must choose a sequence and stick to it" | one sequence per agent instance | correct |
+
+**A detail worth recording because it is one boundary away from breaking.** Module 9's worked nesting
+example (NFLX, slide 4) has the W demand at 485.67-507.84 and the nested D1 demand at 485.67-501.77 -
+the two zones share their distal **exactly**. `Imbalance.Contains` uses `price >= Distal`, inclusive,
+so the course's own illustration passes. With a strict inequality it would fail, and the rule would
+look correct in every test while rejecting the canonical example.
+
+#### The finding below is WITHDRAWN (2026-09-05, same day) - see 3.62
+
+Module 11 states the same scenarios as a **text table**, and every non-aligned cell reads "Out of
+alignment", never "Downtrend". The slide captions are loose prose; module 11 is the specification.
+`ScenarioMatrix`'s strict `== OutOfAlignment` test is **correct** and needs no change. The rest of
+this section stands; only the conclusion below is wrong, and it is left in place rather than deleted
+so the reasoning error stays visible.
+
+#### The finding: "down" and "out of alignment" are one bucket in the slides and two states in the code
+
+Both scenario slides label the non-aligned timeframes **red** and describe them as down *and* out of
+alignment - "Daily **down** out of alignment", "weekly and daily are **down** and out of alignment".
+The book appears to use the two interchangeably: within a bullish sequence, a timeframe that is not
+up is "out of alignment".
+
+`ScenarioMatrix` does not. It requires `lower == AlfonsoTrend.OutOfAlignment` exactly, and module 5's
+`AlfonsoTrend` makes `Downtrend` a distinct state that is **directly reachable** - a trend can flip
+straight to its opposite without passing through OOA (`ATrendFlipsStraightToTheOppositeDirectionOnEnoughEvidence`).
+So with top and middle up and the lower in a confirmed downtrend, every row misses and the sequence
+falls through to `"Alignment ... is not one of the eight permitted setups"` - **the code refuses the
+configuration slide 2 depicts, read literally.** Same for slide 3 with the middle down.
+
+This is not a rare corner. 3.30's occupancy measurement puts each timeframe at OutOfAlignment 56-76%
+of bars, Uptrend ~14% and Downtrend ~14% - so the opposing-trend state is a comparable share of
+non-aligned bars to OOA itself.
+
+**Both readings are defensible and the module supplies the counter-argument itself**: "Any scenario
+not included in these three slides will be considered advanced and will require a thorough
+understanding of price action and counter-trend scenarios (not covered in the core rules)." That
+sentence justifies a whitelist. It just does not settle whether a red D on slide 2 *is* one of the
+three slides or is outside them.
+
+**Not changed, and not measured.** Widening rows 2-4 to accept `Downtrend` alongside `OutOfAlignment`
+is a one-line change per row that would materially increase trade count, so it needs its own A/B, and
+the joint distribution of (top, middle, lower) states has never been tabulated - `AlfonsoFilterTally.ScenarioBlocked`
+counts refusals but does not break them down by alignment, so the size of the affected population is
+currently unknown. Sizing it needs either that breakdown or a replay harness pass.
+
+#### One minor ambiguity
+
+Module 9 also says a zone is "considered nested as long as it's touching or overlapping the bigger
+timeframe's proximal line", which is a looser test than the distal-inside rule quoted above and would
+additionally admit an inner zone *wider* than its host (distal below the host's distal). The code
+implements the explicit distal rule. Since nesting exists to "drill the entry timeframe to a smaller
+zone" and cut risk, admitting a wider inner zone would defeat the purpose - the stricter reading is
+the more faithful one, and is recorded here only so the discrepancy is not rediscovered.
+
+### 3.61 Module 10 audited against the code: three of four entry options built; "confirmation" means something different in the code than in the book (2026-09-05)
+
+Read `10-Planning a trade` against `AlfonsoAgent`, `Imbalance` and the options record. Most of the
+module is order-type tutorial and trading psychology with no code counterpart. The mechanical part is
+the four entry options, the padding, and the set-and-forget/confirmation split.
+
+| module 10 rule | code | verdict |
+|---|---|---|
+| entry option 1: "Take the full imbalance ... plan the entry at weekly demand proximal line" | `EntryPrice(Proximal)` | correct |
+| entry option 2: "Use half the width of the original imbalance" | `EntryPrice(Midpoint)`, `--alfonso-half-entry` | correct, built in 3.50 |
+| entry option 3: "Locate a lower timeframe imbalance inside the imbalance ... used to drill the entry down" | `Nesting.FindHost`, and every scenario row past the first is a nested entry | correct |
+| entry option 4: "Use a lower timeframe imbalance located at the **distal** line of the bigger timeframe imbalance ... make sure you use the stop padding you would use for the bigger timeframe imbalance" | **absent** - see below | **gap** |
+| stop protection: "we need to add 25% of padding" | `StopPaddingFraction = 0.25` | correct, and it is the module's own figure |
+| target: fixed reward multiple from the padded stop | `TargetPrice` computes risk as entry-to-padded-stop and applies `RewardMultiple` | correct |
+| "no set and forget trades will be possible" if the top timeframe is out of alignment | `ScenarioMatrix` refuses unless the top trends; the rule is quoted in the source | correct |
+| "stick to trading with the trend and never against it"; counter-trend and OOA scenarios excluded | the matrix is a whitelist and direction always follows the top | correct |
+| set and forget: "Use only fresh levels ... The first pullback is the safest" | `FreshLevelsOnly`; `IsTradeable` requires Fresh or Tested | correct |
+| "Confirmation is defined as a brand new imbalance created at a bigger timeframe imbalance or a bigger timeframe confluence" | two mechanisms exist, neither is this - see below | **mismatch** |
+
+#### Entry option 4: the stop padding always comes from the inner zone
+
+The agent computes protection as `zone.StopPrice(StopPaddingFraction)` (`AlfonsoAgent.cs:263` and
+`:497`), and `StopPrice` pads by **the zone's own width**. For a nested entry the zone is the inner,
+lower-timeframe one, so the padding is a quarter of the *narrow* zone.
+
+Module 10's fourth option says the opposite for the distal-located case: "make sure you use the stop
+padding you would use for the bigger timeframe imbalance." The host's width is available at that
+point - `TradeCandidate.Host` is right there - so this is a missing rule rather than missing data.
+
+The direction of the error is systematic: nested entries are exactly the case where the inner zone is
+much narrower than its host, so the padding is much tighter than the book prescribes, and the stop
+sits closer. **Unmeasured**: the candidate log records the traded zone's geometry but not its host's,
+so sizing this needs a new column or a harness pass.
+
+#### "Confirmation" is a different thing in the code
+
+Module 10 defines it precisely: **"Confirmation is defined as a brand new imbalance created at a
+bigger timeframe imbalance or a bigger timeframe confluence"** - a *new* zone forms at an HTF level,
+and that new zone is what you trade. Its worked example is explicit: "New weekly demand created at [5]
+after breaking bearish weekly trendline ... #5 would be a confirmation type of trade."
+
+The code has two things called confirmation and neither is that:
+
+- `AllowConfirmationEntries` (default off) lets a **Tested** zone be traded when it has a host. That
+  re-trades the *same, already-tested* zone rather than a newly created one.
+- `RequireReversalConfirmation` (default off) requires the candle to trade into the zone and close
+  back out of it, entering at market on that close. This is a candle-reversal filter; its own
+  documentation says it "departs from the book's set-and-forget premise".
+
+The structure the book describes does exist in the engine - a newly created lower-timeframe zone
+whose `Host` is a higher-timeframe zone is precisely a "brand new imbalance created at a bigger
+timeframe imbalance", and rows 2-4 of the matrix trade exactly that. **What is missing is its use as a
+rescue route.** The book invokes confirmation for levels that fail the set-and-forget bar - "the level
+is wicky, tested or used-up, the trend is not with us, there is a critical obstacle" - and module 7
+adds sub-2:1 levels (3.58). In the code those levels are simply dropped; no confirmation path
+reconsiders them.
+
+So this is the same shape as 3.58's finding, seen from the other side: the book has one rescue
+mechanism used in several places, and the code implements the mechanism as an ordinary entry path
+while implementing none of the rescues.
+
+#### One ambiguity, low severity
+
+Module 10 says the option-1 entry is "at weekly demand proximal line at $46.25, **including the entry
+padding**" - the only mention of an *entry* padding anywhere in the eleven PDFs, and it is never
+defined or given a figure. `EntryPrice` returns the proximal exactly, with no padding. Recorded
+because the phrase exists, not as a defect: there is nothing to implement from one undefined mention.
+
+### 3.62 Module 11 audited against the code: the scenario matrix is exactly right, and 3.60's finding is withdrawn (2026-09-05)
+
+Read `11-Building your own trading plan` against `ScenarioMatrix`, `AlfonsoAgent` and the options
+record. Much of the module is routine, psychology and self-discipline with no code counterpart. The
+mechanical core is the **eight-scenario table**, the exit rule, and the money-management plan.
+
+#### 3.60's "down vs out of alignment" finding is WITHDRAWN
+
+Module 11 states the realignment scenarios as a **text table**, not slides, and it is unambiguous:
+
+| Top | Middle | Lower | Action |
+|---|---|---|---|
+| Uptrend | Uptrend | Uptrend | Long at lower timeframe demand levels |
+| Uptrend | Uptrend | **Out of alignment** | Long at lower demand inside middle timeframe demand |
+| Uptrend | **Out of alignment** | **Out of alignment** | Long at lower timeframe demand inside top timeframe demand |
+| Uptrend | **Out of alignment** | **Out of alignment** | Long at the **middle** timeframe demand inside top timeframe demand |
+
+plus the mirrored four for downtrends. Every non-aligned cell says **"Out of alignment"** - never
+"Downtrend". 3.60 read module 9's slide captions ("Daily **down** out of alignment") as evidence that
+the book treats down and OOA as one bucket, and inferred that `ScenarioMatrix`'s strict
+`== OutOfAlignment` test wrongly refuses the depicted configuration. **That inference was wrong.** The
+slides are loose prose; module 11 is the specification, and the code matches it exactly. The strict
+test is correct and no change is needed.
+
+The code's own phrasing corroborates it: the catch-all refusal says "not one of the **eight** permitted
+setups", which is exactly this table's four bullish plus four bearish rows.
+
+**How the error happened, since it is the second of its kind this session.** I treated an illustrative
+caption as normative without checking whether a later module stated the same rule formally. The
+lesson is the one 3.50 already records for stale binaries, in a different domain: when two sources in
+this course disagree, the one stating a table or a numbered rule outranks the one captioning a
+picture.
+
+| module 11 rule | code | verdict |
+|---|---|---|
+| the eight-scenario table above | `ScenarioMatrix.Resolve` rows 1, 2, and 3/4 (which emits both the lower-nested and middle-nested entries) | **correct, row for row** |
+| "Exit at a fixed target of 3:1, three times the width of the imbalance **including the padding**" | `RewardMultiple = 3.0`; `TargetPrice` measures risk entry-to-**padded**-stop, so a proximal entry targets 3 x (width + padding) | correct, and precisely as worded |
+| "Do not move the stop loss to breakeven. It's either a win or a loss" | `AllowPositionManagement` **off by default**, and the option's own doc quotes this sentence | correct |
+| "ALWAYS pre-plan all of your trades, do not use market execution orders" | resting limit orders throughout | correct; `RequireReversalConfirmation` enters at market and is a documented departure, off by default |
+| "I focus only on assets that are clearly trending" | the top timeframe must trend or nothing resolves | correct |
+| IPO/ICO and all-time lows: "Buy the whole imbalance or half of it", "Wait for new smaller timeframe demand zones", or "Do nothing" | proximal or midpoint entry; nesting; refusal when no scenario resolves | correct - all three branches exist |
+| 1% risk per trade, 5% total exposure, max 5 open trades, max 2 correlated | generic platform homes; the agent itself sizes at a fixed `Quantity` | as recorded in 3.50, unchanged |
+| "Max of 2 losses in the same asset"; monthly goal 3-5% and 5% drawdown stops | no home anywhere - `AgentMarketContext` carries no closed-trade history | as recorded in 3.50, unchanged |
+| **"A new trade can only be opened if I protect one of the existing trades or one of them has hit its target"** | no code anywhere | **new gap** - not in 3.50's list of missing money-management rules |
+| "Close the trade before the fixed 3:1 target is reached" if strong obstacles have formed | discretionary by the book's framing; partly pre-empted by the 3:1 margin gate refusing such trades up front | as recorded in 3.50 |
+
+#### The one new gap: trade pacing
+
+Module 11's plan gates *new* trades on the state of existing ones - "A new trade can only be opened if
+I protect one of the existing trades or one of them has hit its target" - and adds a second pacing
+rule for after the monthly goal is hit ("No more than one trade at a time ... If the trade is a
+winner, I will be allowed to take a new one until I get a loss").
+
+Neither exists. The agent is per-instrument and holds at most one position and one resting order for
+its own instrument (`AlfonsoAgent.cs:114-126`), which is compatible with the book but is not this
+rule: the book's is a **portfolio** pacing constraint across instruments, and it needs the same
+closed-trade history that the two-losses rule needs. It belongs with 3.50's list of money-management
+rules the agent contract cannot currently express, and is added here.
 
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
@@ -6080,6 +6769,129 @@ into `docs/`; Docker packaging.
 
 ## Recent session log
 
+- **2026-09-05 (later)**: Audited module 2 (`02-Types of Imbalances`) against the zone engine
+  (§3.53). The two-type taxonomy, valley/peak geometry, the CP definition and module 3's CP
+  exclusion from trendlines are all implemented correctly, and `IsContinuation` is a sound
+  operationalisation of the book's CP rather than a loose approximation. **One measured deviation**:
+  module 2's drop/rally base is two ERCs, the code uses only the turning candle, so the distal
+  excludes the opposing ERC's extreme - 384 such bases over ~75k H4 bars, 48% with a different
+  distal, median omission 0.14 zone widths and 42% of those above 0.25. Left unfixed pending the
+  A/B that `CLAUDE.md` requires for zone-creation changes. Also found that neither the drop/rally
+  base nor the swing-vs-CP classification has any unit test. New tool:
+  `tools/alfonso_droprally_distal.py`.
+- **2026-09-05 (module 11, last)**: Audited module 11 (§3.62). It carries the **canonical
+  eight-scenario table in text**, and `ScenarioMatrix` matches it row for row - which **withdraws
+  §3.60's finding**: every non-aligned cell reads "Out of alignment", never "Downtrend", so the strict
+  test is right and module 9's slide captions were loose prose. Error recorded rather than deleted; the
+  lesson is that a stated table outranks a picture caption. Also correct: the 3:1 exit measured as
+  3 x (width + padding) exactly as worded, no-breakeven (`AllowPositionManagement` off, quoting the
+  book), limit-order pre-planning, and all three IPO/ICO branches. **One new gap** beyond §3.50's
+  list: "A new trade can only be opened if I protect one of the existing trades or one of them has hit
+  its target" - a portfolio pacing rule with no code home, needing the same closed-trade history the
+  two-losses rule needs. No code changed. **All eleven modules now audited.**
+- **2026-09-05 (module 10)**: Audited module 10 (§3.61). Entry options 1-3 (proximal, half-width,
+  nested) are built, 25% stop padding matches, and the top-OOA and counter-trend refusals are
+  correct. **Two findings.** (1) Entry option 4 - a lower-timeframe zone at the host's *distal*, using
+  "the stop padding you would use for the bigger timeframe imbalance" - is absent: `StopPrice` always
+  pads by the inner zone's own width, so nested stops are systematically tighter than the book
+  prescribes. Host geometry is available (`TradeCandidate.Host`); unmeasured because the candidate log
+  omits it. (2) The book defines confirmation as "a brand new imbalance created at a bigger timeframe
+  imbalance"; the code's two confirmation switches are a tested-zone re-trade and a candle-reversal
+  filter, neither of which is that. The book's structure exists as the ordinary nested-entry path, but
+  is never used as the **rescue** route the book intends for wicky/tested/used-up/sub-2:1 levels -
+  the same gap §3.58 found from the module 7 side. No code changed.
+- **2026-09-05 (module 9)**: Audited module 9 (§3.60), **including its three scenario slides**, which
+  are images `pdftotext` never saw - so §3.49's "the matrix matches the table exactly" had never been
+  checked against the table. Extracted with `pdfimages` and read: all three rows match, and slide 1's
+  single arrow on D **settles §3.59's carry-over** (no middle entry in the all-aligned row). Nesting's
+  distal-only test is right, and the course's own NFLX example passes only because `Contains` is
+  inclusive - the two zones share a distal exactly. **New finding**: both slides label the non-aligned
+  timeframes "down" *and* "out of alignment", while `ScenarioMatrix` requires strictly
+  `OutOfAlignment`; a lower timeframe in a confirmed `Downtrend` (directly reachable, and ~14% of bars
+  per §3.30 against OOA's 56-76%) falls through to the catch-all refusal, so the code refuses the
+  configuration slide 2 depicts read literally. Both readings defensible; not changed, and the
+  affected population is **unmeasured** because the tally does not break refusals down by alignment.
+  No code changed.
+- **2026-09-05 (module 8)**: Audited module 8 (§3.59). **Clean.** Three timeframes exactly, strict
+  ordering validated, all five book sequences present, top-gives-direction enforced in
+  `ScenarioMatrix`. Checked the calendar-timeframe path specifically since the book's flagship
+  sequences are M/W/D and W/D/H4: `BarInterval` treats week/month as units, `IntervalMath` buckets
+  them with real calendar arithmetic, and brokers map them natively - the "monthly is really a 30-day
+  bucket" failure mode does not exist. The lone 30-day approximation (`ToTimeSpan`) only feeds role
+  ordering. One item **carried to module 9**: module 8 says the middle timeframe "can also be used as
+  the execution timeframe", and `ScenarioMatrix` offers Middle as an entry only in rows 3/4, not in
+  the all-aligned row - module 9's table governs whether that is right. No code changed.
+- **2026-09-05 (module 7)**: Audited module 7 (§3.58). `ZoneScorer` is a faithful reading of the
+  module, and the impulse/base/freshness/2:1 mechanics all check out, including that the 2:1 is
+  measured proximal-to-distal as stated and the 3:1 margin to the first opposing zone. **Two
+  findings.** (1) Module 7 defines an accomplishment as **two** routes ("trendline break or opposing
+  imbalance taken out"), narrower than module 4's three, so `SwingBroken` does not just create zones
+  (§3.55) - it **raises their grade**: 85% of accomplished candidates are score-inflated by it and 27%
+  would score zero. (2) The book keeps sub-2:1 zones tradeable **with confirmation**; the code drops
+  them at `IsTradeable` so no confirmation path reaches them - and §3.51/§3.52 measured that exact
+  population as performing no worse than the 2-3:1 band the gate admits. Neither fixed; both are
+  behaviour changes needing their own A/B. No code changed.
+- **2026-09-05 (module 6)**: Audited module 6 (§3.57). **Faithful** - `RangeCalculator` reproduces the
+  book's worked example exactly (7.5 span -> bands at 112 / 107.50), uses proximal lines as specified,
+  checks range permission on every timeframe in the sequence, and implements the control rule
+  including transfer to an opposing zone. **Corrected §3.49**, which claimed the zone-in-control gate
+  is off by default: it has been ON since `8bc113a` (2026-09-01), though every research run in this
+  file disables it with `--alfonso-ignore-control` - worth stating plainly, since it means the
+  published numbers ran without a rule the book states. One unmeasured gap: at ATH/ATL the range is
+  `Unavailable` and permits both directions while the book retains one-sided "too low/too high"
+  knowledge; control covers most of it but only after a touch. No code changed.
+- **2026-09-05 (modules 4-5)**: Audited modules 4 and 5 (§3.55, §3.56). **Module 4 produced the
+  audit's biggest finding**: `SwingBreakIsAnAccomplishment` (default on) is a **fourth** zone-creation
+  route justified by a quoted rule that appears in **none of the eleven PDFs** - module 4 lists
+  exactly three - and 27% of accomplished candidates (14,261 of 53,578) qualify solely through it,
+  while the trendline break the book presents first is the rarest route at ~2,700. Also found module
+  4's engulfing base template has no code (535 of 1,880 engulfing shapes form no base), which
+  **narrows the module 1 note in §3.49** - absent engulfing code is compliance for candle
+  classification, not for base drawing. **Module 5 is clean**: every rule implemented and scoped
+  correctly, including the over-extension trading prohibition, with the "large ERC" nuance measured
+  and dismissed (23 triggers, none small). No code changed for either module.
+- **2026-09-05 (last)**: Audited module 3 (`03-Drawing Trendlines`) against `Trend/` (§3.54).
+  `TrendlineBuilder` implements every drawing rule the module states - both activation conditions,
+  the rising/falling second-swing rules, the no-cut-through-candles fit, the CP exclusion and the
+  can't-draw-one fallback - and the bearish activation's index spans were checked specifically rather
+  than assumed. **One defect found upstream of it**: `SwingPoint.Index` is documented as the bar of
+  the swing extreme but is set from `zone.BaseEnd`, while `Price` is the extreme over the whole base,
+  so the two describe different bars in ~36% of bases (measured: 19,282 candidate bases, 57%
+  multi-candle, 63% of those with the extreme off the last bar; index wrong by a median 1 bar). It
+  feeds `TrendlineBuilder.Fit`'s slope arithmetic. **Fixed and A/B'd**: `Imbalance.DistalAt` +
+  `AnchorSwingsAtExtreme` (default true, `--alfonso-swing-anchor-at-base-end` to opt out);
+  133 -> 135 trades, avgR -0.1420 -> -0.1066, B-A +0.0354R CI [-0.3848, +0.4556] - contains zero, so
+  the change rests on correctness. Arm A reproduced 3.53's arm B exactly (n=133, -0.1420, -3,171),
+  confirming the harness. Two multi-candle-base trendline tests added, mutation-checked. New tools:
+  `tools/alfonso_swing_anchor.py`, `tools/alfonso_swing_anchor_ab.sh`.
+- **2026-09-05 (later still)**: Fixed the 3.53 deviation and A/B'd it.
+  `ImbalanceOptions.DropRallyBaseSpansBothCandles` defaults true, with
+  `--alfonso-single-candle-drop-rally` as the opt-out, so both arms run from one binary and differ by
+  one flag. **A/B: 132 -> 133 trades, avgR -0.1212 -> -0.1420, B-A -0.0208R, CI [-0.4426, +0.4010]** -
+  contains zero, as it must at n=132 against a ~3,500-per-arm requirement, so the change rests on
+  correctness rather than on this result. Flag verified live (all six candidate logs differ between
+  arms). Closed the coverage gap with `Simulator.Tests/AlfonsoModuleTwoTests.cs` (8 tests,
+  mutation-checked: reverting the default fails 3 of 8). Alfonso suite 112 green. New tools:
+  `tools/alfonso_droprally_ab.sh`.
+- **2026-09-05**: Read module 1 (`01_Basic_Concepts_and_Terminonoly`) against
+  `Agent/Strategies/Alfonso/` line by line. Everything module 1 states mechanically is implemented
+  correctly: ERC at 80% of range, bullish/bearish by close-vs-open, basing as the sub-ERC pause,
+  peaks/valleys (`Trend/SwingPoint.cs`), OHLC-only inputs (`AlfonsoBar` carries no volume, spread or
+  instrument), trend-only trading (`ScenarioMatrix.cs:51` refuses unless the top timeframe trends).
+  The H4 floor is a *sharing* rule, not a trading rule, so `TimeframeSequence.Scalping`'s M15 leg is
+  not a violation. The one departure is ATR, already recorded in §3.50. **Corrected §3.49**: its
+  "candle reading missing entirely" row is withdrawn - module 1 instructs the reader to ignore named
+  patterns, so the absence of engulfing/harami code is compliance. **One code change**: the ERC ratio
+  was written as a `0.80m` literal twice (`ImbalanceOptions` and `AlfonsoTrendOptions`) with nothing
+  linking them; both now default from `AlfonsoBar.ExtendedRangeBodyRatio`, a single named constant.
+  No behaviour change - the values were already equal, and neither is exposed on the CLI. Agent
+  builds clean; 104 Alfonso tests pass.
+- **2026-09-04 (later still, verification only)**: Re-ran every test suite in the solution on the
+  current branch; no code changed. 1,692 passing / 0 failing across the six runnable suites
+  (breakdown in §2.1). `DBManager.Tests` fails 7/7 purely because there is no Docker daemon on this
+  machine for `Testcontainers`; `Brokers.IntegrationTests` was deliberately not run because it hits
+  live broker APIs. Also re-read §3.51/§3.52 to report the held-out 5:1 results — no correction
+  needed to either section.
 - **2026-09-04 (later)**: Tested §3.51's 5:1 hypothesis forward on candles that did not produce it
   (§3.52), with the predictions committed in git beforehand. **It replicates**: +0.1685 on a new
   2.9-year period for the same five instruments and +0.2340 on six FX pairs never studied, against

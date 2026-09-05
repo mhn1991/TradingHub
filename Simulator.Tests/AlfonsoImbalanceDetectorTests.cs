@@ -316,6 +316,7 @@ public sealed class AlfonsoImbalanceDetectorTests
             Distal = 96m,
             BaseStart = Start,
             BaseEnd = Start,
+            DistalAt = Start,
             ConfirmedAt = Start,
             BaseCandleCount = 1,
             Strength = ImpulseStrength.Strong,

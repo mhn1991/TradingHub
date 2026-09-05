@@ -34,6 +34,7 @@ public sealed class AlfonsoScoringAndEntryTests
         Distal = distal,
         BaseStart = Start.AddMinutes(minute),
         BaseEnd = Start.AddMinutes(minute),
+        DistalAt = Start.AddMinutes(minute),
         ConfirmedAt = Start.AddMinutes(minute),
         BaseCandleCount = baseCandles,
         Strength = strength,

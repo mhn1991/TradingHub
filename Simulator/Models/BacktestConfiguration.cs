@@ -768,6 +768,10 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-allow-invalid-hosts disables module 7's negation rule for nested entries.</summary>
     public bool AlfonsoRequireValidHost { get; init; } = true;
 
+    public bool AlfonsoDropRallyBaseSpansBothCandles { get; init; } = true;
+
+    public bool AlfonsoAnchorSwingsAtExtreme { get; init; } = true;
+
     /// <summary>--alfonso-overextension-trendlines: module 3's aggressive line across three CPs.</summary>
     public bool AlfonsoOverExtensionTrendlines { get; init; }
 
@@ -1051,6 +1055,7 @@ public sealed record BacktestRequest
                         EliminationRequiresClose = AlfonsoEliminationRequiresClose,
                         SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
                         TreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation,
+                        DropRallyBaseSpansBothCandles = AlfonsoDropRallyBaseSpansBothCandles,
                         MinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,
                         EntryPlacement = AlfonsoHalfZoneEntry
                             ? ZoneEntryPlacement.Midpoint
@@ -1062,7 +1067,8 @@ public sealed record BacktestRequest
                         RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
                         RequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
                         RequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
-                        OverExtensionTrendlines = AlfonsoOverExtensionTrendlines
+                        OverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
+                        AnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme
                     }
                 };
                 return new TradingAgentDefinition { Kind = kind, Alfonso = alfonso };

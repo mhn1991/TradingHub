@@ -42,8 +42,25 @@ public sealed record AlfonsoTrendOptions
     /// <summary>Consecutive same-direction extended range candles that mark over-extension.</summary>
     public int OverExtensionExtendedRangeCandles { get; init; } = 3;
 
-    /// <summary>Body-to-range ratio at which a candle counts as an ERC for over-extension.</summary>
-    public decimal ExtendedRangeBodyRatio { get; init; } = 0.80m;
+    /// <summary>
+    /// Whether a swing is anchored on the bar that printed its extreme rather than on the last bar of
+    /// its base. Module 3 connects trendlines through the valleys and peaks themselves - the swing
+    /// low or high - and <see cref="SwingPoint.Index"/> feeds `TrendlineBuilder.Fit`'s slope
+    /// arithmetic, so the two have to name the same bar.
+    /// <para>
+    /// Default true. False restores the base-end anchoring every result before 2026-09-05 was
+    /// measured under, where the anchor price sat on a bar that never traded it in about 36% of
+    /// bases (3.54).
+    /// </para>
+    /// </summary>
+    public bool AnchorSwingsAtExtreme { get; init; } = true;
+
+    /// <summary>
+    /// Body-to-range ratio at which a candle counts as an ERC for over-extension. Defaulted from
+    /// <see cref="AlfonsoBar.ExtendedRangeBodyRatio"/>, module 1's definition, which the zone layer
+    /// defaults from too.
+    /// </summary>
+    public decimal ExtendedRangeBodyRatio { get; init; } = AlfonsoBar.ExtendedRangeBodyRatio;
 
     /// <summary>
     /// Whether the aggressive over-extension trendline of module 3 may be drawn: "In over-extension
@@ -318,14 +335,16 @@ public sealed class AlfonsoTrendDetector
             if (zone.IsContinuationPattern && !_options.OverExtensionTrendlines)
                 continue;
 
-            int index = _times.FindLastIndex(time => time == zone.BaseEnd);
+            // Module 3 draws through the extreme itself, so that is the bar the line is anchored on.
+            DateTimeOffset at = _options.AnchorSwingsAtExtreme ? zone.DistalAt : zone.BaseEnd;
+            int index = _times.FindLastIndex(time => time == at);
             if (index < 0)
                 continue;
 
             SwingPoint swing = new()
             {
                 Index = index,
-                At = zone.BaseEnd,
+                At = at,
                 Price = zone.Distal,
                 Kind = zone.Kind
             };
