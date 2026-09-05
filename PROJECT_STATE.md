@@ -6137,6 +6137,100 @@ rule: the book's is a **portfolio** pacing constraint across instruments, and it
 closed-trade history that the two-losses rule needs. It belongs with 3.50's list of money-management
 rules the agent contract cannot currently express, and is added here.
 
+### 3.63 CORRECTION: true R never converted the quote currency, so GBP/JPY contributed ~nothing to every pooled average (2026-09-05)
+
+Found while auditing individual trades in the inspection page (below). **`true_r` in
+`tools/alfonso_ab_report.py` divided a USD P&L by a risk denominated in the QUOTE currency**, with no
+conversion:
+
+```
+risk = |entry - stop| * quantity          # quote currency
+return netProfitLoss / risk               # account currency
+```
+
+`quantity` is in base-currency units, so `|entry - stop| * quantity` is in the **quote** currency.
+For every USD-quoted instrument that is the account currency and the rate is 1.0, which is why this
+went unseen. For **GBP/JPY on a USD account the rate is 0.006322**, so its R was understated by a
+factor of ~158 - a full 1R loss recorded as -0.006R. GBP/JPY was in every pooled average while
+contributing essentially zero to it.
+
+The rate was confirmed empirically rather than taken from the `--quote-rate` flag: `gross / ((entry -
+exit) * quantity)` is 1.000000 for gold, silver, NAS100, US30 and EUR/USD, and **0.006322** for
+GBP/JPY - exactly the flag the runs passed. Both tools now derive it per trade, so it cannot drift
+from the run that produced the file.
+
+#### Every published figure that moves
+
+| section | figure | as published | corrected |
+|---|---|---|---|
+| 3.54 | arm A avgR | -0.1420 | **-0.2097** |
+| 3.54 | arm B avgR | -0.1066 | **-0.1733** |
+| 3.54 | B - A | +0.0354 | +0.0364 |
+| 3.52 axis B | R2 avgR | -0.3974 | **-0.4775** |
+| 3.52 axis B | R5 avgR | -0.3440 | **-0.4507** |
+| 3.52 axis B | R5 - R2 | +0.0534 | +0.0268 |
+| 3.52 axis A | P2 avgR | -0.2092 | **-0.3506** |
+| 3.52 axis A | P5 avgR | -0.1191 | **-0.2891** |
+| 3.52 axis A | P5 - P2 | +0.0901 | +0.0615 |
+| 3.50 host rule | A avgR | (as run) | **-0.2389** |
+| 3.50 host rule | B avgR | (as run) | **-0.2337** |
+| GBP/JPY alone, 3.54 arm B | avgR | -0.0028 | **-0.4486** |
+
+**What changes and what does not.** Every *level* is worse than published - the method loses more
+than this file has been recording. **No conclusion changes**: the defect applies equally to both arms
+of every A/B, so each difference is nearly untouched and every interval still contains zero. 3.43's
+verdict is unaffected in direction and strengthened in magnitude.
+
+Axis A of 3.52 and 3.54 both include GBP/JPY; axis B additionally includes USD/CAD, USD/CHF and
+USD/JPY, all non-USD-quoted. Only the six-instrument runs that happen to exclude GBP/JPY are clean.
+
+**Why it survived this long.** Five of the six headline instruments are USD-quoted, so the bug is
+invisible unless you read a GBP/JPY trade on its own - which is exactly how it was found: a ledger row
+showing -0.01R next to a chart of a full stop-out. Commit `4a409f9` did prove the quote-currency
+conversion, but for the *sizing* path; the R calculation in the reporting tool was never checked
+against it.
+
+### 3.63a The same audit, applied to every trade rather than one (2026-09-05)
+
+Two checks over all 135 arm-B trades came back clean:
+
+- **Fills are all legitimate.** Every entry price sits inside the bar at `openedAt` or the bar one
+  execution-interval earlier; none outside both. The apparent impossibility that started this - an
+  entry of 25566 on a candle whose low was 25616.8 - is the bar-close stamping convention recorded in
+  3.54, not a bad fill.
+- **The agent never traded against its own stated direction.** 135/135 sides match the trend claimed
+  in the scenario text.
+
+**A trend check that looked alarming and was not.** Comparing the claimed trend against a regression
+slope over the prior 30 4h closes disagreed on **31%** of trades, and the disagreement did not fall at
+shorter lookbacks (43% at 0.7 days). Inspecting the worst case dissolved it: gold 2026-01-30, called
+"All three timeframes Downtrend" against a +6.25% 5-day slope, had printed lower highs on five of its
+last six 4h bars and collapsed from 5,050 to **4,679** on the bar after the trade. The short was
+right; the slope was still measuring the rally that preceded the reversal. **This is module 5's own
+point** - a trend is structure plus an accomplishment, not net drift - so a slope proxy is guaranteed
+to disagree exactly at the turning points this method exists to trade.
+
+Tested properly, the disagreements are where the agent reads direction **better**:
+
+| | n | price moved the called way over the next 2 days | avg true R |
+|---|---|---|---|
+| slope agrees | 81 | 38% | +0.0449 |
+| slope disagrees | 37 | **65%** | **-0.4719** |
+
+The reversal calls follow through more often and lose more money. Entering a turn with a stop only a
+zone-width-plus-padding wide means the whipsaw takes the trade out before the move develops. With
+n=37 against 81 and true-R dispersion near 1.3, treat the R gap as suggestive, not established.
+
+**The losses are mostly not wrong calls.** Of 99 stop-outs: **84% lose more than the 1R they
+planned** (mean overshoot +0.24R, worst -3.84R true R), and **30% printed their 3:1 target within 4
+hours of being stopped, 62% within 24 hours** (median 4.5h). That corroborates 3.50's replay note
+that a break-even stop at +1R lifted gross expectancy from +0.0709R to +0.1654R. **It is a diagnostic,
+not a counterfactual P&L** - without the stop, price could have run much further against the position
+first.
+
+Both are now filterable in the trade page (`Target printed after the stop`), and each stopped trade
+shows how far beyond its own stop it exited.
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
@@ -6798,6 +6892,15 @@ into `docs/`; Docker packaging.
   A/B that `CLAUDE.md` requires for zone-creation changes. Also found that neither the drop/rally
   base nor the swing-vs-CP classification has any unit test. New tool:
   `tools/alfonso_droprally_distal.py`.
+- **2026-09-05 (correction)**: **`true_r` never converted the quote currency** (§3.63). Risk was
+  computed in the quote currency and divided into an account-currency P&L, so GBP/JPY's R was
+  understated ~158x and it contributed essentially nothing to any pooled average. Fixed in
+  `alfonso_ab_report.py` and `alfonso_trade_viz.py`, deriving the rate per trade from its own P&L.
+  **Every published level is worse than recorded** (3.54 arm B -0.1066 -> -0.1733; 3.52 axis A P2
+  -0.2092 -> -0.3506); **no conclusion changes**, since the defect hits both arms of every A/B
+  equally. Also audited every trade rather than one (§3.63a): fills all legitimate, 135/135 sides
+  match the claimed trend, and the losses are mostly correct calls stopped by noise - 84% of stop-outs
+  lose more than 1R and 62% print their target within a day.
 - **2026-09-05 (visualisation, later)**: Added Bollinger/RSI/CCI to the trade page as a clearly
   separate reference layer (module 1 prohibits all three by name; the agent never reads them), and
   fixed three defects the review surfaced. (1) Trade timestamps are bar **close** times, so markers

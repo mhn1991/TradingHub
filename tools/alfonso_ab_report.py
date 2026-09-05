@@ -66,8 +66,28 @@ def trades(root, arm, instrument):
     return (hit[0].get("trades") or []) if hit else []
 
 
+def quote_rate(t):
+    """Quote-currency to account-currency rate for one trade, derived from its own P&L.
+
+    `quantity` is in units of the base currency, so |entry - stop| * quantity is denominated in the
+    QUOTE currency while netProfitLoss is in the account currency. For a USD-quoted instrument these
+    coincide and the rate is 1.0; for GBP/JPY on a USD account it is about 0.0063, and dividing an
+    unconverted risk into a USD P&L understates R by a factor of ~158 - which silently removed
+    GBP/JPY from every pooled average (3.63).
+
+    Derived per trade rather than taken from --quote-rate so it cannot drift from the run.
+    """
+    move = (t["entryPrice"] - t["exitPrice"]) if t["side"] == "Sell" else (t["exitPrice"] - t["entryPrice"])
+    denominator = move * t["quantity"]
+    if abs(denominator) < 1e-9:
+        return 1.0
+    rate = t["grossProfitLoss"] / denominator
+    # A rate far from a plausible FX quote means the trade is degenerate, not that the market moved.
+    return rate if 1e-6 < rate < 1e6 else 1.0
+
+
 def true_r(t):
-    risk = abs(t["entryPrice"] - t["stopLossPrice"]) * t["quantity"]
+    risk = abs(t["entryPrice"] - t["stopLossPrice"]) * t["quantity"] * quote_rate(t)
     return t["netProfitLoss"] / risk if risk > 0 else None
 
 

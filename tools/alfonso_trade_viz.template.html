@@ -184,6 +184,12 @@ table.data td{padding:6px 9px 6px 0;border-bottom:1px solid var(--grid);white-sp
       <span><i class="dot" style="background:var(--loss);border-radius:50%"></i> Stopped out</span>
       <span style="color:var(--muted)">&mdash; dot ring marks a trade present in one arm only</span>
     </div>
+    <p class="note" style="margin:-4px 0 12px">Most losses are not wrong calls. 84% of stop-outs exit
+      <em>beyond</em> their own stop, and the majority go on to print the 3:1 target within a day &mdash;
+      filter the ledger below by &ldquo;Target printed after the stop&rdquo; to read them. That is a
+      diagnostic, not a counterfactual: without the stop, price could have run much further against the
+      position first.
+    </div>
     <div class="chartbox"><svg id="strip" role="img" aria-label="Realised R by instrument"></svg></div>
   </div>
 </section>
@@ -286,6 +292,8 @@ function stats(arm) {
 }
 function renderTiles() {
   const a = stats('a'), b = stats('b');
+  const stopped = T.filter(t => t.exitReason === 'InitialStopLoss');
+  const stops = stopped.length, rec = stopped.filter(t => t.recoveredIn != null).length;
   const row = (k, av, bv) => `<div class="lab">${k}</div>
     <div class="num" style="color:var(--arm-a)">${av}</div><div class="num" style="color:var(--arm-b)">${bv}</div>`;
   document.getElementById('tiles').innerHTML = `
@@ -294,6 +302,7 @@ function renderTiles() {
     <div class="tile"><div class="k">Average R</div><div class="v" style="color:var(--loss)">${a.avg.toFixed(4)}</div><div class="s">${b.avg.toFixed(4)} in arm B</div></div>
     <div class="tile"><div class="k">Net</div><div class="v" style="color:var(--loss)">${fmtMoney(a.net)}</div><div class="s">${fmtMoney(b.net)} in arm B</div></div>
     <div class="tile"><div class="k">Shared setups</div><div class="v">130</div><div class="s">identical R in both arms</div></div>
+    <div class="tile"><div class="k">Target after stop</div><div class="v">${rec}<span style="font-size:15px;color:var(--muted)">/${stops}</span></div><div class="s">printed the 3:1 within 24h</div></div>
     <div class="tile"><div class="k">Swing-break only</div><div class="v">${T.filter(swingOnly).length}</div><div class="s">of ${T.length} distinct trades</div></div>`;
 }
 
@@ -417,7 +426,7 @@ function renderEquity() {
 }
 
 /* ---------- filters + ledger ---------- */
-const filters = { inst: 'all', outcome: 'all', rule: 'all', arm: 'all' };
+const filters = { inst: 'all', outcome: 'all', rule: 'all', arm: 'all', after: 'all' };
 function renderFilters() {
   const insts = [...new Set(T.map(t => t.inst))];
   const grp = (key, opts) => `<div class="grp" role="group">` + opts.map(([v, l]) =>
@@ -426,7 +435,9 @@ function renderFilters() {
     grp('inst', [['all', 'All']].concat(insts.map(i => [i, T.find(t => t.inst === i).label]))) +
     grp('outcome', [['all', 'Any outcome'], ['TakeProfit', 'Target'], ['InitialStopLoss', 'Stopped']]) +
     grp('rule', [['all', 'Any rule'], ['swing', 'Swing-break only'], ['book', 'Book routes']]) +
-    grp('arm', [['all', 'Either arm'], ['diff', 'Differing only']]);
+    grp('arm', [['all', 'Either arm'], ['diff', 'Differing only']]) +
+    grp('after', [['all', 'Any ending'], ['recovered', 'Target printed after the stop'],
+                  ['never', 'Never recovered']]);
   document.querySelectorAll('button.f').forEach(b => b.addEventListener('click', () => {
     filters[b.dataset.k] = b.dataset.v; renderFilters(); renderLedger();
   }));
@@ -436,7 +447,9 @@ function visible() {
     (filters.inst === 'all' || t.inst === filters.inst) &&
     (filters.outcome === 'all' || t.exitReason === filters.outcome) &&
     (filters.rule === 'all' || (filters.rule === 'swing' ? swingOnly(t) : !swingOnly(t))) &&
-    (filters.arm === 'all' || t.arm !== 'both'))
+    (filters.arm === 'all' || t.arm !== 'both') &&
+    (filters.after === 'all' || (t.exitReason === 'InitialStopLoss' &&
+      (filters.after === 'recovered' ? t.recoveredIn != null : t.recoveredIn == null))))
     .sort((a, b) => a.open - b.open);
 }
 let selected = null;
@@ -449,7 +462,7 @@ function renderLedger() {
     const col = win ? 'var(--wintext)' : 'var(--loss)';
     return `<button class="row" role="option" data-id="${t.id}" aria-selected="${t.id === selected}">
       <i class="mark" style="background:${win ? 'var(--win)' : 'var(--loss)'}"></i>
-      <span><span class="ttl">${t.label} ${t.side}</span><br><span class="meta">${dt(t.open)} &middot; ${t.dur < 60 ? Math.round(t.dur) + 'm' : (t.dur / 60).toFixed(1) + 'h'}${t.arm !== 'both' ? ' &middot; arm ' + t.arm.toUpperCase() + ' only' : ''}${swingOnly(t) ? ' &middot; swing-break only' : ''}</span></span>
+      <span><span class="ttl">${t.label} ${t.side}</span><br><span class="meta">${dt(t.open)} &middot; ${t.dur < 60 ? Math.round(t.dur) + 'm' : (t.dur / 60).toFixed(1) + 'h'}${t.arm !== 'both' ? ' &middot; arm ' + t.arm.toUpperCase() + ' only' : ''}${swingOnly(t) ? ' &middot; swing-break only' : ''}${t.recoveredIn != null ? ' &middot; target +' + (t.recoveredIn < 1 ? Math.round(t.recoveredIn * 60) + 'm' : t.recoveredIn.toFixed(1) + 'h') : ''}</span></span>
       <span class="rr" style="color:${col}">${fmtR(t.r)}</span></button>`;
   }).join('');
   box.querySelectorAll('.row').forEach(r => r.addEventListener('click', () => select(r.dataset.id)));
@@ -506,6 +519,11 @@ function renderInspect() {
         `<span class="tag${bookRoutes.has(a) ? '' : ' warn'}">${a}</span>`).join('')}
         ${swingOnly(t) ? '<span style="font-size:11.5px;color:var(--loss)">&mdash; this zone exists only because of the swing-break route, which is in none of the eleven PDFs</span>' : ''}</div></dd>
       <dt>Excursion</dt><dd class="num">best ${t.mfeR != null ? fmtR(t.mfeR) : '—'} &middot; worst ${t.maeR != null ? fmtR(t.maeR) : '—'}</dd>
+      ${t.exitReason === 'InitialStopLoss' ? `<dt>After the stop</dt><dd>
+        <span class="num">exited ${t.slipR != null ? fmtR(t.slipR).replace('R', 'R') : '—'} beyond the stop</span>
+        ${t.recoveredIn != null
+          ? ` &middot; <b style="color:var(--wintext)">the 3:1 target printed ${t.recoveredIn < 1 ? Math.round(t.recoveredIn * 60) + ' minutes' : t.recoveredIn.toFixed(1) + ' hours'} later</b>`
+          : ' &middot; target never printed within 24h'}</dd>` : ''}
     </dl>`;
   drawTrade(t);
 }

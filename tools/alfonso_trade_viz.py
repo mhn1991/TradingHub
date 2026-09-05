@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+from bisect import bisect_right
 from datetime import datetime, timezone
 
 PADDING = 0.25
@@ -80,9 +81,55 @@ def read_trades(root, arm, tag):
         return {t["setupId"]: t for t in json.load(handle)["strategies"][0]["trades"]}
 
 
+def after_the_stop(trade, bars, times, horizon_hours=24):
+    """For a stopped-out trade: how far past its own stop it exited, and whether its target printed
+    afterwards anyway.
+
+    3.63: 84% of stop-outs lose more than the 1R they planned, and most of them go on to print the
+    target within a day - the direction is often right and the stop is what fails. `recoveredIn` is a
+    diagnostic, NOT a counterfactual P&L: without the stop, price could have run much further against
+    the position first.
+    """
+    if trade["exitReason"] != "InitialStopLoss":
+        return None, None
+    risk = abs(trade["entryPrice"] - trade["stopLossPrice"])
+    sell = trade["side"] == "Sell"
+    slip = (trade["exitPrice"] - trade["stopLossPrice"]) if sell else (trade["stopLossPrice"] - trade["exitPrice"])
+    closed = ts(trade["closedAt"])
+    target = trade["takeProfitPrice"]
+    end = closed + horizon_hours * 3600
+    for i in range(bisect_right(times, closed), len(bars)):
+        t, _o, high, low, _c = bars[i]
+        if t > end:
+            break
+        if (low <= target) if sell else (high >= target):
+            return slip / risk if risk else None, (t - closed) / 3600.0
+    return slip / risk if risk else None, None
+
+
+def quote_rate(t):
+    """Quote-currency to account-currency rate for one trade, derived from its own P&L.
+
+    `quantity` is in units of the base currency, so |entry - stop| * quantity is denominated in the
+    QUOTE currency while netProfitLoss is in the account currency. For a USD-quoted instrument these
+    coincide and the rate is 1.0; for GBP/JPY on a USD account it is about 0.0063, and dividing an
+    unconverted risk into a USD P&L understates R by a factor of ~158 - which silently removed
+    GBP/JPY from every pooled average (3.63).
+
+    Derived per trade rather than taken from --quote-rate so it cannot drift from the run.
+    """
+    move = (t["entryPrice"] - t["exitPrice"]) if t["side"] == "Sell" else (t["exitPrice"] - t["entryPrice"])
+    denominator = move * t["quantity"]
+    if abs(denominator) < 1e-9:
+        return 1.0
+    rate = t["grossProfitLoss"] / denominator
+    # A rate far from a plausible FX quote means the trade is degenerate, not that the market moved.
+    return rate if 1e-6 < rate < 1e6 else 1.0
+
+
 def true_r(trade):
-    """netProfitLoss / (|entry - stop| * quantity) - profit per unit of risk actually taken."""
-    risk = abs(trade["entryPrice"] - trade["stopLossPrice"]) * trade["quantity"]
+    """Profit per unit of risk actually taken, with the risk converted to the account currency."""
+    risk = abs(trade["entryPrice"] - trade["stopLossPrice"]) * trade["quantity"] * quote_rate(trade)
     return trade["netProfitLoss"] / risk if risk else 0.0
 
 
@@ -98,7 +145,7 @@ def entry_role(reason):
     return None
 
 
-def parse(trade, tag, arm, label, digits):
+def parse(trade, tag, arm, label, digits, bars=None, times=None):
     reason = trade.get("setupReason") or ""
     match = ZONE.search(reason)
     strength, ratio, accs = None, None, []
@@ -119,6 +166,7 @@ def parse(trade, tag, arm, label, digits):
                 f"inversion; re-check before trusting the drawn zones.")
 
     opened, closed = ts(trade["openedAt"]), ts(trade["closedAt"])
+    slip_r, recovered_in = (after_the_stop(trade, bars, times) if bars else (None, None))
     return {
         "id": f"{tag}:{trade['setupId']}",
         "inst": tag, "label": label, "digits": digits, "arm": arm,
@@ -140,6 +188,8 @@ def parse(trade, tag, arm, label, digits):
         "scenario": reason.split(".")[0].strip() if reason else "",
         "nested": "nested at" in reason,
         "entryRole": entry_role(reason),
+        "slipR": round(slip_r, 3) if slip_r is not None else None,
+        "recoveredIn": round(recovered_in, 2) if recovered_in is not None else None,
     }
 
 
@@ -311,10 +361,11 @@ def build(root, arms, sequence, quiet=False):
             continue
         a, b = a or {}, b or {}
         bars = load_candles(stem)
+        times = [b[0] for b in bars]
         for key in sorted(set(a) | set(b)):
             arm = "both" if key in a and key in b else (arms[0] if key in a else arms[1])
             arm = {arms[0]: "a", arms[1]: "b", "both": "both"}[arm]
-            record = parse(b.get(key) or a[key], tag, arm, label, digits)
+            record = parse(b.get(key) or a[key], tag, arm, label, digits, bars, times)
             window = slice_window(bars, record["open"], record["close"], digits)
             if window:
                 candles[record["id"]] = window
