@@ -5382,6 +5382,7 @@ rather than by inspection:
 |---|---|---|
 | `tools/alfonso_grade_report.py` | 3.51/3.52 zone tables | the four-sample ratio table exactly: +0.1621, +0.1363, +0.1685, +0.2340 |
 | `tools/alfonso_ab_report.py` | 3.50/3.52 strategy A/B | all three experiments exactly, incl. P5-P2 +0.0901R and B-A +0.0131R |
+| `tools/alfonso_trade_viz.py` + `.template.html` | the 3.54 trade-inspection page | regenerates the published artifact's payload exactly - 138 trades, 0 records differing on any drawn field |
 | `tools/alfonso_lookahead_report.py` + `alfonso_portfolio.py` | 3.47's retraction | `doff=-1` n=4,995 hit 29.03% +0.0326R and `doff=-2` n=4,330 hit 26.84% -0.0571R, plus caps 1/2/3 at 634/1,168/1,515 |
 
 `alfonso_portfolio.py` keeps the `doff` switch that IS the 3.47 bug (-1 reads the still-forming daily
@@ -5626,6 +5627,14 @@ interval contains zero, exactly as in 3.53 and for the same reason - n=133 again
 requirement. **The change rests on correctness, not on this number.** The direction happens to be
 favourable where 3.53's was not; at this sample size that difference is noise and should not be read
 as one fix being better than the other.
+
+**Sharper than the interval: the arms share 130 setups with identical R.** Matching trades by setup
+id, 130 of them appear in both arms and **not one has a different R-multiple**; the entire
+-0.0208R -> +0.0354R swing comes from **8 marginal trades** (4 EUR/USD and 1 XAU/USD present only in
+arm B, 1 XAU/USD + 1 XAG/USD + 1 US30 only in arm A). GBP/JPY and NAS100 are byte-identical between
+arms. So the swing-anchor change is not merely unresolvable at this sample size - it barely touches
+the population at all, which is what a rule affecting ~36% of *bases* but only the trendline anchor
+should look like. Surfaced by `tools/alfonso_trade_viz.py`.
 
 **Two integrity checks passed.** The flag is live - all six candidate logs differ between arms (gold
 2,398 lines, eurusd 918, us30 682). And arm A here reproduces 3.53's arm B **exactly** - n=133,
@@ -6779,6 +6788,14 @@ into `docs/`; Docker packaging.
   A/B that `CLAUDE.md` requires for zone-creation changes. Also found that neither the drop/rally
   base nor the swing-vs-CP classification has any unit test. New tool:
   `tools/alfonso_droprally_distal.py`.
+- **2026-09-05 (visualisation)**: Built `tools/alfonso_trade_viz.py` + `alfonso_trade_viz.template.html`,
+  which turn a two-arm A/B into a self-contained inspection page: population stats, the differing
+  trades, R by instrument, cumulative R, and a per-trade candle chart carrying the imbalance band,
+  entry/stop/target, excursions and the rule that created the zone. Zone lines are **reconstructed**
+  from entry and stop, since `setupReason` rounds to 2dp and is unusable on FX; the inversion is
+  cross-checked against the logged `stopSource` on every trade and the script refuses rather than
+  drawing a wrong zone. **Finding added to §3.54**: the two arms share 130 setups with identical
+  R-multiples, so the whole A/B difference is 8 marginal trades.
 - **2026-09-05 (module 11, last)**: Audited module 11 (§3.62). It carries the **canonical
   eight-scenario table in text**, and `ScenarioMatrix` matches it row for row - which **withdraws
   §3.60's finding**: every non-aligned cell reads "Out of alignment", never "Downtrend", so the strict

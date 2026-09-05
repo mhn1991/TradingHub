@@ -1,0 +1,570 @@
+<title>Alfonso Trade Inspector</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+:root {
+  color-scheme: light;
+  --plane:#f9f9f7; --surface:#fcfcfb; --sunken:#f2f1ed;
+  --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --hair:rgba(11,11,11,.10);
+  --arm-a:#2a78d6; --arm-b:#eb6834;
+  --win:#0ca30c; --loss:#d03b3b; --wintext:#006300;
+  --zone:#4a3aa7; --zone-fill:rgba(74,58,167,.13);
+  --candle:#52514e;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+  color-scheme: dark;
+  --plane:#0d0d0d; --surface:#1a1a19; --sunken:#141413;
+  --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --hair:rgba(255,255,255,.10);
+  --arm-a:#3987e5; --arm-b:#d95926;
+  --win:#0ca30c; --loss:#d03b3b; --wintext:#0ca30c;
+  --zone:#9085e9; --zone-fill:rgba(144,133,233,.16);
+  --candle:#c3c2b7;
+}}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --plane:#0d0d0d; --surface:#1a1a19; --sunken:#141413;
+  --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --hair:rgba(255,255,255,.10);
+  --arm-a:#3987e5; --arm-b:#d95926;
+  --win:#0ca30c; --loss:#d03b3b; --wintext:#0ca30c;
+  --zone:#9085e9; --zone-fill:rgba(144,133,233,.16);
+  --candle:#c3c2b7;
+}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--sans);
+  font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1240px;margin:0 auto;padding:34px 22px 72px;display:flex;flex-direction:column;gap:30px}
+h1{font-size:29px;font-weight:600;letter-spacing:-.02em;margin:0;text-wrap:balance}
+h2{font-size:17px;font-weight:600;letter-spacing:-.01em;margin:0}
+p{margin:0;color:var(--ink2);max-width:68ch}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);
+  font-family:var(--mono)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.panel{background:var(--surface);border:1px solid var(--hair);border-radius:10px;padding:20px}
+.sec{display:flex;flex-direction:column;gap:14px}
+.sechead{display:flex;flex-direction:column;gap:5px}
+
+/* ---- header ---- */
+header{display:flex;flex-direction:column;gap:11px;border-bottom:1px solid var(--hair);padding-bottom:22px}
+.armkey{display:flex;flex-wrap:wrap;gap:20px;font-size:13px;color:var(--ink2)}
+.armkey span{display:flex;align-items:center;gap:7px}
+.dot{width:11px;height:11px;border-radius:3px;flex:none}
+
+/* ---- stat band ---- */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:11px}
+.tile{background:var(--surface);border:1px solid var(--hair);border-radius:9px;padding:13px 15px;
+  display:flex;flex-direction:column;gap:3px}
+.tile .k{font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.tile .v{font-family:var(--mono);font-size:23px;font-weight:500;letter-spacing:-.02em}
+.tile .s{font-size:12px;color:var(--ink2)}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;font-size:13px;align-items:baseline}
+.cmp .lab{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  grid-column:1/-1;margin-top:5px}
+
+/* ---- diff callout ---- */
+.diff{display:flex;flex-direction:column;gap:12px}
+.difftable{width:100%;border-collapse:collapse;font-size:13px}
+.difftable th{text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);font-weight:600;padding:0 10px 7px 0;border-bottom:1px solid var(--hair)}
+.difftable td{padding:8px 10px 8px 0;border-bottom:1px solid var(--hair);vertical-align:middle}
+.difftable tr:last-child td{border-bottom:none}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
+  padding:2px 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
+
+/* ---- charts ---- */
+.chartbox{overflow-x:auto}
+svg{display:block;max-width:100%}
+.ax{font-family:var(--mono);font-size:10px;fill:var(--muted)}
+.gl{stroke:var(--grid);stroke-width:1}
+.bl{stroke:var(--axis);stroke-width:1}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12.5px;color:var(--ink2);align-items:center}
+.legend span{display:flex;align-items:center;gap:6px}
+
+/* ---- filters ---- */
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.filters .grp{display:flex;gap:0;border:1px solid var(--hair);border-radius:8px;overflow:hidden;background:var(--surface)}
+button.f{font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--ink2);background:transparent;
+  border:none;padding:6px 11px;cursor:pointer;border-right:1px solid var(--hair)}
+button.f:last-child{border-right:none}
+button.f:hover{background:var(--sunken);color:var(--ink)}
+button.f[aria-pressed="true"]{background:var(--ink);color:var(--surface)}
+button.f:focus-visible{outline:2px solid var(--arm-a);outline-offset:-2px}
+
+/* ---- ledger + inspector ---- */
+.split{display:grid;grid-template-columns:minmax(300px,400px) 1fr;gap:16px;align-items:start}
+@media (max-width:900px){.split{grid-template-columns:1fr}}
+.ledger{background:var(--surface);border:1px solid var(--hair);border-radius:10px;overflow:hidden;
+  max-height:620px;overflow-y:auto}
+.row{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  padding:9px 13px;border-bottom:1px solid var(--hair);cursor:pointer;width:100%;text-align:left;
+  background:transparent;border-left:3px solid transparent;font-family:var(--sans);color:var(--ink)}
+.row:hover{background:var(--sunken)}
+.row[aria-selected="true"]{background:var(--sunken);border-left-color:var(--ink)}
+.row:focus-visible{outline:2px solid var(--arm-a);outline-offset:-2px}
+.row .rr{font-family:var(--mono);font-size:13px;font-weight:500;text-align:right;white-space:nowrap}
+.row > span{min-width:0;overflow:hidden}
+.row .meta{font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;display:block}
+.row .ttl{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .ttl{font-size:13px;font-weight:500}
+.row .rr{padding-left:4px}
+.mark{width:8px;height:8px;border-radius:2px;flex:none}
+.inspect{background:var(--surface);border:1px solid var(--hair);border-radius:10px;padding:18px;
+  display:flex;flex-direction:column;gap:14px;min-height:420px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px}
+.kv dt{color:var(--muted);font-size:11px;letter-spacing:.07em;text-transform:uppercase;padding-top:3px}
+.kv dd{margin:0;color:var(--ink2)}
+.accs{display:flex;flex-wrap:wrap;gap:6px}
+.tag{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;
+  background:var(--sunken);border:1px solid var(--hair);color:var(--ink2)}
+.tag.warn{color:var(--loss);border-color:currentColor}
+.tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--hair);
+  border-radius:7px;padding:7px 10px;font-size:12px;font-family:var(--mono);box-shadow:0 6px 22px rgba(0,0,0,.16);
+  opacity:0;transition:opacity .1s;z-index:20;white-space:nowrap;color:var(--ink)}
+.note{font-size:12.5px;color:var(--muted);max-width:70ch}
+.tblwrap{overflow-x:auto}
+table.data{width:100%;border-collapse:collapse;font-size:12.5px}
+table.data th{text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;padding:0 9px 6px 0;border-bottom:1px solid var(--hair);white-space:nowrap}
+table.data td{padding:6px 9px 6px 0;border-bottom:1px solid var(--grid);white-space:nowrap}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Set and Forget agent &middot; 2025-11-24 to 2026-07-23 &middot; six instruments</div>
+  <h1>Alfonso Trade Inspector</h1>
+  <p>Every trade both arms of the swing-anchor A/B produced, with the imbalance each one leaned on.
+     Built to check the trades against the course rules, not to re-litigate whether the method has an
+     edge &mdash; §3.43 already settled that.</p>
+  <div class="armkey">
+    <span><i class="dot" style="background:var(--arm-a)"></i> <b>Arm A</b> &mdash; swing anchored at the base end (the old reading)</span>
+    <span><i class="dot" style="background:var(--arm-b)"></i> <b>Arm B</b> &mdash; anchored at the extreme (shipped default)</span>
+  </div>
+</header>
+
+<section class="sec">
+  <div class="sechead"><h2>Both arms, side by side</h2></div>
+  <div class="tiles" id="tiles"></div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>The fix moved 8 trades and changed no shared outcome</h2>
+    <p>130 setups appear in both arms with an identical R&#8209;multiple to the last digit. The whole
+       difference between the arms is the eight trades below &mdash; which is a stronger statement than
+       the confidence interval alone: the treatment barely touched the population.</p>
+  </div>
+  <div class="panel diff">
+    <div class="tblwrap"><table class="difftable" id="difftable"></table></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>Outcome by instrument</h2>
+    <p>One dot per trade, placed at its realised R. Exits are binary by design &mdash; module 11:
+       &ldquo;Do not move the stop loss to breakeven. It&rsquo;s either a win or a loss.&rdquo;</p>
+  </div>
+  <div class="panel">
+    <div class="legend" style="margin-bottom:12px">
+      <span><i class="dot" style="background:var(--win);border-radius:50%"></i> Target reached</span>
+      <span><i class="dot" style="background:var(--loss);border-radius:50%"></i> Stopped out</span>
+      <span style="color:var(--muted)">&mdash; dot ring marks a trade present in one arm only</span>
+    </div>
+    <div class="chartbox"><svg id="strip" role="img" aria-label="Realised R by instrument"></svg></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>Cumulative R</h2>
+    <p>Both arms on one scale, ordered by close time. They are the same line until the marginal trades
+       separate them.</p>
+  </div>
+  <div class="panel">
+    <div class="chartbox"><svg id="equity" role="img" aria-label="Cumulative R by arm"></svg></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>Trade by trade</h2>
+    <p>Pick a trade to see the zone the agent leaned on, where price actually went, and which rule
+       created the zone in the first place.</p>
+  </div>
+  <div class="filters" id="filters"></div>
+  <div class="split">
+    <div class="ledger" id="ledger" role="listbox" aria-label="Trades"></div>
+    <div class="inspect" id="inspect"></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>All trades</h2>
+    <p>The same data as a table, for reading without the charts.</p>
+  </div>
+  <div class="panel"><div class="tblwrap"><table class="data" id="datatable"></table></div></div>
+</section>
+
+<p class="note">Zone lines are recovered from each trade&rsquo;s entry and padded stop rather than from
+the logged setup text, which rounds to two decimals and is unusable on FX. Candles are aggregated from
+the 1&#8209;minute cache to roughly 240 bars per window, so the interval differs per trade and is stated
+on each chart.</p>
+
+</div>
+<div class="tip" id="tip" role="status"></div>
+
+<script>
+const DATA = /*__DATA__*/;
+const T = DATA.trades, C = DATA.candles;
+const tip = document.getElementById('tip');
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmtR = v => (v >= 0 ? '+' : '') + v.toFixed(2) + 'R';
+const fmtMoney = v => (v >= 0 ? '+' : '−') + '$' + Math.abs(v).toFixed(0);
+const px = (p, d) => p.toFixed(d);
+const dt = s => new Date(s * 1000).toISOString().slice(0, 16).replace('T', ' ');
+const SVG = 'http://www.w3.org/2000/svg';
+const el = (n, a = {}) => { const e = document.createElementNS(SVG, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+const inArm = (t, arm) => t.arm === 'both' || t.arm === arm;
+const armTrades = arm => T.filter(t => inArm(t, arm));
+const bookRoutes = new Set(['TrendlineBreak', 'OpposingImbalanceEliminated', 'ExtremeBroken']);
+const swingOnly = t => t.accs.length > 0 && !t.accs.some(a => bookRoutes.has(a));
+
+function showTip(html, ev) {
+  tip.innerHTML = html; tip.style.opacity = '1';
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY - r.height - 10;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y < 8) y = ev.clientY + 18;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.opacity = '0'; };
+
+/* ---------- stat tiles ---------- */
+function stats(arm) {
+  const r = armTrades(arm);
+  const wins = r.filter(t => t.exitReason === 'TakeProfit').length;
+  const sum = r.reduce((a, t) => a + t.r, 0);
+  return { n: r.length, win: wins / r.length, avg: sum / r.length, net: r.reduce((a, t) => a + t.net, 0) };
+}
+function renderTiles() {
+  const a = stats('a'), b = stats('b');
+  const row = (k, av, bv) => `<div class="lab">${k}</div>
+    <div class="num" style="color:var(--arm-a)">${av}</div><div class="num" style="color:var(--arm-b)">${bv}</div>`;
+  document.getElementById('tiles').innerHTML = `
+    <div class="tile"><div class="k">Trades</div><div class="v">${a.n} <span style="color:var(--muted)">/</span> ${b.n}</div><div class="s">arm A / arm B</div></div>
+    <div class="tile"><div class="k">Win rate</div><div class="v">${(a.win*100).toFixed(1)}<span style="font-size:15px">%</span></div><div class="s">${(b.win*100).toFixed(1)}% in arm B</div></div>
+    <div class="tile"><div class="k">Average R</div><div class="v" style="color:var(--loss)">${a.avg.toFixed(4)}</div><div class="s">${b.avg.toFixed(4)} in arm B</div></div>
+    <div class="tile"><div class="k">Net</div><div class="v" style="color:var(--loss)">${fmtMoney(a.net)}</div><div class="s">${fmtMoney(b.net)} in arm B</div></div>
+    <div class="tile"><div class="k">Shared setups</div><div class="v">130</div><div class="s">identical R in both arms</div></div>
+    <div class="tile"><div class="k">Swing-break only</div><div class="v">${T.filter(swingOnly).length}</div><div class="s">of ${T.length} distinct trades</div></div>`;
+}
+
+/* ---------- differing trades ---------- */
+function renderDiff() {
+  const rows = T.filter(t => t.arm !== 'both')
+    .sort((x, y) => x.inst.localeCompare(y.inst) || x.open - y.open);
+  const head = '<tr><th>Instrument</th><th>Opened</th><th>Side</th><th>Present in</th><th>Outcome</th><th>R</th></tr>';
+  document.getElementById('difftable').innerHTML = head + rows.map(t => {
+    const armCol = t.arm === 'a' ? 'var(--arm-a)' : 'var(--arm-b)';
+    const armTxt = t.arm === 'a' ? 'Arm A only' : 'Arm B only';
+    const wl = t.exitReason === 'TakeProfit';
+    return `<tr>
+      <td style="font-weight:600">${t.label}</td>
+      <td class="num" style="color:var(--ink2)">${dt(t.open)}</td>
+      <td style="color:var(--ink2)">${t.side}</td>
+      <td><span class="pill" style="color:${armCol}"><i class="dot" style="background:${armCol};width:7px;height:7px"></i>${armTxt}</span></td>
+      <td><span class="pill" style="color:${wl ? 'var(--wintext)' : 'var(--loss)'}">${wl ? '▲ Target' : '▼ Stopped'}</span></td>
+      <td class="num" style="color:${wl ? 'var(--wintext)' : 'var(--loss)'};font-weight:600">${fmtR(t.r)}</td></tr>`;
+  }).join('');
+}
+
+/* ---------- R strip ---------- */
+function renderStrip() {
+  const svg = document.getElementById('strip');
+  const insts = [...new Set(T.map(t => t.inst))];
+  const W = 1180, rowH = 54, padL = 92, padR = 26, padT = 26, H = padT + insts.length * rowH + 34;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.textContent = '';
+  const lo = Math.min(...T.map(t => t.r)) - .15, hi = Math.max(...T.map(t => t.r)) + .15;
+  const x = v => padL + (v - lo) / (hi - lo) * (W - padL - padR);
+
+  for (let g = Math.ceil(lo); g <= hi; g++) {
+    svg.appendChild(el('line', { x1: x(g), x2: x(g), y1: padT - 8, y2: padT + insts.length * rowH,
+      class: g === 0 ? 'bl' : 'gl' }));
+    const tx = el('text', { x: x(g), y: H - 12, class: 'ax', 'text-anchor': 'middle' });
+    tx.textContent = (g > 0 ? '+' : '') + g + 'R'; svg.appendChild(tx);
+  }
+  insts.forEach((inst, i) => {
+    const y0 = padT + i * rowH;
+    const lbl = el('text', { x: padL - 12, y: y0 + rowH / 2 + 4, class: 'ax', 'text-anchor': 'end' });
+    lbl.style.fontSize = '11.5px'; lbl.style.fill = css('--ink2');
+    lbl.textContent = T.find(t => t.inst === inst).label;
+    svg.appendChild(lbl);
+    const rows = T.filter(t => t.inst === inst);
+    rows.forEach((t, k) => {
+      const jitter = ((k * 37) % 23) / 23 * (rowH - 22) + 11;
+      const win = t.exitReason === 'TakeProfit';
+      const c = el('circle', { cx: x(t.r), cy: y0 + jitter, r: 5,
+        fill: win ? css('--win') : css('--loss'), 'fill-opacity': .82 });
+      if (t.arm !== 'both') { c.setAttribute('stroke', css('--ink')); c.setAttribute('stroke-width', '1.6'); }
+      c.style.cursor = 'pointer';
+      c.addEventListener('mousemove', e => showTip(
+        `${t.label} &middot; ${t.side} &middot; ${fmtR(t.r)}<br>${dt(t.open)} &middot; ${t.exitReason === 'TakeProfit' ? 'target' : 'stopped'}` +
+        (t.arm !== 'both' ? `<br>arm ${t.arm.toUpperCase()} only` : ''), e));
+      c.addEventListener('mouseleave', hideTip);
+      c.addEventListener('click', () => select(t.id));
+      svg.appendChild(c);
+    });
+  });
+}
+
+/* ---------- equity ---------- */
+function renderEquity() {
+  const svg = document.getElementById('equity');
+  const W = 1180, H = 300, padL = 54, padR = 96, padT = 18, padB = 34;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.textContent = '';
+  const series = ['a', 'b'].map(arm => {
+    const rows = armTrades(arm).slice().sort((p, q) => p.close - q.close);
+    let acc = 0; return rows.map(t => ({ t: t.close, v: (acc += t.r) }));
+  });
+  const all = series.flat();
+  const t0 = Math.min(...all.map(p => p.t)), t1 = Math.max(...all.map(p => p.t));
+  const lo = Math.min(0, ...all.map(p => p.v)), hi = Math.max(0, ...all.map(p => p.v));
+  const x = v => padL + (v - t0) / (t1 - t0) * (W - padL - padR);
+  const y = v => padT + (hi - v) / (hi - lo) * (H - padT - padB);
+
+  const stepR = Math.max(1, Math.ceil((hi - lo) / 6));
+  for (let g = Math.ceil(lo / stepR) * stepR; g <= hi; g += stepR) {
+    svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(g), y2: y(g), class: g === 0 ? 'bl' : 'gl' }));
+    const tx = el('text', { x: padL - 9, y: y(g) + 4, class: 'ax', 'text-anchor': 'end' });
+    tx.textContent = (g > 0 ? '+' : '') + g; svg.appendChild(tx);
+  }
+  const seen = new Set();
+  for (let m = 0; m <= 10; m++) {
+    const tv = t0 + (t1 - t0) * m / 10;
+    const label = new Date(tv * 1000).toISOString().slice(0, 7);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    const tx = el('text', { x: x(tv), y: H - 11, class: 'ax', 'text-anchor': 'middle' });
+    tx.textContent = label; svg.appendChild(tx);
+  }
+  const ends = [];
+  series.forEach((pts, i) => {
+    const col = css(i === 0 ? '--arm-a' : '--arm-b');
+    let d = `M ${x(pts[0].t)} ${y(0)}`;
+    pts.forEach(p => { d += ` L ${x(p.t)} ${y(p.v)}`; });
+    svg.appendChild(el('path', { d, fill: 'none', stroke: col, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+    const last = pts[pts.length - 1];
+    svg.appendChild(el('circle', { cx: x(last.t), cy: y(last.v), r: 4, fill: col,
+      stroke: css('--surface'), 'stroke-width': 2 }));
+    ends.push({ i, col, cx: x(last.t), cy: y(last.v), v: last.v });
+  });
+  // Both arms finish at a similar R, so the two end labels would sit on top of each other.
+  // Order them by value and force a minimum vertical gap.
+  ends.sort((p, q) => p.cy - q.cy);
+  const GAP = 15;
+  if (ends[1].cy - ends[0].cy < GAP) {
+    const mid = (ends[0].cy + ends[1].cy) / 2;
+    ends[0].cy = mid - GAP / 2; ends[1].cy = mid + GAP / 2;
+  }
+  ends.forEach(e => {
+    // Labels live in the right gutter, never over the plotted lines.
+    const lab = el('text', { x: e.cx + 10, y: e.cy + 4, 'text-anchor': 'start' });
+    lab.setAttribute('class', 'ax'); lab.style.fill = e.col; lab.style.fontWeight = '600'; lab.style.fontSize = '11.5px';
+    lab.textContent = `Arm ${e.i === 0 ? 'A' : 'B'} ${e.v.toFixed(1)}R`;
+    svg.appendChild(lab);
+  });
+}
+
+/* ---------- filters + ledger ---------- */
+const filters = { inst: 'all', outcome: 'all', rule: 'all', arm: 'all' };
+function renderFilters() {
+  const insts = [...new Set(T.map(t => t.inst))];
+  const grp = (key, opts) => `<div class="grp" role="group">` + opts.map(([v, l]) =>
+    `<button class="f" data-k="${key}" data-v="${v}" aria-pressed="${filters[key] === v}">${l}</button>`).join('') + `</div>`;
+  document.getElementById('filters').innerHTML =
+    grp('inst', [['all', 'All']].concat(insts.map(i => [i, T.find(t => t.inst === i).label]))) +
+    grp('outcome', [['all', 'Any outcome'], ['TakeProfit', 'Target'], ['InitialStopLoss', 'Stopped']]) +
+    grp('rule', [['all', 'Any rule'], ['swing', 'Swing-break only'], ['book', 'Book routes']]) +
+    grp('arm', [['all', 'Either arm'], ['diff', 'Differing only']]);
+  document.querySelectorAll('button.f').forEach(b => b.addEventListener('click', () => {
+    filters[b.dataset.k] = b.dataset.v; renderFilters(); renderLedger();
+  }));
+}
+function visible() {
+  return T.filter(t =>
+    (filters.inst === 'all' || t.inst === filters.inst) &&
+    (filters.outcome === 'all' || t.exitReason === filters.outcome) &&
+    (filters.rule === 'all' || (filters.rule === 'swing' ? swingOnly(t) : !swingOnly(t))) &&
+    (filters.arm === 'all' || t.arm !== 'both'))
+    .sort((a, b) => a.open - b.open);
+}
+let selected = null;
+function renderLedger() {
+  const rows = visible();
+  const box = document.getElementById('ledger');
+  if (!rows.length) { box.innerHTML = `<div style="padding:18px;color:var(--muted);font-size:13px">No trades match these filters.</div>`; return; }
+  box.innerHTML = rows.map(t => {
+    const win = t.exitReason === 'TakeProfit';
+    const col = win ? 'var(--wintext)' : 'var(--loss)';
+    return `<button class="row" role="option" data-id="${t.id}" aria-selected="${t.id === selected}">
+      <i class="mark" style="background:${win ? 'var(--win)' : 'var(--loss)'}"></i>
+      <span><span class="ttl">${t.label} ${t.side}</span><br><span class="meta">${dt(t.open)} &middot; ${t.dur < 60 ? Math.round(t.dur) + 'm' : (t.dur / 60).toFixed(1) + 'h'}${t.arm !== 'both' ? ' &middot; arm ' + t.arm.toUpperCase() + ' only' : ''}${swingOnly(t) ? ' &middot; swing-break only' : ''}</span></span>
+      <span class="rr" style="color:${col}">${fmtR(t.r)}</span></button>`;
+  }).join('');
+  box.querySelectorAll('.row').forEach(r => r.addEventListener('click', () => select(r.dataset.id)));
+  if (!rows.some(t => t.id === selected)) select(rows[0].id, true);
+}
+
+/* ---------- per-trade chart ---------- */
+function select(id, quiet) {
+  selected = id;
+  document.querySelectorAll('.row').forEach(r => r.setAttribute('aria-selected', r.dataset.id === id));
+  if (!quiet) {
+    const r = document.querySelector(`.row[data-id="${CSS.escape(id)}"]`);
+    if (r) r.scrollIntoView({ block: 'nearest' });
+  }
+  renderInspect();
+}
+function renderInspect() {
+  const t = T.find(x => x.id === selected);
+  const box = document.getElementById('inspect');
+  if (!t) { box.innerHTML = ''; return; }
+  const win = t.exitReason === 'TakeProfit';
+  const stepName = { 60: '1m', 300: '5m', 900: '15m', 3600: '1h', 14400: '4h' };
+  const w = C[t.id];
+  box.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between">
+      <div><span class="eyebrow">${t.label} &middot; ${t.side}</span>
+        <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">${fmtR(t.r)}
+          <span class="pill" style="color:${win ? 'var(--wintext)' : 'var(--loss)'};margin-left:8px">${win ? '▲ Target reached' : '▼ Stopped out'}</span></div></div>
+      <div class="num" style="font-size:12px;color:var(--muted);text-align:right">${dt(t.open)} &rarr; ${dt(t.close)}<br>${t.dur < 60 ? Math.round(t.dur) + ' min' : (t.dur / 60).toFixed(1) + ' h'} &middot; ${w ? stepName[w.step] : '—'} candles</div>
+    </div>
+    <div class="chartbox"><svg id="tchart" role="img" aria-label="Price around the trade"></svg></div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--zone-fill);border:1px solid var(--zone)"></i> Imbalance (proximal &rarr; distal)</span>
+      <span><i class="dot" style="background:var(--ink2);height:2px;border-radius:0"></i> Entry</span>
+      <span><i class="dot" style="background:var(--loss);height:2px;border-radius:0"></i> Stop</span>
+      <span><i class="dot" style="background:var(--win);height:2px;border-radius:0"></i> Target 3:1</span>
+    </div>
+    <dl class="kv">
+      <dt>Scenario</dt><dd>${t.scenario}${t.nested ? ' &middot; nested entry' : ''}</dd>
+      <dt>Zone</dt><dd class="num">proximal ${px(t.proximal, t.digits)} &middot; distal ${px(t.distal, t.digits)}
+        &middot; width ${px(Math.abs(t.proximal - t.distal), t.digits)}</dd>
+      <dt>Grade</dt><dd>${t.strength || '—'} departure &middot; impulse ${t.ratio ? t.ratio.toFixed(2) + ':1' : '—'}</dd>
+      <dt>Created by</dt><dd><div class="accs">${t.accs.map(a =>
+        `<span class="tag${bookRoutes.has(a) ? '' : ' warn'}">${a}</span>`).join('')}
+        ${swingOnly(t) ? '<span style="font-size:11.5px;color:var(--loss)">&mdash; this zone exists only because of the swing-break route, which is in none of the eleven PDFs</span>' : ''}</div></dd>
+      <dt>Excursion</dt><dd class="num">best ${t.mfeR != null ? fmtR(t.mfeR) : '—'} &middot; worst ${t.maeR != null ? fmtR(t.maeR) : '—'}</dd>
+    </dl>`;
+  drawTrade(t);
+}
+function drawTrade(t) {
+  const svg = document.getElementById('tchart');
+  const w = C[t.id];
+  const W = 760, H = 330, padL = 12, padR = 112, padT = 14, padB = 26;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', '100%'); svg.setAttribute('height', H);
+  svg.textContent = '';
+  if (!w) return;
+  const bars = w.bars, n = bars.length;
+  const prices = bars.flatMap(b => [b[2], b[3]])
+    .concat([t.entry, t.stop, t.target, t.proximal, t.distal]);
+  let lo = Math.min(...prices), hi = Math.max(...prices);
+  const pad = (hi - lo) * .07 || 1; lo -= pad; hi += pad;
+  const y = v => padT + (hi - v) / (hi - lo) * (H - padT - padB);
+  const idxMax = bars[n - 1][0];
+  const x = i => padL + (i / Math.max(idxMax, 1)) * (W - padL - padR);
+  const tx2i = ts => (ts - w.t0) / w.step;
+  const bw = Math.max(1.6, Math.min(7, (W - padL - padR) / Math.max(idxMax, 1) * .68));
+
+  // zone band first, so candles read on top of it
+  const zTop = Math.max(t.proximal, t.distal), zBot = Math.min(t.proximal, t.distal);
+  svg.appendChild(el('rect', { x: padL, y: y(zTop), width: W - padL - padR,
+    height: Math.max(1.5, y(zBot) - y(zTop)), fill: css('--zone-fill') }));
+  [zTop, zBot].forEach(v => svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v),
+    stroke: css('--zone'), 'stroke-width': 1, 'stroke-opacity': .75 })));
+
+  // candles, hollow for bullish and filled for bearish - module 1's own white/black vocabulary,
+  // which keeps green and red reserved for the trade's outcome
+  const ink = css('--candle');
+  bars.forEach(b => {
+    const [i, o, h, l, c] = b, cx = x(i), up = c >= o;
+    svg.appendChild(el('line', { x1: cx, x2: cx, y1: y(h), y2: y(l), stroke: ink, 'stroke-width': 1, 'stroke-opacity': .75 }));
+    const top = y(Math.max(o, c)), bot = y(Math.min(o, c));
+    svg.appendChild(el('rect', { x: cx - bw / 2, y: top, width: bw, height: Math.max(1, bot - top),
+      fill: up ? css('--surface') : ink, stroke: ink, 'stroke-width': 1, 'stroke-opacity': .85 }));
+  });
+
+  // levels
+  const lines = [[t.target, css('--win'), 'Target'], [t.stop, css('--loss'), 'Stop'], [t.entry, css('--ink2'), 'Entry']];
+  lines.forEach(([v, col, label]) => {
+    svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: col,
+      'stroke-width': 1.4, 'stroke-dasharray': label === 'Entry' ? '' : '5 4' }));
+    const tt = el('text', { x: W - padR + 7, y: y(v) + 3.5, class: 'ax' });
+    tt.style.fill = col; tt.style.fontWeight = '600';
+    tt.textContent = `${label} ${px(v, t.digits)}`; svg.appendChild(tt);
+  });
+
+  // fill and exit
+  const mark = (ts, price, col, glyph) => {
+    if (ts == null) return;
+    const cx = x(tx2i(ts));
+    if (cx < padL || cx > W - padR) return;
+    svg.appendChild(el('circle', { cx, cy: y(price), r: 4.5, fill: col, stroke: css('--surface'), 'stroke-width': 1.8 }));
+    const g = el('text', { x: cx, y: y(price) - 9, class: 'ax', 'text-anchor': 'middle' });
+    g.style.fill = col; g.style.fontWeight = '600'; g.textContent = glyph; svg.appendChild(g);
+  };
+  mark(t.open, t.entry, css('--ink'), 'in');
+  mark(t.close, t.exit, t.exitReason === 'TakeProfit' ? css('--win') : css('--loss'), 'out');
+  if (t.mfeAt) mark(t.mfeAt, t.mfeR != null ? t.entry + (t.side === 'Buy' ? 1 : -1) * Math.abs(t.entry - t.stop) * t.mfeR : t.entry, css('--muted'), 'best');
+
+  // hover band
+  const hit = el('rect', { x: padL, y: padT, width: W - padL - padR, height: H - padT - padB, fill: 'transparent' });
+  hit.style.cursor = 'crosshair';
+  hit.addEventListener('mousemove', ev => {
+    const r = svg.getBoundingClientRect();
+    const rel = (ev.clientX - r.left) / r.width * W;
+    const idx = Math.round((rel - padL) / (W - padL - padR) * Math.max(idxMax, 1));
+    const b = bars.reduce((best, cur) => Math.abs(cur[0] - idx) < Math.abs(best[0] - idx) ? cur : best, bars[0]);
+    showTip(`${dt(w.t0 + b[0] * w.step)}<br>O ${px(b[1], t.digits)} H ${px(b[2], t.digits)}<br>L ${px(b[3], t.digits)} C ${px(b[4], t.digits)}`, ev);
+  });
+  hit.addEventListener('mouseleave', hideTip);
+  svg.appendChild(hit);
+}
+
+/* ---------- table ---------- */
+function renderTable() {
+  const rows = T.slice().sort((a, b) => a.open - b.open);
+  document.getElementById('datatable').innerHTML =
+    `<tr><th>Instrument</th><th>Opened</th><th>Side</th><th>Arm</th><th>Entry</th><th>Stop</th><th>Exit</th>
+     <th>Outcome</th><th>R</th><th>Impulse</th><th>Created by</th></tr>` +
+    rows.map(t => {
+      const win = t.exitReason === 'TakeProfit';
+      return `<tr><td style="font-weight:600">${t.label}</td><td class="num">${dt(t.open)}</td>
+      <td>${t.side}</td><td>${t.arm === 'both' ? 'both' : t.arm.toUpperCase() + ' only'}</td>
+      <td class="num">${px(t.entry, t.digits)}</td><td class="num">${px(t.stop, t.digits)}</td>
+      <td class="num">${px(t.exit, t.digits)}</td>
+      <td style="color:${win ? 'var(--wintext)' : 'var(--loss)'}">${win ? 'Target' : 'Stopped'}</td>
+      <td class="num" style="color:${win ? 'var(--wintext)' : 'var(--loss)'}">${fmtR(t.r)}</td>
+      <td class="num">${t.ratio ? t.ratio.toFixed(2) : '—'}</td>
+      <td style="color:var(--ink2)">${t.accs.join(', ') || '—'}</td></tr>`;
+    }).join('');
+}
+
+renderTiles(); renderDiff(); renderStrip(); renderEquity(); renderFilters(); renderLedger(); renderTable();
+addEventListener('resize', () => { renderStrip(); renderEquity(); });
+</script>
