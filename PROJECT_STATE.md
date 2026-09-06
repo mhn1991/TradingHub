@@ -6390,6 +6390,69 @@ so four windows cost one copy of the candles. The prose annotations are gone.
 The trendline is deliberately excluded from the y-domain: with 39% of lines running away from price,
 including one squashes the candles to a sliver - the same reasoning that clips the Bollinger envelope.
 
+### 3.67 The replay was never faithful; the agent now logs its own structure (2026-09-06)
+
+`ZZAlfonsoStructureDump` (3.65) recovered trendlines by replaying the analyzer over exported CSVs.
+Measured against the run's own scenario text, it agreed on **77% of 4h rows, 72% of 1h and only 38%
+of 15m** - so a page drawing those lines showed the reader something the agent never saw, on the
+timeframe that matters most. The cause is the one `AlfonsoCandidateLog`'s docstring **already
+recorded**: "a standalone replay of the same window found one such bar in 16,420. Same classes,
+different bars ... the only trustworthy place to read decision-time state is inside the run." The
+exported CSVs carry the preserved `t - (t % period)` bucketing (3.50) and no warm-up; the run
+aggregates through the platform's own path. That note sat in the file next to the one being edited
+and was not read.
+
+`AlfonsoStructureLog` (`--alfonso-structure-log PATH`) writes the trend, its live trendline and every
+live imbalance, per timeframe, once per order placed. Keyed on `signalCreatedAt`, it joins **114/114**
+trades, and the trend it reports agrees with the run's scenario text on **342/342** timeframe rows -
+exact by construction rather than 38% by luck. The replay dump is kept for offline work and now
+carries `ALFONSO_LEGACY_TRENDLINES` so it can at least match a pre-3.65 run's fit.
+
+### 3.66 Trendline slope fixed and A/B'd: the corrected geometry performs worse (2026-09-06)
+
+`TrendlineBuilder.Fit` now refuses a line whose fitted slope contradicts its direction
+(`RejectContradictingTrendlines`, default true, `--alfonso-allow-contradicting-trendlines` to opt
+out). Replaying the same candles, live trendlines fall **109 -> 61** and contradicting ones **43 -> 0**;
+availability drops 26% -> 15%, slightly more than the 43 removed because the state machine then
+evolves differently.
+
+A pre-existing test caught it: `TrendlineNeverCutsThroughACandle` had valleys at 8 and 14 with a bar
+dipping to **7, below the first anchor**, forcing a slope of -1. That fixture *was* the defect - a bar
+printing a lower low than V1 means those are not rising valleys - so the dip moved to 9, preserving
+what the test is about (the dip still constrains the slope) and leaving a comment saying why.
+
+| | A: contradicting allowed | B: rejected (new default) |
+|---|---|---|
+| trades | 135 | **114** |
+| avgR | -0.1733 | **-0.3123** |
+| win rate | 26.7% | 23.7% |
+| net | -2,456 | -7,068 |
+
+**B - A = -0.1390R, 95% CI [-0.6154, +0.3374]** - contains zero, so unresolved, but the point estimate
+is clearly worse. The likely mechanism is that a wrong-signed line is nearly unbreakable, and
+`IsBrokenBy` needs a break to release a latched trend (3.64); removing 43 of them makes trends less
+sticky, and over this window the stickiness helped.
+
+**The default is left ON but the choice is now open.** Shipping known-malformed geometry is hard to
+defend, and the evidence says the corrected code loses more. Every other measured-and-refuted change
+in this file defaults off; this one does not, and that inconsistency is deliberate rather than
+overlooked.
+
+#### The pattern across four A/Bs
+
+| change | direction | result |
+|---|---|---|
+| 3.53 drop/rally base | toward the book | -0.0208R, null |
+| 3.54 swing anchor | toward the book | +0.0354R, null |
+| 3.64 structural condition maintained | toward the book | **-0.8708R, refuted** |
+| 3.66 trendline slope | toward the book | -0.1390R, null but negative |
+
+**Every correction that moves the code toward the course has been neutral or harmful.** The most
+economical explanation is not that the book is wrong but that this codebase's departures were
+selected, over many prior sessions, by what survived measurement on this window - so reverting one
+walks back up a hill that was fitted. 3.27 records that hazard by name. It is a reason to distrust
+the *level* of these A/Bs, not a reason to keep malformed geometry.
+
 ### 3.44 CORRECTION: rMultiple is not profit-per-risk, and the leak is slippage not commission (2026-09-03)
 
 **What `rMultiple` actually is.** `StrategySimulationSession.cs:1320-1322` divides net profit by
@@ -7051,6 +7114,16 @@ into `docs/`; Docker packaging.
   A/B that `CLAUDE.md` requires for zone-creation changes. Also found that neither the drop/rally
   base nor the swing-vs-CP classification has any unit test. New tool:
   `tools/alfonso_droprally_distal.py`.
+- **2026-09-06**: Fixed the trendline slope defect and A/B'd it (§3.66): lines 109 -> 61,
+  contradicting 43 -> 0, but **135 -> 114 trades and avgR -0.1733 -> -0.3123**, B-A -0.1390R CI
+  [-0.6154, +0.3374]. That makes **four A/Bs in a row where moving toward the book was neutral or
+  harmful** - recorded as a pattern, with the fitted-hill explanation. Also **§3.67**: the replay-based
+  structure dump was only 38% faithful on 15m, so `AlfonsoStructureLog` now writes the agent's own
+  decision-time trend, trendline and imbalances during the run (`--alfonso-structure-log`); it joins
+  114/114 trades and matches the run's scenario text 342/342. The trade page is rebuilt from a fresh
+  run on current defaults, full-width, with a 4h/1h/15m/1m switcher and wheel zoom. Also added
+  `--alfonso-min-stop-top-atr` (default off) for §3.66's successor question: 93% of trades carry a
+  stop under half a 4h ATR while taking direction from 4h.
 - **2026-09-05 (trendlines)**: Recovered the agent's own trendlines (§3.65) with a new
   `ZZAlfonsoStructureDump` replay, since runs never serialise them, and rebuilt the trade page around
   **one chart with a 4h/1h/15m/1m switcher** drawing the trendline, its anchors, every live imbalance

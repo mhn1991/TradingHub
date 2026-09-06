@@ -43,10 +43,14 @@
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--sans);
   font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
-.wrap{max-width:1240px;margin:0 auto;padding:34px 22px 72px;display:flex;flex-direction:column;gap:30px}
+.wrap{max-width:none;margin:0 auto;padding:30px clamp(16px,2.6vw,52px) 72px;
+  display:flex;flex-direction:column;gap:30px}
+/* Running text stays measured even though the page does not - long lines are the one thing a
+   full-width layout gets wrong. */
+p,.note{max-width:68ch}
 h1{font-size:29px;font-weight:600;letter-spacing:-.02em;margin:0;text-wrap:balance}
 h2{font-size:17px;font-weight:600;letter-spacing:-.01em;margin:0}
-p{margin:0;color:var(--ink2);max-width:68ch}
+p{margin:0;color:var(--ink2)}
 .eyebrow{font-size:11px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);
   font-family:var(--mono)}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -101,10 +105,10 @@ button.f[aria-pressed="true"]{background:var(--ink);color:var(--surface)}
 button.f:focus-visible{outline:2px solid var(--arm-a);outline-offset:-2px}
 
 /* ---- ledger + inspector ---- */
-.split{display:grid;grid-template-columns:minmax(300px,400px) 1fr;gap:16px;align-items:start}
+.split{display:grid;grid-template-columns:minmax(280px,340px) 1fr;gap:16px;align-items:start}
 @media (max-width:900px){.split{grid-template-columns:1fr}}
 .ledger{background:var(--surface);border:1px solid var(--hair);border-radius:10px;overflow:hidden;
-  max-height:620px;overflow-y:auto}
+  max-height:760px;overflow-y:auto}
 .row{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
   padding:9px 13px;border-bottom:1px solid var(--hair);cursor:pointer;width:100%;text-align:left;
   background:transparent;border-left:3px solid transparent;font-family:var(--sans);color:var(--ink)}
@@ -128,6 +132,8 @@ button.f:focus-visible{outline:2px solid var(--arm-a);outline-offset:-2px}
 .tag{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;
   background:var(--sunken);border:1px solid var(--hair);color:var(--ink2)}
 .tag.warn{color:var(--loss);border-color:currentColor}
+#tchart{touch-action:none}
+#tchart.grabbing{cursor:grabbing}
 .tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--hair);
   border-radius:7px;padding:7px 10px;font-size:12px;font-family:var(--mono);box-shadow:0 6px 22px rgba(0,0,0,.16);
   opacity:0;transition:opacity .1s;z-index:20;white-space:nowrap;color:var(--ink)}
@@ -145,22 +151,20 @@ table.data td{padding:6px 9px 6px 0;border-bottom:1px solid var(--grid);white-sp
 <header>
   <div class="eyebrow">Set and Forget agent &middot; 2025-11-24 to 2026-07-23 &middot; six instruments</div>
   <h1>Alfonso Trade Inspector</h1>
-  <p>Every trade both arms of the swing-anchor A/B produced, with the imbalance each one leaned on.
-     Built to check the trades against the course rules, not to re-litigate whether the method has an
-     edge &mdash; §3.43 already settled that.</p>
+  <p id="intro"></p>
   <div class="armkey" id="seqkey"></div>
-  <div class="armkey">
+  <div class="armkey" data-armonly>
     <span><i class="dot" style="background:var(--arm-a)"></i> <b>Arm A</b> &mdash; swing anchored at the base end (the old reading)</span>
     <span><i class="dot" style="background:var(--arm-b)"></i> <b>Arm B</b> &mdash; anchored at the extreme (shipped default)</span>
   </div>
 </header>
 
 <section class="sec">
-  <div class="sechead"><h2>Both arms, side by side</h2></div>
+  <div class="sechead"><h2 data-armonly>Both arms, side by side</h2></div>
   <div class="tiles" id="tiles"></div>
 </section>
 
-<section class="sec">
+<section class="sec" data-armonly>
   <div class="sechead">
     <h2>The fix moved 8 trades and changed no shared outcome</h2>
     <p>130 setups appear in both arms with an identical R&#8209;multiple to the last digit. The whole
@@ -182,13 +186,9 @@ table.data td{padding:6px 9px 6px 0;border-bottom:1px solid var(--grid);white-sp
     <div class="legend" style="margin-bottom:12px">
       <span><i class="dot" style="background:var(--win);border-radius:50%"></i> Target reached</span>
       <span><i class="dot" style="background:var(--loss);border-radius:50%"></i> Stopped out</span>
-      <span style="color:var(--muted)">&mdash; dot ring marks a trade present in one arm only</span>
+      <span style="color:var(--muted)" data-armonly>&mdash; dot ring marks a trade present in one arm only</span>
     </div>
-    <p class="note" style="margin:-4px 0 12px">Most losses are not wrong calls. 84% of stop-outs exit
-      <em>beyond</em> their own stop, and the majority go on to print the 3:1 target within a day &mdash;
-      filter the ledger below by &ldquo;Target printed after the stop&rdquo; to read them. That is a
-      diagnostic, not a counterfactual: without the stop, price could have run much further against the
-      position first.
+    <p class="note" style="margin:-4px 0 12px" id="stopnote">
     </div>
     <div class="chartbox"><svg id="strip" role="img" aria-label="Realised R by instrument"></svg></div>
   </div>
@@ -249,6 +249,14 @@ const dt = s => new Date(s * 1000).toISOString().slice(0, 16).replace('T', ' ');
 const SVG = 'http://www.w3.org/2000/svg';
 const el = (n, a = {}) => { const e = document.createElementNS(SVG, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
 
+const SINGLE = DATA.single === true;
+document.getElementById('intro').innerHTML = SINGLE
+  ? `Every trade the agent took, with the imbalance it leaned on and the rule that created it. Built
+     to check the trades against the course rules, not to re-litigate whether the method has an edge
+     &mdash; \u00a73.43 already settled that.`
+  : `Every trade both arms of the swing-anchor A/B produced, with the imbalance each one leaned on.
+     Built to check the trades against the course rules, not to re-litigate whether the method has an
+     edge &mdash; \u00a73.43 already settled that.`;
 const SEQ = DATA.sequence || { top: '4h', middle: '1h', lower: '15m', execution: '1m' };
 // The chart's candle interval is a display choice - it is picked per trade to fit the window. The
 // timeframe that actually matters is the one the zone belongs to, which is fixed by the sequence.
@@ -294,6 +302,19 @@ function renderTiles() {
   const a = stats('a'), b = stats('b');
   const stopped = T.filter(t => t.exitReason === 'InitialStopLoss');
   const stops = stopped.length, rec = stopped.filter(t => t.recoveredIn != null).length;
+  if (SINGLE) {
+    const r = T.map(t => t.r), wins = T.filter(t => t.exitReason === 'TakeProfit').length;
+    const avg = r.reduce((x, y) => x + y, 0) / r.length;
+    const net = T.reduce((x, t) => x + t.net, 0);
+    document.getElementById('tiles').innerHTML = `
+      <div class="tile"><div class="k">Trades</div><div class="v">${T.length}</div><div class="s">six instruments, 8 months</div></div>
+      <div class="tile"><div class="k">Win rate</div><div class="v">${(wins / T.length * 100).toFixed(1)}<span style="font-size:15px">%</span></div><div class="s">${wins} reached target</div></div>
+      <div class="tile"><div class="k">Average R</div><div class="v" style="color:var(--loss)">${avg.toFixed(4)}</div><div class="s">true R, cost-inclusive</div></div>
+      <div class="tile"><div class="k">Net</div><div class="v" style="color:var(--loss)">${fmtMoney(net)}</div><div class="s">account currency</div></div>
+      <div class="tile"><div class="k">Target after stop</div><div class="v">${rec}<span style="font-size:15px;color:var(--muted)">/${stops}</span></div><div class="s">printed the 3:1 within 24h</div></div>
+      <div class="tile"><div class="k">Swing-break only</div><div class="v">${T.filter(swingOnly).length}</div><div class="s">of ${T.length} trades</div></div>`;
+    return;
+  }
   const row = (k, av, bv) => `<div class="lab">${k}</div>
     <div class="num" style="color:var(--arm-a)">${av}</div><div class="num" style="color:var(--arm-b)">${bv}</div>`;
   document.getElementById('tiles').innerHTML = `
@@ -371,7 +392,7 @@ function renderEquity() {
   const W = 1180, H = 300, padL = 54, padR = 96, padT = 18, padB = 34;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
   svg.textContent = '';
-  const series = ['a', 'b'].map(arm => {
+  const series = (SINGLE ? ['a'] : ['a', 'b']).map(arm => {
     const rows = armTrades(arm).slice().sort((p, q) => p.close - q.close);
     let acc = 0; return rows.map(t => ({ t: t.close, v: (acc += t.r) }));
   });
@@ -420,7 +441,7 @@ function renderEquity() {
     // Labels live in the right gutter, never over the plotted lines.
     const lab = el('text', { x: e.cx + 10, y: e.cy + 4, 'text-anchor': 'start' });
     lab.setAttribute('class', 'ax'); lab.style.fill = e.col; lab.style.fontWeight = '600'; lab.style.fontSize = '11.5px';
-    lab.textContent = `Arm ${e.i === 0 ? 'A' : 'B'} ${e.v.toFixed(1)}R`;
+    lab.textContent = SINGLE ? `${e.v.toFixed(1)}R` : `Arm ${e.i === 0 ? 'A' : 'B'} ${e.v.toFixed(1)}R`;
     svg.appendChild(lab);
   });
 }
@@ -435,7 +456,7 @@ function renderFilters() {
     grp('inst', [['all', 'All']].concat(insts.map(i => [i, T.find(t => t.inst === i).label]))) +
     grp('outcome', [['all', 'Any outcome'], ['TakeProfit', 'Target'], ['InitialStopLoss', 'Stopped']]) +
     grp('rule', [['all', 'Any rule'], ['swing', 'Swing-break only'], ['book', 'Book routes']]) +
-    grp('arm', [['all', 'Either arm'], ['diff', 'Differing only']]) +
+    (SINGLE ? '' : grp('arm', [['all', 'Either arm'], ['diff', 'Differing only']])) +
     grp('after', [['all', 'Any ending'], ['recovered', 'Target printed after the stop'],
                   ['never', 'Never recovered']]);
   document.querySelectorAll('button.f').forEach(b => b.addEventListener('click', () => {
@@ -472,6 +493,7 @@ function renderLedger() {
 /* ---------- per-trade chart ---------- */
 function select(id, quiet) {
   selected = id;
+  view = null;
   document.querySelectorAll('.row').forEach(r => r.setAttribute('aria-selected', r.dataset.id === id));
   if (!quiet) {
     const r = document.querySelector(`.row[data-id="${CSS.escape(id)}"]`);
@@ -506,6 +528,8 @@ function renderInspect() {
       </div>
       <button class="f" id="indtoggle" aria-pressed="${showInd}"
         style="border:1px solid var(--hair);border-radius:8px">Indicators</button>
+      <button class="f" id="zoomreset"
+        style="border:1px solid var(--hair);border-radius:8px">Fit</button>
       <span class="num" style="font-size:11.5px;color:var(--muted);margin-left:auto">
         ${selectedTf} trend <b style="color:var(--ink2)">${st ? st.trend : '—'}</b>${st && st.overExtended ? ' &middot; over-extended' : ''} &middot; ${lineNote}</span>
     </div>
@@ -528,7 +552,9 @@ function renderInspect() {
     </dl>`;
 
   box.querySelectorAll('button[data-tf]').forEach(b =>
-    b.addEventListener('click', () => { selectedTf = b.dataset.tf; renderInspect(); }));
+    b.addEventListener('click', () => { selectedTf = b.dataset.tf; view = null; renderInspect(); }));
+  const reset = document.getElementById('zoomreset');
+  if (reset) reset.addEventListener('click', () => { view = null; drawTrade(t); });
   const toggle = document.getElementById('indtoggle');
   if (toggle) toggle.addEventListener('click', () => { showInd = !showInd; renderInspect(); });
 
@@ -537,6 +563,7 @@ function renderInspect() {
 
 let showInd = true;
 let selectedTf = null;
+let view = null;   // {lo, hi} in bucket-index space, or null for fit-to-window
 
 /* ---- indicators, computed here so four timeframe windows cost one copy of the candles ---- */
 function bollinger(closes, n = 20, mult = 2) {
@@ -587,7 +614,9 @@ function drawTrade(t) {
   const tf = selectedTf && panes[selectedTf] ? selectedTf : defaultTf(t);
   const w = panes[tf];
   const svg = document.getElementById('tchart');
-  const W = 900, padL = 12, padR = 116, padT = 16;
+  // 1 viewBox unit = 1 CSS pixel, so a wider page gives more chart rather than bigger text.
+  const measured = svg.parentElement ? svg.parentElement.clientWidth : 900;
+  const W = Math.max(720, Math.round(measured || 900)), padL = 12, padR = 116, padT = 16;
   const priceH = 300, paneH = 66, paneGap = 10, padB = 24;
   const H = padT + priceH + padB + (showInd ? (paneH + paneGap) * 2 : 0);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
@@ -597,11 +626,20 @@ function drawTrade(t) {
 
   const bars = w.bars, n = bars.length;
   const closes = bars.map(b => b[4]), highs = bars.map(b => b[2]), lows = bars.map(b => b[3]);
+  // Indicators are computed over the WHOLE window, never the zoomed slice - otherwise zooming in
+  // would silently change RSI and the bands, which is a lie about the data.
   const bb = showInd ? bollinger(closes) : null;
+  const rsiAll = showInd ? rsi(closes) : null;
+  const cciAll = showInd ? cci(highs, lows, closes) : null;
   const idxMax = bars[n - 1][0];
-  const x = i => padL + (i / Math.max(idxMax, 1)) * (W - padL - padR);
+  const vLo = view ? view.lo : 0, vHi = view ? view.hi : idxMax;
+  const spanIdx = Math.max(vHi - vLo, 1e-6);
+  const x = i => padL + ((i - vLo) / spanIdx) * (W - padL - padR);
+  const iAtX = px2 => vLo + ((px2 - padL) / (W - padL - padR)) * spanIdx;
   const tAt = i => w.t0 + i * w.step;
   const xTime = ts => x((ts - w.t0) / w.step);
+  const visible = bars.filter(b => b[0] >= vLo - 1 && b[0] <= vHi + 1);
+  const shown = visible.length ? visible : bars;
 
   const struct = (t.structure || {})[tf] || (t.structure || {})[zoneTf(t)] || {};
   const line = struct.line || null;
@@ -609,7 +647,7 @@ function drawTrade(t) {
   const zTop = Math.max(t.proximal, t.distal), zBot = Math.min(t.proximal, t.distal);
   // The trendline is deliberately NOT in the domain. 39% of the agent's lines slope against their
   // own direction (3.65), and one of those extended forward will squash the candles to a sliver.
-  const prices = bars.flatMap(b => [b[3], b[2]]).concat([t.entry, t.stop, t.target, zTop, zBot]);
+  const prices = shown.flatMap(b => [b[3], b[2]]).concat([t.entry, t.stop, t.target, zTop, zBot]);
   let lo = Math.min(...prices), hi = Math.max(...prices);
   const pad = (hi - lo) * .07 || 1; lo -= pad; hi += pad;
   const y = v => padT + (hi - v) / (hi - lo) * priceH;
@@ -647,7 +685,7 @@ function drawTrade(t) {
     const g = el('g', { 'clip-path': `url(#${clipId})` });
     const host = svg;
     [0, 1, 2].forEach(k => {
-      const pts = bars.map((b, i) => bb[i] ? [x(b[0]), y(bb[i][k])] : null);
+      const pts = bars.map((b, i) => (bb[i] && b[0] >= vLo - 2 && b[0] <= vHi + 2) ? [x(b[0]), y(bb[i][k])] : null);
       const runs = []; let cur = [];
       pts.forEach(p => { if (!p) { if (cur.length > 1) runs.push(cur); cur = []; } else cur.push(p); });
       if (cur.length > 1) runs.push(cur);
@@ -658,13 +696,13 @@ function drawTrade(t) {
   }
 
   const ink = css('--candle');
-  const bw = Math.max(1.2, Math.min(7, (W - padL - padR) / Math.max(idxMax, 1) * .68));
-  bars.forEach(b => {
+  const bw2 = Math.max(1.2, Math.min(9, (W - padL - padR) / Math.max(shown.length, 1) * .68));
+  shown.forEach(b => {
     const [i, o, h, l, c] = b, cx = x(i), up = c >= o;
     svg.appendChild(el('line', { x1: cx, x2: cx, y1: y(h), y2: y(l), stroke: ink,
       'stroke-width': 1, 'stroke-opacity': .75 }));
     const top = y(Math.max(o, c)), bot = y(Math.min(o, c));
-    svg.appendChild(el('rect', { x: cx - bw / 2, y: top, width: bw, height: Math.max(1, bot - top),
+    svg.appendChild(el('rect', { x: cx - bw2 / 2, y: top, width: bw2, height: Math.max(1, bot - top),
       fill: up ? css('--surface') : ink, stroke: ink, 'stroke-width': 1, 'stroke-opacity': .85 }));
   });
 
@@ -736,16 +774,17 @@ function drawTrade(t) {
         const rt = el('text', { x: W - padR + 7, y: ry + 3.5, class: 'ax' });
         rt.textContent = fmt(ref.v); svg.appendChild(rt);
       });
-      path(values.map((v, i) => v == null ? null : [x(bars[i][0]), py(v)]), col, 1.4);
+      path(values.map((v, i) => (v == null || bars[i][0] < vLo - 2 || bars[i][0] > vHi + 2)
+        ? null : [x(bars[i][0]), py(v)]), col, 1.4);
       const lt = el('text', { x: padL + 6, y: top + 12, class: 'ax' });
       lt.style.fill = css('--ink2'); lt.style.fontWeight = '600'; lt.textContent = title;
       svg.appendChild(lt);
     };
-    const r = rsi(closes), ch = cci(highs, lows, closes);
     const rsiTop = padT + priceH + paneGap;
-    pane(rsiTop, 'RSI 14', r, [0, 100], [{ v: 70 }, { v: 30 }], v => String(v));
-    const bound = Math.max(120, ...ch.filter(v => v != null).map(Math.abs)) * 1.05;
-    pane(rsiTop + paneH + paneGap, 'CCI 20', ch, [-bound, bound],
+    pane(rsiTop, 'RSI 14', rsiAll, [0, 100], [{ v: 70 }, { v: 30 }], v => String(v));
+    const inView = cciAll.filter((v, i) => v != null && bars[i][0] >= vLo - 2 && bars[i][0] <= vHi + 2);
+    const bound = Math.max(120, ...inView.map(Math.abs)) * 1.05;
+    pane(rsiTop + paneH + paneGap, 'CCI 20', cciAll, [-bound, bound],
       [{ v: 100 }, { v: 0, label: false }, { v: -100 }], v => (v > 0 ? '+' : '') + v);
   }
 
@@ -755,13 +794,13 @@ function drawTrade(t) {
   hit.addEventListener('mousemove', ev => {
     const rect = svg.getBoundingClientRect();
     const rel = (ev.clientX - rect.left) / rect.width * W;
-    const idx = Math.round((rel - padL) / (W - padL - padR) * Math.max(idxMax, 1));
+    const idx = iAtX(rel);
     let best = 0;
     bars.forEach((cur, i) => { if (Math.abs(cur[0] - idx) < Math.abs(bars[best][0] - idx)) best = i; });
     const b = bars[best];
     let html = `${dt(tAt(b[0]))}<br>O ${px(b[1], t.digits)} H ${px(b[2], t.digits)}<br>L ${px(b[3], t.digits)} C ${px(b[4], t.digits)}`;
     if (showInd && bb && bb[best]) {
-      const r = rsi(closes)[best], ch = cci(highs, lows, closes)[best];
+      const r = rsiAll ? rsiAll[best] : null, ch = cciAll ? cciAll[best] : null;
       html += `<br><span style="color:var(--muted)">BB ${px(bb[best][2], t.digits)} / ${px(bb[best][1], t.digits)} / ${px(bb[best][0], t.digits)}`;
       if (r != null) html += `<br>RSI ${r.toFixed(1)}`;
       if (ch != null) html += ` &middot; CCI ${ch.toFixed(1)}`;
@@ -771,6 +810,57 @@ function drawTrade(t) {
   });
   hit.addEventListener('mouseleave', hideTip);
   svg.appendChild(hit);
+
+  // --- zoom and pan -------------------------------------------------------------------------
+  // Both work in bucket-index space, so they survive a timeframe switch and market gaps stay gaps.
+  const MIN_SPAN = 6;
+  const toUnits = clientX => {
+    const rect = svg.getBoundingClientRect();
+    return (clientX - rect.left) / rect.width * W;
+  };
+  svg.onwheel = ev => {
+    ev.preventDefault();
+    const anchor = iAtX(toUnits(ev.clientX));
+    const factor = ev.deltaY > 0 ? 1.18 : 1 / 1.18;
+    let lo = anchor - (anchor - vLo) * factor;
+    let hi = anchor + (vHi - anchor) * factor;
+    if (hi - lo < MIN_SPAN) { const mid = (lo + hi) / 2; lo = mid - MIN_SPAN / 2; hi = mid + MIN_SPAN / 2; }
+    if (hi - lo >= idxMax) { view = null; drawTrade(t); return; }
+    view = { lo: Math.max(0, lo), hi: Math.min(idxMax, hi) };
+    if (view.hi - view.lo < MIN_SPAN) view = { lo: view.hi - MIN_SPAN, hi: view.hi };
+    drawTrade(t);
+  };
+  let dragFrom = null;
+  svg.onpointerdown = ev => {
+    dragFrom = { x: ev.clientX, lo: vLo, hi: vHi };
+    svg.setPointerCapture(ev.pointerId);
+    svg.classList.add('grabbing');
+  };
+  svg.onpointermove = ev => {
+    if (!dragFrom) return;
+    const shift = (toUnits(dragFrom.x) - toUnits(ev.clientX)) / (W - padL - padR) * (dragFrom.hi - dragFrom.lo);
+    let lo = dragFrom.lo + shift, hi = dragFrom.hi + shift;
+    if (lo < 0) { hi -= lo; lo = 0; }
+    if (hi > idxMax) { lo -= hi - idxMax; hi = idxMax; }
+    view = { lo: Math.max(0, lo), hi: Math.min(idxMax, hi) };
+    drawTrade(t);
+  };
+  const endDrag = ev => {
+    if (!dragFrom) return;
+    dragFrom = null;
+    svg.classList.remove('grabbing');
+    if (ev && ev.pointerId != null && svg.hasPointerCapture(ev.pointerId)) svg.releasePointerCapture(ev.pointerId);
+  };
+  svg.onpointerup = endDrag;
+  svg.onpointercancel = endDrag;
+  svg.ondblclick = () => { view = null; drawTrade(t); };
+
+  if (view) {
+    const badge = el('text', { x: padL + 6, y: padT + priceH - 8, class: 'ax' });
+    badge.style.fill = css('--muted');
+    badge.textContent = `${shown.length} of ${n} bars \u00b7 double-click or Fit to reset`;
+    svg.appendChild(badge);
+  }
 }
 
 /* ---------- table ---------- */
@@ -793,6 +883,29 @@ function renderTable() {
     }).join('');
 }
 
-renderTiles(); renderDiff(); renderStrip(); renderEquity(); renderFilters(); renderLedger(); renderTable();
+if (SINGLE) {
+  // One run: the arm comparison, its callout and the arm filter have nothing to say.
+  document.querySelectorAll('[data-armonly]').forEach(node => node.remove());
+  document.getElementById('seqkey').insertAdjacentHTML('beforeend',
+    `<span style="margin-left:14px">Trend states, trendlines and imbalances below are written by the
+     agent during the run, not reconstructed &mdash; they are what it actually saw.</span>`);
+} else {
+  renderDiff();
+}
+(function stopNote() {
+  // Data-driven, so the sentence cannot drift from the run the page was built on.
+  const stopped = T.filter(t => t.exitReason === 'InitialStopLoss');
+  const node = document.getElementById('stopnote');
+  if (!stopped.length || !node) return;
+  const over = stopped.filter(t => t.slipR != null && t.slipR > 0.02).length;
+  const rec = stopped.filter(t => t.recoveredIn != null).length;
+  node.innerHTML =
+    `Most losses are not wrong calls. ${(over / stopped.length * 100).toFixed(0)}% of stop-outs exit
+     <em>beyond</em> their own stop, and ${rec} of ${stopped.length} went on to print the 3:1 target
+     within a day &mdash; filter the ledger below by &ldquo;Target printed after the stop&rdquo; to read
+     them. That is a diagnostic, not a counterfactual: without the stop, price could have run much
+     further against the position first.`;
+})();
+renderTiles(); renderStrip(); renderEquity(); renderFilters(); renderLedger(); renderTable();
 addEventListener('resize', () => { renderStrip(); renderEquity(); });
 </script>

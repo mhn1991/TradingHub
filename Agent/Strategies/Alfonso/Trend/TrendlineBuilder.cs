@@ -17,7 +17,8 @@ public static class TrendlineBuilder
         IReadOnlyList<decimal> highs,
         IReadOnlyList<decimal> lows,
         IReadOnlyList<DateTimeOffset> times,
-        int currentIndex)
+        int currentIndex,
+        bool rejectContradicting = true)
     {
         if (valleys.Count < 2)
             return null;
@@ -34,7 +35,7 @@ public static class TrendlineBuilder
         if (!ExtendedBeyond(highs, first.Index, second.Index, currentIndex, higher: true))
             return null;
 
-        return Fit(first, second, lows, times, TrendlineDirection.Bullish);
+        return Fit(first, second, lows, times, TrendlineDirection.Bullish, rejectContradicting);
     }
 
     /// <summary>
@@ -47,7 +48,8 @@ public static class TrendlineBuilder
         IReadOnlyList<decimal> highs,
         IReadOnlyList<decimal> lows,
         IReadOnlyList<DateTimeOffset> times,
-        int currentIndex)
+        int currentIndex,
+        bool rejectContradicting = true)
     {
         if (peaks.Count < 2)
             return null;
@@ -61,7 +63,7 @@ public static class TrendlineBuilder
         if (!ExtendedBeyond(lows, first.Index, second.Index, currentIndex, higher: false))
             return null;
 
-        return Fit(first, second, highs, times, TrendlineDirection.Bearish);
+        return Fit(first, second, highs, times, TrendlineDirection.Bearish, rejectContradicting);
     }
 
     /// <summary>
@@ -89,7 +91,8 @@ public static class TrendlineBuilder
         IReadOnlyList<DateTimeOffset> times,
         int currentIndex,
         TrendlineDirection direction,
-        int anchors = 3)
+        int anchors = 3,
+        bool rejectContradicting = true)
     {
         ArgumentNullException.ThrowIfNull(continuations);
 
@@ -113,7 +116,7 @@ public static class TrendlineBuilder
         if (last.Index >= currentIndex)
             return null;
 
-        return Fit(first, last, constraint, times, direction);
+        return Fit(first, last, constraint, times, direction, rejectContradicting);
     }
 
     /// <summary>
@@ -155,7 +158,8 @@ public static class TrendlineBuilder
         SwingPoint second,
         IReadOnlyList<decimal> constraint,
         IReadOnlyList<DateTimeOffset> times,
-        TrendlineDirection direction)
+        TrendlineDirection direction,
+        bool rejectContradicting)
     {
         if (second.Index <= first.Index || second.Index >= constraint.Count)
             return null;
@@ -174,6 +178,17 @@ public static class TrendlineBuilder
             slope = candidate;
             anchorIndex = index;
         }
+
+        // The anchors are checked to rise (bullish) or fall (bearish) before we get here, but the
+        // fit above pulls the slope back to whatever clears every intervening bar - and that goes
+        // NEGATIVE on a bullish line as soon as one bar dips below the first anchor. The result was a
+        // descending "bullish trendline" on 39% of all live lines (3.65). It is not merely cosmetic:
+        // IsBrokenBy tests a full candle BELOW a bullish line, so a line sloping away from price
+        // becomes progressively harder to break, and a broken line is one of only two exits from a
+        // latched trend (3.64). Module 3 draws a bullish trendline under RISING valleys; a line that
+        // descends is not one, so none is drawable here.
+        if (rejectContradicting && (bullish ? slope < 0m : slope > 0m))
+            return null;
 
         return new Trendline
         {

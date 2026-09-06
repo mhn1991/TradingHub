@@ -188,6 +188,7 @@ def parse(trade, tag, arm, label, digits, bars=None, times=None):
         "scenario": reason.split(".")[0].strip() if reason else "",
         "nested": "nested at" in reason,
         "entryRole": entry_role(reason),
+        "signalAt": int(ts(trade["signalCreatedAt"])) if trade.get("signalCreatedAt") else None,
         "slipR": round(slip_r, 3) if slip_r is not None else None,
         "recoveredIn": round(recovered_in, 2) if recovered_in is not None else None,
     }
@@ -241,6 +242,39 @@ def fixed_window(bars, step, first, last, digits):
                      for k in keys]}
 
 
+def build_single(root, sequence, quiet=False):
+    """One run rather than an A/B - the mode the trade page uses when inspecting current behaviour."""
+    zone_step = interval_seconds(sequence["lower"])
+    global PANES
+    PANES = [(sequence["top"], interval_seconds(sequence["top"])),
+             (sequence["middle"], interval_seconds(sequence["middle"])),
+             (sequence["lower"], zone_step),
+             (sequence["execution"], interval_seconds(sequence["execution"]))]
+    trades, candles = [], {}
+    for tag, (label, stem, digits) in INSTRUMENTS.items():
+        path = os.path.join(root, tag, "simulation-result.json")
+        if not os.path.exists(path):
+            continue
+        with open(path) as handle:
+            rows = json.load(handle)["strategies"][0]["trades"]
+        bars = load_candles(stem)
+        for raw in rows:
+            record = parse(raw, tag, "both", label, digits, bars, [b[0] for b in bars])
+            panes = {}
+            for pane_label, step in PANES:
+                before, after = (132, 28) if step >= zone_step else (150, 40)
+                w = fixed_window(bars, step, record["open"] - before * step,
+                                 record["close"] + after * step, digits)
+                if w:
+                    panes[pane_label] = w
+            if panes:
+                candles[record["id"]] = panes
+            trades.append(record)
+        if not quiet:
+            print(f"{tag}: {len(rows)} trades")
+    return {"trades": trades, "candles": candles}
+
+
 def build(root, arms, sequence, quiet=False):
     """`sequence` supplies the top and lower intervals the run used, so the context panes are drawn
     on the timeframes the agent actually read rather than on a display-derived one."""
@@ -266,12 +300,14 @@ def build(root, arms, sequence, quiet=False):
             # switches between them; indicators are computed client-side so four windows do not
             # cost four copies of the indicator arrays.
             panes = {}
-            for label, step in PANES:
+            # NB: not `label` - that name holds the instrument's label in the enclosing loop, and
+            # shadowing it here relabelled every trade after the first as "1m".
+            for pane_label, step in PANES:
                 before, after = (132, 28) if step >= zone_step else (150, 40)
                 w = fixed_window(bars, step, record["open"] - before * step,
                                  record["close"] + after * step, digits)
                 if w:
-                    panes[label] = w
+                    panes[pane_label] = w
             if panes:
                 candles[record["id"]] = panes
 
@@ -279,6 +315,25 @@ def build(root, arms, sequence, quiet=False):
         if not quiet:
             print(f"{tag}: {len(set(a) | set(b))} distinct trades")
     return {"trades": trades, "candles": candles}
+
+
+def load_run_structure(root):
+    """The agent's OWN decision-time state, written by AlfonsoStructureLog during the run.
+
+    Keyed by the moment the order was placed, which the trade record carries as `signalCreatedAt`.
+    This replaces the standalone replay: measured against the run's own scenario text, a replay over
+    exported CSVs agreed on only 38% of 15m rows (3.67), because it reads different bars.
+    """
+    # The log records the broker instrument key (METAL:XAU/USD); the page keys on the short tag, and
+    # the file name carries it - struct-gold.jsonl.
+    out = {}
+    for path in sorted(glob.glob(os.path.join(root, "struct-*.jsonl"))):
+        tag = os.path.basename(path)[len("struct-"):-len(".jsonl")]
+        with open(path, encoding="utf-8-sig") as handle:
+            for line in handle:
+                row = json.loads(line)
+                out[(tag, row["at"])] = row["timeframes"]
+    return out
 
 
 def load_structure(path, sequence):
@@ -315,6 +370,8 @@ def main():
     parser.add_argument("--json", help="also write the raw payload here")
     parser.add_argument("--sequence", default=DEFAULT_SEQUENCE,
                         help="top,middle,lower intervals the run used (default: the agent's own)")
+    parser.add_argument("--single", action="store_true",
+                        help="one run at <root>/<instrument>/, with its own struct-*.jsonl")
     parser.add_argument("--structure",
                         help="JSONL from ZZAlfonsoStructureDump: the agent's trendlines and zones")
     parser.add_argument("--execution", default="1m",
@@ -327,16 +384,37 @@ def main():
 
     top, middle, lower = (v.strip() for v in args.sequence.split(","))
     sequence = {"top": top, "middle": middle, "lower": lower, "execution": args.execution}
-    payload = build(args.root, arms, sequence)
-    structure = load_structure(args.structure, sequence)
-    if structure:
+    if args.single:
+        payload = build_single(args.root, sequence)
+        payload["single"] = True
+        live = load_run_structure(args.root)
         joined = 0
+        # Roles, not intervals: the log names Top/Middle/Lower, the page reads intervals.
+        role_to_label = {"Top": sequence["top"], "Middle": sequence["middle"], "Lower": sequence["lower"]}
         for record in payload["trades"]:
-            found = structure.get((record["inst"], int(record["open"])))
-            if found:
-                record["structure"] = found
-                joined += 1
-        print(f"structure joined onto {joined}/{len(payload['trades'])} trades")
+            found = live.get((record["inst"], record["signalAt"]))
+            if not found:
+                continue
+            record["structure"] = {
+                role_to_label[role]: {
+                    "trend": snap["trend"], "overExtended": snap["overExtended"],
+                    "line": snap["line"], "zones": snap["zones"],
+                }
+                for role, snap in found.items() if role in role_to_label
+            }
+            joined += 1
+        print(f"structure joined onto {joined}/{len(payload['trades'])} trades (from the run itself)")
+    else:
+        payload = build(args.root, arms, sequence)
+        structure = load_structure(args.structure, sequence)
+        if structure:
+            joined = 0
+            for record in payload["trades"]:
+                found = structure.get((record["inst"], int(record["open"])))
+                if found:
+                    record["structure"] = found
+                    joined += 1
+            print(f"structure joined onto {joined}/{len(payload['trades'])} trades (replay)")
     if not payload["trades"]:
         raise SystemExit(f"no runs found under {args.root}")
 

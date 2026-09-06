@@ -30,6 +30,15 @@ public sealed class ZZAlfonsoStructureDump
     private static string DataDirectory =>
         Environment.GetEnvironmentVariable("ALFONSO_DATA") ?? "/mnt/storage/scratch/alfonso";
 
+    /// <summary>
+    /// The replay MUST use the same trendline fit as the run whose trades it annotates. A dump taken
+    /// with the 3.65 fix in place, laid beside trades produced before it, shows trend states the run
+    /// never saw - which is how a page came to print "15m OutOfAlignment" next to scenario text
+    /// reading "All three timeframes Downtrend". Set ALFONSO_LEGACY_TRENDLINES=1 for a pre-3.65 run.
+    /// </summary>
+    private static bool RejectContradictingTrendlines =>
+        Environment.GetEnvironmentVariable("ALFONSO_LEGACY_TRENDLINES") is not "1";
+
     private static readonly (string Suffix, int Minutes)[] Timeframes =
         [("m15", 15), ("h1", 60), ("h4", 240)];
 
@@ -86,7 +95,10 @@ public sealed class ZZAlfonsoStructureDump
                     continue;
 
                 TimeSpan interval = TimeSpan.FromMinutes(minutes);
-                AlfonsoTimeframeAnalyzer analyzer = new(interval);
+                AlfonsoTimeframeAnalyzer analyzer = new(interval, trendOptions: new AlfonsoTrendOptions
+                {
+                    RejectContradictingTrendlines = RejectContradictingTrendlines
+                });
 
                 // Decision points in ascending order; a bar "covers" a point when the point falls at
                 // or before that bar's close and after the previous one's.
@@ -112,7 +124,9 @@ public sealed class ZZAlfonsoStructureDump
         }
 
         File.WriteAllText(outPath, output.ToString());
-        TestContext.Out.WriteLine($"{rows} rows -> {outPath}");
+        TestContext.Out.WriteLine(
+            $"{rows} rows -> {outPath} " +
+            $"(trendline fit: {(RejectContradictingTrendlines ? "3.65 corrected" : "legacy")})");
     }
 
     private static string Row(string inst, DateTimeOffset at, string tf, AlfonsoTimeframeAnalyzer analyzer)

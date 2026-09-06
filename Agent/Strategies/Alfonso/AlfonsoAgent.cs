@@ -32,6 +32,7 @@ public sealed class AlfonsoAgent : ITradingAgent
 
     private readonly Action<AlfonsoCandidateRecord>? _candidateSink;
     private readonly Action<AlfonsoInventorySnapshot>? _inventorySink;
+    private readonly Action<string, DateTimeOffset, Sequence.AlfonsoSequenceAnalyzer>? _structure;
 
     /// <param name="options">Strategy configuration; defaults are the course's own values.</param>
     /// <param name="candidateSink">
@@ -41,13 +42,19 @@ public sealed class AlfonsoAgent : ITradingAgent
     /// <param name="inventorySink">
     /// Optional sink for periodic zone-inventory snapshots. Null disables the measurement entirely.
     /// </param>
+    /// <param name="structureSink">
+    /// Optional sink for the trend layer's state at each order placed - the only faithful source for
+    /// it, since replaying the analyzer outside the run reads different bars (3.67).
+    /// </param>
     public AlfonsoAgent(
         AlfonsoStrategyOptions? options = null,
         Action<AlfonsoCandidateRecord>? candidateSink = null,
-        Action<AlfonsoInventorySnapshot>? inventorySink = null)
+        Action<AlfonsoInventorySnapshot>? inventorySink = null,
+        Action<string, DateTimeOffset, Sequence.AlfonsoSequenceAnalyzer>? structureSink = null)
     {
         _candidateSink = candidateSink;
         _inventorySink = inventorySink;
+        _structure = structureSink;
         _options = options ?? new AlfonsoStrategyOptions();
         _options.Validate();
         RequiredIntervals = _options.RequiredIntervals;
@@ -128,6 +135,13 @@ public sealed class AlfonsoAgent : ITradingAgent
             if (state.LastEvaluated == bar.OpenTime)
                 return Observe(context, "This execution candle has already been evaluated.");
             state.LastEvaluated = bar.OpenTime;
+
+            // The top timeframe's ATR, read every evaluation rather than inside the new-bar loop
+            // above, which skips whenever that timeframe has not printed a fresh candle.
+            decimal? topAtr =
+                context.Analysis.TryGet(_options.TopInterval, out AnalysisSnapshot topSnapshot)
+                    ? topSnapshot.Indicators.Atr
+                    : null;
 
             decimal? atr = trigger.Indicators.Atr;
             if (atr is decimal sample && sample > 0m)
@@ -337,6 +351,17 @@ public sealed class AlfonsoAgent : ITradingAgent
                     continue;
                 }
 
+                // The same floor against the timeframe that supplied the direction, not the one the
+                // order sits on (3.66).
+                if (_options.MinimumStopTopAtrMultiple > 0m &&
+                    topAtr is decimal topUnit && topUnit > 0m &&
+                    risk / topUnit < _options.MinimumStopTopAtrMultiple)
+                {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.StopTooTight);
+                    continue;
+                }
+
                 if (!atrRegimeOk)
                 {
                     Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
@@ -346,6 +371,7 @@ public sealed class AlfonsoAgent : ITradingAgent
 
                 Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
                     atrPercentile, CandidateOutcome.Entered);
+                _structure?.Invoke(context.Instrument.ToString(), context.Timestamp, state.Analyzer);
                 state.PendingOrder = key;
 
                 return Task.FromResult(new AgentDecision

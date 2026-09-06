@@ -774,6 +774,12 @@ public sealed record BacktestRequest
 
     public bool AlfonsoMaintainStructuralAgreement { get; init; }
 
+    public bool AlfonsoRejectContradictingTrendlines { get; init; } = true;
+
+    public decimal AlfonsoMinimumStopTopAtrMultiple { get; init; }
+
+    public string? AlfonsoStructureLogPath { get; init; }
+
     /// <summary>--alfonso-overextension-trendlines: module 3's aggressive line across three CPs.</summary>
     public bool AlfonsoOverExtensionTrendlines { get; init; }
 
@@ -1037,9 +1043,11 @@ public sealed record BacktestRequest
                     AllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
                     MaximumCostToRiskFraction = AlfonsoMaximumCostToRiskFraction,
                     MinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
+                    MinimumStopTopAtrMultiple = AlfonsoMinimumStopTopAtrMultiple,
                     MinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
                     CandidateLogPath = AlfonsoCandidateLogPath,
                     InventoryLogPath = AlfonsoInventoryLogPath,
+                    StructureLogPath = AlfonsoStructureLogPath,
                     MaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
                     RestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
                     RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
@@ -1071,7 +1079,8 @@ public sealed record BacktestRequest
                         RequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
                         OverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
                         AnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
-                        MaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement
+                        MaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,
+                        RejectContradictingTrendlines = AlfonsoRejectContradictingTrendlines
                     }
                 };
                 return new TradingAgentDefinition { Kind = kind, Alfonso = alfonso };

@@ -75,6 +75,16 @@ public sealed record AlfonsoTrendOptions
     public bool MaintainStructuralAgreement { get; init; }
 
     /// <summary>
+    /// Whether a fitted trendline whose slope contradicts its own direction is refused.
+    /// <para>
+    /// Default true: module 3 draws a bullish trendline under rising valleys, and `Fit`'s
+    /// clear-every-candle adjustment can invert that (3.65 - 39% of live lines). Set false to restore
+    /// the pre-2026-09-06 behaviour.
+    /// </para>
+    /// </summary>
+    public bool RejectContradictingTrendlines { get; init; } = true;
+
+    /// <summary>
     /// Body-to-range ratio at which a candle counts as an ERC for over-extension. Defaulted from
     /// <see cref="AlfonsoBar.ExtendedRangeBodyRatio"/>, module 1's definition, which the zone layer
     /// defaults from too.
@@ -230,8 +240,10 @@ public sealed class AlfonsoTrendDetector
         RecordSwings(update);
         ApplyEliminations(update);
 
-        Trendline? bullish = TrendlineBuilder.Bullish(_valleys, _highs, _lows, _times, index);
-        Trendline? bearish = TrendlineBuilder.Bearish(_peaks, _highs, _lows, _times, index);
+        Trendline? bullish = TrendlineBuilder.Bullish(_valleys, _highs, _lows, _times, index,
+            _options.RejectContradictingTrendlines);
+        Trendline? bearish = TrendlineBuilder.Bearish(_peaks, _highs, _lows, _times, index,
+            _options.RejectContradictingTrendlines);
         (bullish, bearish) = WithOverExtensionLines(bullish, bearish, index);
 
         BreakTrendlines(bar, index, bullish, bearish);
@@ -272,9 +284,9 @@ public sealed class AlfonsoTrendDetector
 
         int previousIndex = _highs.Count - 1;
         Trendline? bullish = TrendlineBuilder.Bullish(
-            _valleys, _highs, _lows, _times, previousIndex);
+            _valleys, _highs, _lows, _times, previousIndex, _options.RejectContradictingTrendlines);
         Trendline? bearish = TrendlineBuilder.Bearish(
-            _peaks, _highs, _lows, _times, previousIndex);
+            _peaks, _highs, _lows, _times, previousIndex, _options.RejectContradictingTrendlines);
         (bullish, bearish) = WithOverExtensionLines(bullish, bearish, previousIndex);
 
         BreakTrendlines(bar, _highs.Count, bullish, bearish);

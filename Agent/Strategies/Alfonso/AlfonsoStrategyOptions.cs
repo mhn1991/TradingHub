@@ -89,6 +89,23 @@ public sealed record AlfonsoStrategyOptions
     public decimal MinimumStopAtrMultiple { get; init; }
 
     /// <summary>
+    /// Smallest stop distance, in ATR of the TOP timeframe, that a trade may have. Zero disables it.
+    /// <para>
+    /// Module 8 gives the top timeframe the direction and module 10 sizes the stop from the zone,
+    /// which on a drilled-down entry is a much smaller structure - so the thesis lives on one
+    /// timeframe and the risk on another. Measured over 135 trades, the median stop was **0.21** of a
+    /// 4h ATR and 93% sat under half of one, on trades whose direction came from that 4h chart
+    /// (3.66). Module 10's fourth entry option is the book's own guard - "make sure you use the stop
+    /// padding you would use for the bigger timeframe imbalance" - and 3.61 records it as unbuilt.
+    /// </para>
+    /// <para>
+    /// This is the cruder ATR-shaped version of that rule, and it is off by default because it is a
+    /// behaviour change with its own A/B, not a repair.
+    /// </para>
+    /// </summary>
+    public decimal MinimumStopTopAtrMultiple { get; init; }
+
+    /// <summary>
     /// ATR percentile band, measured against this instrument's own recent history on the execution
     /// timeframe, outside which entries are refused. Defaults to the full range, i.e. no veto.
     /// <para>
@@ -134,6 +151,13 @@ public sealed record AlfonsoStrategyOptions
     /// --alfonso-inventory-log. Written once per top-timeframe bar.
     /// </summary>
     public string? InventoryLogPath { get; init; }
+
+    /// <summary>
+    /// Optional JSONL sink for the trend layer's decision-time state - trend, trendline and live
+    /// imbalances per timeframe - written once per order placed. See <see cref="AlfonsoStructureLog"/>
+    /// for why this cannot be recovered by replaying the analyzer outside the run (3.67).
+    /// </summary>
+    public string? StructureLogPath { get; init; }
 
     /// <summary>
     /// Distance from price, in ATR, inside which a resting order has a realistic chance of filling.

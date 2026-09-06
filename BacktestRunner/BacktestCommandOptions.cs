@@ -168,6 +168,15 @@ internal sealed record BacktestCommandOptions
 
     /// <summary>--alfonso-maintain-structure re-checks module 5's structural condition while a trend runs.</summary>
     public bool AlfonsoMaintainStructuralAgreement { get; init; }
+
+    /// <summary>--alfonso-allow-contradicting-trendlines restores the pre-2026-09-06 fit.</summary>
+    public bool AlfonsoRejectContradictingTrendlines { get; init; } = true;
+
+    /// <summary>--alfonso-min-stop-top-atr N: stop floor in ATR of the TOP timeframe.</summary>
+    public decimal AlfonsoMinimumStopTopAtrMultiple { get; init; }
+
+    /// <summary>--alfonso-structure-log PATH: decision-time trend, trendline and zones as JSONL.</summary>
+    public string? AlfonsoStructureLogPath { get; init; }
     public bool AlfonsoOverExtensionTrendlines { get; init; }
     public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
     public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
@@ -386,6 +395,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-half-entry" or "alfonso-allow-invalid-hosts" or
                 "alfonso-single-candle-drop-rally" or
                 "alfonso-swing-anchor-at-base-end" or "alfonso-maintain-structure" or
+                "alfonso-allow-contradicting-trendlines" or
                 "alfonso-overextension-trendlines" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
@@ -710,6 +720,12 @@ internal sealed record BacktestCommandOptions
             AlfonsoAnchorSwingsAtExtreme =
                 !values.ContainsKey("alfonso-swing-anchor-at-base-end"),
             AlfonsoMaintainStructuralAgreement = values.ContainsKey("alfonso-maintain-structure"),
+            AlfonsoRejectContradictingTrendlines =
+                !values.ContainsKey("alfonso-allow-contradicting-trendlines"),
+            AlfonsoStructureLogPath = values.GetValueOrDefault("alfonso-structure-log"),
+            AlfonsoMinimumStopTopAtrMultiple = ParseDecimal(
+                values.GetValueOrDefault("alfonso-min-stop-top-atr"), 0m, 0m,
+                "alfonso-min-stop-top-atr", allowZero: true),
             AlfonsoOverExtensionTrendlines = values.ContainsKey("alfonso-overextension-trendlines"),
             AlfonsoMinimumZoneGrade = ParseZoneGrade(values.GetValueOrDefault("alfonso-min-grade")),
             AlfonsoMinimumImpulseToBaseRatio = ParseDecimal(
@@ -890,6 +906,9 @@ internal sealed record BacktestCommandOptions
         AlfonsoDropRallyBaseSpansBothCandles = AlfonsoDropRallyBaseSpansBothCandles,
         AlfonsoAnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
         AlfonsoMaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,
+        AlfonsoRejectContradictingTrendlines = AlfonsoRejectContradictingTrendlines,
+        AlfonsoMinimumStopTopAtrMultiple = AlfonsoMinimumStopTopAtrMultiple,
+        AlfonsoStructureLogPath = AlfonsoStructureLogPath,
         AlfonsoOverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
         AlfonsoMinimumZoneGrade = AlfonsoMinimumZoneGrade,
         AlfonsoMinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,
