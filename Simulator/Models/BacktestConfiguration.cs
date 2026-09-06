@@ -762,6 +762,8 @@ public sealed record BacktestRequest
     /// </summary>
     public bool AlfonsoRequireStructuralAgreement { get; init; }
 
+    public bool AlfonsoRequireConfirmedTrendStructure { get; init; }
+
     /// <summary>--alfonso-half-entry: module 10's "use half the width of the original imbalance".</summary>
     public bool AlfonsoHalfZoneEntry { get; init; }
 
@@ -1079,6 +1081,7 @@ public sealed record BacktestRequest
                         RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
                         RequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
                         RequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
+                        RequireConfirmedTrendStructure = AlfonsoRequireConfirmedTrendStructure,
                         OverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
                         AnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
                         MaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,

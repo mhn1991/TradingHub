@@ -171,6 +171,13 @@ public sealed record AlfonsoTrendOptions
     /// </para>
     /// </summary>
     public bool RequireStructuralAgreement { get; init; }
+
+    /// <summary>
+    /// Experimental establishment/reversal gate: two confirmed non-continuation zone peaks and
+    /// valleys must strictly agree with the candidate. Missing or flat structure is not confirmation.
+    /// Existing accomplishment requirements still apply. Off for baseline parity.
+    /// </summary>
+    public bool RequireConfirmedTrendStructure { get; init; }
 }
 
 /// <summary>
@@ -550,7 +557,8 @@ public sealed class AlfonsoTrendDetector
     /// </summary>
     /// <summary>Establish-time gate: the structural test, applied only when it is switched on.</summary>
     private bool StructureAgrees(AlfonsoTrend candidate) =>
-        !_options.RequireStructuralAgreement || StructureMatches(candidate);
+        (!_options.RequireStructuralAgreement || StructureMatches(candidate)) &&
+        (!_options.RequireConfirmedTrendStructure || ConfirmedStructureMatches(candidate));
 
     private void RecordConfirmedPriceSwings(int index)
     {
@@ -584,6 +592,16 @@ public sealed class AlfonsoTrendDetector
     /// successive peak and trough is higher than the ones found earlier" for an uptrend, and the
     /// mirror for a downtrend.
     /// </summary>
+    private bool ConfirmedStructureMatches(AlfonsoTrend candidate)
+    {
+        if (_peaks.Count < 2 || _valleys.Count < 2)
+            return false;
+
+        return candidate == AlfonsoTrend.Uptrend
+            ? _peaks[^1].Price > _peaks[^2].Price && _valleys[^1].Price > _valleys[^2].Price
+            : _peaks[^1].Price < _peaks[^2].Price && _valleys[^1].Price < _valleys[^2].Price;
+    }
+
     private bool StructureMatches(AlfonsoTrend candidate)
     {
         // Too little structure to read is not a disagreement.
@@ -658,7 +676,11 @@ public sealed class AlfonsoTrendDetector
 
         if (!up && !down)
         {
-            if (_trend == AlfonsoTrend.Unknown)
+            if (_options.RequireConfirmedTrendStructure &&
+                ((upByLine || upAlone) && !ConfirmedStructureMatches(AlfonsoTrend.Uptrend) ||
+                 (downByLine || downAlone) && !ConfirmedStructureMatches(AlfonsoTrend.Downtrend)))
+                _reason = "Accomplishment present; waiting for two confirmed peaks and valleys agreeing with its direction.";
+            else if (_trend == AlfonsoTrend.Unknown)
                 _reason = $"No accomplishment yet (supply {_supplyEliminated}, demand {_demandEliminated}).";
             return;
         }

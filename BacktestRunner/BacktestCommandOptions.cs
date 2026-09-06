@@ -138,6 +138,8 @@ internal sealed record BacktestCommandOptions
 
     public bool AlfonsoRequireStructuralAgreement { get; init; }
 
+    public bool AlfonsoRequireConfirmedTrendStructure { get; init; }
+
     public string? AlfonsoCandidateLogPath { get; init; }
 
     public string? AlfonsoInventoryLogPath { get; init; }
@@ -394,7 +396,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
                 "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
                 "alfonso-with-drift" or
-                "alfonso-manage-position" or "alfonso-structural-agreement" or
+                "alfonso-manage-position" or "alfonso-structural-agreement" or "alfonso-confirm-trend-structure" or
                 "alfonso-half-entry" or "alfonso-allow-invalid-hosts" or
                 "alfonso-single-candle-drop-rally" or
                 "alfonso-swing-anchor-at-base-end" or "alfonso-maintain-structure" or
@@ -701,6 +703,7 @@ internal sealed record BacktestCommandOptions
             AlfonsoRequireStructuralAgreement =
                 values.ContainsKey("alfonso-structural-agreement") &&
                 !values.ContainsKey("alfonso-no-structural-agreement"),
+            AlfonsoRequireConfirmedTrendStructure = values.ContainsKey("alfonso-confirm-trend-structure"),
             AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
             AlfonsoInventoryLogPath = values.GetValueOrDefault("alfonso-inventory-log"),
             AlfonsoMaximumPlacementDistanceAtr = ParseDecimal(
@@ -897,6 +900,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoTreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation,
         AlfonsoRequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
         AlfonsoRequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
+        AlfonsoRequireConfirmedTrendStructure = AlfonsoRequireConfirmedTrendStructure,
         AlfonsoCandidateLogPath = AlfonsoCandidateLogPath,
         AlfonsoInventoryLogPath = AlfonsoInventoryLogPath,
         AlfonsoMaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
