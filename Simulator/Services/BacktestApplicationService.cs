@@ -358,11 +358,8 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
             try
             {
-                ComparativeSimulationResult result = await ExecuteJobAsync(job, serviceToken)
+                var (result, instrumentByStrategyId) = await ExecuteJobAsync(job, serviceToken)
                     .ConfigureAwait(false);
-                IReadOnlyDictionary<string, string> instrumentByStrategyId =
-                    (_options.StrategyFactory ?? CreateDefaultStrategies)(job.Request)
-                        .ToDictionary(entry => entry.Id, entry => entry.Instrument.Value);
                 SimulationJobSnapshot completed = await job.ApplyAsync(current => NextRevision(current) with
                 {
                     Status = SimulationJobStatus.Completed,
@@ -435,7 +432,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         }
     }
 
-    private async Task<ComparativeSimulationResult> ExecuteJobAsync(
+    private async Task<(ComparativeSimulationResult Result, IReadOnlyDictionary<string, string> Instruments)> ExecuteJobAsync(
         RunningJob job,
         CancellationToken serviceToken)
     {
@@ -636,7 +633,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             .ConfigureAwait(false);
 
         stopwatch.Stop();
-        return result;
+        // Reuse the actual run's metadata. Constructing agents again during finalization can
+        // reopen diagnostic files (and lose custom factory state) after a successful simulation.
+        return (result, strategies.ToDictionary(entry => entry.Id, entry => entry.Instrument.Value));
     }
 
     private async Task UpdateStatusAsync(
