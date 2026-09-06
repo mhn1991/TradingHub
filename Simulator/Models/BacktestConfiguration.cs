@@ -715,6 +715,12 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-stop-padding N. 25% of the zone width in the worked examples.</summary>
     public decimal? AlfonsoStopPadding { get; init; }
 
+    /// <summary>--alfonso-structural-stop: use confirmed execution-timeframe swing protection.</summary>
+    public bool AlfonsoUseStructuralSwingStop { get; init; }
+
+    /// <summary>--alfonso-stop-lookback N: eligible closed execution candles, default 48.</summary>
+    public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
+
     /// <summary>--alfonso-elimination-on-wick reverts to the English text's tick-penetration rule.</summary>
     public bool AlfonsoEliminationRequiresClose { get; init; } = true;
 
@@ -1045,6 +1051,8 @@ public sealed record BacktestRequest
                     TopInterval = AlfonsoTopInterval ?? defaultAlfonso.TopInterval,
                     MiddleInterval = AlfonsoMiddleInterval ?? defaultAlfonso.MiddleInterval,
                     LowerInterval = AlfonsoLowerInterval ?? defaultAlfonso.LowerInterval,
+                    UseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
+                    StructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
                     RequireNestedEntries = AlfonsoRequireNestedEntries,
                     RequireControlAgreement = AlfonsoRequireControlAgreement,
                     AllowConfirmationEntries = AlfonsoAllowConfirmationEntries,

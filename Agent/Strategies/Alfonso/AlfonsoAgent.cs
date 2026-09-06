@@ -117,6 +117,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                     candle.Prices.Low,
                     candle.Prices.Close);
                 state.Analyzer.Apply(role, closedBar);
+                if (role == SequenceRole.Lower)
+                    state.StructuralStop?.Apply(closedBar);
                 _trendSink?.Invoke(context.Instrument.ToString(), context.Timestamp, role, closedBar, state.Analyzer[role]);
             }
 
@@ -281,6 +283,20 @@ public sealed class AlfonsoAgent : ITradingAgent
                 }
 
                 decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
+                string stopSource = $"distal {zone.Distal:F2} padded {_options.Zones.StopPaddingFraction:P0}";
+                if (state.StructuralStop is { } structuralStop)
+                {
+                    var resolved = structuralStop.Resolve(buy, zone.Distal,
+                        zone.Width * _options.Zones.StopPaddingFraction);
+                    stop = resolved.Stop;
+                    string anchorSource = resolved.Anchor is { } anchor
+                        ? $"swing {(buy ? "low" : "high")} {(buy ? anchor.Low : anchor.High):0.########} " +
+                          $"at {anchor.OpenTime.UtcDateTime:yyyy-MM-dd HH:mm} UTC (candle open)"
+                        : "no confirmed swing; zone fallback";
+                    stopSource = $"structural {BarIntervalParser.Format(_options.LowerInterval)} " +
+                        $"({_options.StructuralStopLookbackCandles} closed candles, 2/2 pivot): {anchorSource}; " +
+                        $"outside distal {zone.Distal:0.########}, zone-width padding {_options.Zones.StopPaddingFraction:P0}";
+                }
                 decimal reference = entryPrice;
 
                 if (!_options.RequireReversalConfirmation)
@@ -318,7 +334,7 @@ public sealed class AlfonsoAgent : ITradingAgent
                 }
 
                 decimal risk = Math.Abs(reference - stop);
-                decimal target = _options.RequireReversalConfirmation
+                decimal target = _options.RequireReversalConfirmation || _options.UseStructuralSwingStop
                     ? (buy
                         ? reference + (_options.Zones.RewardMultiple * risk)
                         : reference - (_options.Zones.RewardMultiple * risk))
@@ -401,7 +417,7 @@ public sealed class AlfonsoAgent : ITradingAgent
                     TakeProfitPrice = target,
                     SignalInterval = _options.LowerInterval,
                     StopSource =
-                        $"distal {zone.Distal:F2} padded {_options.Zones.StopPaddingFraction:P0}, " +
+                        $"{stopSource}, " +
                         $"target {_options.Zones.RewardMultiple:F1}:1"
                 });
             }
@@ -579,6 +595,8 @@ public sealed class AlfonsoAgent : ITradingAgent
 
         public InstrumentState(AlfonsoStrategyOptions options)
         {
+            StructuralStop = options.UseStructuralSwingStop
+                ? new AlfonsoStructuralStop(options.StructuralStopLookbackCandles) : null;
             Analyzer = new AlfonsoSequenceAnalyzer(
                 options.Sequence, options.Zones, options.Trend, options.Range, options.FreshLevelsOnly,
                 options.RequireControlAgreement, options.AllowConfirmationEntries,
@@ -601,6 +619,8 @@ public sealed class AlfonsoAgent : ITradingAgent
         public object Gate { get; } = new();
 
         public AlfonsoSequenceAnalyzer Analyzer { get; }
+
+        public AlfonsoStructuralStop? StructuralStop { get; }
 
         public IReadOnlyList<(SequenceRole Role, BarInterval Interval)> Intervals { get; }
 

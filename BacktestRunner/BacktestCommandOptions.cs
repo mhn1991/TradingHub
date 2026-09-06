@@ -129,6 +129,8 @@ internal sealed record BacktestCommandOptions
     public BarInterval? AlfonsoLowerInterval { get; init; }
     public decimal? AlfonsoRewardMultiple { get; init; }
     public decimal? AlfonsoStopPadding { get; init; }
+    public bool AlfonsoUseStructuralSwingStop { get; init; }
+    public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
     public bool AlfonsoEliminationRequiresClose { get; init; } = false;
     public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
     public bool AlfonsoRequireValidZoneForTrendChange { get; init; } = true;
@@ -688,6 +690,9 @@ internal sealed record BacktestCommandOptions
             AlfonsoRewardMultiple = values.ContainsKey("alfonso-reward")
                 ? ParseDecimal(values.GetValueOrDefault("alfonso-reward"), 3m, 0m, "alfonso-reward")
                 : null,
+            AlfonsoUseStructuralSwingStop = values.ContainsKey("alfonso-structural-stop"),
+            AlfonsoStructuralStopLookbackCandles = ParseInt(
+                values.GetValueOrDefault("alfonso-stop-lookback"), 48, 5, 10000, "alfonso-stop-lookback"),
             AlfonsoStopPadding = values.ContainsKey("alfonso-stop-padding")
                 ? ParseDecimal(
                     values.GetValueOrDefault("alfonso-stop-padding"), 0.25m, 0m, "alfonso-stop-padding",
@@ -901,6 +906,8 @@ internal sealed record BacktestCommandOptions
         AlfonsoLowerInterval = AlfonsoLowerInterval,
         AlfonsoRewardMultiple = AlfonsoRewardMultiple,
         AlfonsoStopPadding = AlfonsoStopPadding,
+        AlfonsoUseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
+        AlfonsoStructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
         AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,
         AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
         AlfonsoRequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,

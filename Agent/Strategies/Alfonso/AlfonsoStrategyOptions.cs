@@ -25,6 +25,12 @@ public sealed record AlfonsoStrategyOptions
     /// <summary>Lower timeframe: execution. Orders are planned at this timeframe's zones.</summary>
     public BarInterval LowerInterval { get; init; } = BarInterval.Minutes(15);
 
+    /// <summary>Opt-in protection beyond the extreme confirmed swing on the execution timeframe.</summary>
+    public bool UseStructuralSwingStop { get; init; }
+
+    /// <summary>Closed execution candles containing eligible anchors; pivots require 2 bars each side.</summary>
+    public int StructuralStopLookbackCandles { get; init; } = 48;
+
     public ImbalanceOptions Zones { get; init; } = new();
 
     public AlfonsoTrendOptions Trend { get; init; } = new();
@@ -328,6 +334,9 @@ public sealed record AlfonsoStrategyOptions
         Zones.Validate();
         Range.Validate();
         Sequence.Validate();
+
+        if (StructuralStopLookbackCandles is < 5 or > 10000)
+            throw new InvalidOperationException("StructuralStopLookbackCandles must be between 5 and 10000.");
 
         if (!Enum.IsDefined(EntryPolicy))
             throw new InvalidOperationException("Unknown Alfonso entry policy.");
