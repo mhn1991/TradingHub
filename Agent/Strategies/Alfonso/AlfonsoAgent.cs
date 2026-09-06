@@ -578,7 +578,7 @@ public sealed class AlfonsoAgent : ITradingAgent
                 options.RequireControlAgreement, options.AllowConfirmationEntries,
                 options.MinimumProfitMarginMultiple, options.Zones.StopPaddingFraction,
                 options.RequireReversalConfirmation, options.MinimumZoneGrade,
-                options.RequireValidHost);
+                options.RequireValidHost, options.EntryPolicy);
 
             Intervals =
             [

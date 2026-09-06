@@ -817,6 +817,8 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-confirm-entry. Enter on a close back out of the zone, not on first touch.</summary>
     public bool AlfonsoRequireReversalConfirmation { get; init; }
 
+    public AlfonsoEntryPolicy AlfonsoEntryPolicy { get; init; } = AlfonsoEntryPolicy.Core;
+
     /// <summary>--alfonso-with-drift. Only trade the side the top-timeframe drift favours.</summary>
     public bool AlfonsoRequireDriftAlignment { get; init; }
 
@@ -1055,6 +1057,7 @@ public sealed record BacktestRequest
                     MaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
                     RestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
                     RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
+                    EntryPolicy = AlfonsoEntryPolicy,
                     RequireDriftAlignment = AlfonsoRequireDriftAlignment,
                     AllowPositionManagement = AlfonsoAllowPositionManagement,
                     DriftLookbackCandles = AlfonsoDriftLookbackCandles,

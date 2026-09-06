@@ -1,5 +1,6 @@
 using System.Globalization;
 using Agent.Strategies;
+using Agent.Strategies.Alfonso;
 using Agent.Strategies.Alfonso.Zones;
 using Brokers.Abstractions;
 using Brokers.Models;
@@ -149,6 +150,8 @@ internal sealed record BacktestCommandOptions
     public decimal AlfonsoRestingOrderReplacementAtr { get; init; }
 
     public bool AlfonsoRequireReversalConfirmation { get; init; }
+
+    public AlfonsoEntryPolicy AlfonsoEntryPolicy { get; init; } = AlfonsoEntryPolicy.Core;
 
     public bool AlfonsoAllowPositionManagement { get; init; }
 
@@ -713,6 +716,7 @@ internal sealed record BacktestCommandOptions
                 values.GetValueOrDefault("alfonso-replace-resting-atr"), 0m, 0m,
                 "alfonso-replace-resting-atr", allowZero: true),
             AlfonsoRequireReversalConfirmation = values.ContainsKey("alfonso-confirm-entry"),
+            AlfonsoEntryPolicy = ParseAlfonsoEntryPolicy(values.GetValueOrDefault("alfonso-entry-policy")),
             AlfonsoAllowPositionManagement = alfonsoManaged,
             AlfonsoPositionManagement = alfonsoManagement,
             AlfonsoRequireDriftAlignment = values.ContainsKey("alfonso-with-drift"),
@@ -906,6 +910,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoMaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
         AlfonsoRestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
         AlfonsoRequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
+        AlfonsoEntryPolicy = AlfonsoEntryPolicy,
         AlfonsoAllowPositionManagement = AlfonsoAllowPositionManagement,
         AlfonsoRequireDriftAlignment = AlfonsoRequireDriftAlignment,
         AlfonsoDriftLookbackCandles = AlfonsoDriftLookbackCandles,
@@ -1109,6 +1114,13 @@ internal sealed record BacktestCommandOptions
             _ => throw new ArgumentException(
                 $"Unknown --price-action-mode '{value}'. Use disabled, soft, required, or required-with-context.")
         };
+
+    private static AlfonsoEntryPolicy ParseAlfonsoEntryPolicy(string? value) => value?.ToLowerInvariant() switch
+    {
+        null or "core" => AlfonsoEntryPolicy.Core,
+        "lower-reversal" => AlfonsoEntryPolicy.LowerTimeframeReversal,
+        _ => throw new ArgumentException("--alfonso-entry-policy must be core or lower-reversal.")
+    };
 
     private static SimulationPrecisionMode ParsePrecisionMode(string? value) =>
         value?.Trim().ToLowerInvariant() switch

@@ -31,6 +31,9 @@ public sealed record AlfonsoStrategyOptions
 
     public RangeOptions Range { get; init; } = new();
 
+    /// <summary>Core by default. The reversal-only experiment requires closed-candle entry confirmation.</summary>
+    public AlfonsoEntryPolicy EntryPolicy { get; init; } = AlfonsoEntryPolicy.Core;
+
     public decimal Quantity { get; init; } = 1_000m;
 
     /// <summary>
@@ -322,6 +325,11 @@ public sealed record AlfonsoStrategyOptions
         Zones.Validate();
         Range.Validate();
         Sequence.Validate();
+
+        if (!Enum.IsDefined(EntryPolicy))
+            throw new InvalidOperationException("Unknown Alfonso entry policy.");
+        if (EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeReversal && !RequireReversalConfirmation)
+            throw new InvalidOperationException("Lower-timeframe reversal policy requires --alfonso-confirm-entry.");
 
         if (Quantity <= 0m)
             throw new InvalidOperationException("Quantity must be positive.");

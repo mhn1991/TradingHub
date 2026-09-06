@@ -53,6 +53,7 @@ public sealed class AlfonsoSequenceAnalyzer
     private readonly ImbalanceOptions _zoneOptions;
     private readonly ZoneGrade _minimumGrade;
     private readonly bool _requireValidHost;
+    private readonly AlfonsoEntryPolicy _entryPolicy;
 
     public AlfonsoSequenceAnalyzer(
         TimeframeSequence sequence,
@@ -66,10 +67,16 @@ public sealed class AlfonsoSequenceAnalyzer
         decimal stopPaddingFraction = 0.25m,
         bool confirmationEntryMode = false,
         ZoneGrade minimumGrade = ZoneGrade.Weak,
-        bool requireValidHost = true)
+        bool requireValidHost = true,
+        AlfonsoEntryPolicy entryPolicy = AlfonsoEntryPolicy.Core)
     {
         ArgumentNullException.ThrowIfNull(sequence);
         sequence.Validate();
+        if (!Enum.IsDefined(entryPolicy))
+            throw new ArgumentOutOfRangeException(nameof(entryPolicy));
+        if (entryPolicy == AlfonsoEntryPolicy.LowerTimeframeReversal && !confirmationEntryMode)
+            throw new ArgumentException("Lower-timeframe reversal requires confirmation entry mode.", nameof(confirmationEntryMode));
+        _entryPolicy = entryPolicy;
         Sequence = sequence;
         _freshLevelsOnly = freshLevelsOnly;
         _confirmationEntryMode = confirmationEntryMode;
@@ -114,11 +121,11 @@ public sealed class AlfonsoSequenceAnalyzer
     /// <summary>Trend on one timeframe of the sequence, for decision-time logging.</summary>
     public AlfonsoTrend TrendOf(SequenceRole role) => _timeframes[role].Trend.Trend;
 
-    /// <summary>The alignment currently in force, resolved against module 11's table.</summary>
+    /// <summary>The alignment currently in force, resolved against the selected entry policy.</summary>
     public ScenarioResolution Scenario => ScenarioMatrix.Resolve(
         _timeframes[SequenceRole.Top].Trend.Trend,
         _timeframes[SequenceRole.Middle].Trend.Trend,
-        _timeframes[SequenceRole.Lower].Trend.Trend);
+        _timeframes[SequenceRole.Lower].Trend.Trend, _entryPolicy);
 
     /// <summary>
     /// Zones the rules permit an order at right now, nearest to price first.
