@@ -335,9 +335,7 @@ public sealed class AlfonsoAgent : ITradingAgent
 
                 decimal risk = Math.Abs(reference - stop);
                 decimal target = _options.RequireReversalConfirmation || _options.UseStructuralSwingStop
-                    ? (buy
-                        ? reference + (_options.Zones.RewardMultiple * risk)
-                        : reference - (_options.Zones.RewardMultiple * risk))
+                    ? CalculateTarget(buy, reference, stop, _options.Zones.RewardMultiple)
                     : zone.TargetPrice(
                         _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple,
                         _options.Zones.EntryPlacement);
@@ -418,7 +416,7 @@ public sealed class AlfonsoAgent : ITradingAgent
                     SignalInterval = _options.LowerInterval,
                     StopSource =
                         $"{stopSource}, " +
-                        $"target {_options.Zones.RewardMultiple:F1}:1"
+                        $"target {_options.Zones.RewardMultiple:0.##}:1"
                 });
             }
 
@@ -566,6 +564,12 @@ public sealed class AlfonsoAgent : ITradingAgent
 
     private static ZoneOrderKey Key(TradeCandidate candidate) =>
         new(candidate.EntryTimeframe, candidate.Zone.BaseEnd, candidate.Zone.Kind);
+
+    internal static decimal CalculateTarget(bool buy, decimal reference, decimal stop, decimal rewardMultiple)
+    {
+        decimal reward = Math.Abs(reference - stop) * rewardMultiple;
+        return buy ? reference + reward : reference - reward;
+    }
 
     private sealed class InstrumentState
     {
