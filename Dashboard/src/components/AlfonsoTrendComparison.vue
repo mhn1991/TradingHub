@@ -8,7 +8,7 @@ type Stats = { bars: number; directionalPercent: number; disagreementPercent: nu
   breakoutEvents: number; breakoutsRecognized: number; medianRecognitionBars: number | null }
 type Timeframe = { minutes: number; file: string; stats: Stats[]; firstAt: number; lastAt: number }
 type Instrument = { id: string; label: string; instrument: string; from: string; to: string
-  simulationId: string; inputHash: string; timeframes: Timeframe[] }
+  simulationId: string; inputHash: string; completionNote?: string; timeframes: Timeframe[] }
 type Index = { schemaVersion: number; revision: string; generatedAt: string; arms: string[]; states: string[]; instruments: Instrument[] }
 type Detail = { schemaVersion: number; rows: Row[]; reasons: string[]
   events: { index: number; at: number; direction: number; delays: (number | null)[] }[] }
@@ -134,6 +134,7 @@ onMounted(loadIndex)
       <span v-if="instrument" class="muted">{{ instrument.from.slice(0, 10) }} → {{ instrument.to.slice(0, 10) }} · All timestamps UTC</span>
     </div>
     <p v-if="loading" role="status">Loading trend timeline…</p>
+    <p v-if="instrument?.completionNote" class="muted">{{ instrument.completionNote }}</p>
     <template v-if="timeframe && index && detail && !loading">
       <div class="table-scroll"><table>
         <thead><tr><th>Variant</th><th>Directional coverage</th><th>Different from baseline</th><th>State changes</th><th>Next 4 bars agree</th><th>Same-bar subset agrees</th><th>Breakouts recognized</th><th>Median delay (bars)</th></tr></thead>
@@ -158,7 +159,7 @@ onMounted(loadIndex)
       </form>
       <p v-if="jumpNotice" role="status">{{ jumpNotice }}</p>
       <p class="legend"><span v-for="(name, i) in names" :key="name"><i :style="{ background: colors[i] }" />{{ name }}</span> · Click a candle to inspect all four reasons.</p>
-      <svg v-if="visible.length" class="timeline" viewBox="0 0 1200 430" role="img" aria-label="Candlestick chart with four aligned trend-state timelines" @click="selectCandle">
+      <svg v-if="visible.length" class="trend-timeline" viewBox="0 0 1200 430" role="img" aria-label="Candlestick chart with four aligned trend-state timelines" @click="selectCandle">
         <g v-for="fraction in [0, .25, .5, .75, 1]" :key="fraction">
           <line x1="112" x2="1122" :y1="20 + fraction * 258" :y2="20 + fraction * 258" stroke="#334155" stroke-width=".5" />
           <text x="1130" :y="24 + fraction * 258">{{ formatPrice(bounds.high - fraction * (bounds.high - bounds.low)) }}</text>
@@ -200,8 +201,8 @@ button { cursor: pointer; } button:disabled { opacity: .5; } .table-scroll { ove
 table { border-collapse: collapse; width: 100%; font-size: .85rem; } th, td { text-align: left; padding: .75rem; border-bottom: 1px solid #334155; }
 .method { margin: 1rem 0; color: #aebed1; font-size: .85rem; overflow-wrap: anywhere; } summary { cursor: pointer; }
 .legend { display: flex; flex-wrap: wrap; gap: .8rem; font-size: .85rem; } .legend i { display: inline-block; width: .7rem; height: .7rem; margin-right: .3rem; }
-.timeline { width: 100%; background: #101a29; border: 1px solid #334155; border-radius: 8px; cursor: crosshair; }
-.timeline text { fill: #aebed1; font: 11px system-ui; } .reasons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+.trend-timeline { display: block; width: 100%; height: auto; aspect-ratio: 1200 / 430; background: #101a29; border: 1px solid #334155; border-radius: 8px; cursor: crosshair; }
+.trend-timeline text { fill: #aebed1; font: 11px system-ui; } .reasons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
 .reasons article { padding: .8rem; background: #172334; border: 1px solid #334155; border-radius: 8px; }
 .reasons h4 span { display: block; font-size: .85rem; margin-top: .3rem; } .reasons p { font-size: .9rem; }
 @media (max-width: 700px) { .reasons { grid-template-columns: 1fr; } label { flex-wrap: wrap; } }

@@ -1,8 +1,9 @@
 import json
+import gzip
 import tempfile
 import unittest
 from pathlib import Path
-from alfonso_trend_export import read_rows, summarize
+from alfonso_trend_export import read_rows, summarize, run_metadata
 
 
 def row(i, close, labels=(1, 1, 3, 3)):
@@ -11,6 +12,34 @@ def row(i, close, labels=(1, 1, 3, 3)):
 
 
 class TrendExportTests(unittest.TestCase):
+    def test_recovery_requires_complete_successful_engine_and_full_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            replay = root / 'simulations/run'
+            strategy = replay / 'strategies/alfonso'
+            strategy.mkdir(parents=True)
+            manifest = {'status': 'Completed', 'strategies': ['alfonso'], 'inputHash': 'hash',
+                        'instrument': 'test', 'simulationId': 'run',
+                        'from': '2026-01-01T00:00:00Z', 'to': '2026-01-02T00:00:00Z'}
+            (replay / 'manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'not a completed'):
+                run_metadata(root, True)
+            (replay / 'COMPLETE').touch()
+            with gzip.open(strategy / 'performance.json.gz', 'wt') as stream:
+                json.dump({'endedAt': manifest['from']}, stream)
+            with self.assertRaisesRegex(ValueError, 'ended before'):
+                run_metadata(root, True)
+            with gzip.open(strategy / 'performance.json.gz', 'wt') as stream:
+                json.dump({'endedAt': manifest['to']}, stream)
+            with gzip.open(strategy / 'trades.json.gz', 'wt') as stream:
+                json.dump([{}], stream)
+            result = run_metadata(root, True)
+            self.assertEqual(result['baselineTradeCount'], 1)
+            self.assertIn('finalization failed', result['completionNote'])
+            (strategy / 'failure.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'not a completed'):
+                run_metadata(root, True)
+
     def test_neutral_is_not_correct_and_future_tail_is_excluded(self):
         rows = [row(i, 100+i) for i in range(30)]
         stats, events = summarize(rows)

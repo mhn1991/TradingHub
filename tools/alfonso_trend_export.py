@@ -1,5 +1,6 @@
 """Export continuous live-feed trend audits, with descriptive (not ground-truth) comparisons."""
 import argparse
+import gzip
 import json
 import statistics
 from datetime import datetime, timezone
@@ -110,19 +111,47 @@ def write_json(path, payload):
     temporary.replace(path)
 
 
-def export(root, out, tags):
+def run_metadata(directory, completed_replay=False):
+    if not completed_replay:
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        result = json.loads((directory / 'simulation-result.json').read_text())
+        return {key: manifest[key] for key in ('instrument', 'from', 'to')} | {
+            'simulationId': result['simulationId'], 'inputHash': result['inputHash'],
+            'baselineTradeCount': manifest['runs'][0]['performance']['tradeCount']}
+    # Explicit recovery only: the engine can finish and persist its replay before runner
+    # finalization fails. Never turn a partial replay into a completed comparison.
+    manifests = list((directory / 'simulations').glob('*/manifest.json'))
+    if len(manifests) != 1:
+        raise ValueError(f'Expected exactly one completed replay in {directory}')
+    path = manifests[0]
+    manifest = json.loads(path.read_text())
+    strategy = path.parent / 'strategies/alfonso'
+    if (not (path.parent / 'COMPLETE').is_file() or manifest.get('status') != 'Completed'
+            or manifest.get('strategies') != ['alfonso'] or not manifest.get('inputHash')
+            or (strategy / 'failure.json').exists()):
+        raise ValueError(f'Replay is not a completed, successful Alfonso engine run: {path}')
+    with gzip.open(strategy / 'performance.json.gz', 'rt') as source:
+        performance = json.load(source)
+    if epoch(performance['endedAt']) < epoch(manifest['to']):
+        raise ValueError(f'Replay ended before the requested window: {path}')
+    with gzip.open(strategy / 'trades.json.gz', 'rt') as source:
+        trades = json.load(source)
+    return {key: manifest[key] for key in ('instrument', 'from', 'to', 'simulationId', 'inputHash')} | {
+        'baselineTradeCount': len(trades),
+        'completionNote': 'Recovered from completed engine replay; runner summary finalization failed. '
+                          'The original failed job status is retained.'}
+
+
+def export(root, out, tags, completed_replay=False):
     out.mkdir(parents=True, exist_ok=True)
     revision = (root / 'code-revision.txt').read_text().strip()
     index = {'schemaVersion': 1, 'generatedAt': datetime.now(timezone.utc).isoformat(),
              'revision': revision, 'arms': ARMS, 'states': STATES, 'instruments': []}
     for tag in tags:
-        manifest = json.loads((root / tag / 'manifest.json').read_text())
-        result = json.loads((root / tag / 'simulation-result.json').read_text())
-        start, end = epoch(manifest['from']), epoch(manifest['to'])
-        grouped, reasons = read_rows(root / f'{tag}.jsonl', manifest['instrument'], start, end)
-        item = {'id': tag, 'label': MARKETS[tag], 'instrument': manifest['instrument'],
-                'from': manifest['from'], 'to': manifest['to'], 'simulationId': result['simulationId'],
-                'inputHash': result['inputHash'], 'timeframes': []}
+        metadata = run_metadata(root / tag, completed_replay)
+        start, end = epoch(metadata['from']), epoch(metadata['to'])
+        grouped, reasons = read_rows(root / f'{tag}.jsonl', metadata['instrument'], start, end)
+        item = {'id': tag, 'label': MARKETS[tag], **metadata, 'timeframes': []}
         for interval, rows in grouped.items():
             stats, events = summarize(rows)
             filename = f'alfonso-trend-{tag}-{interval}.json'
@@ -130,7 +159,6 @@ def export(root, out, tags):
             item['timeframes'].append({'minutes': interval, 'file': filename, 'stats': stats,
                                        'firstAt': rows[0]['at'], 'lastAt': rows[-1]['at']})
         # No P&L comparison: shadows do not trade. Preserve provenance for checking baseline parity.
-        item['baselineTradeCount'] = manifest['runs'][0]['performance']['tradeCount']
         index['instruments'].append(item)
         print(f'{MARKETS[tag]}: ' + ', '.join(f'{n}m={len(r)} bars' for n, r in grouped.items()))
     write_json(out / 'alfonso-trend-index.json', index)
@@ -142,5 +170,7 @@ if __name__ == '__main__':
     parser.add_argument('root', type=Path)
     parser.add_argument('--out', type=Path, default=Path(__file__).resolve().parents[1] / 'Dashboard/public/data/backtests')
     parser.add_argument('--instruments', nargs='+', choices=MARKETS, default=list(MARKETS))
+    parser.add_argument('--completed-replay', action='store_true',
+                        help='Explicitly recover completed engine replays after runner-summary failure')
     args = parser.parse_args()
-    export(args.root, args.out, args.instruments)
+    export(args.root, args.out, args.instruments, args.completed_replay)
