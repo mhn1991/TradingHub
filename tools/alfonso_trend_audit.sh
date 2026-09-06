@@ -45,4 +45,6 @@ for i in "${!PIDS[@]}"; do
     failed=1
   fi
 done
-exit "$failed"
+if [[ "$failed" != 0 ]]; then exit "$failed"; fi
+python3 tools/alfonso_trend_export.py "$OUT" --instruments "${TAGS[@]}"
+echo "Trend comparison exported to Dashboard/public/data/backtests/alfonso-trend-index.json"
