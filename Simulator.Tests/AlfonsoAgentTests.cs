@@ -260,6 +260,27 @@ public sealed class AlfonsoAgentTests
     private static AgentMarketContext Context(params AnalysisSnapshot[] snapshots) =>
         Context(snapshots, []);
 
+    [Test]
+    public async Task TrendAuditObservesNewTimeframeBarsOnceEvenWhilePositionIsOpen()
+    {
+        List<(DateTimeOffset AvailableAt, TimeSpan Interval)> observed = [];
+        AlfonsoAgent agent = new(trendSink: (_, at, _, _, analyzer) => observed.Add((at, analyzer.Interval)));
+        AgentMarketContext context = Context(
+            [Snapshot(Top, 2000m), Snapshot(Middle, 2000m), Snapshot(Lower, 2000m)],
+            [new BrokerPosition { PositionId = "open", Instrument = Instrument, Quantity = 1m,
+                Side = OrderSide.Buy, AveragePrice = 2000m }]);
+        AgentDecision first = await agent.EvaluateAsync(context);
+        AgentDecision repeated = await agent.EvaluateAsync(context);
+        Assert.Multiple(() =>
+        {
+            Assert.That(first.Reason, Does.Contain("bracket owns it"));
+            Assert.That(repeated.Action, Is.EqualTo(AgentAction.Observe));
+            Assert.That(observed.Select(item => item.Interval), Is.EquivalentTo(new[]
+                { TimeSpan.FromHours(4), TimeSpan.FromHours(1), TimeSpan.FromMinutes(15) }));
+            Assert.That(observed.All(item => item.AvailableAt == Now), Is.True);
+        });
+    }
+
     private static AgentMarketContext Context(
         AnalysisSnapshot[] snapshots, IReadOnlyList<BrokerPosition> positions) =>
         new()

@@ -162,6 +162,9 @@ public sealed record AlfonsoStrategyOptions
     /// </summary>
     public string? StructureLogPath { get; init; }
 
+    /// <summary>Optional continuous baseline/individual/combined trend audit on the live candle feed.</summary>
+    public string? TrendAuditPath { get; init; }
+
     /// <summary>
     /// Distance from price, in ATR, inside which a resting order has a realistic chance of filling.
     /// Used only to label inventory snapshots. Measured fill rates: 21-35% inside 3 ATR, ~5% at 3-6,

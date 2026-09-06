@@ -783,6 +783,7 @@ public sealed record BacktestRequest
     public decimal AlfonsoMinimumStopTopAtrMultiple { get; init; }
 
     public string? AlfonsoStructureLogPath { get; init; }
+    public string? AlfonsoTrendAuditPath { get; init; }
 
     /// <summary>--alfonso-overextension-trendlines: module 3's aggressive line across three CPs.</summary>
     public bool AlfonsoOverExtensionTrendlines { get; init; }
@@ -1054,6 +1055,7 @@ public sealed record BacktestRequest
                     CandidateLogPath = AlfonsoCandidateLogPath,
                     InventoryLogPath = AlfonsoInventoryLogPath,
                     StructureLogPath = AlfonsoStructureLogPath,
+                    TrendAuditPath = AlfonsoTrendAuditPath,
                     MaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
                     RestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
                     RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,

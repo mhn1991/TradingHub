@@ -185,6 +185,8 @@ internal sealed record BacktestCommandOptions
 
     /// <summary>--alfonso-structure-log PATH: decision-time trend, trendline and zones as JSONL.</summary>
     public string? AlfonsoStructureLogPath { get; init; }
+    /// <summary>--alfonso-trend-audit PATH: four trend variants on identical live closed candles.</summary>
+    public string? AlfonsoTrendAuditPath { get; init; }
     public bool AlfonsoOverExtensionTrendlines { get; init; }
     public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
     public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
@@ -735,6 +737,7 @@ internal sealed record BacktestCommandOptions
             AlfonsoRejectContradictingTrendlines =
                 !values.ContainsKey("alfonso-allow-contradicting-trendlines"),
             AlfonsoStructureLogPath = values.GetValueOrDefault("alfonso-structure-log"),
+            AlfonsoTrendAuditPath = values.GetValueOrDefault("alfonso-trend-audit"),
             AlfonsoMinimumStopTopAtrMultiple = ParseDecimal(
                 values.GetValueOrDefault("alfonso-min-stop-top-atr"), 0m, 0m,
                 "alfonso-min-stop-top-atr", allowZero: true),
@@ -924,6 +927,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoRejectContradictingTrendlines = AlfonsoRejectContradictingTrendlines,
         AlfonsoMinimumStopTopAtrMultiple = AlfonsoMinimumStopTopAtrMultiple,
         AlfonsoStructureLogPath = AlfonsoStructureLogPath,
+        AlfonsoTrendAuditPath = AlfonsoTrendAuditPath,
         AlfonsoOverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
         AlfonsoMinimumZoneGrade = AlfonsoMinimumZoneGrade,
         AlfonsoMinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,

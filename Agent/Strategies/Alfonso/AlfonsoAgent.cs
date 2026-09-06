@@ -33,6 +33,7 @@ public sealed class AlfonsoAgent : ITradingAgent
     private readonly Action<AlfonsoCandidateRecord>? _candidateSink;
     private readonly Action<AlfonsoInventorySnapshot>? _inventorySink;
     private readonly Action<string, DateTimeOffset, Sequence.AlfonsoSequenceAnalyzer>? _structure;
+    private readonly Action<string, DateTimeOffset, SequenceRole, AlfonsoBar, AlfonsoTimeframeAnalyzer>? _trendSink;
 
     /// <param name="options">Strategy configuration; defaults are the course's own values.</param>
     /// <param name="candidateSink">
@@ -46,15 +47,18 @@ public sealed class AlfonsoAgent : ITradingAgent
     /// Optional sink for the trend layer's state at each order placed - the only faithful source for
     /// it, since replaying the analyzer outside the run reads different bars (3.67).
     /// </param>
+    /// <param name="trendSink">Read-only observer after every new closed timeframe candle, including while a position is open.</param>
     public AlfonsoAgent(
         AlfonsoStrategyOptions? options = null,
         Action<AlfonsoCandidateRecord>? candidateSink = null,
         Action<AlfonsoInventorySnapshot>? inventorySink = null,
-        Action<string, DateTimeOffset, Sequence.AlfonsoSequenceAnalyzer>? structureSink = null)
+        Action<string, DateTimeOffset, Sequence.AlfonsoSequenceAnalyzer>? structureSink = null,
+        Action<string, DateTimeOffset, SequenceRole, AlfonsoBar, AlfonsoTimeframeAnalyzer>? trendSink = null)
     {
         _candidateSink = candidateSink;
         _inventorySink = inventorySink;
         _structure = structureSink;
+        _trendSink = trendSink;
         _options = options ?? new AlfonsoStrategyOptions();
         _options.Validate();
         RequiredIntervals = _options.RequiredIntervals;
@@ -106,12 +110,14 @@ public sealed class AlfonsoAgent : ITradingAgent
                     state.RecordTopClose(candle.Prices.Close, _options.DriftLookbackCandles);
                     topBarClosed = true;
                 }
-                state.Analyzer.Apply(role, new AlfonsoBar(
+                AlfonsoBar closedBar = new(
                     candle.OpenTime,
                     candle.Prices.Open,
                     candle.Prices.High,
                     candle.Prices.Low,
-                    candle.Prices.Close));
+                    candle.Prices.Close);
+                state.Analyzer.Apply(role, closedBar);
+                _trendSink?.Invoke(context.Instrument.ToString(), context.Timestamp, role, closedBar, state.Analyzer[role]);
             }
 
             if (!context.Analysis.TryGet(_options.LowerInterval, out AnalysisSnapshot trigger))
