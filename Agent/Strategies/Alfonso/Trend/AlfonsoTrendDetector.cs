@@ -75,6 +75,13 @@ public sealed record AlfonsoTrendOptions
     public bool MaintainStructuralAgreement { get; init; }
 
     /// <summary>
+    /// Experimental close-only invalidation against the latest confirmed price swing (two closed
+    /// candles on each side). Independent of zone-derived trendlines and structural agreement.
+    /// A break makes the timeframe neutral, never directly reverses it. Off for baseline parity.
+    /// </summary>
+    public bool InvalidateOnPriceStructureBreak { get; init; }
+
+    /// <summary>
     /// Whether a fitted trendline whose slope contradicts its own direction is refused.
     /// <para>
     /// Default true: module 3 draws a bullish trendline under rising valleys, and `Fit`'s
@@ -203,6 +210,10 @@ public sealed class AlfonsoTrendDetector
     private AlfonsoTrend _trend = AlfonsoTrend.Unknown;
     private bool _undermined;
 
+    private decimal _lastClose;
+    private decimal? _confirmedPriceHigh;
+    private decimal? _confirmedPriceLow;
+
     /// <summary>Eliminations that established the current trend, kept for reporting only.</summary>
     private int _establishedWith;
     private string _reason = "No history yet.";
@@ -235,6 +246,10 @@ public sealed class AlfonsoTrendDetector
         _lows.Add(bar.Low);
         _times.Add(bar.OpenTime);
         int index = _highs.Count - 1;
+
+        _lastClose = bar.Close;
+        if (_options.InvalidateOnPriceStructureBreak)
+            RecordConfirmedPriceSwings(index);
 
         TrackOverExtension(bar, update);
         RecordSwings(update);
@@ -537,6 +552,33 @@ public sealed class AlfonsoTrendDetector
     private bool StructureAgrees(AlfonsoTrend candidate) =>
         !_options.RequireStructuralAgreement || StructureMatches(candidate);
 
+    private void RecordConfirmedPriceSwings(int index)
+    {
+        if (index < 4)
+            return;
+
+        int pivot = index - 2;
+        bool high = true;
+        bool low = true;
+        for (int other = pivot - 2; other <= pivot + 2; other++)
+        {
+            if (other == pivot)
+                continue;
+            high &= _highs[pivot] > _highs[other];
+            low &= _lows[pivot] < _lows[other];
+        }
+
+        if (high)
+            _confirmedPriceHigh = _highs[pivot];
+        if (low)
+            _confirmedPriceLow = _lows[pivot];
+    }
+
+    private bool PriceStructureAgrees(AlfonsoTrend candidate) =>
+        !_options.InvalidateOnPriceStructureBreak || (candidate == AlfonsoTrend.Uptrend
+            ? _confirmedPriceLow is not decimal low || _lastClose >= low
+            : _confirmedPriceHigh is not decimal high || _lastClose <= high);
+
     /// <summary>
     /// Module 5's structural condition itself, independent of which switch is asking. "Each
     /// successive peak and trough is higher than the ones found earlier" for an uptrend, and the
@@ -558,14 +600,23 @@ public sealed class AlfonsoTrendDetector
 
     private void Resolve(Trendline? bullish, Trendline? bearish)
     {
+        if (_trend is AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend && !PriceStructureAgrees(_trend))
+        {
+            decimal? level = _trend == AlfonsoTrend.Uptrend ? _confirmedPriceLow : _confirmedPriceHigh;
+            EnterOutOfAlignment($"Close {_lastClose} broke confirmed price swing {level} against {_trend}.");
+            return;
+        }
+
         bool upByLine = bullish is not null && _supplyEliminated >= _options.EliminationsWithTrendline;
         bool upAlone = (!_options.FallbackRequiresNoTrendline || bullish is null) &&
             _supplyEliminated >= _options.EliminationsWithoutTrendline;
         bool downByLine = bearish is not null && _demandEliminated >= _options.EliminationsWithTrendline;
         bool downAlone = (!_options.FallbackRequiresNoTrendline || bearish is null) &&
             _demandEliminated >= _options.EliminationsWithoutTrendline;
-        bool up = (upByLine || upAlone) && StructureAgrees(AlfonsoTrend.Uptrend);
-        bool down = (downByLine || downAlone) && StructureAgrees(AlfonsoTrend.Downtrend);
+        bool up = (upByLine || upAlone) && StructureAgrees(AlfonsoTrend.Uptrend) &&
+            PriceStructureAgrees(AlfonsoTrend.Uptrend);
+        bool down = (downByLine || downAlone) && StructureAgrees(AlfonsoTrend.Downtrend) &&
+            PriceStructureAgrees(AlfonsoTrend.Downtrend);
 
         if (_trend is AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend)
         {

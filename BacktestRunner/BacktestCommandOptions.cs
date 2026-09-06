@@ -169,6 +169,9 @@ internal sealed record BacktestCommandOptions
     /// <summary>--alfonso-maintain-structure re-checks module 5's structural condition while a trend runs.</summary>
     public bool AlfonsoMaintainStructuralAgreement { get; init; }
 
+    /// <summary>--alfonso-invalidate-price-structure: neutral on a confirmed price-swing close break.</summary>
+    public bool AlfonsoInvalidateOnPriceStructureBreak { get; init; }
+
     /// <summary>--alfonso-allow-contradicting-trendlines restores the pre-2026-09-06 fit.</summary>
     public bool AlfonsoRejectContradictingTrendlines { get; init; } = true;
 
@@ -395,6 +398,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-half-entry" or "alfonso-allow-invalid-hosts" or
                 "alfonso-single-candle-drop-rally" or
                 "alfonso-swing-anchor-at-base-end" or "alfonso-maintain-structure" or
+                "alfonso-invalidate-price-structure" or
                 "alfonso-allow-contradicting-trendlines" or
                 "alfonso-overextension-trendlines" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
@@ -720,6 +724,7 @@ internal sealed record BacktestCommandOptions
             AlfonsoAnchorSwingsAtExtreme =
                 !values.ContainsKey("alfonso-swing-anchor-at-base-end"),
             AlfonsoMaintainStructuralAgreement = values.ContainsKey("alfonso-maintain-structure"),
+            AlfonsoInvalidateOnPriceStructureBreak = values.ContainsKey("alfonso-invalidate-price-structure"),
             AlfonsoRejectContradictingTrendlines =
                 !values.ContainsKey("alfonso-allow-contradicting-trendlines"),
             AlfonsoStructureLogPath = values.GetValueOrDefault("alfonso-structure-log"),
@@ -906,6 +911,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoDropRallyBaseSpansBothCandles = AlfonsoDropRallyBaseSpansBothCandles,
         AlfonsoAnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
         AlfonsoMaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,
+        AlfonsoInvalidateOnPriceStructureBreak = AlfonsoInvalidateOnPriceStructureBreak,
         AlfonsoRejectContradictingTrendlines = AlfonsoRejectContradictingTrendlines,
         AlfonsoMinimumStopTopAtrMultiple = AlfonsoMinimumStopTopAtrMultiple,
         AlfonsoStructureLogPath = AlfonsoStructureLogPath,

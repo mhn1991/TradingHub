@@ -774,6 +774,8 @@ public sealed record BacktestRequest
 
     public bool AlfonsoMaintainStructuralAgreement { get; init; }
 
+    public bool AlfonsoInvalidateOnPriceStructureBreak { get; init; }
+
     public bool AlfonsoRejectContradictingTrendlines { get; init; } = true;
 
     public decimal AlfonsoMinimumStopTopAtrMultiple { get; init; }
@@ -1080,6 +1082,7 @@ public sealed record BacktestRequest
                         OverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
                         AnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
                         MaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,
+                        InvalidateOnPriceStructureBreak = AlfonsoInvalidateOnPriceStructureBreak,
                         RejectContradictingTrendlines = AlfonsoRejectContradictingTrendlines
                     }
                 };
