@@ -4,5 +4,8 @@ namespace Agent.Strategies.Alfonso;
 public enum AlfonsoEntryPolicy
 {
     Core,
-    LowerTimeframeReversal
+    LowerTimeframeReversal,
+
+    /// <summary>Experimental: 15m owns direction, confirmed by an independent 5m trend.</summary>
+    LowerTimeframeAligned
 }

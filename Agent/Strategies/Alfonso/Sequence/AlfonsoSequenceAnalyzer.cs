@@ -54,6 +54,7 @@ public sealed class AlfonsoSequenceAnalyzer
     private readonly ZoneGrade _minimumGrade;
     private readonly bool _requireValidHost;
     private readonly AlfonsoEntryPolicy _entryPolicy;
+    private readonly AlfonsoTimeframeAnalyzer? _confirmation;
 
     public AlfonsoSequenceAnalyzer(
         TimeframeSequence sequence,
@@ -77,6 +78,12 @@ public sealed class AlfonsoSequenceAnalyzer
         if (entryPolicy == AlfonsoEntryPolicy.LowerTimeframeReversal && !confirmationEntryMode)
             throw new ArgumentException("Lower-timeframe reversal requires confirmation entry mode.", nameof(confirmationEntryMode));
         _entryPolicy = entryPolicy;
+        if (entryPolicy == AlfonsoEntryPolicy.LowerTimeframeAligned)
+        {
+            if (sequence.Lower != TimeSpan.FromMinutes(15))
+                throw new ArgumentException("Lower-timeframe alignment requires 15m entries.", nameof(sequence));
+            _confirmation = new AlfonsoTimeframeAnalyzer(TimeSpan.FromMinutes(5), zoneOptions, trendOptions, rangeOptions);
+        }
         Sequence = sequence;
         _freshLevelsOnly = freshLevelsOnly;
         _confirmationEntryMode = confirmationEntryMode;
@@ -121,11 +128,28 @@ public sealed class AlfonsoSequenceAnalyzer
     /// <summary>Trend on one timeframe of the sequence, for decision-time logging.</summary>
     public AlfonsoTrend TrendOf(SequenceRole role) => _timeframes[role].Trend.Trend;
 
+    public AlfonsoTrend? ConfirmationTrend => _confirmation?.Trend.Trend;
+
+    public DateTimeOffset? ConfirmationClosedAt { get; private set; }
+
+    /// <summary>Feed every closed 5m candle once; never sample a 15m candle into this detector.</summary>
+    public bool ApplyConfirmation(AlfonsoBar bar, DateTimeOffset availableAt)
+    {
+        if (_confirmation is null)
+            return false;
+        DateTimeOffset close = bar.OpenTime + _confirmation.Interval;
+        if (close > availableAt || (ConfirmationClosedAt is DateTimeOffset previous && close <= previous))
+            return false;
+        _confirmation.Apply(bar);
+        ConfirmationClosedAt = close;
+        return true;
+    }
+
     /// <summary>The alignment currently in force, resolved against the selected entry policy.</summary>
     public ScenarioResolution Scenario => ScenarioMatrix.Resolve(
         _timeframes[SequenceRole.Top].Trend.Trend,
         _timeframes[SequenceRole.Middle].Trend.Trend,
-        _timeframes[SequenceRole.Lower].Trend.Trend, _entryPolicy);
+        _timeframes[SequenceRole.Lower].Trend.Trend, _entryPolicy, ConfirmationTrend);
 
     /// <summary>
     /// Zones the rules permit an order at right now, nearest to price first.

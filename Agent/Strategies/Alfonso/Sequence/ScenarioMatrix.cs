@@ -45,10 +45,27 @@ public static class ScenarioMatrix
 {
     public static ScenarioResolution Resolve(
         AlfonsoTrend top, AlfonsoTrend middle, AlfonsoTrend lower,
-        AlfonsoEntryPolicy policy = AlfonsoEntryPolicy.Core)
+        AlfonsoEntryPolicy policy = AlfonsoEntryPolicy.Core, AlfonsoTrend? confirmation = null)
     {
         if (!Enum.IsDefined(policy))
             throw new ArgumentOutOfRangeException(nameof(policy));
+        if (policy == AlfonsoEntryPolicy.LowerTimeframeAligned)
+        {
+            string reason = $"Experimental lower-timeframe alignment: 15m {lower}, 5m {confirmation?.ToString() ?? "Unknown"}; higher trends informational only.";
+            if (lower is not (AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend) || confirmation != lower)
+                return ScenarioResolution.No(reason + " Wait for agreement.");
+            return new ScenarioResolution
+            {
+                CanTrade = true,
+                Side = lower == AlfonsoTrend.Uptrend ? ImbalanceKind.Demand : ImbalanceKind.Supply,
+                Reason = reason,
+                Entries = [new ScenarioEntry
+                {
+                    EntryTimeframe = SequenceRole.Lower,
+                    Description = "Enter at a 15m zone with aligned 5m direction."
+                }]
+            };
+        }
         if (policy == AlfonsoEntryPolicy.LowerTimeframeReversal)
             return ResolveLowerReversal(top, middle, lower);
 

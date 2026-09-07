@@ -62,7 +62,9 @@ public sealed class AlfonsoAgent : ITradingAgent
         _options = options ?? new AlfonsoStrategyOptions();
         _options.Validate();
         RequiredIntervals = _options.RequiredIntervals;
-        TriggerInterval = _options.LowerInterval;
+        // In the alignment experiment ingest every 5m close, but retain the existing
+        // LastEvaluated guard below: orders are still considered once per 15m candle.
+        TriggerInterval = _options.ConfirmationInterval ?? _options.LowerInterval;
     }
 
     public string Name => "Set and Forget supply/demand agent";
@@ -90,6 +92,16 @@ public sealed class AlfonsoAgent : ITradingAgent
 
         lock (state.Gate)
         {
+            if (_options.ConfirmationInterval is BarInterval confirmationInterval)
+            {
+                if (!context.Analysis.TryGet(confirmationInterval, out AnalysisSnapshot confirmation) ||
+                    confirmation.AvailableAt > context.Timestamp ||
+                    confirmation.LatestCandle.OpenTime + TimeSpan.FromMinutes(5) != context.Timestamp)
+                    return Observe(context, "Waiting for a current closed 5m confirmation candle.");
+                Candle five = confirmation.LatestCandle;
+                state.Analyzer.ApplyConfirmation(new AlfonsoBar(five.OpenTime, five.Prices.Open,
+                    five.Prices.High, five.Prices.Low, five.Prices.Close), context.Timestamp);
+            }
             // Every timeframe is advanced only by its OWN closed candles. Feeding one detector
             // another timeframe's bars turns it into a copy of that timeframe and it silently stops
             // disagreeing - the failure that made three gate configurations produce byte-identical
@@ -124,6 +136,11 @@ public sealed class AlfonsoAgent : ITradingAgent
 
             if (!context.Analysis.TryGet(_options.LowerInterval, out AnalysisSnapshot trigger))
                 return Observe(context, "No execution timeframe analysis.");
+
+            if (_options.ConfirmationInterval is not null &&
+                (trigger.AvailableAt > context.Timestamp ||
+                 trigger.LatestCandle.OpenTime + TimeSpan.FromMinutes(15) != context.Timestamp))
+                return Observe(context, "5m trend updated; waiting for a closed 15m entry candle.");
 
             // An open position is left entirely alone. There is no position-management path in this
             // agent by design; module 11 is explicit that the trade is either a win or a loss.
@@ -520,6 +537,8 @@ public sealed class AlfonsoAgent : ITradingAgent
             TopTrend = logged?.Analyzer.TrendOf(SequenceRole.Top),
             MiddleTrend = logged?.Analyzer.TrendOf(SequenceRole.Middle),
             LowerTrend = logged?.Analyzer.TrendOf(SequenceRole.Lower),
+            ConfirmationTrend = logged?.Analyzer.ConfirmationTrend,
+            ConfirmationClosedAt = logged?.Analyzer.ConfirmationClosedAt,
             Instrument = context.Instrument,
             Outcome = outcome,
             Side = candidate.Side,

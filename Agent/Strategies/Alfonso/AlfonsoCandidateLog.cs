@@ -54,7 +54,7 @@ public static class AlfonsoCandidateLog
             "proximal,distal,stop,target,risk,marketPrice,nested,continuationPattern,state," +
             "strength,accomplished,impulseToBaseRatio,impulseDisplacement,baseCandles," +
             "grade,scoreTotal," +
-            "costToRisk,stopAtrMultiple,atrPercentile,rangePosition,scenario";
+            "costToRisk,stopAtrMultiple,atrPercentile,rangePosition,scenario,confirmationTrend,confirmationClosedAt";
 
         private readonly Lock _gate = new();
         private readonly StreamWriter _writer;
@@ -106,7 +106,9 @@ public static class AlfonsoCandidateLog
                 Number(record.StopAtrMultiple),
                 Number(record.AtrPercentile),
                 Number(record.RangePosition),
-                Quote(record.Scenario));
+                Quote(record.Scenario),
+                Quote(Text(record.ConfirmationTrend)),
+                Quote(record.ConfirmationClosedAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty));
 
             lock (_gate)
             {

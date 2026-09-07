@@ -306,8 +306,19 @@ public sealed record AlfonsoStrategyOptions
     /// </summary>
     public bool RequireValidHost { get; init; } = true;
 
-    public IReadOnlySet<BarInterval> RequiredIntervals =>
-        new HashSet<BarInterval> { TopInterval, MiddleInterval, LowerInterval };
+    public BarInterval? ConfirmationInterval => EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeAligned
+        ? BarInterval.Minutes(5) : null;
+
+    public IReadOnlySet<BarInterval> RequiredIntervals
+    {
+        get
+        {
+            HashSet<BarInterval> intervals = [TopInterval, MiddleInterval, LowerInterval];
+            if (ConfirmationInterval is BarInterval confirmation)
+                intervals.Add(confirmation);
+            return intervals;
+        }
+    }
 
     public TimeframeSequence Sequence => new()
     {
@@ -343,6 +354,8 @@ public sealed record AlfonsoStrategyOptions
 
         if (!Enum.IsDefined(EntryPolicy))
             throw new InvalidOperationException("Unknown Alfonso entry policy.");
+        if (EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeAligned && LowerInterval != BarInterval.Minutes(15))
+            throw new InvalidOperationException("Lower-timeframe alignment experiment requires 15m entries and 5m confirmation.");
         if (EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeReversal && !RequireReversalConfirmation)
             throw new InvalidOperationException("Lower-timeframe reversal policy requires --alfonso-confirm-entry.");
 

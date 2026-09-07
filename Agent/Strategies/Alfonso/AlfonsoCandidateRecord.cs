@@ -66,6 +66,10 @@ public sealed record AlfonsoCandidateRecord
 
     public AlfonsoTrend? LowerTrend { get; init; }
 
+    public AlfonsoTrend? ConfirmationTrend { get; init; }
+
+    public DateTimeOffset? ConfirmationClosedAt { get; init; }
+
     public required decimal Proximal { get; init; }
     public required decimal Distal { get; init; }
     public required decimal Stop { get; init; }

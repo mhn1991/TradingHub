@@ -1133,7 +1133,8 @@ internal sealed record BacktestCommandOptions
     {
         null or "core" => AlfonsoEntryPolicy.Core,
         "lower-reversal" => AlfonsoEntryPolicy.LowerTimeframeReversal,
-        _ => throw new ArgumentException("--alfonso-entry-policy must be core or lower-reversal.")
+        "lower-aligned" => AlfonsoEntryPolicy.LowerTimeframeAligned,
+        _ => throw new ArgumentException("--alfonso-entry-policy must be core, lower-reversal or lower-aligned.")
     };
 
     private static SimulationPrecisionMode ParsePrecisionMode(string? value) =>
