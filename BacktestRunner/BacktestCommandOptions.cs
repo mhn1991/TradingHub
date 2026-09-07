@@ -398,7 +398,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-elimination-on-wick" or "alfonso-elimination-on-close" or
                 "alfonso-trendline-break-full-candle" or
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
-                "alfonso-nested-only" or "alfonso-ignore-control" or
+                "alfonso-nested-only" or "alfonso-ignore-control" or "alfonso-structural-stop" or
                 "alfonso-confirmation-trades" or
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
                 "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
