@@ -1,6 +1,8 @@
 using Agent.Strategies.Alfonso;
+using Agent.Models;
 using Brokers.Models;
 using NUnit.Framework;
+using RiskManager;
 using Simulator.Models;
 
 namespace Simulator.Tests;
@@ -8,6 +10,35 @@ namespace Simulator.Tests;
 [TestFixture]
 public sealed class AlfonsoRewardTargetTests
 {
+    [TestCase(0.75)]
+    [TestCase(1)]
+    public void FractionalTargetExperimentMustLowerRewardGateWithoutRemovingCashRiskLimits(decimal reward)
+    {
+        var context = new PreTradeRiskContext
+        {
+            Decision = new AgentDecision
+            {
+                DecisionId = "alfonso-reward-test", StrategyName = "alfonso", Action = AgentAction.Buy,
+                Instrument = new InstrumentKey("METAL:XAG/USD"), SuggestedQuantity = 10m,
+                QuantityUnit = QuantityUnit.Units, ReferencePrice = 100m, StopLossPrice = 90m,
+                TakeProfitPrice = 100m + 10m * reward, Confidence = 80m,
+                CreatedAt = DateTimeOffset.UnixEpoch, Reason = "fractional target test"
+            },
+            Quantity = 10m,
+            Accounts = [new AccountSnapshot { AccountId = "test", Currency = "USD", Balance = 100000m, CanTrade = true }],
+            Positions = []
+        };
+        var original = new PreTradeRiskManager(PreTradeRiskOptions.PhaseOneSafeDefaults);
+        Assert.That(original.Evaluate(context).Summary, Does.Contain("below the configured minimum"));
+        var experiment = new PreTradeRiskManager(PreTradeRiskOptions.PhaseOneSafeDefaults with
+        {
+            MinimumRewardRiskRatio = 0.75m
+        });
+        Assert.That(experiment.Evaluate(context).Approved, Is.True);
+        Assert.That(experiment.Evaluate(context with { Quantity = 100m }).Approved, Is.False,
+            "The existing 0.5% cash-risk cap must still reject an oversized order.");
+    }
+
     [TestCase(false, 0.75)]
     [TestCase(false, 1)]
     [TestCase(true, 0.75)]
