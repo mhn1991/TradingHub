@@ -334,11 +334,25 @@ public sealed class AlfonsoAgent : ITradingAgent
                 }
 
                 decimal risk = Math.Abs(reference - stop);
+                Imbalance? targetZone = null;
+                if (_options.UseOpposingZoneTarget)
+                {
+                    targetZone = AlfonsoOpposingZoneTarget.Find(buy, reference, zone.Interval,
+                        context.Timestamp, state.Analyzer.ZonesOf(candidate.EntryTimeframe));
+                    if (targetZone is null)
+                    {
+                        Log(context, candidate, bar, stop, reference, risk, null, null,
+                            atrPercentile, CandidateOutcome.NoOpposingZone);
+                        continue;
+                    }
+                }
                 decimal target = _options.RequireReversalConfirmation || _options.UseStructuralSwingStop
                     ? CalculateTarget(buy, reference, stop, _options.Zones.RewardMultiple)
                     : zone.TargetPrice(
                         _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple,
                         _options.Zones.EntryPlacement);
+                if (targetZone is not null)
+                    target = targetZone.Proximal;
                 decimal? costToRisk = context.RoundTripCostEstimate is decimal cost && risk > 0m
                     ? cost / risk
                     : null;
@@ -414,7 +428,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                     StopLossPrice = stop,
                     TakeProfitPrice = target,
                     SignalInterval = _options.LowerInterval,
-                    StopSource =
+                    TargetSource = targetZone is null ? null : AlfonsoOpposingZoneTarget.Describe(targetZone),
+                    StopSource = targetZone is not null ? stopSource :
                         $"{stopSource}, " +
                         $"target {_options.Zones.RewardMultiple:0.##}:1"
                 });

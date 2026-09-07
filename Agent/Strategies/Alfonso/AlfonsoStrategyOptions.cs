@@ -28,6 +28,9 @@ public sealed record AlfonsoStrategyOptions
     /// <summary>Opt-in protection beyond the extreme confirmed swing on the execution timeframe.</summary>
     public bool UseStructuralSwingStop { get; init; }
 
+    /// <summary>Target the nearest confirmed opposing entry-timeframe zone; skip if none exists.</summary>
+    public bool UseOpposingZoneTarget { get; init; }
+
     /// <summary>Closed execution candles containing eligible anchors; pivots require 2 bars each side.</summary>
     public int StructuralStopLookbackCandles { get; init; } = 48;
 

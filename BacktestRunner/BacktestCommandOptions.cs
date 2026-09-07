@@ -130,6 +130,7 @@ internal sealed record BacktestCommandOptions
     public decimal? AlfonsoRewardMultiple { get; init; }
     public decimal? AlfonsoStopPadding { get; init; }
     public bool AlfonsoUseStructuralSwingStop { get; init; }
+    public bool AlfonsoUseOpposingZoneTarget { get; init; }
     public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
     public bool AlfonsoEliminationRequiresClose { get; init; } = false;
     public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
@@ -399,7 +400,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-trendline-break-full-candle" or
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
                 "alfonso-nested-only" or "alfonso-ignore-control" or "alfonso-structural-stop" or
-                "alfonso-confirmation-trades" or
+                "alfonso-confirmation-trades" or "alfonso-opposing-zone-target" or
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
                 "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
                 "alfonso-with-drift" or
@@ -673,7 +674,7 @@ internal sealed record BacktestCommandOptions
             CommissionRate = ParseDecimal(values.GetValueOrDefault("commission-rate"), 0.00002m, -1m, "commission-rate", allowZero: true),
             SpreadBasisPoints = ParseDecimal(values.GetValueOrDefault("spread-bps"), 1m, -1m, "spread-bps", allowZero: true),
             SlippageBasisPoints = ParseDecimal(values.GetValueOrDefault("slippage-bps"), 0.5m, -1m, "slippage-bps", allowZero: true),
-            MinimumRewardRisk = ParseDecimal(values.GetValueOrDefault("minimum-rr"), 1.5m, 0m, "minimum-rr"),
+            MinimumRewardRisk = ParseDecimal(values.GetValueOrDefault("minimum-rr"), 1.5m, 0m, "minimum-rr", allowZero: true),
             BreakoutStopAtrMultiple = ParseDecimal(
                 values.GetValueOrDefault("breakout-stop-atr"), 1.5m, 0m, "breakout-stop-atr"),
             BreakoutTargetAtrMultiple = ParseDecimal(
@@ -691,6 +692,7 @@ internal sealed record BacktestCommandOptions
                 ? ParseDecimal(values.GetValueOrDefault("alfonso-reward"), 3m, 0m, "alfonso-reward")
                 : null,
             AlfonsoUseStructuralSwingStop = values.ContainsKey("alfonso-structural-stop"),
+            AlfonsoUseOpposingZoneTarget = values.ContainsKey("alfonso-opposing-zone-target"),
             AlfonsoStructuralStopLookbackCandles = ParseInt(
                 values.GetValueOrDefault("alfonso-stop-lookback"), 48, 5, 10000, "alfonso-stop-lookback"),
             AlfonsoStopPadding = values.ContainsKey("alfonso-stop-padding")
@@ -907,6 +909,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoRewardMultiple = AlfonsoRewardMultiple,
         AlfonsoStopPadding = AlfonsoStopPadding,
         AlfonsoUseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
+        AlfonsoUseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
         AlfonsoStructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
         AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,
         AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,

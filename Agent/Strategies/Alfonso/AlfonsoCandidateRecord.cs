@@ -34,7 +34,10 @@ public enum CandidateOutcome
     DegenerateGeometry,
 
     /// <summary>A nearer candidate on the same bar was taken instead.</summary>
-    Superseded
+    Superseded,
+
+    /// <summary>Opposing-zone targeting was requested but no confirmed zone lies ahead of entry.</summary>
+    NoOpposingZone
 }
 
 /// <summary>

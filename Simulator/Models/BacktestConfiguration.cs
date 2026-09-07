@@ -718,6 +718,8 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-structural-stop: use confirmed execution-timeframe swing protection.</summary>
     public bool AlfonsoUseStructuralSwingStop { get; init; }
 
+    public bool AlfonsoUseOpposingZoneTarget { get; init; }
+
     /// <summary>--alfonso-stop-lookback N: eligible closed execution candles, default 48.</summary>
     public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
 
@@ -1052,6 +1054,7 @@ public sealed record BacktestRequest
                     MiddleInterval = AlfonsoMiddleInterval ?? defaultAlfonso.MiddleInterval,
                     LowerInterval = AlfonsoLowerInterval ?? defaultAlfonso.LowerInterval,
                     UseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
+                    UseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
                     StructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
                     RequireNestedEntries = AlfonsoRequireNestedEntries,
                     RequireControlAgreement = AlfonsoRequireControlAgreement,
@@ -1162,8 +1165,8 @@ public sealed record BacktestRequest
             throw new ArgumentException("From must be earlier than To.");
         if (Strategies is null || Strategies.Count == 0)
             throw new ArgumentException("At least one strategy is required.");
-        if (StartingBalance <= 0 || Quantity <= 0 || Leverage <= 0 || MinimumRewardRisk <= 0)
-            throw new ArgumentException("Balance, quantity, leverage, and minimum R:R must be positive.");
+        if (StartingBalance <= 0 || Quantity <= 0 || Leverage <= 0 || MinimumRewardRisk < 0)
+            throw new ArgumentException("Balance, quantity and leverage must be positive; minimum R:R must be non-negative (0 disables the reward floor).");
         if (!Enum.IsDefined(PriceActionConfirmation) || MinimumPriceActionConfidence is < 0m or > 100m)
             throw new ArgumentException("Price-action confirmation mode and confidence must be valid.");
         if (InlineCandles is null && Runtime.SourceKind == HistoricalDataSourceKind.InlineTestData)

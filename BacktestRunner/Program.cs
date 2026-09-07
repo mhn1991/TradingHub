@@ -948,6 +948,9 @@ Options:
   --spread-bps 1
   --slippage-bps 0.5
   --minimum-rr 1.5
+    Alfonso bracket tests may use 0 to disable the reward floor; stop, target and sizing checks remain.
+  --alfonso-opposing-zone-target
+    Target the nearest confirmed opposing entry-timeframe zone; skip if none exists.
   --daily-equity-profit-target 3000
   --daily-equity-giveback-activation 2500
   --maximum-daily-equity-giveback 750
