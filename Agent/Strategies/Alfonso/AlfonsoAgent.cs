@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using Agent.Abstractions;
 using Agent.Models;
 using Agent.Strategies.Alfonso.Sequence;
@@ -27,6 +28,7 @@ namespace Agent.Strategies.Alfonso;
 /// </summary>
 public sealed class AlfonsoAgent : ITradingAgent
 {
+    private static readonly object ShadowLogGate = new();
     private readonly AlfonsoStrategyOptions _options;
     private readonly ConcurrentDictionary<InstrumentKey, InstrumentState> _state = new();
 
@@ -88,7 +90,7 @@ public sealed class AlfonsoAgent : ITradingAgent
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
 
-        InstrumentState state = _state.GetOrAdd(context.Instrument, _ => new InstrumentState(_options));
+        InstrumentState state = _state.GetOrAdd(context.Instrument, _ => new InstrumentState(_options, context.Instrument));
 
         lock (state.Gate)
         {
@@ -134,6 +136,14 @@ public sealed class AlfonsoAgent : ITradingAgent
                 if (role == SequenceRole.Lower)
                     state.StructuralStop?.Apply(closedBar);
                 _trendSink?.Invoke(context.Instrument.ToString(), context.Timestamp, role, closedBar, state.Analyzer[role]);
+            }
+
+            // Read-only research observer. Runs even while an order/position exists, but its
+            // output is never consulted by the entry, cancellation or position paths.
+            if (state.ReversalShadow is { } shadow && context.Analysis.TryGet(BarInterval.Minutes(5), out var shadowBar))
+            {
+                var c = shadowBar.LatestCandle;
+                shadow.Apply(new AlfonsoBar(c.OpenTime, c.Prices.Open, c.Prices.High, c.Prices.Low, c.Prices.Close), context.Timestamp);
             }
 
             if (!context.Analysis.TryGet(_options.LowerInterval, out AnalysisSnapshot trigger))
@@ -651,7 +661,7 @@ public sealed class AlfonsoAgent : ITradingAgent
         }
 
 
-        public InstrumentState(AlfonsoStrategyOptions options)
+        public InstrumentState(AlfonsoStrategyOptions options, InstrumentKey instrument)
         {
             FiveMinuteStructure = options.RevalidatePendingOnFiveMinute ? new() : null;
             StructuralStop = options.UseStructuralSwingStop
@@ -662,6 +672,19 @@ public sealed class AlfonsoAgent : ITradingAgent
                 options.MinimumProfitMarginMultiple, options.Zones.StopPaddingFraction,
                 options.RequireReversalConfirmation, options.MinimumZoneGrade,
                 options.RequireValidHost, options.EntryPolicy);
+
+            if (options.ReversalShadowLogPath is { } path)
+            {
+                string fullPath = Path.GetFullPath(path);
+                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                ReversalShadow = new AlfonsoReversalShadow(observation =>
+                {
+                    var line = JsonSerializer.Serialize(new AlfonsoReversalShadowRow(instrument.ToString(),
+                        Analyzer.TrendOf(SequenceRole.Lower).ToString(), Analyzer.ConfirmationTrend.ToString(), observation),
+                        AlfonsoReversalShadowJsonContext.Default.AlfonsoReversalShadowRow) + Environment.NewLine;
+                    lock (ShadowLogGate) File.AppendAllText(fullPath, line);
+                });
+            }
 
             Intervals =
             [
@@ -681,6 +704,7 @@ public sealed class AlfonsoAgent : ITradingAgent
 
         public AlfonsoStructuralStop? StructuralStop { get; }
         public AlfonsoFiveMinuteStructure? FiveMinuteStructure { get; }
+        public AlfonsoReversalShadow? ReversalShadow { get; }
 
         public IReadOnlyList<(SequenceRole Role, BarInterval Interval)> Intervals { get; }
 

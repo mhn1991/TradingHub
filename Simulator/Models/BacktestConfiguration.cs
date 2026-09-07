@@ -720,6 +720,7 @@ public sealed record BacktestRequest
 
     public bool AlfonsoUseOpposingZoneTarget { get; init; }
     public bool AlfonsoRevalidatePendingOnFiveMinute { get; init; }
+    public string? AlfonsoReversalShadowLogPath { get; init; }
 
     /// <summary>--alfonso-stop-lookback N: eligible closed execution candles, default 48.</summary>
     public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
@@ -1057,6 +1058,7 @@ public sealed record BacktestRequest
                     UseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
                     UseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
                     RevalidatePendingOnFiveMinute = AlfonsoRevalidatePendingOnFiveMinute,
+                    ReversalShadowLogPath = AlfonsoReversalShadowLogPath,
                     StructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
                     RequireNestedEntries = AlfonsoRequireNestedEntries,
                     RequireControlAgreement = AlfonsoRequireControlAgreement,

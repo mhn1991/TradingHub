@@ -132,6 +132,7 @@ internal sealed record BacktestCommandOptions
     public bool AlfonsoUseStructuralSwingStop { get; init; }
     public bool AlfonsoUseOpposingZoneTarget { get; init; }
     public bool AlfonsoRevalidatePendingOnFiveMinute { get; init; }
+    public string? AlfonsoReversalShadowLogPath { get; init; }
     public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
     public bool AlfonsoEliminationRequiresClose { get; init; } = false;
     public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
@@ -695,6 +696,7 @@ internal sealed record BacktestCommandOptions
             AlfonsoUseStructuralSwingStop = values.ContainsKey("alfonso-structural-stop"),
             AlfonsoUseOpposingZoneTarget = values.ContainsKey("alfonso-opposing-zone-target"),
             AlfonsoRevalidatePendingOnFiveMinute = values.ContainsKey("alfonso-revalidate-pending-5m"),
+            AlfonsoReversalShadowLogPath = values.GetValueOrDefault("alfonso-reversal-shadow-log"),
             AlfonsoStructuralStopLookbackCandles = ParseInt(
                 values.GetValueOrDefault("alfonso-stop-lookback"), 48, 5, 10000, "alfonso-stop-lookback"),
             AlfonsoStopPadding = values.ContainsKey("alfonso-stop-padding")
@@ -913,6 +915,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoUseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
         AlfonsoUseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
         AlfonsoRevalidatePendingOnFiveMinute = AlfonsoRevalidatePendingOnFiveMinute,
+        AlfonsoReversalShadowLogPath = AlfonsoReversalShadowLogPath,
         AlfonsoStructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
         AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,
         AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,

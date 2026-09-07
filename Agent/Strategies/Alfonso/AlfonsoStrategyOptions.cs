@@ -34,6 +34,9 @@ public sealed record AlfonsoStrategyOptions
     /// <summary>Opt-in: revalidate owned, unfilled limits on each closed 5m candle.</summary>
     public bool RevalidatePendingOnFiveMinute { get; init; }
 
+    /// <summary>Optional NDJSON research log. Reversal observations never authorize orders.</summary>
+    public string? ReversalShadowLogPath { get; init; }
+
     /// <summary>Closed execution candles containing eligible anchors; pivots require 2 bars each side.</summary>
     public int StructuralStopLookbackCandles { get; init; } = 48;
 
@@ -359,6 +362,9 @@ public sealed record AlfonsoStrategyOptions
             throw new InvalidOperationException("Unknown Alfonso entry policy.");
         if (RevalidatePendingOnFiveMinute && EntryPolicy != AlfonsoEntryPolicy.LowerTimeframeAligned)
             throw new InvalidOperationException("5m pending revalidation requires lower-aligned entry policy.");
+        if (ReversalShadowLogPath is not null && (string.IsNullOrWhiteSpace(ReversalShadowLogPath) ||
+            EntryPolicy != AlfonsoEntryPolicy.LowerTimeframeAligned))
+            throw new InvalidOperationException("Reversal shadow logging requires a path and lower-aligned entry policy.");
         if (EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeAligned && LowerInterval != BarInterval.Minutes(15))
             throw new InvalidOperationException("Lower-timeframe alignment experiment requires 15m entries and 5m confirmation.");
         if (EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeReversal && !RequireReversalConfirmation)
