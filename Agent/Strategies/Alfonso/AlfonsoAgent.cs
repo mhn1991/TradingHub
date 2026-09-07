@@ -101,6 +101,8 @@ public sealed class AlfonsoAgent : ITradingAgent
                 Candle five = confirmation.LatestCandle;
                 state.Analyzer.ApplyConfirmation(new AlfonsoBar(five.OpenTime, five.Prices.Open,
                     five.Prices.High, five.Prices.Low, five.Prices.Close), context.Timestamp);
+                state.FiveMinuteStructure?.Apply(new AlfonsoBar(five.OpenTime, five.Prices.Open,
+                    five.Prices.High, five.Prices.Low, five.Prices.Close), context.Timestamp);
             }
             // Every timeframe is advanced only by its OWN closed candles. Feeding one detector
             // another timeframe's bars turns it into a copy of that timeframe and it silently stops
@@ -136,6 +138,24 @@ public sealed class AlfonsoAgent : ITradingAgent
 
             if (!context.Analysis.TryGet(_options.LowerInterval, out AnalysisSnapshot trigger))
                 return Observe(context, "No execution timeframe analysis.");
+
+            // Fills are processed before this evaluation. Never cancel retrospectively or
+            // manage a filled position; only this agent's still-pending plan is eligible.
+            if (_options.RevalidatePendingOnFiveMinute && state.PendingOrder is ZoneOrderKey pending &&
+                !context.Positions.Any(x => x.Instrument == context.Instrument && x.Quantity > 0m))
+            {
+                var owned = context.OpenOrders.FirstOrDefault(x => x.Instrument == context.Instrument &&
+                    x.NormalizedStatus is OrderStatus.Pending or OrderStatus.Open);
+                string? invalid = state.FiveMinuteStructure!.PendingInvalidation(
+                    pending.Kind == ImbalanceKind.Demand, state.Analyzer.ConfirmationTrend);
+                if (owned is not null && invalid is not null)
+                    return Task.FromResult(new AgentDecision
+                    {
+                        Action = AgentAction.Cancel, Instrument = context.Instrument,
+                        BrokerOrderId = owned.BrokerOrderId, CreatedAt = context.Timestamp,
+                        Confidence = 0m, Reason = "5m pending guard: " + invalid
+                    });
+            }
 
             if (_options.ConfirmationInterval is not null &&
                 (trigger.AvailableAt > context.Timestamp ||
@@ -633,6 +653,7 @@ public sealed class AlfonsoAgent : ITradingAgent
 
         public InstrumentState(AlfonsoStrategyOptions options)
         {
+            FiveMinuteStructure = options.RevalidatePendingOnFiveMinute ? new() : null;
             StructuralStop = options.UseStructuralSwingStop
                 ? new AlfonsoStructuralStop(options.StructuralStopLookbackCandles) : null;
             Analyzer = new AlfonsoSequenceAnalyzer(
@@ -659,6 +680,7 @@ public sealed class AlfonsoAgent : ITradingAgent
         public AlfonsoSequenceAnalyzer Analyzer { get; }
 
         public AlfonsoStructuralStop? StructuralStop { get; }
+        public AlfonsoFiveMinuteStructure? FiveMinuteStructure { get; }
 
         public IReadOnlyList<(SequenceRole Role, BarInterval Interval)> Intervals { get; }
 

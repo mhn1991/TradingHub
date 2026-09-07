@@ -31,6 +31,9 @@ public sealed record AlfonsoStrategyOptions
     /// <summary>Target the nearest confirmed opposing entry-timeframe zone; skip if none exists.</summary>
     public bool UseOpposingZoneTarget { get; init; }
 
+    /// <summary>Opt-in: revalidate owned, unfilled limits on each closed 5m candle.</summary>
+    public bool RevalidatePendingOnFiveMinute { get; init; }
+
     /// <summary>Closed execution candles containing eligible anchors; pivots require 2 bars each side.</summary>
     public int StructuralStopLookbackCandles { get; init; } = 48;
 
@@ -354,6 +357,8 @@ public sealed record AlfonsoStrategyOptions
 
         if (!Enum.IsDefined(EntryPolicy))
             throw new InvalidOperationException("Unknown Alfonso entry policy.");
+        if (RevalidatePendingOnFiveMinute && EntryPolicy != AlfonsoEntryPolicy.LowerTimeframeAligned)
+            throw new InvalidOperationException("5m pending revalidation requires lower-aligned entry policy.");
         if (EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeAligned && LowerInterval != BarInterval.Minutes(15))
             throw new InvalidOperationException("Lower-timeframe alignment experiment requires 15m entries and 5m confirmation.");
         if (EntryPolicy == AlfonsoEntryPolicy.LowerTimeframeReversal && !RequireReversalConfirmation)

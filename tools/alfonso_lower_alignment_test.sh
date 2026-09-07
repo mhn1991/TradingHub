@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=${1:?Provide a new output directory}
+shift
 if [[ -e "$OUT" ]]; then
   echo "Refusing to overwrite existing results: $OUT" >&2; exit 1
 fi
@@ -23,5 +24,6 @@ dotnet BacktestRunner/bin/Release/net10.0/BacktestRunner.dll \
   --improved-no-stagnation-reduction --improved-no-structure-reduction \
   --improved-no-momentum-reduction --improved-no-volatility-reduction \
   --alfonso-candidate-log "$OUT/lower-aligned.csv" \
+  "$@" \
   --output "$OUT/lower-aligned" > "$OUT/lower-aligned.log" 2>&1
 echo "Completed lower-aligned"

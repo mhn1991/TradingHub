@@ -719,6 +719,7 @@ public sealed record BacktestRequest
     public bool AlfonsoUseStructuralSwingStop { get; init; }
 
     public bool AlfonsoUseOpposingZoneTarget { get; init; }
+    public bool AlfonsoRevalidatePendingOnFiveMinute { get; init; }
 
     /// <summary>--alfonso-stop-lookback N: eligible closed execution candles, default 48.</summary>
     public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
@@ -1055,6 +1056,7 @@ public sealed record BacktestRequest
                     LowerInterval = AlfonsoLowerInterval ?? defaultAlfonso.LowerInterval,
                     UseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
                     UseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
+                    RevalidatePendingOnFiveMinute = AlfonsoRevalidatePendingOnFiveMinute,
                     StructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
                     RequireNestedEntries = AlfonsoRequireNestedEntries,
                     RequireControlAgreement = AlfonsoRequireControlAgreement,

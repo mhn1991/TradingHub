@@ -131,6 +131,7 @@ internal sealed record BacktestCommandOptions
     public decimal? AlfonsoStopPadding { get; init; }
     public bool AlfonsoUseStructuralSwingStop { get; init; }
     public bool AlfonsoUseOpposingZoneTarget { get; init; }
+    public bool AlfonsoRevalidatePendingOnFiveMinute { get; init; }
     public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
     public bool AlfonsoEliminationRequiresClose { get; init; } = false;
     public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
@@ -400,7 +401,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-trendline-break-full-candle" or
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
                 "alfonso-nested-only" or "alfonso-ignore-control" or "alfonso-structural-stop" or
-                "alfonso-confirmation-trades" or "alfonso-opposing-zone-target" or
+                "alfonso-confirmation-trades" or "alfonso-opposing-zone-target" or "alfonso-revalidate-pending-5m" or
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
                 "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
                 "alfonso-with-drift" or
@@ -693,6 +694,7 @@ internal sealed record BacktestCommandOptions
                 : null,
             AlfonsoUseStructuralSwingStop = values.ContainsKey("alfonso-structural-stop"),
             AlfonsoUseOpposingZoneTarget = values.ContainsKey("alfonso-opposing-zone-target"),
+            AlfonsoRevalidatePendingOnFiveMinute = values.ContainsKey("alfonso-revalidate-pending-5m"),
             AlfonsoStructuralStopLookbackCandles = ParseInt(
                 values.GetValueOrDefault("alfonso-stop-lookback"), 48, 5, 10000, "alfonso-stop-lookback"),
             AlfonsoStopPadding = values.ContainsKey("alfonso-stop-padding")
@@ -910,6 +912,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoStopPadding = AlfonsoStopPadding,
         AlfonsoUseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
         AlfonsoUseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
+        AlfonsoRevalidatePendingOnFiveMinute = AlfonsoRevalidatePendingOnFiveMinute,
         AlfonsoStructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
         AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,
         AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,

@@ -951,6 +951,8 @@ Options:
     Alfonso bracket tests may use 0 to disable the reward floor; stop, target and sizing checks remain.
   --alfonso-opposing-zone-target
     Target the nearest confirmed opposing entry-timeframe zone; skip if none exists.
+  --alfonso-revalidate-pending-5m
+    Cancel pending lower-aligned entries when 5m trend disagrees or a confirmed swing breaks.
   --alfonso-entry-policy core|lower-reversal|lower-aligned
     lower-aligned: 15m direction confirmed by 5m; higher trends informational.
   --daily-equity-profit-target 3000
