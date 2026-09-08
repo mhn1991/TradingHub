@@ -954,7 +954,8 @@ Options:
   --alfonso-revalidate-pending-5m
     Cancel pending lower-aligned entries when 5m trend disagrees or a confirmed swing breaks.
   --alfonso-block-exhausted-buys-5m
-    Block/cancel unfilled buys when closed 5m high >= BB upper and (RSI > 70 or CCI >= 100).
+    Block/cancel unfilled buys if either of the last two closed 5m candles has
+    high >= BB upper and (RSI > 70 or CCI >= 100), with indicators from that same candle.
   --alfonso-reversal-shadow-log PATH
     Log 5m sweep/reclaim, break and holding-retest observations; never trade them.
   --alfonso-entry-policy core|lower-reversal|lower-aligned

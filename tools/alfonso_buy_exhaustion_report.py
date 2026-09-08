@@ -29,14 +29,16 @@ def exhaustion_events(simulation):
             fields = dict(pair.strip().split('=', 1) for pair in message.removeprefix(
                 '5m buy exhaustion: ').removesuffix('.').split(';'))
             at = datetime.fromisoformat(row['timestamp'])
-            assert datetime.fromisoformat(fields['candle']) + timedelta(minutes=5) == at
+            candle_age = at - datetime.fromisoformat(fields['candle'])
+            assert candle_age in (timedelta(minutes=5), timedelta(minutes=10))
             assert at.minute % 5 == 0 and at.second == 0
             assert Decimal(fields['high']) >= Decimal(fields['BBUpper'])
             rsi = Decimal(fields['RSI']) if fields['RSI'] else None
             cci = Decimal(fields['CCI']) if fields['CCI'] else None
             assert (rsi is not None and rsi > 70) or (cci is not None and cci >= 100)
             assert row['action'] in ('Observe', 'Cancel')
-            events[key] = {'at': row['timestamp'], 'action': row['action'], **fields}
+            events[key] = {'at': row['timestamp'], 'action': row['action'],
+                           'matchedCandle': 'current' if candle_age == timedelta(minutes=5) else 'previous', **fields}
     return list(events.values())
 
 

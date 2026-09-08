@@ -94,12 +94,14 @@ public sealed class AlfonsoAgent : ITradingAgent
 
         lock (state.Gate)
         {
+            string? buyExhaustion = null;
             if (_options.ConfirmationInterval is BarInterval confirmationInterval)
             {
                 if (!context.Analysis.TryGet(confirmationInterval, out AnalysisSnapshot confirmation) ||
                     confirmation.AvailableAt > context.Timestamp ||
                     confirmation.LatestCandle.OpenTime + TimeSpan.FromMinutes(5) != context.Timestamp)
                     return Observe(context, "Waiting for a current closed 5m confirmation candle.");
+                buyExhaustion = state.BuyExhaustion?.Evaluate(confirmation, context.Timestamp);
                 Candle five = confirmation.LatestCandle;
                 state.Analyzer.ApplyConfirmation(new AlfonsoBar(five.OpenTime, five.Prices.Open,
                     five.Prices.High, five.Prices.Low, five.Prices.Close), context.Timestamp);
@@ -151,9 +153,6 @@ public sealed class AlfonsoAgent : ITradingAgent
 
             // Fills are processed before this evaluation. Never cancel retrospectively or
             // manage a filled position; only this agent's still-pending plan is eligible.
-            string? buyExhaustion = _options.BlockExhaustedBuysOnFiveMinute &&
-                context.Analysis.TryGet(BarInterval.Minutes(5), out var exhaustionBar)
-                ? AlfonsoBuyExhaustion.Reason(exhaustionBar, context.Timestamp) : null;
             if ((_options.RevalidatePendingOnFiveMinute || buyExhaustion is not null) &&
                 state.PendingOrder is ZoneOrderKey pending &&
                 !context.Positions.Any(x => x.Instrument == context.Instrument && x.Quantity > 0m))
@@ -677,6 +676,7 @@ public sealed class AlfonsoAgent : ITradingAgent
         public InstrumentState(AlfonsoStrategyOptions options, InstrumentKey instrument)
         {
             FiveMinuteStructure = options.RevalidatePendingOnFiveMinute ? new() : null;
+            BuyExhaustion = options.BlockExhaustedBuysOnFiveMinute ? new() : null;
             StructuralStop = options.UseStructuralSwingStop
                 ? new AlfonsoStructuralStop(options.StructuralStopLookbackCandles) : null;
             Analyzer = new AlfonsoSequenceAnalyzer(
@@ -717,6 +717,7 @@ public sealed class AlfonsoAgent : ITradingAgent
 
         public AlfonsoStructuralStop? StructuralStop { get; }
         public AlfonsoFiveMinuteStructure? FiveMinuteStructure { get; }
+        public AlfonsoBuyExhaustion? BuyExhaustion { get; }
         public AlfonsoReversalShadow? ReversalShadow { get; }
 
         public IReadOnlyList<(SequenceRole Role, BarInterval Interval)> Intervals { get; }

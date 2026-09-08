@@ -34,7 +34,8 @@ public sealed record AlfonsoStrategyOptions
     /// <summary>Opt-in: revalidate owned, unfilled limits on each closed 5m candle.</summary>
     public bool RevalidatePendingOnFiveMinute { get; init; }
 
-    /// <summary>Opt-in buy filter: closed 5m high >= BB upper and (RSI > 70 or CCI >= 100).</summary>
+    /// <summary>Opt-in buy filter: either of the last two consecutive closed 5m candles has
+    /// high >= BB upper and (RSI > 70 or CCI >= 100), using that candle's own indicators.</summary>
     public bool BlockExhaustedBuysOnFiveMinute { get; init; }
 
     /// <summary>Optional NDJSON research log. Reversal observations never authorize orders.</summary>
