@@ -132,6 +132,7 @@ internal sealed record BacktestCommandOptions
     public bool AlfonsoUseStructuralSwingStop { get; init; }
     public bool AlfonsoUseOpposingZoneTarget { get; init; }
     public bool AlfonsoRevalidatePendingOnFiveMinute { get; init; }
+    public bool AlfonsoBlockExhaustedBuysOnFiveMinute { get; init; }
     public string? AlfonsoReversalShadowLogPath { get; init; }
     public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
     public bool AlfonsoEliminationRequiresClose { get; init; } = false;
@@ -403,6 +404,7 @@ internal sealed record BacktestCommandOptions
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
                 "alfonso-nested-only" or "alfonso-ignore-control" or "alfonso-structural-stop" or
                 "alfonso-confirmation-trades" or "alfonso-opposing-zone-target" or "alfonso-revalidate-pending-5m" or
+                "alfonso-block-exhausted-buys-5m" or
                 "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
                 "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
                 "alfonso-with-drift" or
@@ -696,6 +698,7 @@ internal sealed record BacktestCommandOptions
             AlfonsoUseStructuralSwingStop = values.ContainsKey("alfonso-structural-stop"),
             AlfonsoUseOpposingZoneTarget = values.ContainsKey("alfonso-opposing-zone-target"),
             AlfonsoRevalidatePendingOnFiveMinute = values.ContainsKey("alfonso-revalidate-pending-5m"),
+            AlfonsoBlockExhaustedBuysOnFiveMinute = values.ContainsKey("alfonso-block-exhausted-buys-5m"),
             AlfonsoReversalShadowLogPath = values.GetValueOrDefault("alfonso-reversal-shadow-log"),
             AlfonsoStructuralStopLookbackCandles = ParseInt(
                 values.GetValueOrDefault("alfonso-stop-lookback"), 48, 5, 10000, "alfonso-stop-lookback"),
@@ -915,6 +918,7 @@ internal sealed record BacktestCommandOptions
         AlfonsoUseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
         AlfonsoUseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
         AlfonsoRevalidatePendingOnFiveMinute = AlfonsoRevalidatePendingOnFiveMinute,
+        AlfonsoBlockExhaustedBuysOnFiveMinute = AlfonsoBlockExhaustedBuysOnFiveMinute,
         AlfonsoReversalShadowLogPath = AlfonsoReversalShadowLogPath,
         AlfonsoStructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
         AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,

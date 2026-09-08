@@ -34,6 +34,9 @@ public sealed record AlfonsoStrategyOptions
     /// <summary>Opt-in: revalidate owned, unfilled limits on each closed 5m candle.</summary>
     public bool RevalidatePendingOnFiveMinute { get; init; }
 
+    /// <summary>Opt-in buy filter: closed 5m high >= BB upper and (RSI > 70 or CCI >= 100).</summary>
+    public bool BlockExhaustedBuysOnFiveMinute { get; init; }
+
     /// <summary>Optional NDJSON research log. Reversal observations never authorize orders.</summary>
     public string? ReversalShadowLogPath { get; init; }
 
@@ -362,6 +365,8 @@ public sealed record AlfonsoStrategyOptions
             throw new InvalidOperationException("Unknown Alfonso entry policy.");
         if (RevalidatePendingOnFiveMinute && EntryPolicy != AlfonsoEntryPolicy.LowerTimeframeAligned)
             throw new InvalidOperationException("5m pending revalidation requires lower-aligned entry policy.");
+        if (BlockExhaustedBuysOnFiveMinute && EntryPolicy != AlfonsoEntryPolicy.LowerTimeframeAligned)
+            throw new InvalidOperationException("5m buy exhaustion filter requires lower-aligned entry policy.");
         if (ReversalShadowLogPath is not null && (string.IsNullOrWhiteSpace(ReversalShadowLogPath) ||
             EntryPolicy != AlfonsoEntryPolicy.LowerTimeframeAligned))
             throw new InvalidOperationException("Reversal shadow logging requires a path and lower-aligned entry policy.");

@@ -112,12 +112,13 @@ public sealed class AlfonsoLowerAlignmentTests
         Assert.That(decision.Reason, Does.Contain("current closed 5m"));
     }
 
-    internal static AgentMarketContext Context(DateTimeOffset at, DateTimeOffset fiveOpen, DateTimeOffset? lowerOpen = null)
+    internal static AgentMarketContext Context(DateTimeOffset at, DateTimeOffset fiveOpen, DateTimeOffset? lowerOpen = null,
+        IndicatorSnapshot? fiveIndicators = null)
     {
         AnalysisSnapshot[] snapshots = [Snapshot(BarInterval.Hours(4), Now.AddHours(-4)),
             Snapshot(BarInterval.Hours(1), Now.AddHours(-1)),
             Snapshot(BarInterval.Minutes(15), lowerOpen ?? Now.AddMinutes(-15)),
-            Snapshot(BarInterval.Minutes(5), fiveOpen)];
+            Snapshot(BarInterval.Minutes(5), fiveOpen) with { Indicators = fiveIndicators ?? new IndicatorSnapshot { Atr = 2m } }];
         return new AgentMarketContext
         {
             Instrument = Instrument, Timestamp = at,

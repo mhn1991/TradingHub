@@ -37,7 +37,10 @@ public enum CandidateOutcome
     Superseded,
 
     /// <summary>Opposing-zone targeting was requested but no confirmed zone lies ahead of entry.</summary>
-    NoOpposingZone
+    NoOpposingZone,
+
+    /// <summary>Closed 5m BB/RSI/CCI rule blocked an otherwise eligible buy.</summary>
+    BuyExhaustion
 }
 
 /// <summary>

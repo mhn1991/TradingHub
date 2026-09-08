@@ -151,19 +151,25 @@ public sealed class AlfonsoAgent : ITradingAgent
 
             // Fills are processed before this evaluation. Never cancel retrospectively or
             // manage a filled position; only this agent's still-pending plan is eligible.
-            if (_options.RevalidatePendingOnFiveMinute && state.PendingOrder is ZoneOrderKey pending &&
+            string? buyExhaustion = _options.BlockExhaustedBuysOnFiveMinute &&
+                context.Analysis.TryGet(BarInterval.Minutes(5), out var exhaustionBar)
+                ? AlfonsoBuyExhaustion.Reason(exhaustionBar, context.Timestamp) : null;
+            if ((_options.RevalidatePendingOnFiveMinute || buyExhaustion is not null) &&
+                state.PendingOrder is ZoneOrderKey pending &&
                 !context.Positions.Any(x => x.Instrument == context.Instrument && x.Quantity > 0m))
             {
                 var owned = context.OpenOrders.FirstOrDefault(x => x.Instrument == context.Instrument &&
                     x.NormalizedStatus is OrderStatus.Pending or OrderStatus.Open);
-                string? invalid = state.FiveMinuteStructure!.PendingInvalidation(
+                string? invalid = state.FiveMinuteStructure?.PendingInvalidation(
                     pending.Kind == ImbalanceKind.Demand, state.Analyzer.ConfirmationTrend);
-                if (owned is not null && invalid is not null)
+                string? cancellation = invalid is not null ? "5m pending guard: " + invalid :
+                    pending.Kind == ImbalanceKind.Demand && owned?.Side == OrderSide.Buy ? buyExhaustion : null;
+                if (owned is not null && cancellation is not null)
                     return Task.FromResult(new AgentDecision
                     {
                         Action = AgentAction.Cancel, Instrument = context.Instrument,
                         BrokerOrderId = owned.BrokerOrderId, CreatedAt = context.Timestamp,
-                        Confidence = 0m, Reason = "5m pending guard: " + invalid
+                        Confidence = 0m, Reason = cancellation
                     });
             }
 
@@ -448,6 +454,13 @@ public sealed class AlfonsoAgent : ITradingAgent
                     Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
                         atrPercentile, CandidateOutcome.AtrRegime);
                     continue;
+                }
+
+                if (buy && buyExhaustion is not null)
+                {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.BuyExhaustion);
+                    return Observe(context, buyExhaustion);
                 }
 
                 Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
