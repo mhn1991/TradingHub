@@ -65,4 +65,18 @@ The recalculation uses complete UTC-aligned 5m buckets from cached 1m data, the 
 
 The completed replay processed **253,035** execution candles with input hash `fb5f4eeeb27bfb331a4baac0bf84081aa416ec615458e2fe61739e92ed7f9fc9`, identical to control. New simulation: `f8bd4eda-f795-43ee-8651-ce810c746d66`; control: `a0672756-574f-47ce-8e3d-d459f062fcac`. Detailed validated output is `.cache/alfonso-buy-exhaustion-20260908-r2/comparison.json`.
 
-Keep this optional: this one-instrument, four-trade, in-sample replay establishes correct rule execution, not a reversal predictor or a performance advantage. Thresholds were not changed after seeing the result. No new dashboard publication was performed for this experiment.
+Keep this optional: this one-instrument, four-trade, in-sample replay establishes correct rule execution, not a reversal predictor or a performance advantage. Thresholds were not changed after seeing the result.
+
+## Dashboard publication
+
+The filtered run and pending-guard control are published under **Saved Alfonso tests → Latest completed tests** (`/#alfonso-tests`). Each has four identical filled trades. The original comparisons remain available in the comparison selector.
+
+`tools/alfonso_lower_alignment_test.sh` now automatically validates and publishes successful runs to `Dashboard/public/data/backtests/alfonso-latest-tests.json`. Run labels default to the experiment directory name. The archive keeps previous runs, deduplicates by simulation ID, and uses a lock plus atomic replacement for concurrent test processes. Failed/incomplete results are not published. Click **Refresh tests** on an already-open dashboard; no rerun is needed.
+
+To retry a failed export or publish an existing completed run with a friendly label:
+
+```bash
+python3 tools/alfonso_publish_completed.py .cache/alfonso-buy-exhaustion-20260908-r2 --label 'Silver · BB/RSI/CCI buy filter + pending guard'
+```
+
+This automation applies to the lower-alignment shell runner, not arbitrary direct `dotnet` launches or other experiment scripts. A separately deployed static dashboard still needs its updated public data deployed.

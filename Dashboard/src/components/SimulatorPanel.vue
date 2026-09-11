@@ -19,8 +19,9 @@ import AnalysisChart from './AnalysisChart.vue'
 import { useMultiTimeframeSelection } from '../composables/useMultiTimeframeSelection'
 import { findAnchorIndex } from '../utils/timeframeSeries'
 import SimulationExperimentPanel from './SimulationExperimentPanel.vue'
-import ProfileBuilderWizard from './simulator/ProfileBuilderWizard.vue'
+import SavedAlfonsoTests from './SavedAlfonsoTests.vue'
 import AlfonsoTrendComparison from './AlfonsoTrendComparison.vue'
+import ProfileBuilderWizard from './simulator/ProfileBuilderWizard.vue'
 import { useSimulationRealtime } from '../composables/useSimulationRealtime'
 import { useSimulationPlayback, type PlaybackRow } from '../composables/useSimulationPlayback'
 import { useSimulationProfiles } from '../composables/useSimulationProfiles'
@@ -30,8 +31,8 @@ const emit = defineEmits<{
   (event: 'open-experiment-report', experimentId: string): void
 }>()
 
-const simulatorMode = ref<'single' | 'experiment' | 'trend'>(
-  window.location.hash === '#alfonso-trends' ? 'trend' : 'single',
+const simulatorMode = ref<'single' | 'experiment' | 'saved' | 'trend'>(
+  window.location.hash === '#alfonso-trends' ? 'trend' : window.location.hash === '#alfonso-tests' ? 'saved' : 'single',
 )
 
 /** Full UTC calendar months ending at the start of the current month. */
@@ -2007,16 +2008,17 @@ onMounted(() => {
   <section class="simulator-panel">
     <header class="simulator-header">
       <div>
-        <h2>{{ simulatorMode === 'single' ? 'Dashboard Simulator' : simulatorMode === 'trend' ? 'Alfonso trend comparison' : 'Experiment Lab' }}</h2>
+        <h2>{{ simulatorMode === 'single' ? 'Dashboard Simulator' : simulatorMode === 'saved' ? 'Saved Alfonso tests' : simulatorMode === 'trend' ? 'Alfonso trend comparison' : 'Experiment Lab' }}</h2>
         <p>
           {{ simulatorMode === 'single'
             ? 'Choose a trading-style preset, adjust instrument/dates if needed, then run. Warm-up history is loaded automatically; trading starts at the evaluation From date.'
-            : simulatorMode === 'trend' ? 'Compare trend recognition on identical closed candles, independently of entries.' : 'Build immutable profile comparisons with explicit learning, embargo, warm-up, and held-out boundaries.' }}
+            : simulatorMode === 'saved' ? 'Inspect completed tests and the reasons behind each trade.' : simulatorMode === 'trend' ? 'Compare trend recognition on identical closed candles, independently of entries.' : 'Build immutable profile comparisons with explicit learning, embargo, warm-up, and held-out boundaries.' }}
         </p>
       </div>
       <div class="simulator-mode" aria-label="Simulator mode">
         <button type="button" :class="{ active: simulatorMode === 'single' }" @click="simulatorMode = 'single'">Single Run</button>
         <button type="button" :class="{ active: simulatorMode === 'experiment' }" @click="simulatorMode = 'experiment'">Experiment</button>
+        <button type="button" :class="{ active: simulatorMode === 'saved' }" @click="simulatorMode = 'saved'">Saved Alfonso tests</button>
         <button type="button" :class="{ active: simulatorMode === 'trend' }" @click="simulatorMode = 'trend'">Trend comparison</button>
       </div>
       <div v-if="simulatorMode === 'single'" class="simulator-status">
@@ -3133,6 +3135,7 @@ onMounted(() => {
         <button type="button" class="secondary" @click="refreshJobList">Refresh jobs</button>
       </section>
     </div>
+    <SavedAlfonsoTests v-else-if="simulatorMode === 'saved'" />
     <AlfonsoTrendComparison v-else-if="simulatorMode === 'trend'" />
     <SimulationExperimentPanel v-else @open-report="experimentId => emit('open-experiment-report', experimentId)" />
   </section>
@@ -3437,5 +3440,7 @@ button.secondary {
 .promote-form label.full { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   .simulator-grid { grid-template-columns: 1fr; }
+  .simulator-header { flex-wrap: wrap; }
+  .simulator-mode { flex-wrap: wrap; }
 }
 </style>

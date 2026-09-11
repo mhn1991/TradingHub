@@ -429,11 +429,12 @@ function renderEquity() {
       stroke: css('--surface'), 'stroke-width': 2 }));
     ends.push({ i, col, cx: x(last.t), cy: y(last.v), v: last.v });
   });
-  // Both arms finish at a similar R, so the two end labels would sit on top of each other.
-  // Order them by value and force a minimum vertical gap.
+  // Two arms finish at a similar R, so their end labels would sit on top of each other. Only
+  // applies when there ARE two - a single-run page has one series, and indexing ends[1] there threw
+  // at module level and silently killed every render after this point.
   ends.sort((p, q) => p.cy - q.cy);
   const GAP = 15;
-  if (ends[1].cy - ends[0].cy < GAP) {
+  if (ends.length > 1 && ends[1].cy - ends[0].cy < GAP) {
     const mid = (ends[0].cy + ends[1].cy) / 2;
     ends[0].cy = mid - GAP / 2; ends[1].cy = mid + GAP / 2;
   }

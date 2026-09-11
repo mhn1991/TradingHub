@@ -27,3 +27,8 @@ dotnet BacktestRunner/bin/Release/net10.0/BacktestRunner.dll \
   "$@" \
   --output "$OUT/lower-aligned" > "$OUT/lower-aligned.log" 2>&1
 echo "Completed lower-aligned"
+if ! python3 tools/alfonso_publish_completed.py "$OUT"; then
+  echo "Replay completed, but dashboard publication failed. Results are safe in: $OUT" >&2
+  echo "Retry publication without rerunning the test: python3 tools/alfonso_publish_completed.py '$OUT'" >&2
+  exit 1
+fi

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { compact, price, shortTime, timestamp } from '../format'
 import { collectPriceActionMarkers } from './priceActionMarkers'
 import { indexForCloseStampedTime } from './chartTime'
+import { drawnTrade, threeRTrade, type DrawingSide, type DrawingLevel } from './tradeDrawing'
 import type {
   ChartLayers,
   PriceChannel,
@@ -19,6 +20,9 @@ const props = defineProps<{
   windowSize: number
   layers: ChartLayers
   trades?: ReplayTrade[]
+  /** Optional initial-bracket price bands; does not change other chart instances. */
+  showTradeZones?: boolean
+  enableTradeDrawing?: boolean
   /** Optional: renders a timeframe switcher in the toolbar and enables double-click-to-drill.
    * Omit entirely for chart instances that only ever show one fixed interval (e.g. a single
    * trade's execution-detail replay) — everything below is inert unless this is provided. */
@@ -66,6 +70,109 @@ const hoveredIndex = ref<number | null>(null)
 const localWindowSize = ref(props.windowSize)
 const panOffset = ref(0)
 const dragging = ref(false)
+const drawingSide = ref<DrawingSide>('Sell')
+const drawingStep = ref<DrawingLevel | null>(null)
+const drawingEntry = ref<number | null>(null)
+const drawingStop = ref<number | null>(null)
+const drawingTarget = ref<number | null>(null)
+const drawingDrag = ref<DrawingLevel | null>(null)
+const drawingDragDomain = ref<{ min: number; max: number } | null>(null)
+let drawingDragOriginal = 0
+const drawingVisible = ref(true)
+const drawingError = ref('')
+const manualTrade = computed(() => drawingEntry.value == null || drawingStop.value == null || drawingTarget.value == null
+  ? null : drawnTrade(drawingSide.value, drawingEntry.value, drawingStop.value, drawingTarget.value))
+const visibleManualTrade = computed(() => props.enableTradeDrawing && drawingVisible.value ? manualTrade.value : null)
+const drawingLevels = computed(() => visibleManualTrade.value ? ([
+  { key: 'entry', name: 'Entry', value: visibleManualTrade.value.entry },
+  { key: 'stop', name: 'Stop · 1R', value: visibleManualTrade.value.stop },
+  { key: 'target', name: `Target · ${visibleManualTrade.value.ratio.toFixed(2)}R`, value: visibleManualTrade.value.target },
+] satisfies { key: DrawingLevel; name: string; value: number }[]) : [])
+
+function clearDrawing() {
+  drawingStep.value = null
+  drawingEntry.value = null
+  drawingStop.value = null
+  drawingTarget.value = null
+  drawingError.value = ''
+}
+
+function startDrawing(side: DrawingSide) {
+  clearDrawing()
+  drawingSide.value = side
+  drawingVisible.value = true
+  drawingStep.value = 'entry'
+}
+
+function setDrawingLevel(field: DrawingLevel, value: number | null) {
+  if (field === 'entry') drawingEntry.value = value
+  else if (field === 'stop') drawingStop.value = value
+  else drawingTarget.value = value
+}
+
+function editDrawing(field: DrawingLevel, event: Event) {
+  const value = (event.target as HTMLInputElement).valueAsNumber
+  setDrawingLevel(field, Number.isFinite(value) ? value : null)
+}
+
+function drawingPointerPrice(event: PointerEvent, clamp = false): number | null {
+  const svg = chartSvg.value
+  const matrix = svg?.getScreenCTM()
+  if (!svg || !matrix) return null
+  const point = svg.createSVGPoint()
+  point.x = event.clientX
+  point.y = event.clientY
+  const local = point.matrixTransform(matrix.inverse())
+  if (!clamp && (local.x < plotLeft || local.x > plotLeft + plotWidth || local.y < priceTop || local.y > priceTop + priceHeight)) return null
+  const domain = priceDomain.value
+  const y = Math.max(priceTop, Math.min(priceTop + priceHeight, local.y))
+  return domain.max - (y - priceTop) / priceHeight * (domain.max - domain.min)
+}
+
+function placeDrawingPoint(event: PointerEvent) {
+  const value = drawingPointerPrice(event)
+  if (value == null) return
+  if (drawingStep.value === 'entry') {
+    drawingEntry.value = value
+    drawingStep.value = 'stop'
+  } else if (drawingStep.value === 'stop' && drawingEntry.value != null) {
+    if (!threeRTrade(drawingSide.value, drawingEntry.value, value)) {
+      drawingError.value = `Place the stop ${drawingSide.value === 'Sell' ? 'above' : 'below'} entry.`
+      return
+    }
+    drawingStop.value = value
+    drawingStep.value = 'target'
+    drawingError.value = ''
+  } else if (drawingEntry.value != null && drawingStop.value != null) {
+    if (!drawnTrade(drawingSide.value, drawingEntry.value, drawingStop.value, value)) {
+      drawingError.value = `Place the target ${drawingSide.value === 'Sell' ? 'below' : 'above'} entry.`
+      return
+    }
+    drawingTarget.value = value
+    drawingStep.value = null
+    drawingError.value = ''
+  }
+}
+
+function startDrawingDrag(level: DrawingLevel, event: PointerEvent) {
+  if (event.button !== 0 || !manualTrade.value || drawingStep.value) return
+  event.preventDefault()
+  cancelPendingPointerMove()
+  drawingDragOriginal = manualTrade.value[level]
+  // Freeze autoscale during the gesture so a moved level stays under the pointer.
+  drawingDragDomain.value = { ...priceDomain.value }
+  drawingDrag.value = level
+  chartSvg.value?.setPointerCapture(event.pointerId)
+}
+
+function moveDrawingLevel(event: PointerEvent) {
+  const trade = manualTrade.value
+  const level = drawingDrag.value
+  const value = drawingPointerPrice(event, true)
+  if (!trade || !level || value == null) return
+  const next = { ...trade, [level]: value }
+  if (drawnTrade(next.side, next.entry, next.stop, next.target)) setDrawingLevel(level, value)
+}
 
 let dragStartClientX = 0
 let dragStartOffset = 0
@@ -167,7 +274,16 @@ watch([viewportStartIndex, viewportEndIndex], () => {
   hoveredIndex.value = null
 })
 
+const tradeZoneLevels = computed(() => props.showTradeZones ? (props.trades ?? []).flatMap(trade => {
+  const entry = trade.entryPrice
+  const stop = trade.initialStopLossPrice ?? trade.stopLossPrice
+  const target = trade.takeProfitPrice
+  if (entry == null || stop == null || target == null || ![entry, stop, target].every(Number.isFinite)) return []
+  return [{ id: trade.setupId, entry, stop, target }]
+}) : [])
+
 const priceDomain = computed(() => {
+  if (drawingDragDomain.value) return drawingDragDomain.value
   let min = Number.POSITIVE_INFINITY
   let max = Number.NEGATIVE_INFINITY
   const include = (value: number | null | undefined) => {
@@ -191,6 +307,17 @@ const priceDomain = computed(() => {
       include(frame.indicators.donchian?.upper)
       include(frame.indicators.donchian?.lower)
     }
+  }
+  // Keep the entire original bracket visible when its reference bands are enabled.
+  for (const zone of tradeZoneLevels.value) {
+    include(zone.entry)
+    include(zone.stop)
+    include(zone.target)
+  }
+  if (visibleManualTrade.value) {
+    include(visibleManualTrade.value.entry)
+    include(visibleManualTrade.value.stop)
+    include(visibleManualTrade.value.target)
   }
 
   if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 1 }
@@ -933,6 +1060,11 @@ function handlePointerEnter(event: PointerEvent) {
 }
 
 function handlePointerDown(event: PointerEvent) {
+  if (props.enableTradeDrawing && drawingStep.value && event.button === 0) {
+    event.preventDefault()
+    placeDrawingPoint(event)
+    return
+  }
   if (event.button !== 0 || visibleFrames.value.length <= 1) return
   const target = event.currentTarget as SVGSVGElement
   refreshSvgBounds(target)
@@ -979,6 +1111,10 @@ function handlePointerLeave() {
 }
 
 function handlePointerMove(event: PointerEvent) {
+  if (drawingDrag.value) {
+    moveDrawingLevel(event)
+    return
+  }
   pendingPointerX = event.clientX
   if (pointerAnimationFrame != null) return
   pointerAnimationFrame = requestAnimationFrame(() => {
@@ -991,6 +1127,12 @@ function handlePointerMove(event: PointerEvent) {
 }
 
 function handlePointerUp(event: PointerEvent) {
+  if (drawingDrag.value) {
+    if (event.type === 'pointercancel') setDrawingLevel(drawingDrag.value, drawingDragOriginal)
+    else moveDrawingLevel(event)
+    drawingDrag.value = null
+    drawingDragDomain.value = null
+  }
   if (dragging.value) applyPointerPosition(event.clientX)
   cancelPendingPointerMove()
   dragging.value = false
@@ -999,6 +1141,7 @@ function handlePointerUp(event: PointerEvent) {
 }
 
 function handleDoubleClick(event: MouseEvent) {
+  if (drawingStep.value) return
   if (!props.availableIntervals?.length || visibleFrames.value.length === 0) return
   const target = event.currentTarget as SVGSVGElement
   refreshSvgBounds(target)
@@ -1018,6 +1161,10 @@ function handleDoubleClick(event: MouseEvent) {
  * candle; Backspace returns to the timeframe drilled from. Requires the chart to have focus —
  * click it or tab to it first. */
 function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && drawingStep.value) {
+    clearDrawing()
+    return
+  }
   if (event.key === 'Enter') {
     if (!props.availableIntervals?.length) return
     const frame = focusFrame.value
@@ -1338,6 +1485,26 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
 
 <template>
   <div ref="chartShell" class="chart-shell">
+    <div v-if="enableTradeDrawing" class="trade-drawing-toolbar" aria-label="Draw a hypothetical trade">
+      <strong>Draw a trade · What-if</strong>
+      <button type="button" @click="startDrawing('Buy')">Draw Buy</button>
+      <button type="button" @click="startDrawing('Sell')">Draw Sell</button>
+      <template v-if="drawingStep">
+        <span role="status">{{ drawingError || (drawingStep === 'entry' ? 'Click your entry price on the candles panel.' : drawingStep === 'stop' ? `Click your stop ${drawingSide === 'Sell' ? 'above' : 'below'} entry.` : `Click your target ${drawingSide === 'Sell' ? 'below' : 'above'} entry.`) }}</span>
+        <button type="button" @click="clearDrawing">Cancel</button>
+      </template>
+      <template v-else-if="drawingEntry !== null || drawingStop !== null">
+        <span>{{ drawingSide }}</span>
+        <label>Entry <input type="number" step="any" :value="drawingEntry" aria-label="Drawing entry price" @input="editDrawing('entry', $event)" /></label>
+        <label>Stop <input type="number" step="any" :value="drawingStop" aria-label="Drawing stop price" @input="editDrawing('stop', $event)" /></label>
+        <label>Target <input type="number" step="any" :value="drawingTarget" aria-label="Drawing target price" @input="editDrawing('target', $event)" /></label>
+        <strong v-if="manualTrade" class="drawing-target">Risk/reward 1:{{ manualTrade.ratio.toFixed(2) }}</strong>
+        <span v-else role="status">Stop must be {{ drawingSide === 'Sell' ? 'above' : 'below' }} entry; target must be {{ drawingSide === 'Sell' ? 'below' : 'above' }} entry.</span>
+        <button type="button" :aria-pressed="drawingVisible" @click="drawingVisible = !drawingVisible">{{ drawingVisible ? 'Hide drawing' : 'Show drawing' }}</button>
+        <button type="button" @click="clearDrawing">Clear drawing</button>
+      </template>
+      <small>Click entry → stop → target, then drag any line or handle to adjust. Ratio updates live; target is not locked. Excludes costs · no order placed · resets on another trade or reload.</small>
+    </div>
     <div v-if="availableIntervals?.length" class="chart-interval-switcher" aria-label="Timeframe">
       <button
         v-for="option in availableIntervals" :key="option.interval"
@@ -1437,11 +1604,11 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
 
     <svg
       ref="chartSvg"
-      :class="['analysis-chart', { 'is-dragging': dragging, 'is-hovering': isHovering }]"
+      :class="['analysis-chart', { 'is-dragging': dragging, 'is-hovering': isHovering, 'is-drawing': drawingStep }]"
       :viewBox="`0 0 ${width} ${height}`"
       preserveAspectRatio="xMidYMid meet"
       role="img"
-      :tabindex="availableIntervals?.length ? 0 : undefined"
+      :tabindex="availableIntervals?.length || enableTradeDrawing ? 0 : undefined"
       aria-label="Interactive candlestick chart with Bollinger and Donchian regimes, RSI relationships, ATR and Efficiency Ratio context, price action, market structure and market regime annotations"
       @pointerdown="handlePointerDown"
       @pointerenter="handlePointerEnter"
@@ -1546,10 +1713,10 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           :y="height - 12"
           text-anchor="middle"
         >{{ tick.label }}</text>
-        <text :x="plotLeft + 10" :y="rsiTop + 15" class="panel-label">RSI · 14</text>
-        <text v-if="panelBadges?.rsi" :x="plotLeft + plotWidth - 8" :y="rsiTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.rsi }}</text>
-        <text :x="plotLeft + 10" :y="cciTop + 15" class="panel-label">CCI · 20</text>
-        <text v-if="panelBadges?.cci" :x="plotLeft + plotWidth - 8" :y="cciTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.cci }}</text>
+        <text v-if="layers.rsi !== false" :x="plotLeft + 10" :y="rsiTop + 15" class="panel-label">RSI · 14</text>
+        <text v-if="layers.rsi !== false && panelBadges?.rsi" :x="plotLeft + plotWidth - 8" :y="rsiTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.rsi }}</text>
+        <text v-if="layers.cci" :x="plotLeft + 10" :y="cciTop + 15" class="panel-label">CCI · 20</text>
+        <text v-if="layers.cci && panelBadges?.cci" :x="plotLeft + plotWidth - 8" :y="cciTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.cci }}</text>
         <text :x="plotLeft + 10" :y="volumeTop + 15" class="panel-label">TICK VOLUME</text>
         <text v-if="panelBadges?.volume" :x="plotLeft + plotWidth - 8" :y="volumeTop + 15" text-anchor="end" class="panel-value">{{ panelBadges.volume }}</text>
         <text :x="plotLeft + 10" :y="atrTop + 15" class="panel-label">ATR · NORMALIZED %</text>
@@ -1559,6 +1726,19 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
       </g>
 
       <g clip-path="url(#price-clip)">
+        <g class="trade-risk-reward-zones" pointer-events="none">
+          <g v-for="zone in tradeZoneLevels" :key="zone.id">
+            <rect class="trade-risk-zone" :x="plotLeft" :width="plotWidth"
+              :y="yPrice(Math.max(zone.entry, zone.stop))" :height="Math.abs(yPrice(zone.entry) - yPrice(zone.stop))">
+              <title>Initial stop-loss zone: entry {{ price(zone.entry) }} to stop {{ price(zone.stop) }}</title>
+            </rect>
+            <rect class="trade-reward-zone" :x="plotLeft" :width="plotWidth"
+              :y="yPrice(Math.max(zone.entry, zone.target))" :height="Math.abs(yPrice(zone.entry) - yPrice(zone.target))">
+              <title>Target zone: entry {{ price(zone.entry) }} to target {{ price(zone.target) }}</title>
+            </rect>
+            <line class="trade-zone-entry" :x1="plotLeft" :x2="plotLeft + plotWidth" :y1="yPrice(zone.entry)" :y2="yPrice(zone.entry)" />
+          </g>
+        </g>
         <g v-if="layers.bollingerRegimes" class="bollinger-regimes">
           <rect
             v-for="span in narrowSpans"
@@ -1876,12 +2056,12 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
         <path v-if="volumePaths.down" :d="volumePaths.down" class="volume-down" />
       </g>
 
-      <g class="rsi-guides">
+      <g v-if="layers.rsi !== false" class="rsi-guides">
         <rect :x="plotLeft" :y="yRsi(70)" :width="plotWidth" :height="yRsi(30) - yRsi(70)" />
         <line v-for="level in [30, 50, 70]" :key="level" :x1="plotLeft" :x2="plotLeft + plotWidth" :y1="yRsi(level)" :y2="yRsi(level)" />
         <text v-for="level in [30, 50, 70]" :key="`rsi-${level}`" :x="plotLeft + plotWidth + 10" :y="yRsi(level) + 4">{{ level }}</text>
       </g>
-      <g clip-path="url(#rsi-clip)">
+      <g v-if="layers.rsi !== false" clip-path="url(#rsi-clip)">
         <path :d="rsiPath" class="rsi-line" />
         <g v-if="layers.rsiRelationships" class="rsi-relationships rsi-panel-relationships">
           <g v-for="item in rsiRelationshipVisuals" :key="`rsi-${item.relationship.confirmedAt}-${item.relationship.type}`" :class="item.className">
@@ -2006,6 +2186,43 @@ function swingPoints(swing: SwingPoint, x: number, y: number): string {
           </circle>
         </g>
       </g>
+      <g v-if="visibleManualTrade" class="manual-trade-drawing" clip-path="url(#price-clip)" pointer-events="none">
+        <rect class="trade-risk-zone" :x="plotLeft" :width="plotWidth"
+          :y="yPrice(Math.max(visibleManualTrade.entry, visibleManualTrade.stop))"
+          :height="Math.abs(yPrice(visibleManualTrade.entry) - yPrice(visibleManualTrade.stop))" />
+        <rect class="trade-reward-zone" :x="plotLeft" :width="plotWidth"
+          :y="yPrice(Math.max(visibleManualTrade.entry, visibleManualTrade.target))"
+          :height="Math.abs(yPrice(visibleManualTrade.entry) - yPrice(visibleManualTrade.target))" />
+        <g v-for="level in drawingLevels" :key="level.key">
+          <line class="trade-zone-entry" :x1="plotLeft" :x2="plotLeft + plotWidth" :y1="yPrice(level.value)" :y2="yPrice(level.value)" />
+          <text class="manual-trade-label" :x="plotLeft + plotWidth - 8" :y="yPrice(level.value) - 5" text-anchor="end">What-if {{ level.name }} {{ price(level.value) }}</text>
+          <line class="drawing-level-hit" :data-drawing-level="level.key" :x1="plotLeft" :x2="plotLeft + plotWidth" :y1="yPrice(level.value)" :y2="yPrice(level.value)" @pointerdown.stop="startDrawingDrag(level.key, $event)" @dblclick.stop />
+          <circle class="drawing-level-handle" :cx="plotLeft + plotWidth / 2" :cy="yPrice(level.value)" r="5" @pointerdown.stop="startDrawingDrag(level.key, $event)" @dblclick.stop><title>Drag {{ level.key }}</title></circle>
+        </g>
+      </g>
+      <line v-if="drawingStep && drawingEntry !== null" class="trade-zone-entry" pointer-events="none"
+        :x1="plotLeft" :x2="plotLeft + plotWidth" :y1="yPrice(drawingEntry)" :y2="yPrice(drawingEntry)" />
+      <line v-if="drawingStep === 'target' && drawingStop !== null" class="trade-zone-entry" pointer-events="none"
+        :x1="plotLeft" :x2="plotLeft + plotWidth" :y1="yPrice(drawingStop)" :y2="yPrice(drawingStop)" />
     </svg>
   </div>
 </template>
+
+<style scoped>
+.trade-risk-zone { fill: #f43f5e; fill-opacity: .17; stroke: #fb7185; stroke-width: 1; stroke-opacity: .65; }
+.trade-reward-zone { fill: #10b981; fill-opacity: .17; stroke: #34d399; stroke-width: 1; stroke-opacity: .65; }
+.trade-zone-entry { stroke: #e2e8f0; stroke-width: 1; stroke-dasharray: 5 4; opacity: .8; }
+.trade-drawing-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0; }
+.trade-drawing-toolbar label { display: inline-flex; align-items: center; gap: 5px; }
+.trade-drawing-toolbar input { width: 125px; }
+.trade-drawing-toolbar button, .trade-drawing-toolbar input { border: 1px solid #334155; border-radius: 6px; background: #111c29; color: #e2e8f0; padding: 6px 9px; font: inherit; font-size: 12px; }
+.trade-drawing-toolbar button { cursor: pointer; }
+.trade-drawing-toolbar button:hover { border-color: #60a5fa; background: #1e293b; }
+.trade-drawing-toolbar button:focus-visible, .trade-drawing-toolbar input:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.trade-drawing-toolbar small { flex-basis: 100%; color: #94a3b8; }
+.drawing-target { color: #34d399; }
+.analysis-chart.is-drawing { cursor: crosshair; }
+.drawing-level-hit { stroke: transparent; stroke-width: 14px; pointer-events: stroke; cursor: ns-resize; touch-action: none; }
+.drawing-level-handle { fill: #e2e8f0; stroke: #0f172a; stroke-width: 2px; pointer-events: all; cursor: ns-resize; touch-action: none; }
+.manual-trade-label { fill: #f8fafc; font-size: 12px; paint-order: stroke; stroke: #101827; stroke-width: 3px; stroke-linejoin: round; }
+</style>

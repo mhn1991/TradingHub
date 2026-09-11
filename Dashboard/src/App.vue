@@ -79,7 +79,7 @@ const workspaces = ref<WorkspaceDefinition[]>([])
 const activeWorkspaceId = ref('')
 const mode = ref<'replay' | 'live'>('replay')
 const uiView = ref<'workspaces' | 'simulator' | 'research' | 'live-demo' | 'reports'>(
-  window.location.hash === '#alfonso-trends' ? 'simulator' : 'workspaces',
+  ['#alfonso-tests', '#alfonso-trends'].includes(window.location.hash) ? 'simulator' : 'workspaces',
 )
 const reportTarget = reactive({ kind: 'live-session' as 'live-session' | 'experiment', identifier: '', autoLoad: false })
 const liveStatus = ref<LiveFeedStatus | null>(null)
