@@ -2,6 +2,8 @@ using Agent.Strategies.Alfonso.Sequence;
 using Agent.Strategies.Alfonso.Zones;
 using Brokers.Models;
 
+using Agent.Strategies.Alfonso.Trend;
+
 namespace Agent.Strategies.Alfonso;
 
 /// <summary>Why a candidate the agent looked at did not become a trade.</summary>
@@ -12,6 +14,9 @@ public enum CandidateOutcome
 
     /// <summary>Price had not reached the proximal line yet, so the order would not have filled.</summary>
     NotReached,
+
+    /// <summary>Further from price than orders are ever filled at.</summary>
+    TooFarToFill,
 
     /// <summary>Fresh-level rule, without a confirmation to admit it.</summary>
     NotFresh,
@@ -29,7 +34,13 @@ public enum CandidateOutcome
     DegenerateGeometry,
 
     /// <summary>A nearer candidate on the same bar was taken instead.</summary>
-    Superseded
+    Superseded,
+
+    /// <summary>Opposing-zone targeting was requested but no confirmed zone lies ahead of entry.</summary>
+    NoOpposingZone,
+
+    /// <summary>Closed 5m BB/RSI/CCI rule blocked an otherwise eligible buy.</summary>
+    BuyExhaustion
 }
 
 /// <summary>
@@ -51,6 +62,17 @@ public sealed record AlfonsoCandidateRecord
     public required ImbalanceKind Side { get; init; }
     public required SequenceRole EntryTimeframe { get; init; }
 
+    /// <summary>Trend on each timeframe of the sequence at the moment of the decision.</summary>
+    public AlfonsoTrend? TopTrend { get; init; }
+
+    public AlfonsoTrend? MiddleTrend { get; init; }
+
+    public AlfonsoTrend? LowerTrend { get; init; }
+
+    public AlfonsoTrend? ConfirmationTrend { get; init; }
+
+    public DateTimeOffset? ConfirmationClosedAt { get; init; }
+
     public required decimal Proximal { get; init; }
     public required decimal Distal { get; init; }
     public required decimal Stop { get; init; }
@@ -66,6 +88,12 @@ public sealed record AlfonsoCandidateRecord
     public required decimal ImpulseToBaseRatio { get; init; }
     public required decimal ImpulseDisplacement { get; init; }
     public required int BaseCandleCount { get; init; }
+
+    /// <summary>
+    /// Module 7's grade for this zone as of the decision. Null on records written before the scoring
+    /// existed; the agent always populates it.
+    /// </summary>
+    public ZoneScore? Score { get; init; }
 
     /// <summary>Round-trip cost as a fraction of planned risk, when the platform supplied an estimate.</summary>
     public decimal? CostToRisk { get; init; }

@@ -23,6 +23,7 @@ public sealed class AlfonsoRangeTests
         Distal = distal,
         BaseStart = Start,
         BaseEnd = Start.AddMinutes(proximal is var p ? (double)p : 0),
+        DistalAt = Start.AddMinutes(proximal is var q ? (double)q : 0),
         ConfirmedAt = Start,
         BaseCandleCount = 2,
         Strength = ImpulseStrength.Strong,

@@ -358,11 +358,8 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
             try
             {
-                ComparativeSimulationResult result = await ExecuteJobAsync(job, serviceToken)
+                var (result, instrumentByStrategyId) = await ExecuteJobAsync(job, serviceToken)
                     .ConfigureAwait(false);
-                IReadOnlyDictionary<string, string> instrumentByStrategyId =
-                    (_options.StrategyFactory ?? CreateDefaultStrategies)(job.Request)
-                        .ToDictionary(entry => entry.Id, entry => entry.Instrument.Value);
                 SimulationJobSnapshot completed = await job.ApplyAsync(current => NextRevision(current) with
                 {
                     Status = SimulationJobStatus.Completed,
@@ -435,7 +432,7 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
         }
     }
 
-    private async Task<ComparativeSimulationResult> ExecuteJobAsync(
+    private async Task<(ComparativeSimulationResult Result, IReadOnlyDictionary<string, string> Instruments)> ExecuteJobAsync(
         RunningJob job,
         CancellationToken serviceToken)
     {
@@ -468,12 +465,15 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             // Do not claim historical bid/ask until broker path supports it.
             UseHistoricalBidAsk = false
         };
-        string baseCurrency = request.BaseCurrency ??
-                              ResolveBaseCurrency(request.Instrument);
+        // Deliberately NOT derived from the instrument's quote currency. That default silently
+        // denominated a GBP/JPY run in yen while its USD-quoted siblings ran in dollars, and summing
+        // their profit and loss produced 3.43's overstated -15,505 (see 3.48 axis 7).
+        string baseCurrency = request.BaseCurrency ?? Models.BacktestRequest.DefaultBaseCurrency;
 
         var simulationOptions = new SimulationOptions
         {
             BaseCurrency = baseCurrency,
+            QuoteToBaseCurrencyRates = request.QuoteToBaseCurrencyRates,
             StartingBalance = request.StartingBalance,
             Leverage = request.Leverage,
             CommissionRate = request.CommissionRate,
@@ -633,7 +633,9 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
             .ConfigureAwait(false);
 
         stopwatch.Stop();
-        return result;
+        // Reuse the actual run's metadata. Constructing agents again during finalization can
+        // reopen diagnostic files (and lose custom factory state) after a successful simulation.
+        return (result, strategies.ToDictionary(entry => entry.Id, entry => entry.Instrument.Value));
     }
 
     private async Task UpdateStatusAsync(
@@ -898,15 +900,6 @@ public sealed class BacktestApplicationService : IBacktestApplicationService, IA
 
     private static string NormalizeStrategyId(string name) =>
         TradingAgentTypeIds.Format(TradingAgentTypeIds.Parse(name));
-
-    private static string ResolveBaseCurrency(InstrumentKey instrument)
-    {
-        string value = instrument.Value;
-        int slash = value.LastIndexOf('/');
-        if (slash > 0 && slash < value.Length - 1)
-            return value[(slash + 1)..].Trim().ToUpperInvariant();
-        return "USD";
-    }
 
     private static Uri ResolveBinanceMarketDataBaseAddress()
     {

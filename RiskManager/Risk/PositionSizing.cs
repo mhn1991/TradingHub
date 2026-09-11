@@ -93,6 +93,46 @@ public sealed record PositionSizingOptions
                 "Position-sizing values must be positive and percentage values must be within 0-100.");
         }
     }
+
+    /// <summary>
+    /// Folds a broker's per-instrument quantity granularity into these options, taking the stricter
+    /// bound on each: the larger minimum, the smaller maximum, and the coarser step. Returns this
+    /// instance unchanged when the broker supplies no metadata.
+    /// <para>
+    /// This is the single definition of the rule. Sizing that ignores it can emit a quantity the
+    /// broker will refuse at submission, and because a rejected order is dropped rather than
+    /// resized, the trade is simply lost.
+    /// </para>
+    /// </summary>
+    public PositionSizingOptions WithBrokerConstraints(InstrumentTradingMetadata? metadata)
+    {
+        if (metadata is null)
+            return this;
+        metadata.Validate();
+
+        decimal? maximum = MaximumQuantity;
+        if (metadata.MaximumOrderQuantity is decimal brokerMaximum)
+        {
+            maximum = maximum is decimal configuredMaximum
+                ? Math.Min(configuredMaximum, brokerMaximum)
+                : brokerMaximum;
+        }
+
+        decimal minimum = Math.Max(MinimumQuantity, metadata.MinimumQuantity);
+        if (maximum is decimal effectiveMaximum && effectiveMaximum < minimum)
+        {
+            throw new InvalidOperationException(
+                $"Broker maximum quantity {effectiveMaximum} is below the effective minimum {minimum} " +
+                $"for {metadata.Instrument}.");
+        }
+
+        return this with
+        {
+            MinimumQuantity = minimum,
+            MaximumQuantity = maximum,
+            QuantityStep = Math.Max(QuantityStep, metadata.QuantityStep)
+        };
+    }
 }
 
 public sealed record PositionSizingContext
@@ -112,6 +152,12 @@ public sealed record PositionSizingContext
     public decimal? KnownOpenRiskAccountCurrency { get; init; }
     public IReadOnlyDictionary<InstrumentKey, InstrumentRiskSpec>? InstrumentSpecs { get; init; }
     public IReadOnlyDictionary<InstrumentKey, decimal>? QuoteToAccountRatesByInstrument { get; init; }
+    /// <summary>
+    /// Broker-supplied quantity granularity for the decision instrument. When present it is folded
+    /// into the configured options via <see cref="PositionSizingOptions.WithBrokerConstraints"/>,
+    /// taking the stricter bound on each side.
+    /// </summary>
+    public InstrumentTradingMetadata? BrokerQuantitySpec { get; init; }
     /// <summary>Final composed risk-budget multiplier, always within 0..1.</summary>
     public decimal RiskBudgetMultiplier { get; init; } = 1m;
     public RiskBudgetDecision? RiskBudgetDecision { get; init; }
@@ -162,6 +208,18 @@ public sealed class PositionSizer : IPositionSizer
             return Reject("SizingNotApplicable", "Position sizing is only applicable to opening buy/sell decisions.");
         }
 
+        // Broker granularity overrides the configured defaults where it is stricter. A contradiction
+        // between the two is rejected rather than thrown, so this stays fail-closed like the rest.
+        PositionSizingOptions effective;
+        try
+        {
+            effective = _options.WithBrokerConstraints(context.BrokerQuantitySpec);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentOutOfRangeException)
+        {
+            return Reject("BrokerQuantityConstraintConflict", exception.Message);
+        }
+
         if (decision.QuantityUnit is not (QuantityUnit.Units or QuantityUnit.BaseAsset or QuantityUnit.Contracts))
         {
             return Reject(
@@ -182,14 +240,14 @@ public sealed class PositionSizer : IPositionSizer
                 ? context.RequestedQuantity
                 : _options.FixedQuantity;
             fixedQuantity *= context.RiskBudgetMultiplier * ConfidenceSizingMultiplier(decision.Confidence);
-            if (_options.MaximumQuantity is decimal fixedMaximum)
+            if (effective.MaximumQuantity is decimal fixedMaximum)
                 fixedQuantity = Math.Min(fixedQuantity, fixedMaximum);
-            fixedQuantity = RoundDown(fixedQuantity, _options.QuantityStep);
-            if (fixedQuantity < _options.MinimumQuantity)
+            fixedQuantity = RoundDown(fixedQuantity, effective.QuantityStep);
+            if (fixedQuantity < effective.MinimumQuantity)
             {
                 return Reject(
                     "QuantityBelowMinimum",
-                    $"Fixed quantity {fixedQuantity:F8} is below the minimum {_options.MinimumQuantity:F8}.");
+                    $"Fixed quantity {fixedQuantity:F8} is below the minimum {effective.MinimumQuantity:F8}.");
             }
 
             AccountSnapshot? fixedAccount = context.Accounts.FirstOrDefault(item => item.Balance is > 0m);
@@ -380,18 +438,18 @@ public sealed class PositionSizer : IPositionSizer
             quantity = Math.Min(quantity, remainingHeatBudget / heatPerUnit);
         }
 
-        if (_options.MaximumQuantity is decimal maximumQuantity)
+        if (effective.MaximumQuantity is decimal maximumQuantity)
         {
             quantity = Math.Min(quantity, maximumQuantity);
         }
 
-        quantity = RoundDown(quantity, _options.QuantityStep);
-        if (quantity < _options.MinimumQuantity)
+        quantity = RoundDown(quantity, effective.QuantityStep);
+        if (quantity < effective.MinimumQuantity)
         {
             return Reject(
                 "QuantityBelowMinimum",
                 $"Risk, margin, and open-risk heat limits allow {quantity:F8}, below the minimum " +
-                $"{_options.MinimumQuantity:F8}.");
+                $"{effective.MinimumQuantity:F8}.");
         }
 
         decimal estimatedLoss = perUnitLoss is decimal lossPerUnit

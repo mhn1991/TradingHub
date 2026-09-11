@@ -1,0 +1,912 @@
+<title>Alfonso Trade Inspector</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+
+<style>
+:root {
+  color-scheme: light;
+  --plane:#f9f9f7; --surface:#fcfcfb; --sunken:#f2f1ed;
+  --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --hair:rgba(11,11,11,.10);
+  --arm-a:#2a78d6; --arm-b:#eb6834;
+  --win:#0ca30c; --loss:#d03b3b; --wintext:#006300;
+  --zone:#4a3aa7; --zone-fill:rgba(74,58,167,.13);
+  --candle:#52514e;
+  --ind:#6b6a66; --ind-fill:rgba(107,106,102,.10);
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+  color-scheme: dark;
+  --plane:#0d0d0d; --surface:#1a1a19; --sunken:#141413;
+  --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --hair:rgba(255,255,255,.10);
+  --arm-a:#3987e5; --arm-b:#d95926;
+  --win:#0ca30c; --loss:#d03b3b; --wintext:#0ca30c;
+  --zone:#9085e9; --zone-fill:rgba(144,133,233,.16);
+  --candle:#c3c2b7;
+  --ind:#8d8c86; --ind-fill:rgba(141,140,134,.12);
+}}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --plane:#0d0d0d; --surface:#1a1a19; --sunken:#141413;
+  --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --hair:rgba(255,255,255,.10);
+  --arm-a:#3987e5; --arm-b:#d95926;
+  --win:#0ca30c; --loss:#d03b3b; --wintext:#0ca30c;
+  --zone:#9085e9; --zone-fill:rgba(144,133,233,.16);
+  --candle:#c3c2b7;
+  --ind:#8d8c86; --ind-fill:rgba(141,140,134,.12);
+}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--sans);
+  font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:none;margin:0 auto;padding:30px clamp(16px,2.6vw,52px) 72px;
+  display:flex;flex-direction:column;gap:30px}
+/* Running text stays measured even though the page does not - long lines are the one thing a
+   full-width layout gets wrong. */
+p,.note{max-width:68ch}
+h1{font-size:29px;font-weight:600;letter-spacing:-.02em;margin:0;text-wrap:balance}
+h2{font-size:17px;font-weight:600;letter-spacing:-.01em;margin:0}
+p{margin:0;color:var(--ink2)}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);
+  font-family:var(--mono)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.panel{background:var(--surface);border:1px solid var(--hair);border-radius:10px;padding:20px}
+.sec{display:flex;flex-direction:column;gap:14px}
+.sechead{display:flex;flex-direction:column;gap:5px}
+
+/* ---- header ---- */
+header{display:flex;flex-direction:column;gap:11px;border-bottom:1px solid var(--hair);padding-bottom:22px}
+.armkey{display:flex;flex-wrap:wrap;gap:20px;font-size:13px;color:var(--ink2)}
+.armkey span{display:flex;align-items:center;gap:7px}
+.dot{width:11px;height:11px;border-radius:3px;flex:none}
+
+/* ---- stat band ---- */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:11px}
+.tile{background:var(--surface);border:1px solid var(--hair);border-radius:9px;padding:13px 15px;
+  display:flex;flex-direction:column;gap:3px}
+.tile .k{font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.tile .v{font-family:var(--mono);font-size:23px;font-weight:500;letter-spacing:-.02em}
+.tile .s{font-size:12px;color:var(--ink2)}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;font-size:13px;align-items:baseline}
+.cmp .lab{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  grid-column:1/-1;margin-top:5px}
+
+/* ---- diff callout ---- */
+.diff{display:flex;flex-direction:column;gap:12px}
+.difftable{width:100%;border-collapse:collapse;font-size:13px}
+.difftable th{text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);font-weight:600;padding:0 10px 7px 0;border-bottom:1px solid var(--hair)}
+.difftable td{padding:8px 10px 8px 0;border-bottom:1px solid var(--hair);vertical-align:middle}
+.difftable tr:last-child td{border-bottom:none}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
+  padding:2px 8px;border-radius:99px;border:1px solid currentColor;white-space:nowrap}
+
+/* ---- charts ---- */
+.chartbox{overflow-x:auto}
+svg{display:block;max-width:100%}
+.ax{font-family:var(--mono);font-size:10px;fill:var(--muted)}
+.gl{stroke:var(--grid);stroke-width:1}
+.bl{stroke:var(--axis);stroke-width:1}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12.5px;color:var(--ink2);align-items:center}
+.legend span{display:flex;align-items:center;gap:6px}
+
+/* ---- filters ---- */
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.filters .grp{display:flex;gap:0;border:1px solid var(--hair);border-radius:8px;overflow:hidden;background:var(--surface)}
+button.f{font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--ink2);background:transparent;
+  border:none;padding:6px 11px;cursor:pointer;border-right:1px solid var(--hair)}
+button.f:last-child{border-right:none}
+button.f:hover{background:var(--sunken);color:var(--ink)}
+button.f[aria-pressed="true"]{background:var(--ink);color:var(--surface)}
+button.f:focus-visible{outline:2px solid var(--arm-a);outline-offset:-2px}
+
+/* ---- ledger + inspector ---- */
+.split{display:grid;grid-template-columns:minmax(280px,340px) 1fr;gap:16px;align-items:start}
+@media (max-width:900px){.split{grid-template-columns:1fr}}
+.ledger{background:var(--surface);border:1px solid var(--hair);border-radius:10px;overflow:hidden;
+  max-height:760px;overflow-y:auto}
+.row{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  padding:9px 13px;border-bottom:1px solid var(--hair);cursor:pointer;width:100%;text-align:left;
+  background:transparent;border-left:3px solid transparent;font-family:var(--sans);color:var(--ink)}
+.row:hover{background:var(--sunken)}
+.row[aria-selected="true"]{background:var(--sunken);border-left-color:var(--ink)}
+.row:focus-visible{outline:2px solid var(--arm-a);outline-offset:-2px}
+.row .rr{font-family:var(--mono);font-size:13px;font-weight:500;text-align:right;white-space:nowrap}
+.row > span{min-width:0;overflow:hidden}
+.row .meta{font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;display:block}
+.row .ttl{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .ttl{font-size:13px;font-weight:500}
+.row .rr{padding-left:4px}
+.mark{width:8px;height:8px;border-radius:2px;flex:none}
+.inspect{background:var(--surface);border:1px solid var(--hair);border-radius:10px;padding:18px;
+  display:flex;flex-direction:column;gap:14px;min-height:420px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px}
+.kv dt{color:var(--muted);font-size:11px;letter-spacing:.07em;text-transform:uppercase;padding-top:3px}
+.kv dd{margin:0;color:var(--ink2)}
+.accs{display:flex;flex-wrap:wrap;gap:6px}
+.tag{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:5px;
+  background:var(--sunken);border:1px solid var(--hair);color:var(--ink2)}
+.tag.warn{color:var(--loss);border-color:currentColor}
+#tchart{touch-action:none}
+#tchart.grabbing{cursor:grabbing}
+.tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--hair);
+  border-radius:7px;padding:7px 10px;font-size:12px;font-family:var(--mono);box-shadow:0 6px 22px rgba(0,0,0,.16);
+  opacity:0;transition:opacity .1s;z-index:20;white-space:nowrap;color:var(--ink)}
+.note{font-size:12.5px;color:var(--muted);max-width:70ch}
+.tblwrap{overflow-x:auto}
+table.data{width:100%;border-collapse:collapse;font-size:12.5px}
+table.data th{text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+  font-weight:600;padding:0 9px 6px 0;border-bottom:1px solid var(--hair);white-space:nowrap}
+table.data td{padding:6px 9px 6px 0;border-bottom:1px solid var(--grid);white-space:nowrap}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Set and Forget agent &middot; 2025-11-24 to 2026-07-23 &middot; six instruments</div>
+  <h1>Alfonso Trade Inspector</h1>
+  <p id="intro"></p>
+  <div class="armkey" id="seqkey"></div>
+  <div class="armkey" data-armonly>
+    <span><i class="dot" style="background:var(--arm-a)"></i> <b>Arm A</b> &mdash; swing anchored at the base end (the old reading)</span>
+    <span><i class="dot" style="background:var(--arm-b)"></i> <b>Arm B</b> &mdash; anchored at the extreme (shipped default)</span>
+  </div>
+</header>
+
+<section class="sec">
+  <div class="sechead"><h2 data-armonly>Both arms, side by side</h2></div>
+  <div class="tiles" id="tiles"></div>
+</section>
+
+<section class="sec" data-armonly>
+  <div class="sechead">
+    <h2>The fix moved 8 trades and changed no shared outcome</h2>
+    <p>130 setups appear in both arms with an identical R&#8209;multiple to the last digit. The whole
+       difference between the arms is the eight trades below &mdash; which is a stronger statement than
+       the confidence interval alone: the treatment barely touched the population.</p>
+  </div>
+  <div class="panel diff">
+    <div class="tblwrap"><table class="difftable" id="difftable"></table></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>Outcome by instrument</h2>
+    <p>One dot per trade, placed at its realised R. Exits are binary by design &mdash; module 11:
+       &ldquo;Do not move the stop loss to breakeven. It&rsquo;s either a win or a loss.&rdquo;</p>
+  </div>
+  <div class="panel">
+    <div class="legend" style="margin-bottom:12px">
+      <span><i class="dot" style="background:var(--win);border-radius:50%"></i> Target reached</span>
+      <span><i class="dot" style="background:var(--loss);border-radius:50%"></i> Stopped out</span>
+      <span style="color:var(--muted)" data-armonly>&mdash; dot ring marks a trade present in one arm only</span>
+    </div>
+    <p class="note" style="margin:-4px 0 12px" id="stopnote">
+    </div>
+    <div class="chartbox"><svg id="strip" role="img" aria-label="Realised R by instrument"></svg></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>Cumulative R</h2>
+    <p>Both arms on one scale, ordered by close time. They are the same line until the marginal trades
+       separate them.</p>
+  </div>
+  <div class="panel">
+    <div class="chartbox"><svg id="equity" role="img" aria-label="Cumulative R by arm"></svg></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>Trade by trade</h2>
+    <p>Pick a trade to see the zone the agent leaned on, where price actually went, and which rule
+       created the zone in the first place.</p>
+  </div>
+  <div class="filters" id="filters"></div>
+  <div class="split">
+    <div class="ledger" id="ledger" role="listbox" aria-label="Trades"></div>
+    <div class="inspect" id="inspect"></div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sechead">
+    <h2>All trades</h2>
+    <p>The same data as a table, for reading without the charts.</p>
+  </div>
+  <div class="panel"><div class="tblwrap"><table class="data" id="datatable"></table></div></div>
+</section>
+
+<p class="note">Zone lines are recovered from each trade&rsquo;s entry and padded stop rather than from
+the logged setup text, which rounds to two decimals and is unusable on FX. Candles are aggregated from
+the 1&#8209;minute cache to roughly 240 bars per window, so the interval differs per trade and is stated
+on each chart. Trade timestamps in the run output are bar <em>close</em> times, so the in/out/best
+markers are drawn on the bar that ends at the stamp &mdash; placing them by the stamp itself puts them
+one candle late, on a bar whose range need not contain the fill price.</p>
+
+</div>
+<div class="tip" id="tip" role="status"></div>
+
+<script>
+const DATA = /*__DATA__*/;
+const T = DATA.trades, C = DATA.candles;
+const CTX = DATA.context || {}, ZP = DATA.zonepane || {};
+const tip = document.getElementById('tip');
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmtR = v => (v >= 0 ? '+' : '') + v.toFixed(2) + 'R';
+const fmtMoney = v => (v >= 0 ? '+' : '−') + '$' + Math.abs(v).toFixed(0);
+const px = (p, d) => p.toFixed(d);
+const dt = s => new Date(s * 1000).toISOString().slice(0, 16).replace('T', ' ');
+const SVG = 'http://www.w3.org/2000/svg';
+const el = (n, a = {}) => { const e = document.createElementNS(SVG, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+const SINGLE = DATA.single === true;
+document.getElementById('intro').innerHTML = SINGLE
+  ? `Every trade the agent took, with the imbalance it leaned on and the rule that created it. Built
+     to check the trades against the course rules, not to re-litigate whether the method has an edge
+     &mdash; \u00a73.43 already settled that.`
+  : `Every trade both arms of the swing-anchor A/B produced, with the imbalance each one leaned on.
+     Built to check the trades against the course rules, not to re-litigate whether the method has an
+     edge &mdash; \u00a73.43 already settled that.`;
+const SEQ = DATA.sequence || { top: '4h', middle: '1h', lower: '15m', execution: '1m' };
+// The chart's candle interval is a display choice - it is picked per trade to fit the window. The
+// timeframe that actually matters is the one the zone belongs to, which is fixed by the sequence.
+const zoneTf = t => SEQ[t.entryRole] || SEQ.lower;
+// Trade timestamps are bar CLOSE times - the simulator stamps an event with the moment the bar
+// became available, so a fill inside the 14:36 bar is recorded as 14:37. Verified across all 135
+// trades: every entry price sits inside the bar at `openedAt` or the one an execution-interval
+// earlier, and none outside both. Markers are therefore placed on the bar that ENDS at the stamp,
+// otherwise they land one candle to the right - on a candle whose range may not contain the price.
+const EXEC_SECONDS = (() => {
+  const m = /^(\d+)([smhd])$/.exec(SEQ.execution || '1m');
+  if (!m) return 60;
+  return +m[1] * { s: 1, m: 60, h: 3600, d: 86400 }[m[2]];
+})();
+document.getElementById('seqkey').innerHTML =
+  `<span>Sequence <b>${SEQ.top}</b> direction &middot; <b>${SEQ.middle}</b> intermediate &middot; ` +
+  `<b>${SEQ.lower}</b> execution &mdash; orders rest on ${SEQ.lower} zones, and fills resolve at ` +
+  `${SEQ.execution}. Chart intervals below are a display choice, not the trade's timeframe.</span>`;
+
+const inArm = (t, arm) => t.arm === 'both' || t.arm === arm;
+const armTrades = arm => T.filter(t => inArm(t, arm));
+const bookRoutes = new Set(['TrendlineBreak', 'OpposingImbalanceEliminated', 'ExtremeBroken']);
+const swingOnly = t => t.accs.length > 0 && !t.accs.some(a => bookRoutes.has(a));
+
+function showTip(html, ev) {
+  tip.innerHTML = html; tip.style.opacity = '1';
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY - r.height - 10;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y < 8) y = ev.clientY + 18;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.opacity = '0'; };
+
+/* ---------- stat tiles ---------- */
+function stats(arm) {
+  const r = armTrades(arm);
+  const wins = r.filter(t => t.exitReason === 'TakeProfit').length;
+  const sum = r.reduce((a, t) => a + t.r, 0);
+  return { n: r.length, win: wins / r.length, avg: sum / r.length, net: r.reduce((a, t) => a + t.net, 0) };
+}
+function renderTiles() {
+  const a = stats('a'), b = stats('b');
+  const stopped = T.filter(t => t.exitReason === 'InitialStopLoss');
+  const stops = stopped.length, rec = stopped.filter(t => t.recoveredIn != null).length;
+  if (SINGLE) {
+    const r = T.map(t => t.r), wins = T.filter(t => t.exitReason === 'TakeProfit').length;
+    const avg = r.reduce((x, y) => x + y, 0) / r.length;
+    const net = T.reduce((x, t) => x + t.net, 0);
+    document.getElementById('tiles').innerHTML = `
+      <div class="tile"><div class="k">Trades</div><div class="v">${T.length}</div><div class="s">six instruments, 8 months</div></div>
+      <div class="tile"><div class="k">Win rate</div><div class="v">${(wins / T.length * 100).toFixed(1)}<span style="font-size:15px">%</span></div><div class="s">${wins} reached target</div></div>
+      <div class="tile"><div class="k">Average R</div><div class="v" style="color:var(--loss)">${avg.toFixed(4)}</div><div class="s">true R, cost-inclusive</div></div>
+      <div class="tile"><div class="k">Net</div><div class="v" style="color:var(--loss)">${fmtMoney(net)}</div><div class="s">account currency</div></div>
+      <div class="tile"><div class="k">Target after stop</div><div class="v">${rec}<span style="font-size:15px;color:var(--muted)">/${stops}</span></div><div class="s">printed the 3:1 within 24h</div></div>
+      <div class="tile"><div class="k">Swing-break only</div><div class="v">${T.filter(swingOnly).length}</div><div class="s">of ${T.length} trades</div></div>`;
+    return;
+  }
+  const row = (k, av, bv) => `<div class="lab">${k}</div>
+    <div class="num" style="color:var(--arm-a)">${av}</div><div class="num" style="color:var(--arm-b)">${bv}</div>`;
+  document.getElementById('tiles').innerHTML = `
+    <div class="tile"><div class="k">Trades</div><div class="v">${a.n} <span style="color:var(--muted)">/</span> ${b.n}</div><div class="s">arm A / arm B</div></div>
+    <div class="tile"><div class="k">Win rate</div><div class="v">${(a.win*100).toFixed(1)}<span style="font-size:15px">%</span></div><div class="s">${(b.win*100).toFixed(1)}% in arm B</div></div>
+    <div class="tile"><div class="k">Average R</div><div class="v" style="color:var(--loss)">${a.avg.toFixed(4)}</div><div class="s">${b.avg.toFixed(4)} in arm B</div></div>
+    <div class="tile"><div class="k">Net</div><div class="v" style="color:var(--loss)">${fmtMoney(a.net)}</div><div class="s">${fmtMoney(b.net)} in arm B</div></div>
+    <div class="tile"><div class="k">Shared setups</div><div class="v">130</div><div class="s">identical R in both arms</div></div>
+    <div class="tile"><div class="k">Target after stop</div><div class="v">${rec}<span style="font-size:15px;color:var(--muted)">/${stops}</span></div><div class="s">printed the 3:1 within 24h</div></div>
+    <div class="tile"><div class="k">Swing-break only</div><div class="v">${T.filter(swingOnly).length}</div><div class="s">of ${T.length} distinct trades</div></div>`;
+}
+
+/* ---------- differing trades ---------- */
+function renderDiff() {
+  const rows = T.filter(t => t.arm !== 'both')
+    .sort((x, y) => x.inst.localeCompare(y.inst) || x.open - y.open);
+  const head = '<tr><th>Instrument</th><th>Opened</th><th>Side</th><th>Present in</th><th>Outcome</th><th>R</th></tr>';
+  document.getElementById('difftable').innerHTML = head + rows.map(t => {
+    const armCol = t.arm === 'a' ? 'var(--arm-a)' : 'var(--arm-b)';
+    const armTxt = t.arm === 'a' ? 'Arm A only' : 'Arm B only';
+    const wl = t.exitReason === 'TakeProfit';
+    return `<tr>
+      <td style="font-weight:600">${t.label}</td>
+      <td class="num" style="color:var(--ink2)">${dt(t.open)}</td>
+      <td style="color:var(--ink2)">${t.side}</td>
+      <td><span class="pill" style="color:${armCol}"><i class="dot" style="background:${armCol};width:7px;height:7px"></i>${armTxt}</span></td>
+      <td><span class="pill" style="color:${wl ? 'var(--wintext)' : 'var(--loss)'}">${wl ? '▲ Target' : '▼ Stopped'}</span></td>
+      <td class="num" style="color:${wl ? 'var(--wintext)' : 'var(--loss)'};font-weight:600">${fmtR(t.r)}</td></tr>`;
+  }).join('');
+}
+
+/* ---------- R strip ---------- */
+function renderStrip() {
+  const svg = document.getElementById('strip');
+  const insts = [...new Set(T.map(t => t.inst))];
+  const W = 1180, rowH = 54, padL = 92, padR = 26, padT = 26, H = padT + insts.length * rowH + 34;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.textContent = '';
+  const lo = Math.min(...T.map(t => t.r)) - .15, hi = Math.max(...T.map(t => t.r)) + .15;
+  const x = v => padL + (v - lo) / (hi - lo) * (W - padL - padR);
+
+  for (let g = Math.ceil(lo); g <= hi; g++) {
+    svg.appendChild(el('line', { x1: x(g), x2: x(g), y1: padT - 8, y2: padT + insts.length * rowH,
+      class: g === 0 ? 'bl' : 'gl' }));
+    const tx = el('text', { x: x(g), y: H - 12, class: 'ax', 'text-anchor': 'middle' });
+    tx.textContent = (g > 0 ? '+' : '') + g + 'R'; svg.appendChild(tx);
+  }
+  insts.forEach((inst, i) => {
+    const y0 = padT + i * rowH;
+    const lbl = el('text', { x: padL - 12, y: y0 + rowH / 2 + 4, class: 'ax', 'text-anchor': 'end' });
+    lbl.style.fontSize = '11.5px'; lbl.style.fill = css('--ink2');
+    lbl.textContent = T.find(t => t.inst === inst).label;
+    svg.appendChild(lbl);
+    const rows = T.filter(t => t.inst === inst);
+    rows.forEach((t, k) => {
+      const jitter = ((k * 37) % 23) / 23 * (rowH - 22) + 11;
+      const win = t.exitReason === 'TakeProfit';
+      const c = el('circle', { cx: x(t.r), cy: y0 + jitter, r: 5,
+        fill: win ? css('--win') : css('--loss'), 'fill-opacity': .82 });
+      if (t.arm !== 'both') { c.setAttribute('stroke', css('--ink')); c.setAttribute('stroke-width', '1.6'); }
+      c.style.cursor = 'pointer';
+      c.addEventListener('mousemove', e => showTip(
+        `${t.label} &middot; ${t.side} &middot; ${fmtR(t.r)}<br>${dt(t.open)} &middot; ${t.exitReason === 'TakeProfit' ? 'target' : 'stopped'}` +
+        (t.arm !== 'both' ? `<br>arm ${t.arm.toUpperCase()} only` : ''), e));
+      c.addEventListener('mouseleave', hideTip);
+      c.addEventListener('click', () => select(t.id));
+      svg.appendChild(c);
+    });
+  });
+}
+
+/* ---------- equity ---------- */
+function renderEquity() {
+  const svg = document.getElementById('equity');
+  const W = 1180, H = 300, padL = 54, padR = 96, padT = 18, padB = 34;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('width', W); svg.setAttribute('height', H);
+  svg.textContent = '';
+  const series = (SINGLE ? ['a'] : ['a', 'b']).map(arm => {
+    const rows = armTrades(arm).slice().sort((p, q) => p.close - q.close);
+    let acc = 0; return rows.map(t => ({ t: t.close, v: (acc += t.r) }));
+  });
+  const all = series.flat();
+  const t0 = Math.min(...all.map(p => p.t)), t1 = Math.max(...all.map(p => p.t));
+  const lo = Math.min(0, ...all.map(p => p.v)), hi = Math.max(0, ...all.map(p => p.v));
+  const x = v => padL + (v - t0) / (t1 - t0) * (W - padL - padR);
+  const y = v => padT + (hi - v) / (hi - lo) * (H - padT - padB);
+
+  const stepR = Math.max(1, Math.ceil((hi - lo) / 6));
+  for (let g = Math.ceil(lo / stepR) * stepR; g <= hi; g += stepR) {
+    svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(g), y2: y(g), class: g === 0 ? 'bl' : 'gl' }));
+    const tx = el('text', { x: padL - 9, y: y(g) + 4, class: 'ax', 'text-anchor': 'end' });
+    tx.textContent = (g > 0 ? '+' : '') + g; svg.appendChild(tx);
+  }
+  const seen = new Set();
+  for (let m = 0; m <= 10; m++) {
+    const tv = t0 + (t1 - t0) * m / 10;
+    const label = new Date(tv * 1000).toISOString().slice(0, 7);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    const tx = el('text', { x: x(tv), y: H - 11, class: 'ax', 'text-anchor': 'middle' });
+    tx.textContent = label; svg.appendChild(tx);
+  }
+  const ends = [];
+  series.forEach((pts, i) => {
+    const col = css(i === 0 ? '--arm-a' : '--arm-b');
+    let d = `M ${x(pts[0].t)} ${y(0)}`;
+    pts.forEach(p => { d += ` L ${x(p.t)} ${y(p.v)}`; });
+    svg.appendChild(el('path', { d, fill: 'none', stroke: col, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+    const last = pts[pts.length - 1];
+    svg.appendChild(el('circle', { cx: x(last.t), cy: y(last.v), r: 4, fill: col,
+      stroke: css('--surface'), 'stroke-width': 2 }));
+    ends.push({ i, col, cx: x(last.t), cy: y(last.v), v: last.v });
+  });
+  // Two arms finish at a similar R, so their end labels would sit on top of each other. Only
+  // applies when there ARE two - a single-run page has one series, and indexing ends[1] there threw
+  // at module level and silently killed every render after this point.
+  ends.sort((p, q) => p.cy - q.cy);
+  const GAP = 15;
+  if (ends.length > 1 && ends[1].cy - ends[0].cy < GAP) {
+    const mid = (ends[0].cy + ends[1].cy) / 2;
+    ends[0].cy = mid - GAP / 2; ends[1].cy = mid + GAP / 2;
+  }
+  ends.forEach(e => {
+    // Labels live in the right gutter, never over the plotted lines.
+    const lab = el('text', { x: e.cx + 10, y: e.cy + 4, 'text-anchor': 'start' });
+    lab.setAttribute('class', 'ax'); lab.style.fill = e.col; lab.style.fontWeight = '600'; lab.style.fontSize = '11.5px';
+    lab.textContent = SINGLE ? `${e.v.toFixed(1)}R` : `Arm ${e.i === 0 ? 'A' : 'B'} ${e.v.toFixed(1)}R`;
+    svg.appendChild(lab);
+  });
+}
+
+/* ---------- filters + ledger ---------- */
+const filters = { inst: 'all', outcome: 'all', rule: 'all', arm: 'all', after: 'all' };
+function renderFilters() {
+  const insts = [...new Set(T.map(t => t.inst))];
+  const grp = (key, opts) => `<div class="grp" role="group">` + opts.map(([v, l]) =>
+    `<button class="f" data-k="${key}" data-v="${v}" aria-pressed="${filters[key] === v}">${l}</button>`).join('') + `</div>`;
+  document.getElementById('filters').innerHTML =
+    grp('inst', [['all', 'All']].concat(insts.map(i => [i, T.find(t => t.inst === i).label]))) +
+    grp('outcome', [['all', 'Any outcome'], ['TakeProfit', 'Target'], ['InitialStopLoss', 'Stopped']]) +
+    grp('rule', [['all', 'Any rule'], ['swing', 'Swing-break only'], ['book', 'Book routes']]) +
+    (SINGLE ? '' : grp('arm', [['all', 'Either arm'], ['diff', 'Differing only']])) +
+    grp('after', [['all', 'Any ending'], ['recovered', 'Target printed after the stop'],
+                  ['never', 'Never recovered']]);
+  document.querySelectorAll('button.f').forEach(b => b.addEventListener('click', () => {
+    filters[b.dataset.k] = b.dataset.v; renderFilters(); renderLedger();
+  }));
+}
+function visible() {
+  return T.filter(t =>
+    (filters.inst === 'all' || t.inst === filters.inst) &&
+    (filters.outcome === 'all' || t.exitReason === filters.outcome) &&
+    (filters.rule === 'all' || (filters.rule === 'swing' ? swingOnly(t) : !swingOnly(t))) &&
+    (filters.arm === 'all' || t.arm !== 'both') &&
+    (filters.after === 'all' || (t.exitReason === 'InitialStopLoss' &&
+      (filters.after === 'recovered' ? t.recoveredIn != null : t.recoveredIn == null))))
+    .sort((a, b) => a.open - b.open);
+}
+let selected = null;
+function renderLedger() {
+  const rows = visible();
+  const box = document.getElementById('ledger');
+  if (!rows.length) { box.innerHTML = `<div style="padding:18px;color:var(--muted);font-size:13px">No trades match these filters.</div>`; return; }
+  box.innerHTML = rows.map(t => {
+    const win = t.exitReason === 'TakeProfit';
+    const col = win ? 'var(--wintext)' : 'var(--loss)';
+    return `<button class="row" role="option" data-id="${t.id}" aria-selected="${t.id === selected}">
+      <i class="mark" style="background:${win ? 'var(--win)' : 'var(--loss)'}"></i>
+      <span><span class="ttl">${t.label} ${t.side}</span><br><span class="meta">${dt(t.open)} &middot; ${t.dur < 60 ? Math.round(t.dur) + 'm' : (t.dur / 60).toFixed(1) + 'h'}${t.arm !== 'both' ? ' &middot; arm ' + t.arm.toUpperCase() + ' only' : ''}${swingOnly(t) ? ' &middot; swing-break only' : ''}${t.recoveredIn != null ? ' &middot; target +' + (t.recoveredIn < 1 ? Math.round(t.recoveredIn * 60) + 'm' : t.recoveredIn.toFixed(1) + 'h') : ''}</span></span>
+      <span class="rr" style="color:${col}">${fmtR(t.r)}</span></button>`;
+  }).join('');
+  box.querySelectorAll('.row').forEach(r => r.addEventListener('click', () => select(r.dataset.id)));
+  if (!rows.some(t => t.id === selected)) select(rows[0].id, true);
+}
+
+/* ---------- per-trade chart ---------- */
+function select(id, quiet) {
+  selected = id;
+  view = null;
+  document.querySelectorAll('.row').forEach(r => r.setAttribute('aria-selected', r.dataset.id === id));
+  if (!quiet) {
+    const r = document.querySelector(`.row[data-id="${CSS.escape(id)}"]`);
+    if (r) r.scrollIntoView({ block: 'nearest' });
+  }
+  renderInspect();
+}
+function renderInspect() {
+  const t = T.find(x => x.id === selected);
+  const box = document.getElementById('inspect');
+  if (!t) { box.innerHTML = ''; return; }
+  const win = t.exitReason === 'TakeProfit';
+  const tfs = tfList(t);
+  if (!selectedTf || !tfs.includes(selectedTf)) selectedTf = defaultTf(t);
+  const st = (t.structure || {})[selectedTf];
+  const lineNote = st
+    ? (st.line
+        ? `${st.line.dir.toLowerCase()} trendline over 2 swings`
+        : 'no trendline drawable on this timeframe')
+    : 'no trend snapshot for this timeframe';
+
+  box.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between">
+      <div><span class="eyebrow">${t.label} &middot; ${t.side}</span>
+        <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">${fmtR(t.r)}
+          <span class="pill" style="color:${win ? 'var(--wintext)' : 'var(--loss)'};margin-left:8px">${win ? 'Target reached' : 'Stopped out'}</span></div></div>
+      <div class="num" style="font-size:12px;color:var(--muted);text-align:right">${dt(t.open)} &rarr; ${dt(t.close)}<br>${t.dur < 60 ? Math.round(t.dur) + ' min' : (t.dur / 60).toFixed(1) + ' h'} &middot; <b style="color:var(--ink2)">${zoneTf(t)} zone</b></div>
+    </div>
+    <div class="filters" style="gap:8px">
+      <div class="grp" role="group" aria-label="Timeframe">
+        ${tfs.map(f => `<button class="f" data-tf="${f}" aria-pressed="${f === selectedTf}">${f}</button>`).join('')}
+      </div>
+      <button class="f" id="indtoggle" aria-pressed="${showInd}"
+        style="border:1px solid var(--hair);border-radius:8px">Indicators</button>
+      <button class="f" id="zoomreset"
+        style="border:1px solid var(--hair);border-radius:8px">Fit</button>
+      <span class="num" style="font-size:11.5px;color:var(--muted);margin-left:auto">
+        ${selectedTf} trend <b style="color:var(--ink2)">${st ? st.trend : '—'}</b>${st && st.overExtended ? ' &middot; over-extended' : ''} &middot; ${lineNote}</span>
+    </div>
+    <div class="chartbox"><svg id="tchart" role="img" aria-label="Price, imbalances and trendline around the trade"></svg></div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--zone-fill);border:1px solid var(--zone)"></i> Traded imbalance</span>
+      <span><i class="dot" style="background:var(--zone-fill);opacity:.45;border:1px solid var(--hair)"></i> Other live imbalances</span>
+      <span><i class="dot" style="background:var(--arm-a);height:3px;border-radius:0"></i> Bullish trendline</span>
+      <span><i class="dot" style="background:var(--arm-b);height:3px;border-radius:0"></i> Bearish trendline</span>
+      <span><i class="dot" style="background:var(--ind);height:2px;border-radius:0"></i> Bollinger 20 / 2&sigma;</span>
+    </div>
+    <dl class="kv">
+      <dt>Scenario</dt><dd>${t.scenario}${t.nested ? ' &middot; nested entry' : ''}</dd>
+      <dt>Zone</dt><dd class="num">proximal ${px(t.proximal, t.digits)} &middot; distal ${px(t.distal, t.digits)}
+        &middot; width ${px(Math.abs(t.proximal - t.distal), t.digits)}</dd>
+      <dt>Grade</dt><dd>${t.strength || '—'} departure &middot; impulse ${t.ratio ? t.ratio.toFixed(2) + ':1' : '—'}
+        &middot; created by ${t.accs.join(', ') || '—'}</dd>
+      <dt>Excursion</dt><dd class="num">best ${t.mfeR != null ? fmtR(t.mfeR) : '—'} &middot; worst ${t.maeR != null ? fmtR(t.maeR) : '—'}</dd>
+      ${t.exitReason === 'InitialStopLoss' ? `<dt>After the stop</dt><dd class="num">exited ${t.slipR != null ? fmtR(t.slipR) : '—'} beyond it${t.recoveredIn != null ? ` &middot; target printed ${t.recoveredIn < 1 ? Math.round(t.recoveredIn * 60) + 'm' : t.recoveredIn.toFixed(1) + 'h'} later` : ' &middot; target never printed within 24h'}</dd>` : ''}
+    </dl>`;
+
+  box.querySelectorAll('button[data-tf]').forEach(b =>
+    b.addEventListener('click', () => { selectedTf = b.dataset.tf; view = null; renderInspect(); }));
+  const reset = document.getElementById('zoomreset');
+  if (reset) reset.addEventListener('click', () => { view = null; drawTrade(t); });
+  const toggle = document.getElementById('indtoggle');
+  if (toggle) toggle.addEventListener('click', () => { showInd = !showInd; renderInspect(); });
+
+  drawTrade(t);
+}
+
+let showInd = true;
+let selectedTf = null;
+let view = null;   // {lo, hi} in bucket-index space, or null for fit-to-window
+
+/* ---- indicators, computed here so four timeframe windows cost one copy of the candles ---- */
+function bollinger(closes, n = 20, mult = 2) {
+  const out = closes.map(() => null);
+  for (let i = n - 1; i < closes.length; i++) {
+    const w = closes.slice(i - n + 1, i + 1);
+    const mean = w.reduce((a, b) => a + b, 0) / n;
+    const sd = Math.sqrt(w.reduce((a, b) => a + (b - mean) ** 2, 0) / n);
+    out[i] = [mean + mult * sd, mean, mean - mult * sd];
+  }
+  return out;
+}
+function rsi(closes, n = 14) {
+  const out = closes.map(() => null);
+  if (closes.length <= n) return out;
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= n; i++) {
+    const d = closes[i] - closes[i - 1];
+    gain += Math.max(d, 0); loss += Math.max(-d, 0);
+  }
+  let ag = gain / n, al = loss / n;
+  out[n] = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
+  for (let i = n + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    ag = (ag * (n - 1) + Math.max(d, 0)) / n;
+    al = (al * (n - 1) + Math.max(-d, 0)) / n;
+    out[i] = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
+  }
+  return out;
+}
+function cci(highs, lows, closes, n = 20) {
+  const tp = closes.map((c, i) => (highs[i] + lows[i] + c) / 3);
+  const out = closes.map(() => null);
+  for (let i = n - 1; i < tp.length; i++) {
+    const w = tp.slice(i - n + 1, i + 1);
+    const mean = w.reduce((a, b) => a + b, 0) / n;
+    const dev = w.reduce((a, b) => a + Math.abs(b - mean), 0) / n;
+    out[i] = dev === 0 ? 0 : (tp[i] - mean) / (0.015 * dev);
+  }
+  return out;
+}
+
+function tfList(t) { return Object.keys(C[t.id] || {}); }
+function defaultTf(t) { const l = tfList(t); return l.includes(zoneTf(t)) ? zoneTf(t) : l[l.length - 1]; }
+
+function drawTrade(t) {
+  const panes = C[t.id] || {};
+  const tf = selectedTf && panes[selectedTf] ? selectedTf : defaultTf(t);
+  const w = panes[tf];
+  const svg = document.getElementById('tchart');
+  // 1 viewBox unit = 1 CSS pixel, so a wider page gives more chart rather than bigger text.
+  const measured = svg.parentElement ? svg.parentElement.clientWidth : 900;
+  const W = Math.max(720, Math.round(measured || 900)), padL = 12, padR = 116, padT = 16;
+  const priceH = 300, paneH = 66, paneGap = 10, padB = 24;
+  const H = padT + priceH + padB + (showInd ? (paneH + paneGap) * 2 : 0);
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', '100%'); svg.setAttribute('height', H);
+  svg.textContent = '';
+  if (!w) return;
+
+  const bars = w.bars, n = bars.length;
+  const closes = bars.map(b => b[4]), highs = bars.map(b => b[2]), lows = bars.map(b => b[3]);
+  // Indicators are computed over the WHOLE window, never the zoomed slice - otherwise zooming in
+  // would silently change RSI and the bands, which is a lie about the data.
+  const bb = showInd ? bollinger(closes) : null;
+  const rsiAll = showInd ? rsi(closes) : null;
+  const cciAll = showInd ? cci(highs, lows, closes) : null;
+  const idxMax = bars[n - 1][0];
+  const vLo = view ? view.lo : 0, vHi = view ? view.hi : idxMax;
+  const spanIdx = Math.max(vHi - vLo, 1e-6);
+  const x = i => padL + ((i - vLo) / spanIdx) * (W - padL - padR);
+  const iAtX = px2 => vLo + ((px2 - padL) / (W - padL - padR)) * spanIdx;
+  const tAt = i => w.t0 + i * w.step;
+  const xTime = ts => x((ts - w.t0) / w.step);
+  const visible = bars.filter(b => b[0] >= vLo - 1 && b[0] <= vHi + 1);
+  const shown = visible.length ? visible : bars;
+
+  const struct = (t.structure || {})[tf] || (t.structure || {})[zoneTf(t)] || {};
+  const line = struct.line || null;
+
+  const zTop = Math.max(t.proximal, t.distal), zBot = Math.min(t.proximal, t.distal);
+  // The trendline is deliberately NOT in the domain. 39% of the agent's lines slope against their
+  // own direction (3.65), and one of those extended forward will squash the candles to a sliver.
+  const prices = shown.flatMap(b => [b[3], b[2]]).concat([t.entry, t.stop, t.target, zTop, zBot]);
+  let lo = Math.min(...prices), hi = Math.max(...prices);
+  const pad = (hi - lo) * .07 || 1; lo -= pad; hi += pad;
+  const y = v => padT + (hi - v) / (hi - lo) * priceH;
+
+  const path = (pts, col, width, dash) => {
+    const runs = []; let cur = [];
+    pts.forEach(p => { if (!p) { if (cur.length > 1) runs.push(cur); cur = []; } else cur.push(p); });
+    if (cur.length > 1) runs.push(cur);
+    runs.forEach(r => svg.appendChild(el('path', { d: 'M ' + r.map(p => `${p[0]} ${p[1]}`).join(' L '),
+      fill: 'none', stroke: col, 'stroke-width': width, 'stroke-dasharray': dash || '',
+      'stroke-linejoin': 'round' })));
+  };
+
+  const clipId = 'pp';
+  const defs = el('defs'); const clip = el('clipPath', { id: clipId });
+  clip.appendChild(el('rect', { x: padL, y: padT, width: W - padL - padR, height: priceH }));
+  defs.appendChild(clip); svg.appendChild(defs);
+
+  // every live imbalance the agent could see, faintly; the one it traded, solid. Clipped, since a
+  // band whose bottom falls below the price pane would otherwise paint over the oscillators.
+  const zoneLayer = el('g', { 'clip-path': `url(#${clipId})` });
+  (struct.zones || []).forEach(z => {
+    const a = y(Math.max(z.proximal, z.distal)), b = y(Math.min(z.proximal, z.distal));
+    if (b < padT || a > padT + priceH) return;
+    zoneLayer.appendChild(el('rect', { x: padL, y: a, width: W - padL - padR,
+      height: Math.max(1, b - a), fill: css('--zone-fill'), 'fill-opacity': .35 }));
+  });
+  svg.appendChild(zoneLayer);
+  svg.appendChild(el('rect', { x: padL, y: y(zTop), width: W - padL - padR,
+    height: Math.max(1.5, y(zBot) - y(zTop)), fill: css('--zone-fill') }));
+  [zTop, zBot].forEach(v => svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v),
+    stroke: css('--zone'), 'stroke-width': 1, 'stroke-opacity': .8 })));
+
+  if (showInd && bb) {
+    const g = el('g', { 'clip-path': `url(#${clipId})` });
+    const host = svg;
+    [0, 1, 2].forEach(k => {
+      const pts = bars.map((b, i) => (bb[i] && b[0] >= vLo - 2 && b[0] <= vHi + 2) ? [x(b[0]), y(bb[i][k])] : null);
+      const runs = []; let cur = [];
+      pts.forEach(p => { if (!p) { if (cur.length > 1) runs.push(cur); cur = []; } else cur.push(p); });
+      if (cur.length > 1) runs.push(cur);
+      runs.forEach(r => g.appendChild(el('path', { d: 'M ' + r.map(p => `${p[0]} ${p[1]}`).join(' L '),
+        fill: 'none', stroke: css('--ind'), 'stroke-width': 1, 'stroke-dasharray': k === 1 ? '4 3' : '' })));
+    });
+    host.appendChild(g);
+  }
+
+  const ink = css('--candle');
+  const bw2 = Math.max(1.2, Math.min(9, (W - padL - padR) / Math.max(shown.length, 1) * .68));
+  shown.forEach(b => {
+    const [i, o, h, l, c] = b, cx = x(i), up = c >= o;
+    svg.appendChild(el('line', { x1: cx, x2: cx, y1: y(h), y2: y(l), stroke: ink,
+      'stroke-width': 1, 'stroke-opacity': .75 }));
+    const top = y(Math.max(o, c)), bot = y(Math.min(o, c));
+    svg.appendChild(el('rect', { x: cx - bw2 / 2, y: top, width: bw2, height: Math.max(1, bot - top),
+      fill: up ? css('--surface') : ink, stroke: ink, 'stroke-width': 1, 'stroke-opacity': .85 }));
+  });
+
+  // the agent's own trendline: the segment between its two anchors, extended forward the way the
+  // break test extends it. Slope is per bar of the timeframe that built it, so it is re-derived
+  // per second here and stays correct on any pane.
+  if (line) {
+    const g = el('g', { 'clip-path': `url(#${clipId})` });
+    const span = line.toTime - line.fromTime;
+    const perSec = span > 0 ? (line.toPrice - line.fromPrice) / span : 0;
+    const x0 = xTime(line.fromTime), x1 = xTime(line.toTime);
+    const rightTs = tAt(idxMax);
+    const col = line.dir === 'Bullish' ? css('--arm-a') : css('--arm-b');
+    g.appendChild(el('line', { x1: x0, y1: y(line.fromPrice), x2: x1, y2: y(line.toPrice),
+      stroke: col, 'stroke-width': 2 }));
+    g.appendChild(el('line', { x1: x1, y1: y(line.toPrice), x2: xTime(rightTs),
+      y2: y(line.toPrice + perSec * (rightTs - line.toTime)),
+      stroke: col, 'stroke-width': 1.4, 'stroke-dasharray': '5 4' }));
+    [[x0, line.fromPrice], [x1, line.toPrice]].forEach(([cx, pv]) =>
+      g.appendChild(el('circle', { cx, cy: y(pv), r: 3.6, fill: col,
+        stroke: css('--surface'), 'stroke-width': 1.5 })));
+    svg.appendChild(g);
+  }
+
+  // Lines always; labels pushed apart, since entry and stop sit a padded zone-width apart and
+  // collide on any tight zone.
+  const levels = [[t.target, css('--win'), 'Target'], [t.stop, css('--loss'), 'Stop'],
+                  [t.entry, css('--ink2'), 'Entry']];
+  levels.forEach(([v, col, label]) =>
+    svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: col,
+      'stroke-width': 1.4, 'stroke-dasharray': label === 'Entry' ? '' : '5 4' })));
+  let lastLabel = -Infinity;
+  levels.slice().sort((p, q) => y(p[0]) - y(q[0])).forEach(([v, col, label]) => {
+    let ly = y(v) + 3.5;
+    if (ly - lastLabel < 12) ly = lastLabel + 12;
+    lastLabel = ly;
+    const tt = el('text', { x: W - padR + 7, y: ly, class: 'ax' });
+    tt.style.fill = col; tt.style.fontWeight = '600';
+    tt.textContent = `${label} ${px(v, t.digits)}`; svg.appendChild(tt);
+  });
+
+  const mark = (ts, price, col) => {
+    if (ts == null) return;
+    const cx = xTime(ts - EXEC_SECONDS);
+    if (cx < padL || cx > W - padR) return;
+    svg.appendChild(el('circle', { cx, cy: y(price), r: 4.5, fill: col,
+      stroke: css('--surface'), 'stroke-width': 1.8 }));
+  };
+  mark(t.open, t.entry, css('--ink'));
+  mark(t.close, t.exit, t.exitReason === 'TakeProfit' ? css('--win') : css('--loss'));
+
+  if (showInd) {
+    const col = css('--ind');
+    const pane = (top, title, values, domain, refs, fmt) => {
+      const vals = values.filter(v => v != null);
+      if (!vals.length) return;
+      const [dlo, dhi] = domain || [Math.min(...vals) * 1.1, Math.max(...vals) * 1.1];
+      const py = v => top + (dhi - v) / (dhi - dlo) * paneH;
+      svg.appendChild(el('rect', { x: padL, y: top, width: W - padL - padR, height: paneH,
+        fill: 'none', stroke: css('--grid'), 'stroke-width': 1 }));
+      let lastY = -Infinity;
+      refs.slice().sort((p, q) => q.v - p.v).forEach(ref => {
+        if (ref.v < dlo || ref.v > dhi) return;
+        const ry = py(ref.v);
+        svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: ry, y2: ry,
+          stroke: css('--grid'), 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+        if (ref.label === false || ry - lastY < 9) return;
+        lastY = ry;
+        const rt = el('text', { x: W - padR + 7, y: ry + 3.5, class: 'ax' });
+        rt.textContent = fmt(ref.v); svg.appendChild(rt);
+      });
+      path(values.map((v, i) => (v == null || bars[i][0] < vLo - 2 || bars[i][0] > vHi + 2)
+        ? null : [x(bars[i][0]), py(v)]), col, 1.4);
+      const lt = el('text', { x: padL + 6, y: top + 12, class: 'ax' });
+      lt.style.fill = css('--ink2'); lt.style.fontWeight = '600'; lt.textContent = title;
+      svg.appendChild(lt);
+    };
+    const rsiTop = padT + priceH + paneGap;
+    pane(rsiTop, 'RSI 14', rsiAll, [0, 100], [{ v: 70 }, { v: 30 }], v => String(v));
+    const inView = cciAll.filter((v, i) => v != null && bars[i][0] >= vLo - 2 && bars[i][0] <= vHi + 2);
+    const bound = Math.max(120, ...inView.map(Math.abs)) * 1.05;
+    pane(rsiTop + paneH + paneGap, 'CCI 20', cciAll, [-bound, bound],
+      [{ v: 100 }, { v: 0, label: false }, { v: -100 }], v => (v > 0 ? '+' : '') + v);
+  }
+
+  const hit = el('rect', { x: padL, y: padT, width: W - padL - padR, height: H - padT - padB,
+    fill: 'transparent' });
+  hit.style.cursor = 'crosshair';
+  hit.addEventListener('mousemove', ev => {
+    const rect = svg.getBoundingClientRect();
+    const rel = (ev.clientX - rect.left) / rect.width * W;
+    const idx = iAtX(rel);
+    let best = 0;
+    bars.forEach((cur, i) => { if (Math.abs(cur[0] - idx) < Math.abs(bars[best][0] - idx)) best = i; });
+    const b = bars[best];
+    let html = `${dt(tAt(b[0]))}<br>O ${px(b[1], t.digits)} H ${px(b[2], t.digits)}<br>L ${px(b[3], t.digits)} C ${px(b[4], t.digits)}`;
+    if (showInd && bb && bb[best]) {
+      const r = rsiAll ? rsiAll[best] : null, ch = cciAll ? cciAll[best] : null;
+      html += `<br><span style="color:var(--muted)">BB ${px(bb[best][2], t.digits)} / ${px(bb[best][1], t.digits)} / ${px(bb[best][0], t.digits)}`;
+      if (r != null) html += `<br>RSI ${r.toFixed(1)}`;
+      if (ch != null) html += ` &middot; CCI ${ch.toFixed(1)}`;
+      html += '</span>';
+    }
+    showTip(html, ev);
+  });
+  hit.addEventListener('mouseleave', hideTip);
+  svg.appendChild(hit);
+
+  // --- zoom and pan -------------------------------------------------------------------------
+  // Both work in bucket-index space, so they survive a timeframe switch and market gaps stay gaps.
+  const MIN_SPAN = 6;
+  const toUnits = clientX => {
+    const rect = svg.getBoundingClientRect();
+    return (clientX - rect.left) / rect.width * W;
+  };
+  svg.onwheel = ev => {
+    ev.preventDefault();
+    const anchor = iAtX(toUnits(ev.clientX));
+    const factor = ev.deltaY > 0 ? 1.18 : 1 / 1.18;
+    let lo = anchor - (anchor - vLo) * factor;
+    let hi = anchor + (vHi - anchor) * factor;
+    if (hi - lo < MIN_SPAN) { const mid = (lo + hi) / 2; lo = mid - MIN_SPAN / 2; hi = mid + MIN_SPAN / 2; }
+    if (hi - lo >= idxMax) { view = null; drawTrade(t); return; }
+    view = { lo: Math.max(0, lo), hi: Math.min(idxMax, hi) };
+    if (view.hi - view.lo < MIN_SPAN) view = { lo: view.hi - MIN_SPAN, hi: view.hi };
+    drawTrade(t);
+  };
+  let dragFrom = null;
+  svg.onpointerdown = ev => {
+    dragFrom = { x: ev.clientX, lo: vLo, hi: vHi };
+    svg.setPointerCapture(ev.pointerId);
+    svg.classList.add('grabbing');
+  };
+  svg.onpointermove = ev => {
+    if (!dragFrom) return;
+    const shift = (toUnits(dragFrom.x) - toUnits(ev.clientX)) / (W - padL - padR) * (dragFrom.hi - dragFrom.lo);
+    let lo = dragFrom.lo + shift, hi = dragFrom.hi + shift;
+    if (lo < 0) { hi -= lo; lo = 0; }
+    if (hi > idxMax) { lo -= hi - idxMax; hi = idxMax; }
+    view = { lo: Math.max(0, lo), hi: Math.min(idxMax, hi) };
+    drawTrade(t);
+  };
+  const endDrag = ev => {
+    if (!dragFrom) return;
+    dragFrom = null;
+    svg.classList.remove('grabbing');
+    if (ev && ev.pointerId != null && svg.hasPointerCapture(ev.pointerId)) svg.releasePointerCapture(ev.pointerId);
+  };
+  svg.onpointerup = endDrag;
+  svg.onpointercancel = endDrag;
+  svg.ondblclick = () => { view = null; drawTrade(t); };
+
+  if (view) {
+    const badge = el('text', { x: padL + 6, y: padT + priceH - 8, class: 'ax' });
+    badge.style.fill = css('--muted');
+    badge.textContent = `${shown.length} of ${n} bars \u00b7 double-click or Fit to reset`;
+    svg.appendChild(badge);
+  }
+}
+
+/* ---------- table ---------- */
+function renderTable() {
+  const rows = T.slice().sort((a, b) => a.open - b.open);
+  document.getElementById('datatable').innerHTML =
+    `<tr><th>Instrument</th><th>Opened</th><th>Side</th><th>Arm</th><th>Entry</th><th>Stop</th><th>Exit</th>
+     <th>Zone TF</th><th>Outcome</th><th>R</th><th>Impulse</th><th>Created by</th></tr>` +
+    rows.map(t => {
+      const win = t.exitReason === 'TakeProfit';
+      return `<tr><td style="font-weight:600">${t.label}</td><td class="num">${dt(t.open)}</td>
+      <td>${t.side}</td><td>${t.arm === 'both' ? 'both' : t.arm.toUpperCase() + ' only'}</td>
+      <td class="num">${px(t.entry, t.digits)}</td><td class="num">${px(t.stop, t.digits)}</td>
+      <td class="num">${px(t.exit, t.digits)}</td>
+      <td class="num">${zoneTf(t)}</td>
+      <td style="color:${win ? 'var(--wintext)' : 'var(--loss)'}">${win ? 'Target' : 'Stopped'}</td>
+      <td class="num" style="color:${win ? 'var(--wintext)' : 'var(--loss)'}">${fmtR(t.r)}</td>
+      <td class="num">${t.ratio ? t.ratio.toFixed(2) : '—'}</td>
+      <td style="color:var(--ink2)">${t.accs.join(', ') || '—'}</td></tr>`;
+    }).join('');
+}
+
+if (SINGLE) {
+  // One run: the arm comparison, its callout and the arm filter have nothing to say.
+  document.querySelectorAll('[data-armonly]').forEach(node => node.remove());
+  document.getElementById('seqkey').insertAdjacentHTML('beforeend',
+    `<span style="margin-left:14px">Trend states, trendlines and imbalances below are written by the
+     agent during the run, not reconstructed &mdash; they are what it actually saw.</span>`);
+} else {
+  renderDiff();
+}
+(function stopNote() {
+  // Data-driven, so the sentence cannot drift from the run the page was built on.
+  const stopped = T.filter(t => t.exitReason === 'InitialStopLoss');
+  const node = document.getElementById('stopnote');
+  if (!stopped.length || !node) return;
+  const over = stopped.filter(t => t.slipR != null && t.slipR > 0.02).length;
+  const rec = stopped.filter(t => t.recoveredIn != null).length;
+  node.innerHTML =
+    `Most losses are not wrong calls. ${(over / stopped.length * 100).toFixed(0)}% of stop-outs exit
+     <em>beyond</em> their own stop, and ${rec} of ${stopped.length} went on to print the 3:1 target
+     within a day &mdash; filter the ledger below by &ldquo;Target printed after the stop&rdquo; to read
+     them. That is a diagnostic, not a counterfactual: without the stop, price could have run much
+     further against the position first.`;
+})();
+renderTiles(); renderStrip(); renderEquity(); renderFilters(); renderLedger(); renderTable();
+addEventListener('resize', () => { renderStrip(); renderEquity(); });
+</script>

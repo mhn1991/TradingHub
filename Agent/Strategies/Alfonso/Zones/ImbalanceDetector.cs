@@ -90,6 +90,10 @@ public sealed class ImbalanceDetector
     /// Tradeable zones of one kind, nearest the given price first. This is the order the rules care
     /// about: the first level price will reach is the one that matters.
     /// </summary>
+    /// <summary>Whether this zone is sitting out a test the engine has not yet resolved.</summary>
+    public bool HasPendingTest(Imbalance zone) =>
+        zone is not null && _pendingTest.Contains(zone.BaseEnd);
+
     public IReadOnlyList<Imbalance> TradeableZones(ImbalanceKind kind, decimal price) => _zones
         .Where(zone =>
             zone.Kind == kind &&
@@ -334,7 +338,7 @@ public sealed class ImbalanceDetector
 
         ImbalanceKind kind = bullish ? ImbalanceKind.Demand : ImbalanceKind.Supply;
 
-        (decimal proximal, decimal distal) = Lines(baseStart, baseEnd, kind);
+        (decimal proximal, decimal distal, int distalIndex) = Lines(baseStart, baseEnd, kind);
         decimal width = Math.Abs(proximal - distal);
         if (width <= 0m)
             return null;
@@ -358,6 +362,7 @@ public sealed class ImbalanceDetector
             Distal = distal,
             BaseStart = _bars[baseStart].OpenTime,
             BaseEnd = _bars[baseEnd].OpenTime,
+            DistalAt = _bars[distalIndex].OpenTime,
             ConfirmedAt = _bars[confirmIndex].OpenTime,
             BaseCandleCount = baseEnd - baseStart + 1,
             Strength = strength,
@@ -374,9 +379,11 @@ public sealed class ImbalanceDetector
     /// Walks back from <paramref name="baseEnd"/> over candles that are pauses. Module 7: "Tight
     /// candle bases with bodies &lt;= 50% of the candle range."
     /// <para>
-    /// Falls back to the single-candle base module 2 allows, where there is no pause at all and the
-    /// turn is made of two opposing extended-range candles: "the basing structure of a valley may be
-    /// formed by non 50% candlesticks and be made of only a bearish ERC and a bullish ERC".
+    /// Falls back to the base module 2 allows where there is no pause at all and the turn is made of
+    /// two opposing extended-range candles: "the basing structure of a valley may be formed by non
+    /// 50% candlesticks and be made of only a bearish ERC and a bullish ERC". Both candles are the
+    /// structure, so both are inside the base unless
+    /// <see cref="ImbalanceOptions.DropRallyBaseSpansBothCandles"/> is cleared.
     /// </para>
     /// </summary>
     private bool TryFindBase(int baseEnd, out int baseStart)
@@ -405,11 +412,18 @@ public sealed class ImbalanceDetector
             return baseEnd - baseStart + 1 >= _options.MinimumBaseCandles;
         }
 
-        // Drop-rally / rally-drop: the "base" is the single turning candle, and it is an ERC.
-        return baseEnd > 0 &&
+        // Drop-rally / rally-drop: the base is the opposing pair of ERCs, not a pause.
+        bool pair = baseEnd > 0 &&
             _bars[baseEnd].BodyRatio >= _options.ExtendedRangeBodyRatio &&
             _bars[baseEnd - 1].BodyRatio >= _options.ExtendedRangeBodyRatio &&
             _bars[baseEnd].IsBullish != _bars[baseEnd - 1].IsBullish;
+
+        // Module 2 makes the pair itself the basing structure, so both candles have to be inside
+        // the base for module 4's distal rule to see the lower of the two lows.
+        if (pair && _options.DropRallyBaseSpansBothCandles)
+            baseStart = baseEnd - 1;
+
+        return pair;
     }
 
     /// <summary>
@@ -418,10 +432,12 @@ public sealed class ImbalanceDetector
     /// level"; the proximal sits at the body edge nearest price, or over the wicks when
     /// <see cref="ImbalanceOptions.ProximalCoversWicks"/> is set.
     /// </summary>
-    private (decimal Proximal, decimal Distal) Lines(int baseStart, int baseEnd, ImbalanceKind kind)
+    private (decimal Proximal, decimal Distal, int DistalIndex) Lines(
+        int baseStart, int baseEnd, ImbalanceKind kind)
     {
         decimal proximal = kind == ImbalanceKind.Demand ? decimal.MinValue : decimal.MaxValue;
         decimal distal = kind == ImbalanceKind.Demand ? decimal.MaxValue : decimal.MinValue;
+        int distalIndex = baseStart;
 
         for (int index = baseStart; index <= baseEnd; index++)
         {
@@ -429,16 +445,26 @@ public sealed class ImbalanceDetector
             if (kind == ImbalanceKind.Demand)
             {
                 proximal = Math.Max(proximal, _options.ProximalCoversWicks ? bar.High : bar.BodyTop);
-                distal = Math.Min(distal, bar.Low);
+                if (bar.Low < distal)
+                {
+                    distal = bar.Low;
+                    distalIndex = index;
+                }
             }
             else
             {
                 proximal = Math.Min(proximal, _options.ProximalCoversWicks ? bar.Low : bar.BodyBottom);
-                distal = Math.Max(distal, bar.High);
+                if (bar.High > distal)
+                {
+                    distal = bar.High;
+                    distalIndex = index;
+                }
             }
         }
 
-        return (proximal, distal);
+        // Ties keep the EARLIEST bar: module 3 draws from where the turn first happened, and a later
+        // equal extreme is the same price being retested, not a new swing.
+        return (proximal, distal, distalIndex);
     }
 
     /// <summary>
@@ -641,6 +667,13 @@ public sealed class ImbalanceDetector
     private bool IsContinuation(int baseStart, ImbalanceKind kind, decimal distal)
     {
         int from = Math.Max(0, baseStart - _options.LegInLookbackCandles);
+
+        // Module 2: "When you are in doubt, consider them as a CP." With no approach to read there
+        // is no evidence this base turned anything, so it is a pause until shown otherwise. The
+        // inverted default made every zone at the start of a series a swing, and swings are what
+        // trendlines are built from.
+        if (from >= baseStart)
+            return _options.TreatAmbiguousBaseAsContinuation;
 
         for (int index = from; index < baseStart; index++)
         {

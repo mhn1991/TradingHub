@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Agent.Configuration;
 using Agent.Strategies;
 using Agent.Strategies.Alfonso;
+using Agent.Strategies.Alfonso.Zones;
 using Agent.Strategies.BreakoutDetector;
 using Agent.Strategies.TrendTactical;
 using Agent.Strategies.DivergenceReversal;
@@ -661,7 +662,25 @@ public sealed record BacktestRequest
     /// </summary>
     public IReadOnlyList<StrategyInstrumentAssignment>? StrategyAssignments { get; init; }
     public decimal StartingBalance { get; init; } = 100_000m;
+    /// <summary>
+    /// Account currency for the run. Null means <see cref="DefaultBaseCurrency"/>.
+    /// </summary>
     public string? BaseCurrency { get; init; }
+
+    /// <summary>
+    /// Quote-currency to account-currency rates, keyed by quote currency (e.g. "JPY" -> 0.0067).
+    /// Required when an instrument's quote currency is neither the account currency nor derivable
+    /// from the pair's own price, which is the case for a cross such as GBP/JPY on a USD account.
+    /// </summary>
+    public IReadOnlyDictionary<string, decimal> QuoteToBaseCurrencyRates { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The account currency a run uses when none is given. Was previously derived from the
+    /// instrument's quote currency, which silently produced runs denominated in different
+    /// currencies within one suite - see 3.48 axis 7 and 3.43's corrected dollar figure.
+    /// </summary>
+    public const string DefaultBaseCurrency = "USD";
     public decimal Quantity { get; init; } = 1_000m;
     public decimal Leverage { get; init; } = 20m;
     public decimal CommissionRate { get; init; } = 0.00002m;
@@ -696,6 +715,17 @@ public sealed record BacktestRequest
     /// <summary>--alfonso-stop-padding N. 25% of the zone width in the worked examples.</summary>
     public decimal? AlfonsoStopPadding { get; init; }
 
+    /// <summary>--alfonso-structural-stop: use confirmed execution-timeframe swing protection.</summary>
+    public bool AlfonsoUseStructuralSwingStop { get; init; }
+
+    public bool AlfonsoUseOpposingZoneTarget { get; init; }
+    public bool AlfonsoRevalidatePendingOnFiveMinute { get; init; }
+    public bool AlfonsoBlockExhaustedBuysOnFiveMinute { get; init; }
+    public string? AlfonsoReversalShadowLogPath { get; init; }
+
+    /// <summary>--alfonso-stop-lookback N: eligible closed execution candles, default 48.</summary>
+    public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
+
     /// <summary>--alfonso-elimination-on-wick reverts to the English text's tick-penetration rule.</summary>
     public bool AlfonsoEliminationRequiresClose { get; init; } = true;
 
@@ -727,6 +757,88 @@ public sealed record BacktestRequest
     public decimal AlfonsoMinimumAtrPercentile { get; init; }
 
     public decimal AlfonsoMaximumAtrPercentile { get; init; } = 1m;
+
+    /// <summary>--alfonso-profit-margin N. Module 7's room-to-the-opposing-level rule.</summary>
+    public decimal AlfonsoMinimumProfitMarginMultiple { get; init; } = 3.0m;
+
+    /// <summary>--alfonso-ambiguous-base-cp. Module 2's "when in doubt, consider them as a CP".</summary>
+    public bool AlfonsoTreatAmbiguousBaseAsContinuation { get; init; }
+
+    /// <summary>--alfonso-tradeable-zone-trend. Only a tradeable zone may move the trend.</summary>
+    public bool AlfonsoRequireTradeableZoneForTrendChange { get; init; }
+
+    /// <summary>
+    /// --alfonso-structural-agreement. Module 5's higher-highs/higher-lows context, off by default
+    /// since it costs 70% of trades for no measurable edge.
+    /// </summary>
+    public bool AlfonsoRequireStructuralAgreement { get; init; }
+
+    public bool AlfonsoRequireConfirmedTrendStructure { get; init; }
+
+    /// <summary>--alfonso-half-entry: module 10's "use half the width of the original imbalance".</summary>
+    public bool AlfonsoHalfZoneEntry { get; init; }
+
+    /// <summary>--alfonso-allow-invalid-hosts disables module 7's negation rule for nested entries.</summary>
+    public bool AlfonsoRequireValidHost { get; init; } = true;
+
+    public bool AlfonsoDropRallyBaseSpansBothCandles { get; init; } = true;
+
+    public bool AlfonsoAnchorSwingsAtExtreme { get; init; } = true;
+
+    public bool AlfonsoMaintainStructuralAgreement { get; init; }
+
+    public bool AlfonsoInvalidateOnPriceStructureBreak { get; init; }
+
+    public bool AlfonsoRejectContradictingTrendlines { get; init; } = true;
+
+    public decimal AlfonsoMinimumStopTopAtrMultiple { get; init; }
+
+    public string? AlfonsoStructureLogPath { get; init; }
+    public string? AlfonsoTrendAuditPath { get; init; }
+
+    /// <summary>--alfonso-overextension-trendlines: module 3's aggressive line across three CPs.</summary>
+    public bool AlfonsoOverExtensionTrendlines { get; init; }
+
+    /// <summary>--alfonso-min-grade: lowest module 7 grade a zone may carry and still be traded.</summary>
+    public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
+
+    /// <summary>
+    /// --alfonso-min-impulse-ratio N. Module 7's "twice as wide as the basing structure", exposed so
+    /// §3.51's finding - that the discrimination sits at 5:1, not at the book's 2:1 - can be tested
+    /// in a real run. Default is the book's 2.0 and is deliberately NOT moved: 3.51 measured that on
+    /// the same candles a change would be fitted to.
+    /// </summary>
+    public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
+        new ImbalanceOptions().MinimumImpulseToBaseRatio;
+
+    /// <summary>--alfonso-candidate-log PATH. Decision-time candidate CSV, or null for none.</summary>
+    public string? AlfonsoCandidateLogPath { get; init; }
+
+    /// <summary>--alfonso-inventory-log PATH. Zone-inventory snapshots, or null for none.</summary>
+    public string? AlfonsoInventoryLogPath { get; init; }
+
+    /// <summary>
+    /// --alfonso-max-placement-atr N. Do not rest orders further than N ATR from price; 0 disables.
+    /// Default 3 - see AlfonsoStrategyOptions for the measurements.
+    /// </summary>
+    public decimal AlfonsoMaximumPlacementDistanceAtr { get; init; } = 3m;
+
+    /// <summary>--alfonso-replace-resting-atr N. Release the slot when a level N ATR nearer appears.</summary>
+    public decimal AlfonsoRestingOrderReplacementAtr { get; init; }
+
+    /// <summary>--alfonso-confirm-entry. Enter on a close back out of the zone, not on first touch.</summary>
+    public bool AlfonsoRequireReversalConfirmation { get; init; }
+
+    public AlfonsoEntryPolicy AlfonsoEntryPolicy { get; init; } = AlfonsoEntryPolicy.Core;
+
+    /// <summary>--alfonso-with-drift. Only trade the side the top-timeframe drift favours.</summary>
+    public bool AlfonsoRequireDriftAlignment { get; init; }
+
+    /// <summary>--alfonso-manage-position. Let the platform trail or break-even the stop.</summary>
+    public bool AlfonsoAllowPositionManagement { get; init; }
+
+    /// <summary>--alfonso-drift-lookback N. Top-timeframe bars used to measure drift.</summary>
+    public int AlfonsoDriftLookbackCandles { get; init; } = 60;
 
     /// <summary>
     /// Classifier options taken from the loaded model artifact. The agent's feature engine and the
@@ -792,6 +904,28 @@ public sealed record BacktestRequest
     /// Every distinct instrument this request actually trades - <see cref="StrategyAssignments"/>'s
     /// instruments when set (§7 multi-instrument clock), otherwise just <see cref="Instrument"/>.
     /// </summary>
+    /// <summary>
+    /// Whether an instrument's quote currency can reach the account currency. True when they match,
+    /// when an explicit rate is configured, or when the pair's own base currency is the account
+    /// currency - a USD/JPY price is itself the USD-per-JPY rate, so the simulator derives it. A
+    /// cross such as GBP/JPY on a USD account satisfies none of these and needs an explicit rate.
+    /// </summary>
+    private bool CanConvertQuoteToAccount(InstrumentKey instrument, string accountCurrency)
+    {
+        string value = instrument.Value;
+        int prefix = value.IndexOf(':');
+        string pair = prefix >= 0 ? value[(prefix + 1)..] : value;
+        int separator = pair.LastIndexOfAny(['/', '_', '-']);
+        if (separator <= 0 || separator >= pair.Length - 1)
+            return true; // not a parseable pair; the broker layer reports this in its own terms
+
+        string baseCurrency = pair[..separator].Trim();
+        string quoteCurrency = pair[(separator + 1)..].Trim();
+        return string.Equals(quoteCurrency, accountCurrency, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(baseCurrency, accountCurrency, StringComparison.OrdinalIgnoreCase) ||
+            QuoteToBaseCurrencyRates.ContainsKey(quoteCurrency);
+    }
+
     public IReadOnlyList<InstrumentKey> TradedInstruments() =>
         StrategyAssignments is { Count: > 0 }
             ? StrategyAssignments.Select(assignment => assignment.Instrument).Distinct().ToArray()
@@ -922,24 +1056,59 @@ public sealed record BacktestRequest
                     TopInterval = AlfonsoTopInterval ?? defaultAlfonso.TopInterval,
                     MiddleInterval = AlfonsoMiddleInterval ?? defaultAlfonso.MiddleInterval,
                     LowerInterval = AlfonsoLowerInterval ?? defaultAlfonso.LowerInterval,
+                    UseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
+                    UseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
+                    RevalidatePendingOnFiveMinute = AlfonsoRevalidatePendingOnFiveMinute,
+                    BlockExhaustedBuysOnFiveMinute = AlfonsoBlockExhaustedBuysOnFiveMinute,
+                    ReversalShadowLogPath = AlfonsoReversalShadowLogPath,
+                    StructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
                     RequireNestedEntries = AlfonsoRequireNestedEntries,
                     RequireControlAgreement = AlfonsoRequireControlAgreement,
                     AllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
                     MaximumCostToRiskFraction = AlfonsoMaximumCostToRiskFraction,
                     MinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
+                    MinimumStopTopAtrMultiple = AlfonsoMinimumStopTopAtrMultiple,
+                    MinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
+                    CandidateLogPath = AlfonsoCandidateLogPath,
+                    InventoryLogPath = AlfonsoInventoryLogPath,
+                    StructureLogPath = AlfonsoStructureLogPath,
+                    TrendAuditPath = AlfonsoTrendAuditPath,
+                    MaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
+                    RestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
+                    RequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
+                    EntryPolicy = AlfonsoEntryPolicy,
+                    RequireDriftAlignment = AlfonsoRequireDriftAlignment,
+                    AllowPositionManagement = AlfonsoAllowPositionManagement,
+                    DriftLookbackCandles = AlfonsoDriftLookbackCandles,
                     MinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
                     MaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
+                    MinimumZoneGrade = AlfonsoMinimumZoneGrade,
+                    RequireValidHost = AlfonsoRequireValidHost,
                     Zones = defaultAlfonso.Zones with
                     {
                         RewardMultiple = AlfonsoRewardMultiple ?? defaultAlfonso.Zones.RewardMultiple,
                         StopPaddingFraction = AlfonsoStopPadding ?? defaultAlfonso.Zones.StopPaddingFraction,
                         EliminationRequiresClose = AlfonsoEliminationRequiresClose,
-                        SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment
+                        SwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
+                        TreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation,
+                        DropRallyBaseSpansBothCandles = AlfonsoDropRallyBaseSpansBothCandles,
+                        MinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,
+                        EntryPlacement = AlfonsoHalfZoneEntry
+                            ? ZoneEntryPlacement.Midpoint
+                            : ZoneEntryPlacement.Proximal
                     },
                     Trend = defaultAlfonso.Trend with
                     {
                         TrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
-                        RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange
+                        RequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
+                        RequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
+                        RequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
+                        RequireConfirmedTrendStructure = AlfonsoRequireConfirmedTrendStructure,
+                        OverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
+                        AnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
+                        MaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,
+                        InvalidateOnPriceStructureBreak = AlfonsoInvalidateOnPriceStructureBreak,
+                        RejectContradictingTrendlines = AlfonsoRejectContradictingTrendlines
                     }
                 };
                 return new TradingAgentDefinition { Kind = kind, Alfonso = alfonso };
@@ -1002,8 +1171,8 @@ public sealed record BacktestRequest
             throw new ArgumentException("From must be earlier than To.");
         if (Strategies is null || Strategies.Count == 0)
             throw new ArgumentException("At least one strategy is required.");
-        if (StartingBalance <= 0 || Quantity <= 0 || Leverage <= 0 || MinimumRewardRisk <= 0)
-            throw new ArgumentException("Balance, quantity, leverage, and minimum R:R must be positive.");
+        if (StartingBalance <= 0 || Quantity <= 0 || Leverage <= 0 || MinimumRewardRisk < 0)
+            throw new ArgumentException("Balance, quantity and leverage must be positive; minimum R:R must be non-negative (0 disables the reward floor).");
         if (!Enum.IsDefined(PriceActionConfirmation) || MinimumPriceActionConfidence is < 0m or > 100m)
             throw new ArgumentException("Price-action confirmation mode and confidence must be valid.");
         if (InlineCandles is null && Runtime.SourceKind == HistoricalDataSourceKind.InlineTestData)
@@ -1057,6 +1226,23 @@ public sealed record BacktestRequest
             ? assigned.Count
             : Strategies.Count;
         runtime.Validate(selectedStrategyCount);
+        string accountCurrency = string.IsNullOrWhiteSpace(BaseCurrency)
+            ? DefaultBaseCurrency
+            : BaseCurrency.Trim();
+        InstrumentKey[] unconvertible = TradedInstruments()
+            .Where(instrument => !CanConvertQuoteToAccount(instrument, accountCurrency))
+            .ToArray();
+        if (unconvertible.Length > 0)
+        {
+            throw new ArgumentException(
+                $"No {accountCurrency} conversion is available for " +
+                string.Join(", ", unconvertible.Select(instrument => instrument.Value)) +
+                ". Supply a rate (for example --quote-rate JPY=0.0067), or denominate the run in the " +
+                "instrument's own quote currency with --base-currency. Deriving the account currency " +
+                "from the instrument is no longer the default: it produced runs in different " +
+                "currencies within one suite whose results could not be summed.");
+        }
+
         if (runtime.Financing.Enabled)
         {
             InstrumentKey[] missingRates = TradedInstruments()

@@ -1,5 +1,7 @@
 using System.Globalization;
 using Agent.Strategies;
+using Agent.Strategies.Alfonso;
+using Agent.Strategies.Alfonso.Zones;
 using Brokers.Abstractions;
 using Brokers.Models;
 using ChartAnnotator.Engine;
@@ -61,6 +63,9 @@ internal sealed record BacktestCommandOptions
     public int PageSize { get; init; } = 5_000;
     public decimal StartingBalance { get; init; } = 100_000m;
     public string? BaseCurrency { get; init; }
+    /// <summary>Quote-currency to account-currency rates, e.g. "JPY=0.0067,CHF=1.12".</summary>
+    public IReadOnlyDictionary<string, decimal> QuoteRates { get; init; } =
+        new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
     public decimal Quantity { get; init; } = 1_000m;
     public PositionSizingOptions PositionSizing { get; init; } =
         RecommendedSimulationDefaults.PositionSizing;
@@ -124,10 +129,74 @@ internal sealed record BacktestCommandOptions
     public BarInterval? AlfonsoLowerInterval { get; init; }
     public decimal? AlfonsoRewardMultiple { get; init; }
     public decimal? AlfonsoStopPadding { get; init; }
+    public bool AlfonsoUseStructuralSwingStop { get; init; }
+    public bool AlfonsoUseOpposingZoneTarget { get; init; }
+    public bool AlfonsoRevalidatePendingOnFiveMinute { get; init; }
+    public bool AlfonsoBlockExhaustedBuysOnFiveMinute { get; init; }
+    public string? AlfonsoReversalShadowLogPath { get; init; }
+    public int AlfonsoStructuralStopLookbackCandles { get; init; } = 48;
     public bool AlfonsoEliminationRequiresClose { get; init; } = false;
     public bool AlfonsoTrendlineBreakRequiresClose { get; init; } = true;
     public bool AlfonsoRequireValidZoneForTrendChange { get; init; } = true;
+
+    public bool AlfonsoTreatAmbiguousBaseAsContinuation { get; init; }
+
+    public bool AlfonsoRequireTradeableZoneForTrendChange { get; init; }
+
+    public bool AlfonsoRequireStructuralAgreement { get; init; }
+
+    public bool AlfonsoRequireConfirmedTrendStructure { get; init; }
+
+    public string? AlfonsoCandidateLogPath { get; init; }
+
+    public string? AlfonsoInventoryLogPath { get; init; }
+
+    public decimal AlfonsoMaximumPlacementDistanceAtr { get; init; } = 3m;
+
+    public decimal AlfonsoRestingOrderReplacementAtr { get; init; }
+
+    public bool AlfonsoRequireReversalConfirmation { get; init; }
+
+    public AlfonsoEntryPolicy AlfonsoEntryPolicy { get; init; } = AlfonsoEntryPolicy.Core;
+
+    public bool AlfonsoAllowPositionManagement { get; init; }
+
+    public PositionManagementOptions AlfonsoPositionManagement { get; init; } =
+        PositionManagementOptions.BracketOnlyDefaults;
+
+    public bool AlfonsoRequireDriftAlignment { get; init; }
+
+    public int AlfonsoDriftLookbackCandles { get; init; } = 60;
     public bool AlfonsoSwingBreakIsAnAccomplishment { get; init; } = true;
+    public bool AlfonsoHalfZoneEntry { get; init; }
+    public bool AlfonsoRequireValidHost { get; init; } = true;
+
+    /// <summary>--alfonso-single-candle-drop-rally restores the pre-2026-09-05 one-candle base.</summary>
+    public bool AlfonsoDropRallyBaseSpansBothCandles { get; init; } = true;
+
+    /// <summary>--alfonso-swing-anchor-at-base-end restores the pre-2026-09-05 swing anchoring.</summary>
+    public bool AlfonsoAnchorSwingsAtExtreme { get; init; } = true;
+
+    /// <summary>--alfonso-maintain-structure re-checks module 5's structural condition while a trend runs.</summary>
+    public bool AlfonsoMaintainStructuralAgreement { get; init; }
+
+    /// <summary>--alfonso-invalidate-price-structure: neutral on a confirmed price-swing close break.</summary>
+    public bool AlfonsoInvalidateOnPriceStructureBreak { get; init; }
+
+    /// <summary>--alfonso-allow-contradicting-trendlines restores the pre-2026-09-06 fit.</summary>
+    public bool AlfonsoRejectContradictingTrendlines { get; init; } = true;
+
+    /// <summary>--alfonso-min-stop-top-atr N: stop floor in ATR of the TOP timeframe.</summary>
+    public decimal AlfonsoMinimumStopTopAtrMultiple { get; init; }
+
+    /// <summary>--alfonso-structure-log PATH: decision-time trend, trendline and zones as JSONL.</summary>
+    public string? AlfonsoStructureLogPath { get; init; }
+    /// <summary>--alfonso-trend-audit PATH: four trend variants on identical live closed candles.</summary>
+    public string? AlfonsoTrendAuditPath { get; init; }
+    public bool AlfonsoOverExtensionTrendlines { get; init; }
+    public ZoneGrade AlfonsoMinimumZoneGrade { get; init; } = ZoneGrade.Weak;
+    public decimal AlfonsoMinimumImpulseToBaseRatio { get; init; } =
+        new ImbalanceOptions().MinimumImpulseToBaseRatio;
     public bool AlfonsoRequireNestedEntries { get; init; }
     public bool AlfonsoRequireControlAgreement { get; init; } = true;
     public bool AlfonsoAllowConfirmationEntries { get; init; }
@@ -135,6 +204,7 @@ internal sealed record BacktestCommandOptions
     public decimal AlfonsoMinimumStopAtrMultiple { get; init; }
     public decimal AlfonsoMinimumAtrPercentile { get; init; }
     public decimal AlfonsoMaximumAtrPercentile { get; init; } = 1m;
+    public decimal AlfonsoMinimumProfitMarginMultiple { get; init; } = 3.0m;
     public decimal? DailyEquityProfitTarget { get; init; }
     public decimal? DailyEquityGivebackActivation { get; init; }
     public decimal? MaximumDailyEquityGiveback { get; init; }
@@ -332,8 +402,19 @@ internal sealed record BacktestCommandOptions
                 "alfonso-elimination-on-wick" or "alfonso-elimination-on-close" or
                 "alfonso-trendline-break-full-candle" or
                 "alfonso-allow-invalid-zones" or "alfonso-no-swing-break" or
-                "alfonso-nested-only" or "alfonso-ignore-control" or
-                "alfonso-confirmation-trades" or
+                "alfonso-nested-only" or "alfonso-ignore-control" or "alfonso-structural-stop" or
+                "alfonso-confirmation-trades" or "alfonso-opposing-zone-target" or "alfonso-revalidate-pending-5m" or
+                "alfonso-block-exhausted-buys-5m" or
+                "alfonso-ambiguous-base-cp" or "alfonso-tradeable-zone-trend" or
+                "alfonso-no-structural-agreement" or "alfonso-confirm-entry" or
+                "alfonso-with-drift" or
+                "alfonso-manage-position" or "alfonso-structural-agreement" or "alfonso-confirm-trend-structure" or
+                "alfonso-half-entry" or "alfonso-allow-invalid-hosts" or
+                "alfonso-single-candle-drop-rally" or
+                "alfonso-swing-anchor-at-base-end" or "alfonso-maintain-structure" or
+                "alfonso-invalidate-price-structure" or
+                "alfonso-allow-contradicting-trendlines" or
+                "alfonso-overextension-trendlines" or
                 "legacy-no-scale-out" or "improved-no-scale-out" or
                 "legacy-no-profit-floor" or "improved-no-profit-floor" or
                 "legacy-no-giveback" or "improved-no-giveback" or
@@ -517,6 +598,20 @@ internal sealed record BacktestCommandOptions
             entryInterval,
             structureDefault: 2m,
             preserveTarget: true);
+        // Alfonso is bracket-only unless --alfonso-manage-position is given, so its trailing mode
+        // defaults to disabled rather than to the structure-atr default the other stacks use.
+        bool alfonsoManaged = values.ContainsKey("alfonso-manage-position");
+        PositionManagementOptions alfonsoManagement = alfonsoManaged
+            ? ParsePositionManagement(
+                values.ContainsKey("alfonso-trailing-mode")
+                    ? values
+                    : new Dictionary<string, string?>(values) { ["alfonso-trailing-mode"] = "break-even" },
+                "alfonso",
+                entryInterval,
+                structureDefault: 2m,
+                preserveTarget: true)
+            : PositionManagementOptions.BracketOnlyDefaults;
+
         PositionManagementOptions structuralManagement = PositionManagementOptions.StructuralDefaults;
         if (strategies.Any(item => string.Equals(item, TradingAgentTypeIds.StructuralConfluence, StringComparison.OrdinalIgnoreCase)))
         {
@@ -576,13 +671,14 @@ internal sealed record BacktestCommandOptions
             PageSize = ParseInt(values.GetValueOrDefault("page-size"), 5_000, 1, 5_000, "page-size"),
             StartingBalance = ParseDecimal(values.GetValueOrDefault("starting-balance"), 100_000m, 0m, "starting-balance"),
             BaseCurrency = values.GetValueOrDefault("base-currency")?.Trim().ToUpperInvariant(),
+            QuoteRates = ParseQuoteRates(values.GetValueOrDefault("quote-rate")),
             Quantity = quantity,
             PositionSizing = positionSizing,
             Leverage = leverage,
             CommissionRate = ParseDecimal(values.GetValueOrDefault("commission-rate"), 0.00002m, -1m, "commission-rate", allowZero: true),
             SpreadBasisPoints = ParseDecimal(values.GetValueOrDefault("spread-bps"), 1m, -1m, "spread-bps", allowZero: true),
             SlippageBasisPoints = ParseDecimal(values.GetValueOrDefault("slippage-bps"), 0.5m, -1m, "slippage-bps", allowZero: true),
-            MinimumRewardRisk = ParseDecimal(values.GetValueOrDefault("minimum-rr"), 1.5m, 0m, "minimum-rr"),
+            MinimumRewardRisk = ParseDecimal(values.GetValueOrDefault("minimum-rr"), 1.5m, 0m, "minimum-rr", allowZero: true),
             BreakoutStopAtrMultiple = ParseDecimal(
                 values.GetValueOrDefault("breakout-stop-atr"), 1.5m, 0m, "breakout-stop-atr"),
             BreakoutTargetAtrMultiple = ParseDecimal(
@@ -599,6 +695,13 @@ internal sealed record BacktestCommandOptions
             AlfonsoRewardMultiple = values.ContainsKey("alfonso-reward")
                 ? ParseDecimal(values.GetValueOrDefault("alfonso-reward"), 3m, 0m, "alfonso-reward")
                 : null,
+            AlfonsoUseStructuralSwingStop = values.ContainsKey("alfonso-structural-stop"),
+            AlfonsoUseOpposingZoneTarget = values.ContainsKey("alfonso-opposing-zone-target"),
+            AlfonsoRevalidatePendingOnFiveMinute = values.ContainsKey("alfonso-revalidate-pending-5m"),
+            AlfonsoBlockExhaustedBuysOnFiveMinute = values.ContainsKey("alfonso-block-exhausted-buys-5m"),
+            AlfonsoReversalShadowLogPath = values.GetValueOrDefault("alfonso-reversal-shadow-log"),
+            AlfonsoStructuralStopLookbackCandles = ParseInt(
+                values.GetValueOrDefault("alfonso-stop-lookback"), 48, 5, 10000, "alfonso-stop-lookback"),
             AlfonsoStopPadding = values.ContainsKey("alfonso-stop-padding")
                 ? ParseDecimal(
                     values.GetValueOrDefault("alfonso-stop-padding"), 0.25m, 0m, "alfonso-stop-padding",
@@ -610,7 +713,53 @@ internal sealed record BacktestCommandOptions
                                                !values.ContainsKey("alfonso-elimination-on-wick"),
             AlfonsoTrendlineBreakRequiresClose = !values.ContainsKey("alfonso-trendline-break-full-candle"),
             AlfonsoRequireValidZoneForTrendChange = !values.ContainsKey("alfonso-allow-invalid-zones"),
+            AlfonsoTreatAmbiguousBaseAsContinuation =
+                values.ContainsKey("alfonso-ambiguous-base-cp"),
+            AlfonsoRequireTradeableZoneForTrendChange =
+                values.ContainsKey("alfonso-tradeable-zone-trend"),
+            // Off by default since 2026-09-02. The former disable flag stays accepted so existing
+            // scripts keep working; --alfonso-structural-agreement opts back in.
+            AlfonsoRequireStructuralAgreement =
+                values.ContainsKey("alfonso-structural-agreement") &&
+                !values.ContainsKey("alfonso-no-structural-agreement"),
+            AlfonsoRequireConfirmedTrendStructure = values.ContainsKey("alfonso-confirm-trend-structure"),
+            AlfonsoCandidateLogPath = values.GetValueOrDefault("alfonso-candidate-log"),
+            AlfonsoInventoryLogPath = values.GetValueOrDefault("alfonso-inventory-log"),
+            AlfonsoMaximumPlacementDistanceAtr = ParseDecimal(
+                values.GetValueOrDefault("alfonso-max-placement-atr"), 3m, 0m,
+                "alfonso-max-placement-atr", allowZero: true),
+            AlfonsoRestingOrderReplacementAtr = ParseDecimal(
+                values.GetValueOrDefault("alfonso-replace-resting-atr"), 0m, 0m,
+                "alfonso-replace-resting-atr", allowZero: true),
+            AlfonsoRequireReversalConfirmation = values.ContainsKey("alfonso-confirm-entry"),
+            AlfonsoEntryPolicy = ParseAlfonsoEntryPolicy(values.GetValueOrDefault("alfonso-entry-policy")),
+            AlfonsoAllowPositionManagement = alfonsoManaged,
+            AlfonsoPositionManagement = alfonsoManagement,
+            AlfonsoRequireDriftAlignment = values.ContainsKey("alfonso-with-drift"),
+            AlfonsoDriftLookbackCandles = ParseInt(
+                values.GetValueOrDefault("alfonso-drift-lookback"), 60, 0, 10_000,
+                "alfonso-drift-lookback"),
             AlfonsoSwingBreakIsAnAccomplishment = !values.ContainsKey("alfonso-no-swing-break"),
+            AlfonsoHalfZoneEntry = values.ContainsKey("alfonso-half-entry"),
+            AlfonsoRequireValidHost = !values.ContainsKey("alfonso-allow-invalid-hosts"),
+            AlfonsoDropRallyBaseSpansBothCandles =
+                !values.ContainsKey("alfonso-single-candle-drop-rally"),
+            AlfonsoAnchorSwingsAtExtreme =
+                !values.ContainsKey("alfonso-swing-anchor-at-base-end"),
+            AlfonsoMaintainStructuralAgreement = values.ContainsKey("alfonso-maintain-structure"),
+            AlfonsoInvalidateOnPriceStructureBreak = values.ContainsKey("alfonso-invalidate-price-structure"),
+            AlfonsoRejectContradictingTrendlines =
+                !values.ContainsKey("alfonso-allow-contradicting-trendlines"),
+            AlfonsoStructureLogPath = values.GetValueOrDefault("alfonso-structure-log"),
+            AlfonsoTrendAuditPath = values.GetValueOrDefault("alfonso-trend-audit"),
+            AlfonsoMinimumStopTopAtrMultiple = ParseDecimal(
+                values.GetValueOrDefault("alfonso-min-stop-top-atr"), 0m, 0m,
+                "alfonso-min-stop-top-atr", allowZero: true),
+            AlfonsoOverExtensionTrendlines = values.ContainsKey("alfonso-overextension-trendlines"),
+            AlfonsoMinimumZoneGrade = ParseZoneGrade(values.GetValueOrDefault("alfonso-min-grade")),
+            AlfonsoMinimumImpulseToBaseRatio = ParseDecimal(
+                values.GetValueOrDefault("alfonso-min-impulse-ratio"),
+                new ImbalanceOptions().MinimumImpulseToBaseRatio, 0m, "alfonso-min-impulse-ratio"),
             AlfonsoRequireNestedEntries = values.ContainsKey("alfonso-nested-only"),
             AlfonsoRequireControlAgreement = !values.ContainsKey("alfonso-ignore-control"),
             AlfonsoAllowConfirmationEntries = values.ContainsKey("alfonso-confirmation-trades"),
@@ -620,6 +769,9 @@ internal sealed record BacktestCommandOptions
             AlfonsoMinimumStopAtrMultiple = ParseDecimal(
                 values.GetValueOrDefault("alfonso-min-stop-atr"), 0m, 0m,
                 "alfonso-min-stop-atr", allowZero: true),
+            AlfonsoMinimumProfitMarginMultiple = ParseDecimal(
+                values.GetValueOrDefault("alfonso-profit-margin"), 3.0m, 0m,
+                "alfonso-profit-margin", allowZero: true),
             AlfonsoMinimumAtrPercentile = ParseDecimal(
                 values.GetValueOrDefault("alfonso-atr-percentile-min"), 0m, 0m,
                 "alfonso-atr-percentile-min", allowZero: true),
@@ -739,6 +891,7 @@ internal sealed record BacktestCommandOptions
         StrategyAssignments = StrategyAssignments,
         StartingBalance = StartingBalance,
         BaseCurrency = BaseCurrency ?? ResolveBaseCurrency(),
+        QuoteToBaseCurrencyRates = QuoteRates,
         Quantity = Quantity,
         Leverage = Leverage,
         CommissionRate = CommissionRate,
@@ -762,15 +915,48 @@ internal sealed record BacktestCommandOptions
         AlfonsoLowerInterval = AlfonsoLowerInterval,
         AlfonsoRewardMultiple = AlfonsoRewardMultiple,
         AlfonsoStopPadding = AlfonsoStopPadding,
+        AlfonsoUseStructuralSwingStop = AlfonsoUseStructuralSwingStop,
+        AlfonsoUseOpposingZoneTarget = AlfonsoUseOpposingZoneTarget,
+        AlfonsoRevalidatePendingOnFiveMinute = AlfonsoRevalidatePendingOnFiveMinute,
+        AlfonsoBlockExhaustedBuysOnFiveMinute = AlfonsoBlockExhaustedBuysOnFiveMinute,
+        AlfonsoReversalShadowLogPath = AlfonsoReversalShadowLogPath,
+        AlfonsoStructuralStopLookbackCandles = AlfonsoStructuralStopLookbackCandles,
         AlfonsoEliminationRequiresClose = AlfonsoEliminationRequiresClose,
         AlfonsoTrendlineBreakRequiresClose = AlfonsoTrendlineBreakRequiresClose,
         AlfonsoRequireValidZoneForTrendChange = AlfonsoRequireValidZoneForTrendChange,
+        AlfonsoTreatAmbiguousBaseAsContinuation = AlfonsoTreatAmbiguousBaseAsContinuation,
+        AlfonsoRequireTradeableZoneForTrendChange = AlfonsoRequireTradeableZoneForTrendChange,
+        AlfonsoRequireStructuralAgreement = AlfonsoRequireStructuralAgreement,
+        AlfonsoRequireConfirmedTrendStructure = AlfonsoRequireConfirmedTrendStructure,
+        AlfonsoCandidateLogPath = AlfonsoCandidateLogPath,
+        AlfonsoInventoryLogPath = AlfonsoInventoryLogPath,
+        AlfonsoMaximumPlacementDistanceAtr = AlfonsoMaximumPlacementDistanceAtr,
+        AlfonsoRestingOrderReplacementAtr = AlfonsoRestingOrderReplacementAtr,
+        AlfonsoRequireReversalConfirmation = AlfonsoRequireReversalConfirmation,
+        AlfonsoEntryPolicy = AlfonsoEntryPolicy,
+        AlfonsoAllowPositionManagement = AlfonsoAllowPositionManagement,
+        AlfonsoRequireDriftAlignment = AlfonsoRequireDriftAlignment,
+        AlfonsoDriftLookbackCandles = AlfonsoDriftLookbackCandles,
         AlfonsoSwingBreakIsAnAccomplishment = AlfonsoSwingBreakIsAnAccomplishment,
+        AlfonsoHalfZoneEntry = AlfonsoHalfZoneEntry,
+        AlfonsoRequireValidHost = AlfonsoRequireValidHost,
+        AlfonsoDropRallyBaseSpansBothCandles = AlfonsoDropRallyBaseSpansBothCandles,
+        AlfonsoAnchorSwingsAtExtreme = AlfonsoAnchorSwingsAtExtreme,
+        AlfonsoMaintainStructuralAgreement = AlfonsoMaintainStructuralAgreement,
+        AlfonsoInvalidateOnPriceStructureBreak = AlfonsoInvalidateOnPriceStructureBreak,
+        AlfonsoRejectContradictingTrendlines = AlfonsoRejectContradictingTrendlines,
+        AlfonsoMinimumStopTopAtrMultiple = AlfonsoMinimumStopTopAtrMultiple,
+        AlfonsoStructureLogPath = AlfonsoStructureLogPath,
+        AlfonsoTrendAuditPath = AlfonsoTrendAuditPath,
+        AlfonsoOverExtensionTrendlines = AlfonsoOverExtensionTrendlines,
+        AlfonsoMinimumZoneGrade = AlfonsoMinimumZoneGrade,
+        AlfonsoMinimumImpulseToBaseRatio = AlfonsoMinimumImpulseToBaseRatio,
         AlfonsoRequireNestedEntries = AlfonsoRequireNestedEntries,
         AlfonsoRequireControlAgreement = AlfonsoRequireControlAgreement,
         AlfonsoAllowConfirmationEntries = AlfonsoAllowConfirmationEntries,
         AlfonsoMaximumCostToRiskFraction = AlfonsoMaximumCostToRiskFraction,
         AlfonsoMinimumStopAtrMultiple = AlfonsoMinimumStopAtrMultiple,
+        AlfonsoMinimumProfitMarginMultiple = AlfonsoMinimumProfitMarginMultiple,
         AlfonsoMinimumAtrPercentile = AlfonsoMinimumAtrPercentile,
         AlfonsoMaximumAtrPercentile = AlfonsoMaximumAtrPercentile,
         PriceActionConfirmation = PriceActionConfirmation,
@@ -820,6 +1006,9 @@ internal sealed record BacktestCommandOptions
             RefreshCache = RefreshCache,
             NoCache = NoCache,
             LegacyPositionManagement = LegacyPositionManagement,
+            // Alfonso's stack was parsed and stored but never copied into the runtime options, so
+            // --alfonso-manage-position ran as a silent no-op: zero stop-amendment requests.
+            AlfonsoPositionManagement = AlfonsoPositionManagement,
             ImprovedPositionManagement = ImprovedPositionManagement,
             StructuralPositionManagement = StructuralPositionManagement,
             PositionSizing = PositionSizing,
@@ -950,6 +1139,14 @@ internal sealed record BacktestCommandOptions
                 $"Unknown --price-action-mode '{value}'. Use disabled, soft, required, or required-with-context.")
         };
 
+    private static AlfonsoEntryPolicy ParseAlfonsoEntryPolicy(string? value) => value?.ToLowerInvariant() switch
+    {
+        null or "core" => AlfonsoEntryPolicy.Core,
+        "lower-reversal" => AlfonsoEntryPolicy.LowerTimeframeReversal,
+        "lower-aligned" => AlfonsoEntryPolicy.LowerTimeframeAligned,
+        _ => throw new ArgumentException("--alfonso-entry-policy must be core, lower-reversal or lower-aligned.")
+    };
+
     private static SimulationPrecisionMode ParsePrecisionMode(string? value) =>
         value?.Trim().ToLowerInvariant() switch
         {
@@ -983,17 +1180,16 @@ internal sealed record BacktestCommandOptions
         };
     }
 
-    public string ResolveBaseCurrency()
-    {
-        if (!string.IsNullOrWhiteSpace(BaseCurrency))
-        {
-            return BaseCurrency;
-        }
-
-        string pair = Instrument.Value[(Instrument.Value.IndexOf(':') + 1)..];
-        int slash = pair.LastIndexOf('/');
-        return slash >= 0 && slash + 1 < pair.Length ? pair[(slash + 1)..] : "USD";
-    }
+    /// <summary>
+    /// The account currency. Defaults to <see cref="Simulator.Models.BacktestRequest.DefaultBaseCurrency"/>
+    /// rather than the instrument's quote currency: deriving it meant a GBP/JPY run banked a yen
+    /// account while its USD-quoted siblings banked dollars, and nothing in the output said so.
+    /// Pass <c>--base-currency</c> to denominate a run in something else.
+    /// </summary>
+    public string ResolveBaseCurrency() =>
+        string.IsNullOrWhiteSpace(BaseCurrency)
+            ? Simulator.Models.BacktestRequest.DefaultBaseCurrency
+            : BaseCurrency;
 
     private static Simulator.Models.StrategyExecutionMode ParseExecutionMode(string value) =>
         value.Trim().ToLowerInvariant() switch
@@ -1018,6 +1214,34 @@ internal sealed record BacktestCommandOptions
             "independent" or "independentperstrategy" => Simulator.Models.AnalysisSharingMode.IndependentPerStrategy,
             _ => throw new ArgumentException($"Unknown --analysis-sharing '{value}'.")
         };
+
+    /// <summary>
+    /// Parses <c>--quote-rate JPY=0.0067,CHF=1.12</c> into quote-currency to account-currency rates.
+    /// </summary>
+    private static IReadOnlyDictionary<string, decimal> ParseQuoteRates(string? value)
+    {
+        var rates = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+            return rates;
+
+        foreach (string entry in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string[] parts = entry.Split('=', StringSplitOptions.TrimEntries);
+            if (parts.Length != 2 ||
+                string.IsNullOrWhiteSpace(parts[0]) ||
+                !decimal.TryParse(parts[1], NumberStyles.Number, CultureInfo.InvariantCulture, out decimal rate) ||
+                rate <= 0m)
+            {
+                throw new ArgumentException(
+                    $"Unknown --quote-rate entry '{entry}'. Use CURRENCY=RATE with a positive rate, " +
+                    "for example JPY=0.0067.");
+            }
+
+            rates[parts[0].ToUpperInvariant()] = rate;
+        }
+
+        return rates;
+    }
 
     private static Simulator.Models.AmbiguousIntrabarPolicy ParseAmbiguousPolicy(string value) =>
         value.Trim().ToLowerInvariant() switch
@@ -1257,6 +1481,25 @@ internal sealed record BacktestCommandOptions
         }
 
         return parsed;
+    }
+
+    /// <summary>
+    /// Parses --alfonso-min-grade. Absent means no gate, which is module 7's scoring measured rather
+    /// than trusted; the module never states a pass mark.
+    /// </summary>
+    private static ZoneGrade ParseZoneGrade(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return ZoneGrade.Weak;
+
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "weak" or "none" or "any" => ZoneGrade.Weak,
+            "medium" => ZoneGrade.Medium,
+            "strong" => ZoneGrade.Strong,
+            _ => throw new ArgumentException(
+                $"--alfonso-min-grade must be weak, medium or strong; got '{value}'.")
+        };
     }
 
     private static int ParseInt(string? value, int fallback, int minimum, int maximum, string name)

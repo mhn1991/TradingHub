@@ -1179,6 +1179,7 @@ export interface ChartLayers {
   bollingerRegimes: boolean
   movingAverages: boolean
   cci: boolean
+  rsi?: boolean
   rsiRelationships: boolean
   atr: boolean
   volume: boolean

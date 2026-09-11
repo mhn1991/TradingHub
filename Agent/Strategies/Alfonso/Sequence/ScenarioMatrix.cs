@@ -44,8 +44,31 @@ public sealed record ScenarioResolution
 public static class ScenarioMatrix
 {
     public static ScenarioResolution Resolve(
-        AlfonsoTrend top, AlfonsoTrend middle, AlfonsoTrend lower)
+        AlfonsoTrend top, AlfonsoTrend middle, AlfonsoTrend lower,
+        AlfonsoEntryPolicy policy = AlfonsoEntryPolicy.Core, AlfonsoTrend? confirmation = null)
     {
+        if (!Enum.IsDefined(policy))
+            throw new ArgumentOutOfRangeException(nameof(policy));
+        if (policy == AlfonsoEntryPolicy.LowerTimeframeAligned)
+        {
+            string reason = $"Experimental lower-timeframe alignment: 15m {lower}, 5m {confirmation?.ToString() ?? "Unknown"}; higher trends informational only.";
+            if (lower is not (AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend) || confirmation != lower)
+                return ScenarioResolution.No(reason + " Wait for agreement.");
+            return new ScenarioResolution
+            {
+                CanTrade = true,
+                Side = lower == AlfonsoTrend.Uptrend ? ImbalanceKind.Demand : ImbalanceKind.Supply,
+                Reason = reason,
+                Entries = [new ScenarioEntry
+                {
+                    EntryTimeframe = SequenceRole.Lower,
+                    Description = "Enter at a 15m zone with aligned 5m direction."
+                }]
+            };
+        }
+        if (policy == AlfonsoEntryPolicy.LowerTimeframeReversal)
+            return ResolveLowerReversal(top, middle, lower);
+
         // Module 10: "If the top timeframe of your sequence is out of alignment, no set and forget
         // trades will be possible." The top timeframe owns direction, so nothing else can rescue it.
         if (top is not (AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend))
@@ -127,5 +150,33 @@ public static class ScenarioMatrix
         // Everything else - a timeframe opposing the top, or an unknown state - is off the table.
         return ScenarioResolution.No(
             $"Alignment {top}/{middle}/{lower} is not one of the eight permitted setups.");
+    }
+
+    private static ScenarioResolution ResolveLowerReversal(
+        AlfonsoTrend top, AlfonsoTrend middle, AlfonsoTrend lower)
+    {
+        const string label = "Experimental lower-timeframe reversal";
+        if (top is not (AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend))
+            return ScenarioResolution.No($"{label}: top timeframe is {top}; no opposing direction to resolve.");
+
+        AlfonsoTrend reversal = top == AlfonsoTrend.Uptrend ? AlfonsoTrend.Downtrend : AlfonsoTrend.Uptrend;
+        if (middle != reversal || lower != reversal)
+            return ScenarioResolution.No($"{label}: middle and lower must both oppose top; got {top}/{middle}/{lower}.");
+
+        bool buy = reversal == AlfonsoTrend.Uptrend;
+        return new ScenarioResolution
+        {
+            CanTrade = true,
+            Side = buy ? ImbalanceKind.Demand : ImbalanceKind.Supply,
+            Reason = $"{label}: middle/lower {reversal} against top {top}; entry confirmation required.",
+            Entries =
+            [
+                new ScenarioEntry
+                {
+                    EntryTimeframe = SequenceRole.Lower,
+                    Description = $"Experimental {(buy ? "long" : "short")} at lower timeframe zone after touch-and-close confirmation."
+                }
+            ]
+        };
     }
 }

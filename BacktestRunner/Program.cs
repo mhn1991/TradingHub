@@ -940,12 +940,26 @@ Options:
   --maximum-account-margin-percent 30
   --maximum-position-margin-percent 10
   --starting-balance 100000
-  --base-currency USD
+  --base-currency USD           account currency (default USD; NOT derived from the instrument)
+  --quote-rate JPY=0.0067       quote->account rates, comma separated; needed for crosses
+                                such as GBP/JPY on a USD account
   --leverage 20
   --commission-rate 0.00002
   --spread-bps 1
   --slippage-bps 0.5
   --minimum-rr 1.5
+    Alfonso bracket tests may use 0 to disable the reward floor; stop, target and sizing checks remain.
+  --alfonso-opposing-zone-target
+    Target the nearest confirmed opposing entry-timeframe zone; skip if none exists.
+  --alfonso-revalidate-pending-5m
+    Cancel pending lower-aligned entries when 5m trend disagrees or a confirmed swing breaks.
+  --alfonso-block-exhausted-buys-5m
+    Block/cancel unfilled buys if either of the last two closed 5m candles has
+    high >= BB upper and (RSI > 70 or CCI >= 100), with indicators from that same candle.
+  --alfonso-reversal-shadow-log PATH
+    Log 5m sweep/reclaim, break and holding-retest observations; never trade them.
+  --alfonso-entry-policy core|lower-reversal|lower-aligned
+    lower-aligned: 15m direction confirmed by 5m; higher trends informational.
   --daily-equity-profit-target 3000
   --daily-equity-giveback-activation 2500
   --maximum-daily-equity-giveback 750

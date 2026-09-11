@@ -36,6 +36,25 @@ public sealed record TimeframeSequence
 
     public required TimeSpan Lower { get; init; }
 
+    /// <summary>Module 8's "quarterly sequence (long-term)": quarterly, monthly and weekly.</summary>
+    public static TimeframeSequence Quarterly => new()
+    {
+        Top = TimeSpan.FromDays(90),
+        Middle = TimeSpan.FromDays(30),
+        Lower = TimeSpan.FromDays(7)
+    };
+
+    /// <summary>
+    /// Module 8's "monthly sequence (medium-term)": monthly, weekly and daily - the MWD the course
+    /// recommends to anyone holding a full-time job, and the one every worked example uses.
+    /// </summary>
+    public static TimeframeSequence Monthly => new()
+    {
+        Top = TimeSpan.FromDays(30),
+        Middle = TimeSpan.FromDays(7),
+        Lower = TimeSpan.FromDays(1)
+    };
+
     /// <summary>Module 8's "weekly sequence (swing)": weekly, daily and H4.</summary>
     public static TimeframeSequence Weekly => new()
     {

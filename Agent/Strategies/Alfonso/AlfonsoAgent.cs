@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using Agent.Abstractions;
 using Agent.Models;
 using Agent.Strategies.Alfonso.Sequence;
@@ -27,25 +28,45 @@ namespace Agent.Strategies.Alfonso;
 /// </summary>
 public sealed class AlfonsoAgent : ITradingAgent
 {
+    private static readonly object ShadowLogGate = new();
     private readonly AlfonsoStrategyOptions _options;
     private readonly ConcurrentDictionary<InstrumentKey, InstrumentState> _state = new();
 
     private readonly Action<AlfonsoCandidateRecord>? _candidateSink;
+    private readonly Action<AlfonsoInventorySnapshot>? _inventorySink;
+    private readonly Action<string, DateTimeOffset, Sequence.AlfonsoSequenceAnalyzer>? _structure;
+    private readonly Action<string, DateTimeOffset, SequenceRole, AlfonsoBar, AlfonsoTimeframeAnalyzer>? _trendSink;
 
     /// <param name="options">Strategy configuration; defaults are the course's own values.</param>
     /// <param name="candidateSink">
     /// Optional observer of every candidate considered, including rejected ones. Null by default so
     /// production behaviour and cost are untouched; research harnesses pass a writer.
     /// </param>
+    /// <param name="inventorySink">
+    /// Optional sink for periodic zone-inventory snapshots. Null disables the measurement entirely.
+    /// </param>
+    /// <param name="structureSink">
+    /// Optional sink for the trend layer's state at each order placed - the only faithful source for
+    /// it, since replaying the analyzer outside the run reads different bars (3.67).
+    /// </param>
+    /// <param name="trendSink">Read-only observer after every new closed timeframe candle, including while a position is open.</param>
     public AlfonsoAgent(
         AlfonsoStrategyOptions? options = null,
-        Action<AlfonsoCandidateRecord>? candidateSink = null)
+        Action<AlfonsoCandidateRecord>? candidateSink = null,
+        Action<AlfonsoInventorySnapshot>? inventorySink = null,
+        Action<string, DateTimeOffset, Sequence.AlfonsoSequenceAnalyzer>? structureSink = null,
+        Action<string, DateTimeOffset, SequenceRole, AlfonsoBar, AlfonsoTimeframeAnalyzer>? trendSink = null)
     {
         _candidateSink = candidateSink;
+        _inventorySink = inventorySink;
+        _structure = structureSink;
+        _trendSink = trendSink;
         _options = options ?? new AlfonsoStrategyOptions();
         _options.Validate();
         RequiredIntervals = _options.RequiredIntervals;
-        TriggerInterval = _options.LowerInterval;
+        // In the alignment experiment ingest every 5m close, but retain the existing
+        // LastEvaluated guard below: orders are still considered once per 15m candle.
+        TriggerInterval = _options.ConfirmationInterval ?? _options.LowerInterval;
     }
 
     public string Name => "Set and Forget supply/demand agent";
@@ -58,7 +79,9 @@ public sealed class AlfonsoAgent : ITradingAgent
     /// The bracket owns the exit. Entry, protection and target are decided together and never
     /// revised - that is what "set and forget" means.
     /// </summary>
-    public AgentExitManagementMode ExitManagementMode => AgentExitManagementMode.Bracket;
+    public AgentExitManagementMode ExitManagementMode => _options.AllowPositionManagement
+        ? AgentExitManagementMode.ProtectiveStopAndStrategyExit
+        : AgentExitManagementMode.Bracket;
 
     public Task<AgentDecision> EvaluateAsync(
         AgentMarketContext context,
@@ -67,14 +90,29 @@ public sealed class AlfonsoAgent : ITradingAgent
         ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
 
-        InstrumentState state = _state.GetOrAdd(context.Instrument, _ => new InstrumentState(_options));
+        InstrumentState state = _state.GetOrAdd(context.Instrument, _ => new InstrumentState(_options, context.Instrument));
 
         lock (state.Gate)
         {
+            string? buyExhaustion = null;
+            if (_options.ConfirmationInterval is BarInterval confirmationInterval)
+            {
+                if (!context.Analysis.TryGet(confirmationInterval, out AnalysisSnapshot confirmation) ||
+                    confirmation.AvailableAt > context.Timestamp ||
+                    confirmation.LatestCandle.OpenTime + TimeSpan.FromMinutes(5) != context.Timestamp)
+                    return Observe(context, "Waiting for a current closed 5m confirmation candle.");
+                buyExhaustion = state.BuyExhaustion?.Evaluate(confirmation, context.Timestamp);
+                Candle five = confirmation.LatestCandle;
+                state.Analyzer.ApplyConfirmation(new AlfonsoBar(five.OpenTime, five.Prices.Open,
+                    five.Prices.High, five.Prices.Low, five.Prices.Close), context.Timestamp);
+                state.FiveMinuteStructure?.Apply(new AlfonsoBar(five.OpenTime, five.Prices.Open,
+                    five.Prices.High, five.Prices.Low, five.Prices.Close), context.Timestamp);
+            }
             // Every timeframe is advanced only by its OWN closed candles. Feeding one detector
             // another timeframe's bars turns it into a copy of that timeframe and it silently stops
             // disagreeing - the failure that made three gate configurations produce byte-identical
             // results in this repo before.
+            bool topBarClosed = false;
             foreach ((SequenceRole role, BarInterval interval) in state.Intervals)
             {
                 if (!context.Analysis.TryGet(interval, out AnalysisSnapshot snapshot))
@@ -85,16 +123,59 @@ public sealed class AlfonsoAgent : ITradingAgent
                     continue;
 
                 state.LastCandle[role] = candle.OpenTime;
-                state.Analyzer.Apply(role, new AlfonsoBar(
+                if (role == SequenceRole.Top)
+                {
+                    state.RecordTopClose(candle.Prices.Close, _options.DriftLookbackCandles);
+                    topBarClosed = true;
+                }
+                AlfonsoBar closedBar = new(
                     candle.OpenTime,
                     candle.Prices.Open,
                     candle.Prices.High,
                     candle.Prices.Low,
-                    candle.Prices.Close));
+                    candle.Prices.Close);
+                state.Analyzer.Apply(role, closedBar);
+                if (role == SequenceRole.Lower)
+                    state.StructuralStop?.Apply(closedBar);
+                _trendSink?.Invoke(context.Instrument.ToString(), context.Timestamp, role, closedBar, state.Analyzer[role]);
+            }
+
+            // Read-only research observer. Runs even while an order/position exists, but its
+            // output is never consulted by the entry, cancellation or position paths.
+            if (state.ReversalShadow is { } shadow && context.Analysis.TryGet(BarInterval.Minutes(5), out var shadowBar))
+            {
+                var c = shadowBar.LatestCandle;
+                shadow.Apply(new AlfonsoBar(c.OpenTime, c.Prices.Open, c.Prices.High, c.Prices.Low, c.Prices.Close), context.Timestamp);
             }
 
             if (!context.Analysis.TryGet(_options.LowerInterval, out AnalysisSnapshot trigger))
                 return Observe(context, "No execution timeframe analysis.");
+
+            // Fills are processed before this evaluation. Never cancel retrospectively or
+            // manage a filled position; only this agent's still-pending plan is eligible.
+            if ((_options.RevalidatePendingOnFiveMinute || buyExhaustion is not null) &&
+                state.PendingOrder is ZoneOrderKey pending &&
+                !context.Positions.Any(x => x.Instrument == context.Instrument && x.Quantity > 0m))
+            {
+                var owned = context.OpenOrders.FirstOrDefault(x => x.Instrument == context.Instrument &&
+                    x.NormalizedStatus is OrderStatus.Pending or OrderStatus.Open);
+                string? invalid = state.FiveMinuteStructure?.PendingInvalidation(
+                    pending.Kind == ImbalanceKind.Demand, state.Analyzer.ConfirmationTrend);
+                string? cancellation = invalid is not null ? "5m pending guard: " + invalid :
+                    pending.Kind == ImbalanceKind.Demand && owned?.Side == OrderSide.Buy ? buyExhaustion : null;
+                if (owned is not null && cancellation is not null)
+                    return Task.FromResult(new AgentDecision
+                    {
+                        Action = AgentAction.Cancel, Instrument = context.Instrument,
+                        BrokerOrderId = owned.BrokerOrderId, CreatedAt = context.Timestamp,
+                        Confidence = 0m, Reason = cancellation
+                    });
+            }
+
+            if (_options.ConfirmationInterval is not null &&
+                (trigger.AvailableAt > context.Timestamp ||
+                 trigger.LatestCandle.OpenTime + TimeSpan.FromMinutes(15) != context.Timestamp))
+                return Observe(context, "5m trend updated; waiting for a closed 15m entry candle.");
 
             // An open position is left entirely alone. There is no position-management path in this
             // agent by design; module 11 is explicit that the trade is either a win or a loss.
@@ -115,9 +196,19 @@ public sealed class AlfonsoAgent : ITradingAgent
                 return Observe(context, "This execution candle has already been evaluated.");
             state.LastEvaluated = bar.OpenTime;
 
+            // The top timeframe's ATR, read every evaluation rather than inside the new-bar loop
+            // above, which skips whenever that timeframe has not printed a fresh candle.
+            decimal? topAtr =
+                context.Analysis.TryGet(_options.TopInterval, out AnalysisSnapshot topSnapshot)
+                    ? topSnapshot.Indicators.Atr
+                    : null;
+
             decimal? atr = trigger.Indicators.Atr;
             if (atr is decimal sample && sample > 0m)
                 state.RecordAtr(sample);
+
+            if (topBarClosed)
+                RecordInventory(context, state, bar.Prices.Close, atr);
 
             decimal? atrPercentile = state.AtrPercentile(atr);
             bool atrRegimeOk = atrPercentile is not decimal band ||
@@ -130,12 +221,46 @@ public sealed class AlfonsoAgent : ITradingAgent
                 if (state.PendingOrder is not ZoneOrderKey planned)
                     return Observe(context, "A resting order already owns the next entry.");
 
-                bool stillValid = scenario.CanTrade && state.Analyzer.Candidates(bar.Prices.Close)
-                    .Any(candidate =>
-                        Key(candidate) == planned &&
-                        IsAheadOfPrice(candidate.Side, candidate.Zone.Proximal, bar.Prices.Close));
-                if (stillValid)
+                IReadOnlyList<TradeCandidate> live = state.Analyzer.Candidates(bar.Prices.Close);
+                TradeCandidate? held = live.FirstOrDefault(candidate =>
+                    Key(candidate) == planned &&
+                    IsAheadOfPrice(
+                        candidate.Side,
+                        candidate.Zone.EntryPrice(_options.Zones.EntryPlacement),
+                        bar.Prices.Close));
+
+                if (held is not null)
+                {
+                    // Candidates arrive sorted by distance, so the first is the best available now.
+                    // Holding a far commitment while a much nearer level is on offer is what leaves
+                    // the only order slot occupied by something that will not fill.
+                    if (_options.RestingOrderReplacementAtr > 0m &&
+                        atr is decimal unit && unit > 0m &&
+                        live.Count > 0)
+                    {
+                        decimal heldAway = Math.Abs(
+                            bar.Prices.Close - held.Zone.EntryPrice(_options.Zones.EntryPlacement));
+                        decimal bestAway = Math.Abs(
+                            bar.Prices.Close - live[0].Zone.EntryPrice(_options.Zones.EntryPlacement));
+                        if ((heldAway - bestAway) / unit >= _options.RestingOrderReplacementAtr)
+                        {
+                            state.PendingOrder = null;
+                            return Task.FromResult(new AgentDecision
+                            {
+                                Action = AgentAction.Cancel,
+                                Instrument = context.Instrument,
+                                BrokerOrderId = restingOrder.BrokerOrderId,
+                                CreatedAt = context.Timestamp,
+                                Confidence = 0m,
+                                Reason =
+                                    $"A level {(heldAway - bestAway) / unit:F1} ATR nearer is available; " +
+                                    "releasing the slot rather than holding a commitment that will not fill."
+                            });
+                        }
+                    }
+
                     return Observe(context, "The pre-planned limit remains valid and is awaiting its first touch.");
+                }
 
                 // Module 11 requires the plan to define conditions that cancel a pending trade and
                 // says set-and-forget entries remain available only while trend/realignment still
@@ -158,6 +283,8 @@ public sealed class AlfonsoAgent : ITradingAgent
             if (!scenario.CanTrade)
                 return Observe(context, scenario.Reason);
 
+            state.Analyzer.ReferenceAtr = atr;
+            state.Analyzer.ReachableAtr = _options.ReachableDistanceAtr;
             IReadOnlyList<TradeCandidate> candidates = state.Analyzer.Candidates(bar.Prices.Close);
             if (candidates.Count == 0)
                 return Observe(context, $"{scenario.Reason} No plannable zone ahead of price.");
@@ -169,7 +296,9 @@ public sealed class AlfonsoAgent : ITradingAgent
                 Imbalance zone = candidate.Zone;
                 ZoneOrderKey key = Key(candidate);
 
-                if (_options.FreshLevelsOnly && zone.State != ImbalanceState.Fresh &&
+                bool firstPullback = _options.RequireReversalConfirmation &&
+                    zone.State == ImbalanceState.Tested && zone.TestCount <= 1;
+                if (_options.FreshLevelsOnly && zone.State != ImbalanceState.Fresh && !firstPullback &&
                     !(_options.AllowConfirmationEntries && candidate.Host is not null &&
                       zone.State == ImbalanceState.Tested))
                 {
@@ -180,27 +309,109 @@ public sealed class AlfonsoAgent : ITradingAgent
                 if (_options.RequireNestedEntries && candidate.Host is null)
                     continue;
 
-                bool aheadOfPrice = IsAheadOfPrice(
-                    candidate.Side, zone.Proximal, bar.Prices.Close);
-                if (!aheadOfPrice)
+                bool buy = candidate.Side == ImbalanceKind.Demand;
+
+                // Only trade the side the drift is already pushing price toward. The opposite side
+                // is the one a drifting market keeps filling and then running over.
+                if (_options.RequireDriftAlignment &&
+                    state.Drift(_options.DriftLookbackCandles) is decimal drift && drift != 0m &&
+                    (buy ? drift < 0m : drift > 0m))
                 {
-                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
+                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.Superseded);
+                    continue;
+                }
+
+                // Module 10's two ways into the same imbalance: at the proximal line, or "half the
+                // width of the original imbalance". Protection does not move with the entry.
+                decimal entryPrice = zone.EntryPrice(_options.Zones.EntryPlacement);
+
+                if (_options.MaximumPlacementDistanceAtr > 0m &&
+                    atr is decimal reach && reach > 0m &&
+                    Math.Abs(bar.Prices.Close - entryPrice) / reach >
+                        _options.MaximumPlacementDistanceAtr)
+                {
+                    LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.TooFarToFill);
                     continue;
                 }
 
                 decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
-                decimal target = zone.TargetPrice(
-                    _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple);
+                string stopSource = $"distal {zone.Distal:F2} padded {_options.Zones.StopPaddingFraction:P0}";
+                if (state.StructuralStop is { } structuralStop)
+                {
+                    var resolved = structuralStop.Resolve(buy, zone.Distal,
+                        zone.Width * _options.Zones.StopPaddingFraction);
+                    stop = resolved.Stop;
+                    string anchorSource = resolved.Anchor is { } anchor
+                        ? $"swing {(buy ? "low" : "high")} {(buy ? anchor.Low : anchor.High):0.########} " +
+                          $"at {anchor.OpenTime.UtcDateTime:yyyy-MM-dd HH:mm} UTC (candle open)"
+                        : "no confirmed swing; zone fallback";
+                    stopSource = $"structural {BarIntervalParser.Format(_options.LowerInterval)} " +
+                        $"({_options.StructuralStopLookbackCandles} closed candles, 2/2 pivot): {anchorSource}; " +
+                        $"outside distal {zone.Distal:0.########}, zone-width padding {_options.Zones.StopPaddingFraction:P0}";
+                }
+                decimal reference = entryPrice;
 
-                bool buy = candidate.Side == ImbalanceKind.Demand;
-                decimal risk = Math.Abs(zone.Proximal - stop);
+                if (!_options.RequireReversalConfirmation)
+                {
+                    if (!IsAheadOfPrice(candidate.Side, entryPrice, bar.Prices.Close))
+                    {
+                        LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
+                        continue;
+                    }
+                }
+                else
+                {
+                    // "Price reached the level" has to come from the zone engine, not from this
+                    // candle. The agent is triggered on the lower interval and sees a sampled bar,
+                    // so testing the bar's own low/high misses any touch that happened between
+                    // samples - which is nearly all of them, and gave 2 trades over six instruments.
+                    // The engine already records the touch continuously on the zone's own timeframe.
+                    bool reached = zone.State == ImbalanceState.Tested;
+
+                    bool heldBack = buy
+                        ? bar.Prices.Close > zone.Proximal
+                        : bar.Prices.Close < zone.Proximal;
+                    bool survived = buy
+                        ? bar.Prices.Close > zone.Distal
+                        : bar.Prices.Close < zone.Distal;
+
+                    if (!reached || !heldBack || !survived)
+                    {
+                        LogSimple(context, candidate, bar, atrPercentile, CandidateOutcome.NotReached);
+                        continue;
+                    }
+
+                    // Entry is at market on this close, so risk is measured from there.
+                    reference = bar.Prices.Close;
+                }
+
+                decimal risk = Math.Abs(reference - stop);
+                Imbalance? targetZone = null;
+                if (_options.UseOpposingZoneTarget)
+                {
+                    targetZone = AlfonsoOpposingZoneTarget.Find(buy, reference, zone.Interval,
+                        context.Timestamp, state.Analyzer.ZonesOf(candidate.EntryTimeframe));
+                    if (targetZone is null)
+                    {
+                        Log(context, candidate, bar, stop, reference, risk, null, null,
+                            atrPercentile, CandidateOutcome.NoOpposingZone);
+                        continue;
+                    }
+                }
+                decimal target = _options.RequireReversalConfirmation || _options.UseStructuralSwingStop
+                    ? CalculateTarget(buy, reference, stop, _options.Zones.RewardMultiple)
+                    : zone.TargetPrice(
+                        _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple,
+                        _options.Zones.EntryPlacement);
+                if (targetZone is not null)
+                    target = targetZone.Proximal;
                 decimal? costToRisk = context.RoundTripCostEstimate is decimal cost && risk > 0m
                     ? cost / risk
                     : null;
                 decimal? stopAtr = atr is decimal unit && unit > 0m ? risk / unit : null;
 
-                if (buy ? stop >= zone.Proximal || target <= zone.Proximal
-                        : stop <= zone.Proximal || target >= zone.Proximal)
+                if (buy ? stop >= reference || target <= reference
+                        : stop <= reference || target >= reference)
                 {
                     Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
                         atrPercentile, CandidateOutcome.DegenerateGeometry);
@@ -226,6 +437,17 @@ public sealed class AlfonsoAgent : ITradingAgent
                     continue;
                 }
 
+                // The same floor against the timeframe that supplied the direction, not the one the
+                // order sits on (3.66).
+                if (_options.MinimumStopTopAtrMultiple > 0m &&
+                    topAtr is decimal topUnit && topUnit > 0m &&
+                    risk / topUnit < _options.MinimumStopTopAtrMultiple)
+                {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.StopTooTight);
+                    continue;
+                }
+
                 if (!atrRegimeOk)
                 {
                     Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
@@ -233,8 +455,16 @@ public sealed class AlfonsoAgent : ITradingAgent
                     continue;
                 }
 
+                if (buy && buyExhaustion is not null)
+                {
+                    Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
+                        atrPercentile, CandidateOutcome.BuyExhaustion);
+                    return Observe(context, buyExhaustion);
+                }
+
                 Log(context, candidate, bar, stop, target, risk, costToRisk, stopAtr,
                     atrPercentile, CandidateOutcome.Entered);
+                _structure?.Invoke(context.Instrument.ToString(), context.Timestamp, state.Analyzer);
                 state.PendingOrder = key;
 
                 return Task.FromResult(new AgentDecision
@@ -249,20 +479,87 @@ public sealed class AlfonsoAgent : ITradingAgent
                         $"({zone.Strength}, {zone.ImpulseToBaseRatio:F2}:1, {zone.Accomplished})" +
                         (candidate.Host is null ? "." : $", nested at {candidate.Host.Proximal:F2}."),
                     SuggestedQuantity = _options.Quantity,
-                    OrderType = StandardOrderType.Limit,
-                    LimitPrice = zone.Proximal,
-                    ReferencePrice = zone.Proximal,
+                    OrderType = _options.RequireReversalConfirmation
+                        ? StandardOrderType.Market
+                        : StandardOrderType.Limit,
+                    LimitPrice = _options.RequireReversalConfirmation ? null : entryPrice,
+                    ReferencePrice = reference,
                     StopLossPrice = stop,
                     TakeProfitPrice = target,
                     SignalInterval = _options.LowerInterval,
-                    StopSource =
-                        $"distal {zone.Distal:F2} padded {_options.Zones.StopPaddingFraction:P0}, " +
-                        $"target {_options.Zones.RewardMultiple:F1}:1"
+                    TargetSource = targetZone is null ? null : AlfonsoOpposingZoneTarget.Describe(targetZone),
+                    StopSource = targetZone is not null ? stopSource :
+                        $"{stopSource}, " +
+                        $"target {_options.Zones.RewardMultiple:0.##}:1"
                 });
             }
 
             return Observe(context,
                 $"{scenario.Reason} {candidates.Count} zone(s) considered; none can take a new resting order.");
+        }
+    }
+
+    /// <summary>
+    /// Snapshots how many zones are live per timeframe and side, and how far they sit from price.
+    /// <para>
+    /// What the agent can trade is decided by where its zones are: fill rate falls from 21-35%
+    /// inside 3 ATR to zero beyond 16, and about 60% of placements sit where fills never happen.
+    /// Counting placements without weighting by distance treats inert orders as intent, which is
+    /// how "intentions are near-symmetric" was concluded from a population that is 1.88:1
+    /// supply-heavy once restricted to reachable zones.
+    /// </para>
+    /// </summary>
+    private void RecordInventory(
+        AgentMarketContext context, InstrumentState state, decimal price, decimal? atr)
+    {
+        if (_inventorySink is null)
+            return;
+
+        foreach ((SequenceRole role, _) in _options.Sequence.All())
+        {
+            IReadOnlyList<Imbalance> zones = state.Analyzer.ZonesOf(role);
+            foreach (ImbalanceKind kind in new[] { ImbalanceKind.Demand, ImbalanceKind.Supply })
+            {
+                List<decimal> distances = [];
+                int live = 0;
+                foreach (Imbalance zone in zones)
+                {
+                    if (zone.Kind != kind || zone.State == ImbalanceState.Eliminated)
+                        continue;
+
+                    live++;
+                    if (atr is decimal unit && unit > 0m)
+                        distances.Add(Math.Abs(price - zone.Proximal) / unit);
+                }
+
+                // The same measurement for zones that would actually be eligible, evaluated for
+                // BOTH sides so it is not conditioned on which side the scenario happens to permit.
+                List<decimal> qualifying = [];
+                foreach (Imbalance zone in state.Analyzer.TradeableZonesOf(role, kind, price))
+                {
+                    if (atr is decimal q && q > 0m)
+                        qualifying.Add(Math.Abs(price - zone.Proximal) / q);
+                }
+
+                qualifying.Sort();
+                distances.Sort();
+                _inventorySink(new AlfonsoInventorySnapshot
+                {
+                    At = context.Timestamp,
+                    Instrument = context.Instrument,
+                    Role = role,
+                    Kind = kind,
+                    LiveZones = live,
+                    Reachable = distances.Count(d => d <= _options.ReachableDistanceAtr),
+                    Qualifying = qualifying.Count,
+                    NearestQualifyingAtr = qualifying.Count == 0 ? null : qualifying[0],
+                    MedianDistanceAtr = distances.Count == 0 ? null : distances[distances.Count / 2],
+                    NearestDistanceAtr = distances.Count == 0 ? null : distances[0],
+                    Price = price,
+                    Atr = atr,
+                    Filters = role == SequenceRole.Lower ? state.Analyzer.TallyOf(kind) : null
+                });
+            }
         }
     }
 
@@ -275,9 +572,15 @@ public sealed class AlfonsoAgent : ITradingAgent
             return;
 
         Imbalance zone = candidate.Zone;
+        _state.TryGetValue(context.Instrument, out InstrumentState? logged);
         _candidateSink(new AlfonsoCandidateRecord
         {
             At = context.Timestamp,
+            TopTrend = logged?.Analyzer.TrendOf(SequenceRole.Top),
+            MiddleTrend = logged?.Analyzer.TrendOf(SequenceRole.Middle),
+            LowerTrend = logged?.Analyzer.TrendOf(SequenceRole.Lower),
+            ConfirmationTrend = logged?.Analyzer.ConfirmationTrend,
+            ConfirmationClosedAt = logged?.Analyzer.ConfirmationClosedAt,
             Instrument = context.Instrument,
             Outcome = outcome,
             Side = candidate.Side,
@@ -296,6 +599,7 @@ public sealed class AlfonsoAgent : ITradingAgent
             ImpulseToBaseRatio = zone.ImpulseToBaseRatio,
             ImpulseDisplacement = zone.ImpulseDisplacement,
             BaseCandleCount = zone.BaseCandleCount,
+            Score = ZoneScorer.Score(zone, _options.Zones),
             CostToRisk = costToRisk,
             StopAtrMultiple = stopAtr,
             AtrPercentile = atrPercentile,
@@ -314,8 +618,11 @@ public sealed class AlfonsoAgent : ITradingAgent
         Imbalance zone = candidate.Zone;
         decimal stop = zone.StopPrice(_options.Zones.StopPaddingFraction);
         Log(context, candidate, bar, stop,
-            zone.TargetPrice(_options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple),
-            Math.Abs(zone.Proximal - stop), null, null, atrPercentile, outcome);
+            zone.TargetPrice(
+                _options.Zones.StopPaddingFraction, _options.Zones.RewardMultiple,
+                _options.Zones.EntryPlacement),
+            Math.Abs(zone.EntryPrice(_options.Zones.EntryPlacement) - stop),
+            null, null, atrPercentile, outcome);
     }
 
     private static Task<AgentDecision> Observe(AgentMarketContext context, string reason) =>
@@ -334,13 +641,63 @@ public sealed class AlfonsoAgent : ITradingAgent
     private static ZoneOrderKey Key(TradeCandidate candidate) =>
         new(candidate.EntryTimeframe, candidate.Zone.BaseEnd, candidate.Zone.Kind);
 
+    internal static decimal CalculateTarget(bool buy, decimal reference, decimal stop, decimal rewardMultiple)
+    {
+        decimal reward = Math.Abs(reference - stop) * rewardMultiple;
+        return buy ? reference + reward : reference - reward;
+    }
+
     private sealed class InstrumentState
     {
-        public InstrumentState(AlfonsoStrategyOptions options)
+        private readonly List<decimal> _topCloses = [];
+
+        /// <summary>Keeps just enough top-timeframe history to measure drift over the lookback.</summary>
+        public void RecordTopClose(decimal close, int lookback)
         {
+            if (lookback <= 0)
+                return;
+
+            _topCloses.Add(close);
+            int keep = lookback + 1;
+            if (_topCloses.Count > keep)
+                _topCloses.RemoveRange(0, _topCloses.Count - keep);
+        }
+
+        /// <summary>Change in top-timeframe close over the lookback, or null before enough history.</summary>
+        public decimal? Drift(int lookback)
+        {
+            if (lookback <= 0 || _topCloses.Count <= lookback)
+                return null;
+
+            return _topCloses[^1] - _topCloses[^(lookback + 1)];
+        }
+
+
+        public InstrumentState(AlfonsoStrategyOptions options, InstrumentKey instrument)
+        {
+            FiveMinuteStructure = options.RevalidatePendingOnFiveMinute ? new() : null;
+            BuyExhaustion = options.BlockExhaustedBuysOnFiveMinute ? new() : null;
+            StructuralStop = options.UseStructuralSwingStop
+                ? new AlfonsoStructuralStop(options.StructuralStopLookbackCandles) : null;
             Analyzer = new AlfonsoSequenceAnalyzer(
                 options.Sequence, options.Zones, options.Trend, options.Range, options.FreshLevelsOnly,
-                options.RequireControlAgreement, options.AllowConfirmationEntries);
+                options.RequireControlAgreement, options.AllowConfirmationEntries,
+                options.MinimumProfitMarginMultiple, options.Zones.StopPaddingFraction,
+                options.RequireReversalConfirmation, options.MinimumZoneGrade,
+                options.RequireValidHost, options.EntryPolicy);
+
+            if (options.ReversalShadowLogPath is { } path)
+            {
+                string fullPath = Path.GetFullPath(path);
+                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                ReversalShadow = new AlfonsoReversalShadow(observation =>
+                {
+                    var line = JsonSerializer.Serialize(new AlfonsoReversalShadowRow(instrument.ToString(),
+                        Analyzer.TrendOf(SequenceRole.Lower).ToString(), Analyzer.ConfirmationTrend.ToString(), observation),
+                        AlfonsoReversalShadowJsonContext.Default.AlfonsoReversalShadowRow) + Environment.NewLine;
+                    lock (ShadowLogGate) File.AppendAllText(fullPath, line);
+                });
+            }
 
             Intervals =
             [
@@ -357,6 +714,11 @@ public sealed class AlfonsoAgent : ITradingAgent
         public object Gate { get; } = new();
 
         public AlfonsoSequenceAnalyzer Analyzer { get; }
+
+        public AlfonsoStructuralStop? StructuralStop { get; }
+        public AlfonsoFiveMinuteStructure? FiveMinuteStructure { get; }
+        public AlfonsoBuyExhaustion? BuyExhaustion { get; }
+        public AlfonsoReversalShadow? ReversalShadow { get; }
 
         public IReadOnlyList<(SequenceRole Role, BarInterval Interval)> Intervals { get; }
 

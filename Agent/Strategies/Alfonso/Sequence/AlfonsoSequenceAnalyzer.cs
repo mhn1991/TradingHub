@@ -34,8 +34,27 @@ public sealed class AlfonsoSequenceAnalyzer
 {
     private readonly Dictionary<SequenceRole, AlfonsoTimeframeAnalyzer> _timeframes = [];
     private readonly bool _freshLevelsOnly;
+    private readonly bool _confirmationEntryMode;
+    /// <summary>
+    /// ATR of the execution timeframe, set by the agent before it asks for candidates. Used only to
+    /// classify a zone as near or far when tallying; nothing about selection depends on it.
+    /// </summary>
+    public decimal? ReferenceAtr { get; set; }
+
+    /// <summary>Distance in ATR inside which a resting order has a realistic chance of filling.</summary>
+    public decimal ReachableAtr { get; set; } = 6m;
+
+    private readonly AlfonsoFilterTally _demandTally = new();
+    private readonly AlfonsoFilterTally _supplyTally = new();
     private readonly bool _requireControlAgreement;
     private readonly bool _allowConfirmationEntries;
+    private readonly decimal _minimumProfitMargin;
+    private readonly decimal _stopPadding;
+    private readonly ImbalanceOptions _zoneOptions;
+    private readonly ZoneGrade _minimumGrade;
+    private readonly bool _requireValidHost;
+    private readonly AlfonsoEntryPolicy _entryPolicy;
+    private readonly AlfonsoTimeframeAnalyzer? _confirmation;
 
     public AlfonsoSequenceAnalyzer(
         TimeframeSequence sequence,
@@ -44,14 +63,37 @@ public sealed class AlfonsoSequenceAnalyzer
         RangeOptions? rangeOptions = null,
         bool freshLevelsOnly = true,
         bool requireControlAgreement = true,
-        bool allowConfirmationEntries = false)
+        bool allowConfirmationEntries = false,
+        decimal minimumProfitMarginMultiple = 0m,
+        decimal stopPaddingFraction = 0.25m,
+        bool confirmationEntryMode = false,
+        ZoneGrade minimumGrade = ZoneGrade.Weak,
+        bool requireValidHost = true,
+        AlfonsoEntryPolicy entryPolicy = AlfonsoEntryPolicy.Core)
     {
         ArgumentNullException.ThrowIfNull(sequence);
         sequence.Validate();
+        if (!Enum.IsDefined(entryPolicy))
+            throw new ArgumentOutOfRangeException(nameof(entryPolicy));
+        if (entryPolicy == AlfonsoEntryPolicy.LowerTimeframeReversal && !confirmationEntryMode)
+            throw new ArgumentException("Lower-timeframe reversal requires confirmation entry mode.", nameof(confirmationEntryMode));
+        _entryPolicy = entryPolicy;
+        if (entryPolicy == AlfonsoEntryPolicy.LowerTimeframeAligned)
+        {
+            if (sequence.Lower != TimeSpan.FromMinutes(15))
+                throw new ArgumentException("Lower-timeframe alignment requires 15m entries.", nameof(sequence));
+            _confirmation = new AlfonsoTimeframeAnalyzer(TimeSpan.FromMinutes(5), zoneOptions, trendOptions, rangeOptions);
+        }
         Sequence = sequence;
         _freshLevelsOnly = freshLevelsOnly;
+        _confirmationEntryMode = confirmationEntryMode;
         _requireControlAgreement = requireControlAgreement;
         _allowConfirmationEntries = allowConfirmationEntries;
+        _minimumProfitMargin = minimumProfitMarginMultiple;
+        _stopPadding = stopPaddingFraction;
+        _zoneOptions = zoneOptions ?? new ImbalanceOptions();
+        _minimumGrade = minimumGrade;
+        _requireValidHost = requireValidHost;
 
         foreach ((SequenceRole role, TimeSpan interval) in sequence.All())
             _timeframes[role] = new AlfonsoTimeframeAnalyzer(interval, zoneOptions, trendOptions, rangeOptions);
@@ -67,11 +109,47 @@ public sealed class AlfonsoSequenceAnalyzer
     public ImbalanceDetectorUpdate Apply(SequenceRole role, AlfonsoBar bar) =>
         _timeframes[role].Apply(bar);
 
-    /// <summary>The alignment currently in force, resolved against module 11's table.</summary>
+    /// <summary>Live zones on one timeframe, for inventory measurement.</summary>
+    public IReadOnlyList<Imbalance> ZonesOf(SequenceRole role) => _timeframes[role].Zones;
+
+    /// <summary>
+    /// Zones on one timeframe that clear the tradeability conditions, for either side, without
+    /// consulting the prevailing scenario. The candidate path can only ever see the permitted side,
+    /// which is the conditioning that makes placement-derived distances unsafe to compare.
+    /// </summary>
+    public IReadOnlyList<Imbalance> TradeableZonesOf(
+        SequenceRole role, ImbalanceKind kind, decimal price) =>
+        _timeframes[role].TradeableZones(kind, price);
+
+    /// <summary>Cumulative record of which gate discarded each zone, for one side.</summary>
+    public AlfonsoFilterTally TallyOf(ImbalanceKind kind) =>
+        kind == ImbalanceKind.Demand ? _demandTally : _supplyTally;
+
+    /// <summary>Trend on one timeframe of the sequence, for decision-time logging.</summary>
+    public AlfonsoTrend TrendOf(SequenceRole role) => _timeframes[role].Trend.Trend;
+
+    public AlfonsoTrend? ConfirmationTrend => _confirmation?.Trend.Trend;
+
+    public DateTimeOffset? ConfirmationClosedAt { get; private set; }
+
+    /// <summary>Feed every closed 5m candle once; never sample a 15m candle into this detector.</summary>
+    public bool ApplyConfirmation(AlfonsoBar bar, DateTimeOffset availableAt)
+    {
+        if (_confirmation is null)
+            return false;
+        DateTimeOffset close = bar.OpenTime + _confirmation.Interval;
+        if (close > availableAt || (ConfirmationClosedAt is DateTimeOffset previous && close <= previous))
+            return false;
+        _confirmation.Apply(bar);
+        ConfirmationClosedAt = close;
+        return true;
+    }
+
+    /// <summary>The alignment currently in force, resolved against the selected entry policy.</summary>
     public ScenarioResolution Scenario => ScenarioMatrix.Resolve(
         _timeframes[SequenceRole.Top].Trend.Trend,
         _timeframes[SequenceRole.Middle].Trend.Trend,
-        _timeframes[SequenceRole.Lower].Trend.Trend);
+        _timeframes[SequenceRole.Lower].Trend.Trend, _entryPolicy, ConfirmationTrend);
 
     /// <summary>
     /// Zones the rules permit an order at right now, nearest to price first.
@@ -84,7 +162,13 @@ public sealed class AlfonsoSequenceAnalyzer
     {
         ScenarioResolution scenario = Scenario;
         if (!scenario.CanTrade || scenario.Side is not ImbalanceKind side)
+        {
+            _demandTally.ScenarioBlocked++;
+            _supplyTally.ScenarioBlocked++;
             return [];
+        }
+
+        AlfonsoFilterTally tally = TallyOf(side);
 
         bool buying = side == ImbalanceKind.Demand;
 
@@ -95,7 +179,10 @@ public sealed class AlfonsoSequenceAnalyzer
         {
             SupplyDemandRange range = _timeframes[role].Range;
             if (buying ? !range.AllowsBuying : !range.AllowsSelling)
+            {
+                tally.RangeBlocked++;
                 return [];
+            }
         }
 
         // Module 6: "When an imbalance on timeframe X has gained control, trading at timeframes
@@ -113,7 +200,10 @@ public sealed class AlfonsoSequenceAnalyzer
                     continue;
 
                 if (_timeframes[role].InControl is ZoneInControl held && held.Kind != side)
+                {
+                    tally.ControlBlocked++;
                     return [];
+                }
             }
         }
 
@@ -126,9 +216,42 @@ public sealed class AlfonsoSequenceAnalyzer
             // Module 5: "Once a certain timeframe is over-extended, that timeframe can no longer be
             // used to place a trade."
             if (timeframe.Trend.IsOverExtended)
+            {
+                tally.OverExtended++;
                 continue;
+            }
 
-            foreach (Imbalance zone in timeframe.TradeableZones(side, price))
+            IReadOnlyList<Imbalance> tradeable = timeframe.TradeableZones(side, price);
+
+            // Which of the three conditions inside TradeableZones removed each zone, and whether the
+            // zone was near enough to price for its removal to change anything.
+            foreach (Imbalance zone in timeframe.Zones)
+            {
+                if (zone.Kind != side)
+                    continue;
+
+                bool near = ReferenceAtr is decimal unit && unit > 0m &&
+                    Math.Abs(price - zone.Proximal) / unit <= ReachableAtr;
+
+                if (!zone.MeetsTradeabilityCriteria)
+                {
+                    if (near) tally.BarNear++; else tally.BarFar++;
+                }
+                else if (zone.State is not (ImbalanceState.Fresh or ImbalanceState.Tested))
+                {
+                    if (near) tally.StateNear++; else tally.StateFar++;
+                }
+                else if (timeframe.HasPendingTest(zone))
+                {
+                    if (near) tally.PendingNear++; else tally.PendingFar++;
+                }
+                else if (near)
+                {
+                    tally.PassedNear++;
+                }
+            }
+
+            foreach (Imbalance zone in tradeable)
             {
                 // Module 7: "We will only trade the first pullback to an imbalance, that is, only
                 // fresh levels." A tested level needs confirmation - which module 10 defines and
@@ -136,17 +259,30 @@ public sealed class AlfonsoSequenceAnalyzer
                 Imbalance? host = null;
                 if (entry.NestedIn is SequenceRole hostRole)
                 {
-                    host = Nesting.FindHost(zone, _timeframes[hostRole].Zones);
+                    host = Nesting.FindHost(zone, EligibleHosts(_timeframes[hostRole].Zones));
                     if (host is null)
+                    {
+                        tally.NoHost++;
                         continue;
+                    }
                 }
 
                 // Fresh levels take the set-and-forget path. A tested one needs confirmation, and
                 // that means a host: the bigger-timeframe imbalance the new zone was created at.
-                bool acceptable = AcceptsLevel(zone, _freshLevelsOnly) ||
+                // Confirmation entry acts on the first pullback rather than ahead of it, so the
+                // zone is necessarily Tested by the time the entry is judged. Fresh-only would drop
+                // every such zone from this list before the agent ever saw it - which it did, giving
+                // 2 trades across six instruments and 80,422 candidates rejected for never having
+                // been reached. Module 7's "first pullback only" is still honoured: TestCount 1.
+                bool firstPullback = _confirmationEntryMode &&
+                    zone.State == ImbalanceState.Tested && zone.TestCount <= 1;
+                bool acceptable = AcceptsLevel(zone, _freshLevelsOnly) || firstPullback ||
                     (_allowConfirmationEntries && IsConfirmed(zone, host));
                 if (!acceptable)
+                {
+                    tally.NotAccepted++;
                     continue;
+                }
 
                 // A zone stays plannable until price breaks through its distal - at which point the
                 // zone engine has eliminated it anyway.
@@ -158,7 +294,24 @@ public sealed class AlfonsoSequenceAnalyzer
                 // above it, which is a small fraction of arrivals.
                 bool live = side == ImbalanceKind.Demand ? price > zone.Distal : price < zone.Distal;
                 if (!live)
+                {
+                    tally.NotLive++;
                     continue;
+                }
+
+                if (!HasRoomToTarget(zone, side, timeframe.Zones))
+                {
+                    tally.NoRoom++;
+                    continue;
+                }
+
+                if (ZoneScorer.Grade(zone, _zoneOptions) < _minimumGrade)
+                {
+                    tally.GradeTooLow++;
+                    continue;
+                }
+
+                tally.Passed++;
 
                 candidates.Add(new TradeCandidate
                 {
@@ -174,6 +327,79 @@ public sealed class AlfonsoSequenceAnalyzer
         return candidates
             .OrderBy(candidate => Math.Abs(candidate.Zone.Proximal - price))
             .ToArray();
+    }
+
+    /// <summary>
+    /// Whether the nearest opposing zone leaves enough room for the target to be reached.
+    /// <para>
+    /// Module 7 requires "3:1 profit margin or more to the opposing level" alongside the 2:1 impulse
+    /// and consolidation away. It is a reachability test, not a quality one: a demand entry with
+    /// supply 1.5R above it cannot make a 3:1 target however well the zone scores.
+    /// </para>
+    /// <para>
+    /// Only zones on the SAME timeframe are considered obstacles, and an absent opposing zone is
+    /// treated as open road - module 6 says the same of the range, that with nothing opposing there
+    /// is no measurement to make rather than a prohibition.
+    /// </para>
+    /// </summary>
+    private bool HasRoomToTarget(Imbalance zone, ImbalanceKind side, IReadOnlyList<Imbalance> onTimeframe)
+    {
+        if (_minimumProfitMargin <= 0m)
+            return true;
+
+        decimal risk = Math.Abs(zone.Proximal - zone.StopPrice(_stopPadding));
+        if (risk <= 0m)
+            return false;
+
+        ImbalanceKind opposing = side == ImbalanceKind.Demand
+            ? ImbalanceKind.Supply
+            : ImbalanceKind.Demand;
+
+        // The first opposing level price would meet on the way to target is the one that matters.
+        decimal? obstacle = onTimeframe
+            .Where(other => other.Kind == opposing &&
+                other.State != ImbalanceState.Eliminated &&
+                (side == ImbalanceKind.Demand
+                    ? other.Proximal > zone.Proximal
+                    : other.Proximal < zone.Proximal))
+            .Select(other => (decimal?)other.Proximal)
+            .DefaultIfEmpty(null)
+            .Aggregate((a, b) => side == ImbalanceKind.Demand
+                ? (a is null ? b : b is null ? a : Math.Min(a.Value, b.Value))
+                : (a is null ? b : b is null ? a : Math.Max(a.Value, b.Value)));
+
+        if (obstacle is not decimal level)
+            return true;
+
+        return Math.Abs(level - zone.Proximal) >= risk * _minimumProfitMargin;
+    }
+
+    /// <summary>
+    /// The higher-timeframe zones a nested entry may lean on.
+    /// <para>
+    /// Module 7's closing rule: "If any of the three timeframes stops creating impulses that
+    /// consolidate away or the newly created imbalance doesn't score high, it will negate lower
+    /// timeframe imbalances nested at those HTF impulses that do not consolidate away. Remember that
+    /// not all impulses become correct imbalances, but all imbalances are made of impulses."
+    /// </para>
+    /// <para>
+    /// So the host has to be a real imbalance, not merely a structure the engine is tracking. That
+    /// distinction is not cosmetic here: the zone engine deliberately keeps every base it finds,
+    /// accomplished or not, because trendlines are drawn from valleys and peaks rather than from
+    /// validated imbalances - which meant a nested entry could previously be admitted by a
+    /// higher-timeframe structure that never accomplished anything and is not an imbalance under
+    /// module 4 at all. When a minimum grade is configured, the second half of the rule - "doesn't
+    /// score high" - applies to the host as well.
+    /// </para>
+    /// </summary>
+    private IEnumerable<Imbalance> EligibleHosts(IEnumerable<Imbalance> zones)
+    {
+        if (!_requireValidHost)
+            return zones;
+
+        return zones.Where(host =>
+            host.Accomplished != Accomplishment.None &&
+            ZoneScorer.Grade(host, _zoneOptions) >= _minimumGrade);
     }
 
     internal static bool AcceptsLevel(Imbalance zone, bool freshLevelsOnly) =>

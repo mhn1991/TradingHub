@@ -23,6 +23,7 @@ Books/
 
 # Dashboard generated / local market data (regenerate sample via DashboardExporter)
 Dashboard/public/data/backtests/*.json
+Dashboard/public/data/backtests/*.lock
 !Dashboard/public/data/backtests/.gitkeep
 Dashboard/public/data/backtests/simulations/
 Dashboard/public/data/simulations/
@@ -37,3 +38,7 @@ artifacts/*.zip.sha256
 resume
 resume~
 *~
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc

@@ -42,8 +42,74 @@ public sealed record AlfonsoTrendOptions
     /// <summary>Consecutive same-direction extended range candles that mark over-extension.</summary>
     public int OverExtensionExtendedRangeCandles { get; init; } = 3;
 
-    /// <summary>Body-to-range ratio at which a candle counts as an ERC for over-extension.</summary>
-    public decimal ExtendedRangeBodyRatio { get; init; } = 0.80m;
+    /// <summary>
+    /// Whether a swing is anchored on the bar that printed its extreme rather than on the last bar of
+    /// its base. Module 3 connects trendlines through the valleys and peaks themselves - the swing
+    /// low or high - and <see cref="SwingPoint.Index"/> feeds `TrendlineBuilder.Fit`'s slope
+    /// arithmetic, so the two have to name the same bar.
+    /// <para>
+    /// Default true. False restores the base-end anchoring every result before 2026-09-05 was
+    /// measured under, where the anchor price sat on a bar that never traded it in about 36% of
+    /// bases (3.54).
+    /// </para>
+    /// </summary>
+    public bool AnchorSwingsAtExtreme { get; init; } = true;
+
+    /// <summary>
+    /// Whether the structural condition is re-checked while a trend RUNS, not only when one is
+    /// established.
+    /// <para>
+    /// Module 5 states it as a standing condition, not an entry test: an uptrend is demand created
+    /// and respected and supply eliminated, "in the context of new bullish impulses where each
+    /// successive peak and trough is higher than the ones found earlier". The state machine
+    /// otherwise latches - once established, a trend survives any rally that neither breaks its
+    /// trendline nor eliminates an opposing zone, so a 15m downtrend can stand through twelve
+    /// consecutive higher highs and higher lows (3.64).
+    /// </para>
+    /// <para>
+    /// Off by default: it is a real behaviour change and needs its own A/B, exactly as 3.53 and 3.54
+    /// did. Note this is independent of <see cref="RequireStructuralAgreement"/>, which gates only
+    /// establishment - turning that on does not release an already-latched trend.
+    /// </para>
+    /// </summary>
+    public bool MaintainStructuralAgreement { get; init; }
+
+    /// <summary>
+    /// Experimental close-only invalidation against the latest confirmed price swing (two closed
+    /// candles on each side). Independent of zone-derived trendlines and structural agreement.
+    /// A break makes the timeframe neutral, never directly reverses it. Off for baseline parity.
+    /// </summary>
+    public bool InvalidateOnPriceStructureBreak { get; init; }
+
+    /// <summary>
+    /// Whether a fitted trendline whose slope contradicts its own direction is refused.
+    /// <para>
+    /// Default true: module 3 draws a bullish trendline under rising valleys, and `Fit`'s
+    /// clear-every-candle adjustment can invert that (3.65 - 39% of live lines). Set false to restore
+    /// the pre-2026-09-06 behaviour.
+    /// </para>
+    /// </summary>
+    public bool RejectContradictingTrendlines { get; init; } = true;
+
+    /// <summary>
+    /// Body-to-range ratio at which a candle counts as an ERC for over-extension. Defaulted from
+    /// <see cref="AlfonsoBar.ExtendedRangeBodyRatio"/>, module 1's definition, which the zone layer
+    /// defaults from too.
+    /// </summary>
+    public decimal ExtendedRangeBodyRatio { get; init; } = AlfonsoBar.ExtendedRangeBodyRatio;
+
+    /// <summary>
+    /// Whether the aggressive over-extension trendline of module 3 may be drawn: "In over-extension
+    /// with three or more consecutive CPs, the trendlines can be drawn more aggressively connecting
+    /// the last three CPs."
+    /// <para>
+    /// Off by default because the module offers it rather than requiring it - "can be drawn" - and
+    /// because it is not inert: a line that exists is a line that can be broken, and a break both
+    /// ends the trend it opposes and creates a new imbalance at the origin of the move. It applies
+    /// only while the timeframe is over-extended, and only where no ordinary line is available.
+    /// </para>
+    /// </summary>
+    public bool OverExtensionTrendlines { get; init; }
 
     /// <summary>
     /// Whether a trendline break needs a candle to CLOSE beyond the line, rather than the whole
@@ -65,6 +131,19 @@ public sealed record AlfonsoTrendOptions
     public bool RequireValidZoneForTrendChange { get; init; } = true;
 
     /// <summary>
+    /// Whether a zone must also have met the tradeability bar - module 7's 2:1 imbalance and a
+    /// departure that is not weak - before its elimination is allowed to move the trend.
+    /// <para>
+    /// Default false, which is the behaviour every result before 2026-09-01 was measured under.
+    /// The measurement that prompted this option: the impulse thresholds turned out to reach only
+    /// <c>Strength</c> and <c>MeetsTradeabilityCriteria</c>, never zone creation and never this
+    /// method, so the 2:1 rule had no influence at all on the trend read. Setting this true is the
+    /// test of whether that decoupling is why the trend layer shows no directional edge.
+    /// </para>
+    /// </summary>
+    public bool RequireTradeableZoneForTrendChange { get; init; } = false;
+
+    /// <summary>
     /// Whether a trend must also agree with market structure - ascending peaks AND troughs for an
     /// uptrend, descending for a downtrend.
     /// <para>
@@ -81,8 +160,24 @@ public sealed record AlfonsoTrendOptions
     /// Structure that cannot be read - fewer than two swings of either kind - does not veto. The
     /// rule is a context requirement, and absence of context is not disagreement.
     /// </para>
+    /// <para>
+    /// Default false as of 2026-09-02. It was adopted on a trend-accuracy gain (Uptrend 55.0% ->
+    /// 62.5%, calls halved 1,641 -> 819) that did not survive contact with trading results: on six
+    /// instruments it costs 70% of trades (127 -> 38) while the difference in avgR is -0.2077 with a
+    /// 95% CI of [-0.679, +0.263], which contains zero. So it is not demonstrably harmful to edge -
+    /// it just discards most of the sample for no measurable benefit, which triples the noise on
+    /// every subsequent measurement. Turned off on statistical-power grounds, not P&amp;L grounds.
+    /// Re-enable with --alfonso-structural-agreement.
+    /// </para>
     /// </summary>
-    public bool RequireStructuralAgreement { get; init; } = true;
+    public bool RequireStructuralAgreement { get; init; }
+
+    /// <summary>
+    /// Experimental establishment/reversal gate: two confirmed non-continuation zone peaks and
+    /// valleys must strictly agree with the candidate. Missing or flat structure is not confirmation.
+    /// Existing accomplishment requirements still apply. Off for baseline parity.
+    /// </summary>
+    public bool RequireConfirmedTrendStructure { get; init; }
 }
 
 /// <summary>
@@ -103,6 +198,13 @@ public sealed class AlfonsoTrendDetector
     private readonly List<DateTimeOffset> _times = [];
     private readonly List<SwingPoint> _valleys = [];
     private readonly List<SwingPoint> _peaks = [];
+
+    /// <summary>
+    /// Continuation patterns, kept separately from the swings. They are barred from ordinary
+    /// trendlines and are only ever read by the over-extension line.
+    /// </summary>
+    private readonly List<SwingPoint> _continuationValleys = [];
+    private readonly List<SwingPoint> _continuationPeaks = [];
     private readonly HashSet<Trendline> _brokenLines = [];
     private readonly Queue<Trendline> _brokenLineOrder = [];
 
@@ -114,6 +216,10 @@ public sealed class AlfonsoTrendDetector
 
     private AlfonsoTrend _trend = AlfonsoTrend.Unknown;
     private bool _undermined;
+
+    private decimal _lastClose;
+    private decimal? _confirmedPriceHigh;
+    private decimal? _confirmedPriceLow;
 
     /// <summary>Eliminations that established the current trend, kept for reporting only.</summary>
     private int _establishedWith;
@@ -148,12 +254,19 @@ public sealed class AlfonsoTrendDetector
         _times.Add(bar.OpenTime);
         int index = _highs.Count - 1;
 
+        _lastClose = bar.Close;
+        if (_options.InvalidateOnPriceStructureBreak)
+            RecordConfirmedPriceSwings(index);
+
         TrackOverExtension(bar, update);
         RecordSwings(update);
         ApplyEliminations(update);
 
-        Trendline? bullish = TrendlineBuilder.Bullish(_valleys, _highs, _lows, _times, index);
-        Trendline? bearish = TrendlineBuilder.Bearish(_peaks, _highs, _lows, _times, index);
+        Trendline? bullish = TrendlineBuilder.Bullish(_valleys, _highs, _lows, _times, index,
+            _options.RejectContradictingTrendlines);
+        Trendline? bearish = TrendlineBuilder.Bearish(_peaks, _highs, _lows, _times, index,
+            _options.RejectContradictingTrendlines);
+        (bullish, bearish) = WithOverExtensionLines(bullish, bearish, index);
 
         BreakTrendlines(bar, index, bullish, bearish);
         if (bullish is not null && _brokenLines.Contains(bullish))
@@ -193,11 +306,34 @@ public sealed class AlfonsoTrendDetector
 
         int previousIndex = _highs.Count - 1;
         Trendline? bullish = TrendlineBuilder.Bullish(
-            _valleys, _highs, _lows, _times, previousIndex);
+            _valleys, _highs, _lows, _times, previousIndex, _options.RejectContradictingTrendlines);
         Trendline? bearish = TrendlineBuilder.Bearish(
-            _peaks, _highs, _lows, _times, previousIndex);
+            _peaks, _highs, _lows, _times, previousIndex, _options.RejectContradictingTrendlines);
+        (bullish, bearish) = WithOverExtensionLines(bullish, bearish, previousIndex);
 
         BreakTrendlines(bar, _highs.Count, bullish, bearish);
+    }
+
+    /// <summary>
+    /// Supplies module 3's aggressive continuation-pattern line where an ordinary one cannot be
+    /// drawn and the timeframe is over-extended. An ordinary line always wins: the module offers the
+    /// CP line as what to do when the market prints no peaks or valleys to connect, not as a
+    /// replacement for the ones it does print.
+    /// </summary>
+    private (Trendline? Bullish, Trendline? Bearish) WithOverExtensionLines(
+        Trendline? bullish, Trendline? bearish, int index)
+    {
+        if (!_options.OverExtensionTrendlines || !IsOverExtended || index < 0)
+            return (bullish, bearish);
+
+        bullish ??= TrendlineBuilder.OverExtended(
+            _continuationValleys, _lows, _times, index, TrendlineDirection.Bullish,
+            _options.OverExtensionContinuationPatterns);
+        bearish ??= TrendlineBuilder.OverExtended(
+            _continuationPeaks, _highs, _times, index, TrendlineDirection.Bearish,
+            _options.OverExtensionContinuationPatterns);
+
+        return (bullish, bearish);
     }
 
     private bool IsOverExtended =>
@@ -247,29 +383,40 @@ public sealed class AlfonsoTrendDetector
     {
         foreach (Imbalance zone in update.Created)
         {
-            if (zone.IsContinuationPattern)
+            // Continuation patterns are only ever read by the over-extension line, so when that is
+            // off they are not worth the index lookup - which is a linear scan of every bar seen.
+            if (zone.IsContinuationPattern && !_options.OverExtensionTrendlines)
                 continue;
 
-            int index = _times.FindLastIndex(time => time == zone.BaseEnd);
+            // Module 3 draws through the extreme itself, so that is the bar the line is anchored on.
+            DateTimeOffset at = _options.AnchorSwingsAtExtreme ? zone.DistalAt : zone.BaseEnd;
+            int index = _times.FindLastIndex(time => time == at);
             if (index < 0)
                 continue;
 
             SwingPoint swing = new()
             {
                 Index = index,
-                At = zone.BaseEnd,
+                At = at,
                 Price = zone.Distal,
                 Kind = zone.Kind
             };
 
-            if (zone.Kind == ImbalanceKind.Demand)
-                _valleys.Add(swing);
-            else
-                _peaks.Add(swing);
+            List<SwingPoint> store = (zone.IsContinuationPattern, zone.Kind) switch
+            {
+                (true, ImbalanceKind.Demand) => _continuationValleys,
+                (true, _) => _continuationPeaks,
+                (false, ImbalanceKind.Demand) => _valleys,
+                _ => _peaks
+            };
+
+            store.Add(swing);
         }
 
         Cap(_valleys);
         Cap(_peaks);
+        Cap(_continuationValleys);
+        Cap(_continuationPeaks);
     }
 
     private static void Cap(List<SwingPoint> swings)
@@ -287,6 +434,9 @@ public sealed class AlfonsoTrendDetector
             // the trend. Structures that never achieved anything are tracked for their swings, not
             // for their significance.
             if (_options.RequireValidZoneForTrendChange && zone.Accomplished == Accomplishment.None)
+                continue;
+
+            if (_options.RequireTradeableZoneForTrendChange && !zone.MeetsTradeabilityCriteria)
                 continue;
 
             if (zone.Kind == ImbalanceKind.Supply)
@@ -405,11 +555,55 @@ public sealed class AlfonsoTrendDetector
     /// explicit that it is "each successive peak AND trough".
     /// </para>
     /// </summary>
-    private bool StructureAgrees(AlfonsoTrend candidate)
-    {
-        if (!_options.RequireStructuralAgreement)
-            return true;
+    /// <summary>Establish-time gate: the structural test, applied only when it is switched on.</summary>
+    private bool StructureAgrees(AlfonsoTrend candidate) =>
+        (!_options.RequireStructuralAgreement || StructureMatches(candidate)) &&
+        (!_options.RequireConfirmedTrendStructure || ConfirmedStructureMatches(candidate));
 
+    private void RecordConfirmedPriceSwings(int index)
+    {
+        if (index < 4)
+            return;
+
+        int pivot = index - 2;
+        bool high = true;
+        bool low = true;
+        for (int other = pivot - 2; other <= pivot + 2; other++)
+        {
+            if (other == pivot)
+                continue;
+            high &= _highs[pivot] > _highs[other];
+            low &= _lows[pivot] < _lows[other];
+        }
+
+        if (high)
+            _confirmedPriceHigh = _highs[pivot];
+        if (low)
+            _confirmedPriceLow = _lows[pivot];
+    }
+
+    private bool PriceStructureAgrees(AlfonsoTrend candidate) =>
+        !_options.InvalidateOnPriceStructureBreak || (candidate == AlfonsoTrend.Uptrend
+            ? _confirmedPriceLow is not decimal low || _lastClose >= low
+            : _confirmedPriceHigh is not decimal high || _lastClose <= high);
+
+    /// <summary>
+    /// Module 5's structural condition itself, independent of which switch is asking. "Each
+    /// successive peak and trough is higher than the ones found earlier" for an uptrend, and the
+    /// mirror for a downtrend.
+    /// </summary>
+    private bool ConfirmedStructureMatches(AlfonsoTrend candidate)
+    {
+        if (_peaks.Count < 2 || _valleys.Count < 2)
+            return false;
+
+        return candidate == AlfonsoTrend.Uptrend
+            ? _peaks[^1].Price > _peaks[^2].Price && _valleys[^1].Price > _valleys[^2].Price
+            : _peaks[^1].Price < _peaks[^2].Price && _valleys[^1].Price < _valleys[^2].Price;
+    }
+
+    private bool StructureMatches(AlfonsoTrend candidate)
+    {
         // Too little structure to read is not a disagreement.
         if (_peaks.Count < 2 || _valleys.Count < 2)
             return true;
@@ -424,14 +618,23 @@ public sealed class AlfonsoTrendDetector
 
     private void Resolve(Trendline? bullish, Trendline? bearish)
     {
+        if (_trend is AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend && !PriceStructureAgrees(_trend))
+        {
+            decimal? level = _trend == AlfonsoTrend.Uptrend ? _confirmedPriceLow : _confirmedPriceHigh;
+            EnterOutOfAlignment($"Close {_lastClose} broke confirmed price swing {level} against {_trend}.");
+            return;
+        }
+
         bool upByLine = bullish is not null && _supplyEliminated >= _options.EliminationsWithTrendline;
         bool upAlone = (!_options.FallbackRequiresNoTrendline || bullish is null) &&
             _supplyEliminated >= _options.EliminationsWithoutTrendline;
         bool downByLine = bearish is not null && _demandEliminated >= _options.EliminationsWithTrendline;
         bool downAlone = (!_options.FallbackRequiresNoTrendline || bearish is null) &&
             _demandEliminated >= _options.EliminationsWithoutTrendline;
-        bool up = (upByLine || upAlone) && StructureAgrees(AlfonsoTrend.Uptrend);
-        bool down = (downByLine || downAlone) && StructureAgrees(AlfonsoTrend.Downtrend);
+        bool up = (upByLine || upAlone) && StructureAgrees(AlfonsoTrend.Uptrend) &&
+            PriceStructureAgrees(AlfonsoTrend.Uptrend);
+        bool down = (downByLine || downAlone) && StructureAgrees(AlfonsoTrend.Downtrend) &&
+            PriceStructureAgrees(AlfonsoTrend.Downtrend);
 
         if (_trend is AlfonsoTrend.Uptrend or AlfonsoTrend.Downtrend)
         {
@@ -443,6 +646,15 @@ public sealed class AlfonsoTrendDetector
             if (opposite)
             {
                 Establish(_trend == AlfonsoTrend.Uptrend, downByLine, upByLine);
+                return;
+            }
+
+            // Module 5 states the structural condition as a standing one. Without this the trend
+            // latches: it survives any move that neither breaks its trendline nor eliminates an
+            // opposing zone, however far price runs the other way (3.64).
+            if (_options.MaintainStructuralAgreement && !StructureMatches(_trend))
+            {
+                EnterOutOfAlignment($"Structure no longer agrees with {_trend}.");
                 return;
             }
 
@@ -464,7 +676,11 @@ public sealed class AlfonsoTrendDetector
 
         if (!up && !down)
         {
-            if (_trend == AlfonsoTrend.Unknown)
+            if (_options.RequireConfirmedTrendStructure &&
+                ((upByLine || upAlone) && !ConfirmedStructureMatches(AlfonsoTrend.Uptrend) ||
+                 (downByLine || downAlone) && !ConfirmedStructureMatches(AlfonsoTrend.Downtrend)))
+                _reason = "Accomplishment present; waiting for two confirmed peaks and valleys agreeing with its direction.";
+            else if (_trend == AlfonsoTrend.Unknown)
                 _reason = $"No accomplishment yet (supply {_supplyEliminated}, demand {_demandEliminated}).";
             return;
         }

@@ -72,6 +72,18 @@ public enum ImbalanceState
 }
 
 /// <summary>
+/// Where inside a zone the entry is planned. Module 10 gives both as options on the same imbalance.
+/// </summary>
+public enum ZoneEntryPlacement
+{
+    /// <summary>"Take the full imbalance based on your entry timeframe." Entry at the proximal line.</summary>
+    Proximal,
+
+    /// <summary>"Use half the width of the original imbalance." Entry half way to the distal line.</summary>
+    Midpoint
+}
+
+/// <summary>
 /// A supply or demand imbalance, as module 4 defines it: a basing structure bounded by a proximal
 /// line (nearest current price) and a distal line (furthest), created by an impulse that
 /// accomplished something and consolidated away.
@@ -104,6 +116,18 @@ public sealed record Imbalance
     public required DateTimeOffset BaseEnd { get; init; }
 
     /// <summary>Open time of the candle that confirmed the zone, i.e. completed consolidation away.</summary>
+    /// <summary>
+    /// The bar that actually printed <see cref="Distal"/> - the valley's low or the peak's high.
+    /// <para>
+    /// Distinct from <see cref="BaseEnd"/> whenever the base spans more than one candle and its
+    /// extreme did not land on the last one, which on real H4 data is about 63% of multi-candle bases
+    /// (3.54). Module 3 connects trendlines through the swing extremes, so the trend layer needs the
+    /// bar the extreme is on; anchoring at <see cref="BaseEnd"/> instead put the anchor price on a
+    /// bar that never traded it and shortened the span the slope divides by.
+    /// </para>
+    /// </summary>
+    public required DateTimeOffset DistalAt { get; init; }
+
     public required DateTimeOffset ConfirmedAt { get; init; }
 
     /// <summary>How many candles formed the base. Module 7 caps this at 4-6.</summary>
@@ -190,15 +214,27 @@ public sealed record Imbalance
     }
 
     /// <summary>
-    /// Target at <paramref name="rewardMultiple"/> times the risk, measured from the proximal entry
-    /// to the padded stop. Module 11: "Exit at a fixed target of 3:1, three times the width of the
+    /// Where the entry is planned inside the zone. Module 10: the full imbalance is entered at the
+    /// proximal line, the half entry "around" the middle of the level.
+    /// </summary>
+    public decimal EntryPrice(ZoneEntryPlacement placement) => placement == ZoneEntryPlacement.Midpoint
+        ? (Proximal + Distal) / 2m
+        : Proximal;
+
+    /// <summary>
+    /// Target at <paramref name="rewardMultiple"/> times the risk, measured from the entry to the
+    /// padded stop. Module 11: "Exit at a fixed target of 3:1, three times the width of the
     /// imbalance including the padding."
     /// </summary>
-    public decimal TargetPrice(decimal paddingFraction, decimal rewardMultiple)
+    public decimal TargetPrice(
+        decimal paddingFraction,
+        decimal rewardMultiple,
+        ZoneEntryPlacement placement = ZoneEntryPlacement.Proximal)
     {
-        decimal risk = Math.Abs(Proximal - StopPrice(paddingFraction));
+        decimal entry = EntryPrice(placement);
+        decimal risk = Math.Abs(entry - StopPrice(paddingFraction));
         return Kind == ImbalanceKind.Demand
-            ? Proximal + (risk * rewardMultiple)
-            : Proximal - (risk * rewardMultiple);
+            ? entry + (risk * rewardMultiple)
+            : entry - (risk * rewardMultiple);
     }
 }

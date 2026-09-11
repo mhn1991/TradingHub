@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""Build the Alfonso trade-inspection page - the artifact described in PROJECT_STATE.md 3.54.
+
+Reads both arms of a BacktestRunner A/B, matches trades across arms by setup id, recovers each
+trade's zone geometry, slices a candle window per trade from the historical cache, and injects the
+result into alfonso_trade_viz.template.html.
+
+  ./tools/alfonso_trade_viz.py --root /mnt/storage/scratch/alfonso/m3ab --out trades.html
+
+ZONE RECOVERY
+-------------
+The logged `setupReason` rounds prices to two decimals, which is unusable on FX - every EUR/USD zone
+reads "1.17/1.17". The trade record does not round, so the zone is reconstructed from entry and stop
+instead. Entry is the proximal line (placement is Proximal by default and the 3.53/3.54 runs used
+defaults); the stop is the distal padded by 25% of the zone width, so
+
+    distal = (stop + padding * proximal) / (1 + padding)
+
+Checked against the two-decimal value in `stopSource` on every trade - a run made with
+--alfonso-half-entry puts the entry at the midpoint instead, the inversion does not hold, and the
+mismatch check below fails loudly rather than drawing a wrong zone.
+
+CANDLES
+-------
+Windows are aggregated from 1m cache data to roughly 240 bars, so the interval differs per trade and
+is reported on each chart. Bucket indices are emitted rather than timestamps, so market gaps stay
+gaps instead of becoming flat bars.
+"""
+import argparse
+import glob
+import gzip
+import json
+import os
+import re
+import sys
+from bisect import bisect_right
+from datetime import datetime, timezone
+
+PADDING = 0.25
+
+INSTRUMENTS = {
+    "gold":   ("XAU/USD", "METAL_XAU_USD_1m_20251103_20260723", 2),
+    "silver": ("XAG/USD", "METAL_XAG_USD_1m_20251124_20260723", 3),
+    "nas100": ("NAS100", "CFD_NAS100_USD_1m_20251124_20260723", 1),
+    "us30":   ("US30", "CFD_US30_USD_1m_20251124_20260723", 1),
+    "eurusd": ("EUR/USD", "FX_EUR_USD_1m_20251124_20260723", 5),
+    "gbpjpy": ("GBP/JPY", "FX_GBP_JPY_1m_20251124_20260723", 3),
+}
+
+ZONE = re.compile(r"Zone [\d.]+/([\d.]+) \(([A-Za-z]+), ([\d.]+):1, ([^)]*)\)")
+STATED = re.compile(r"distal ([\d.]+) padded")
+
+# The agent's timeframe sequence. The 3.53/3.54 runs passed no --alfonso-top/middle/lower, so these
+# are AlfonsoStrategyOptions' defaults - module 8's scalping sequence. The zone an order rests on
+# belongs to one of these, which is NOT the interval the chart is drawn at: that is chosen per trade
+# to fit the window. Pass --sequence when a run used a different one.
+DEFAULT_SEQUENCE = "4h,1h,15m"
+
+
+def repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def cache_dir():
+    return os.environ.get("ALFONSO_CACHE") or os.path.join(repo_root(), ".cache", "historical")
+
+
+def default_root():
+    return os.path.join(os.environ.get("ALFONSO_DATA") or "/mnt/storage/scratch/alfonso", "m3ab")
+
+
+def ts(text):
+    return datetime.fromisoformat(text).replace(tzinfo=timezone.utc).timestamp()
+
+
+def read_trades(root, arm, tag):
+    path = os.path.join(root, f"{arm}-{tag}", "simulation-result.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as handle:
+        return {t["setupId"]: t for t in json.load(handle)["strategies"][0]["trades"]}
+
+
+def after_the_stop(trade, bars, times, horizon_hours=24):
+    """For a stopped-out trade: how far past its own stop it exited, and whether its target printed
+    afterwards anyway.
+
+    3.63: 84% of stop-outs lose more than the 1R they planned, and most of them go on to print the
+    target within a day - the direction is often right and the stop is what fails. `recoveredIn` is a
+    diagnostic, NOT a counterfactual P&L: without the stop, price could have run much further against
+    the position first.
+    """
+    if trade["exitReason"] != "InitialStopLoss":
+        return None, None
+    risk = abs(trade["entryPrice"] - trade["stopLossPrice"])
+    sell = trade["side"] == "Sell"
+    slip = (trade["exitPrice"] - trade["stopLossPrice"]) if sell else (trade["stopLossPrice"] - trade["exitPrice"])
+    closed = ts(trade["closedAt"])
+    target = trade["takeProfitPrice"]
+    end = closed + horizon_hours * 3600
+    for i in range(bisect_right(times, closed), len(bars)):
+        t, _o, high, low, _c = bars[i]
+        if t > end:
+            break
+        if (low <= target) if sell else (high >= target):
+            return slip / risk if risk else None, (t - closed) / 3600.0
+    return slip / risk if risk else None, None
+
+
+def quote_rate(t):
+    """Quote-currency to account-currency rate for one trade, derived from its own P&L.
+
+    `quantity` is in units of the base currency, so |entry - stop| * quantity is denominated in the
+    QUOTE currency while netProfitLoss is in the account currency. For a USD-quoted instrument these
+    coincide and the rate is 1.0; for GBP/JPY on a USD account it is about 0.0063, and dividing an
+    unconverted risk into a USD P&L understates R by a factor of ~158 - which silently removed
+    GBP/JPY from every pooled average (3.63).
+
+    Derived per trade rather than taken from --quote-rate so it cannot drift from the run.
+    """
+    move = (t["entryPrice"] - t["exitPrice"]) if t["side"] == "Sell" else (t["exitPrice"] - t["entryPrice"])
+    denominator = move * t["quantity"]
+    if abs(denominator) < 1e-9:
+        return 1.0
+    rate = t["grossProfitLoss"] / denominator
+    # A rate far from a plausible FX quote means the trade is degenerate, not that the market moved.
+    return rate if 1e-6 < rate < 1e6 else 1.0
+
+
+def true_r(trade):
+    """Profit per unit of risk actually taken, with the risk converted to the account currency."""
+    risk = abs(trade["entryPrice"] - trade["stopLossPrice"]) * trade["quantity"] * quote_rate(trade)
+    return trade["netProfitLoss"] / risk if risk else 0.0
+
+
+def entry_role(reason):
+    """Which timeframe's zone the order was planned at, read from the scenario's action sentence."""
+    action = reason.split(".")[1] if reason.count(".") >= 1 else reason
+    if "at the middle timeframe" in action:
+        return "middle"
+    if "at lower" in action:
+        return "lower"
+    if "at top" in action:
+        return "top"
+    return None
+
+
+def parse(trade, tag, arm, label, digits, bars=None, times=None):
+    reason = trade.get("setupReason") or ""
+    match = ZONE.search(reason)
+    strength, ratio, accs = None, None, []
+    if match:
+        strength, ratio = match.group(2), float(match.group(3))
+        accs = [a.strip() for a in match.group(4).split(",") if a.strip()]
+
+    entry, stop = trade["entryPrice"], trade["stopLossPrice"]
+    distal = (stop + PADDING * entry) / (1 + PADDING)
+
+    stated = STATED.search(trade.get("stopSource") or "")
+    if stated:
+        want = float(stated.group(1))
+        if abs(distal - want) > 0.006 * max(1.0, abs(want)):
+            raise SystemExit(
+                f"zone recovery failed on {tag} {trade['setupId']}: reconstructed distal {distal:.6f} "
+                f"but the run logged {want}. A midpoint entry (--alfonso-half-entry) breaks the "
+                f"inversion; re-check before trusting the drawn zones.")
+
+    opened, closed = ts(trade["openedAt"]), ts(trade["closedAt"])
+    slip_r, recovered_in = (after_the_stop(trade, bars, times) if bars else (None, None))
+    return {
+        "id": f"{tag}:{trade['setupId']}",
+        "inst": tag, "label": label, "digits": digits, "arm": arm,
+        "side": trade["side"],
+        "open": opened, "close": closed, "dur": (closed - opened) / 60.0,
+        "entry": entry, "stop": stop,
+        "target": trade["takeProfitPrice"], "exit": trade["exitPrice"],
+        "proximal": entry, "distal": distal,
+        "exitReason": trade["exitReason"],
+        # TRUE R, not the JSON's rMultiple. 3.44: that field divides by risk PLUS an assumed
+        # round-trip cost, so it is not profit-per-risk and understates the magnitude. This matches
+        # tools/alfonso_ab_report.py, so the page's tiles reproduce 3.54's published table.
+        "r": true_r(trade), "net": trade["netProfitLoss"],
+        "mfeR": trade.get("maximumFavourableExcursionR"),
+        "mfeAt": ts(trade["maximumFavourableExcursionAt"]) if trade.get("maximumFavourableExcursionAt") else None,
+        "maeR": trade.get("maximumAdverseExcursionR"),
+        "maeAt": ts(trade["maximumAdverseExcursionAt"]) if trade.get("maximumAdverseExcursionAt") else None,
+        "strength": strength, "ratio": ratio, "accs": accs,
+        "scenario": reason.split(".")[0].strip() if reason else "",
+        "nested": "nested at" in reason,
+        "entryRole": entry_role(reason),
+        "signalAt": int(ts(trade["signalCreatedAt"])) if trade.get("signalCreatedAt") else None,
+        "slipR": round(slip_r, 3) if slip_r is not None else None,
+        "recoveredIn": round(recovered_in, 2) if recovered_in is not None else None,
+    }
+
+
+def load_candles(stem):
+    hits = sorted(glob.glob(os.path.join(cache_dir(), stem + "_*.jsonl.gz")))
+    if not hits:
+        raise SystemExit(f"no cache file matching {stem}_*.jsonl.gz in {cache_dir()}")
+    bars = []
+    with gzip.open(hits[0], "rt", encoding="utf-8-sig") as handle:
+        for line in handle:
+            row = json.loads(line)
+            if "openTime" not in row:
+                continue  # the leading manifest line
+            bars.append((ts(row["openTime"]), row["open"], row["high"], row["low"], row["close"]))
+    bars.sort()
+    return bars
+
+
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def interval_seconds(text):
+    match = re.fullmatch(r"(\d+)([smhd])", text.strip())
+    if not match:
+        raise SystemExit(f"cannot read interval {text!r}; use forms like 15m, 1h, 4h")
+    return int(match.group(1)) * UNITS[match.group(2)]
+
+
+def fixed_window(bars, step, first, last, digits):
+    """Candles on a FIXED interval spanning [first, last] - used for the context panes, where the
+    interval is the agent's own (top / lower) rather than one chosen to fit the trade."""
+    buckets = {}
+    for t, o, h, l, c in bars:
+        if t < first or t > last:
+            continue
+        key = int(t // step) * step
+        cur = buckets.get(key)
+        if cur is None:
+            buckets[key] = [o, h, l, c]
+        else:
+            cur[1] = max(cur[1], h)
+            cur[2] = min(cur[2], l)
+            cur[3] = c
+    keys = sorted(buckets)
+    if not keys:
+        return None
+    return {"step": step, "t0": keys[0],
+            "bars": [[int((k - keys[0]) // step)] + [round(v, digits) for v in buckets[k]]
+                     for k in keys]}
+
+
+def build_single(root, sequence, quiet=False):
+    """One run rather than an A/B - the mode the trade page uses when inspecting current behaviour."""
+    zone_step = interval_seconds(sequence["lower"])
+    global PANES
+    PANES = [(sequence["top"], interval_seconds(sequence["top"])),
+             (sequence["middle"], interval_seconds(sequence["middle"])),
+             (sequence["lower"], zone_step),
+             (sequence["execution"], interval_seconds(sequence["execution"]))]
+    trades, candles = [], {}
+    for tag, (label, stem, digits) in INSTRUMENTS.items():
+        path = os.path.join(root, tag, "simulation-result.json")
+        if not os.path.exists(path):
+            continue
+        with open(path) as handle:
+            rows = json.load(handle)["strategies"][0]["trades"]
+        bars = load_candles(stem)
+        for raw in rows:
+            record = parse(raw, tag, "both", label, digits, bars, [b[0] for b in bars])
+            panes = {}
+            for pane_label, step in PANES:
+                before, after = (132, 28) if step >= zone_step else (150, 40)
+                w = fixed_window(bars, step, record["open"] - before * step,
+                                 record["close"] + after * step, digits)
+                if w:
+                    panes[pane_label] = w
+            if panes:
+                candles[record["id"]] = panes
+            trades.append(record)
+        if not quiet:
+            print(f"{tag}: {len(rows)} trades")
+    return {"trades": trades, "candles": candles}
+
+
+def build(root, arms, sequence, quiet=False):
+    """`sequence` supplies the top and lower intervals the run used, so the context panes are drawn
+    on the timeframes the agent actually read rather than on a display-derived one."""
+    zone_step = interval_seconds(sequence["lower"])
+    global PANES
+    PANES = [(sequence["top"], interval_seconds(sequence["top"])),
+             (sequence["middle"], interval_seconds(sequence["middle"])),
+             (sequence["lower"], zone_step),
+             (sequence["execution"], interval_seconds(sequence["execution"]))]
+    trades, candles = [], {}
+    for tag, (label, stem, digits) in INSTRUMENTS.items():
+        a, b = read_trades(root, arms[0], tag), read_trades(root, arms[1], tag)
+        if a is None and b is None:
+            continue
+        a, b = a or {}, b or {}
+        bars = load_candles(stem)
+        times = [b[0] for b in bars]
+        for key in sorted(set(a) | set(b)):
+            arm = "both" if key in a and key in b else (arms[0] if key in a else arms[1])
+            arm = {arms[0]: "a", arms[1]: "b", "both": "both"}[arm]
+            record = parse(b.get(key) or a[key], tag, arm, label, digits, bars, times)
+            # One window per timeframe the agent reads, plus the execution interval. The page
+            # switches between them; indicators are computed client-side so four windows do not
+            # cost four copies of the indicator arrays.
+            panes = {}
+            # NB: not `label` - that name holds the instrument's label in the enclosing loop, and
+            # shadowing it here relabelled every trade after the first as "1m".
+            for pane_label, step in PANES:
+                before, after = (132, 28) if step >= zone_step else (150, 40)
+                w = fixed_window(bars, step, record["open"] - before * step,
+                                 record["close"] + after * step, digits)
+                if w:
+                    panes[pane_label] = w
+            if panes:
+                candles[record["id"]] = panes
+
+            trades.append(record)
+        if not quiet:
+            print(f"{tag}: {len(set(a) | set(b))} distinct trades")
+    return {"trades": trades, "candles": candles}
+
+
+def load_run_structure(root):
+    """The agent's OWN decision-time state, written by AlfonsoStructureLog during the run.
+
+    Keyed by the moment the order was placed, which the trade record carries as `signalCreatedAt`.
+    This replaces the standalone replay: measured against the run's own scenario text, a replay over
+    exported CSVs agreed on only 38% of 15m rows (3.67), because it reads different bars.
+    """
+    # The log records the broker instrument key (METAL:XAU/USD); the page keys on the short tag, and
+    # the file name carries it - struct-gold.jsonl.
+    out = {}
+    for path in sorted(glob.glob(os.path.join(root, "struct-*.jsonl"))):
+        tag = os.path.basename(path)[len("struct-"):-len(".jsonl")]
+        with open(path, encoding="utf-8-sig") as handle:
+            for line in handle:
+                row = json.loads(line)
+                out[(tag, row["at"])] = row["timeframes"]
+    return out
+
+
+def load_structure(path, sequence):
+    """The agent's own trendlines and live zones at each decision, from ZZAlfonsoStructureDump.
+
+    The trendlines are never serialised by a run - `AlfonsoTrendSnapshot.Line` lives on the analyzer -
+    so they are recovered by replaying the production classes over the same candles. Without them the
+    page cannot show module 3's construct at all, which is most of what makes a trade checkable.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    suffix = {"m15": sequence["lower"], "h1": sequence["middle"], "h4": sequence["top"]}
+    out = {}
+    with open(path) as handle:
+        for line in handle:
+            row = json.loads(line)
+            label = suffix.get(row["tf"], row["tf"])
+            out.setdefault((row["inst"], row["at"]), {})[label] = {
+                "trend": row["trend"],
+                "overExtended": row["overExtended"],
+                "line": row["line"],
+                "zones": row["zones"],
+            }
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--root", default=default_root(),
+                        help="directory holding the <arm>-<instrument>/ run outputs")
+    parser.add_argument("--arms", default="a,b", help="two comma-separated output-directory prefixes")
+    parser.add_argument("--out", default="alfonso-trades.html", help="page to write")
+    parser.add_argument("--json", help="also write the raw payload here")
+    parser.add_argument("--sequence", default=DEFAULT_SEQUENCE,
+                        help="top,middle,lower intervals the run used (default: the agent's own)")
+    parser.add_argument("--single", action="store_true",
+                        help="one run at <root>/<instrument>/, with its own struct-*.jsonl")
+    parser.add_argument("--structure",
+                        help="JSONL from ZZAlfonsoStructureDump: the agent's trendlines and zones")
+    parser.add_argument("--execution", default="1m",
+                        help="the run's --execution-interval, i.e. where fills actually resolve")
+    args = parser.parse_args()
+
+    arms = tuple(args.arms.split(","))
+    if len(arms) != 2:
+        parser.error("--arms takes exactly two comma-separated prefixes")
+
+    top, middle, lower = (v.strip() for v in args.sequence.split(","))
+    sequence = {"top": top, "middle": middle, "lower": lower, "execution": args.execution}
+    if args.single:
+        payload = build_single(args.root, sequence)
+        payload["single"] = True
+        live = load_run_structure(args.root)
+        joined = 0
+        # Roles, not intervals: the log names Top/Middle/Lower, the page reads intervals.
+        role_to_label = {"Top": sequence["top"], "Middle": sequence["middle"], "Lower": sequence["lower"]}
+        for record in payload["trades"]:
+            found = live.get((record["inst"], record["signalAt"]))
+            if not found:
+                continue
+            record["structure"] = {
+                role_to_label[role]: {
+                    "trend": snap["trend"], "overExtended": snap["overExtended"],
+                    "line": snap["line"], "zones": snap["zones"],
+                }
+                for role, snap in found.items() if role in role_to_label
+            }
+            joined += 1
+        print(f"structure joined onto {joined}/{len(payload['trades'])} trades (from the run itself)")
+    else:
+        payload = build(args.root, arms, sequence)
+        structure = load_structure(args.structure, sequence)
+        if structure:
+            joined = 0
+            for record in payload["trades"]:
+                found = structure.get((record["inst"], int(record["open"])))
+                if found:
+                    record["structure"] = found
+                    joined += 1
+            print(f"structure joined onto {joined}/{len(payload['trades'])} trades (replay)")
+    if not payload["trades"]:
+        raise SystemExit(f"no runs found under {args.root}")
+
+    payload["sequence"] = sequence
+
+    template = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "alfonso_trade_viz.template.html")
+    with open(template) as handle:
+        page = handle.read()
+    if "/*__DATA__*/" not in page:
+        raise SystemExit(f"{template} has no /*__DATA__*/ placeholder")
+
+    blob = json.dumps(payload, separators=(",", ":"))
+    with open(args.out, "w") as handle:
+        handle.write(page.replace("/*__DATA__*/", blob))
+
+    if args.json:
+        with open(args.json, "w") as handle:
+            handle.write(blob)
+
+    size = os.path.getsize(args.out) / 1e6
+    panes = sum(len(v) for v in payload["candles"].values())
+    print(f"\n{len(payload['trades'])} trades, {panes} panes across "
+          f"{', '.join(label for label, _ in PANES)} -> {args.out} ({size:.2f} MB)")
+
+
+if __name__ == "__main__":
+    main()

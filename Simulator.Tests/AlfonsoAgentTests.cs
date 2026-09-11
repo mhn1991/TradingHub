@@ -172,6 +172,7 @@ public sealed class AlfonsoAgentTests
             Distal = 4232.24m,
             BaseStart = Now,
             BaseEnd = Now,
+            DistalAt = Now,
             ConfirmedAt = Now,
             BaseCandleCount = 2,
             Strength = ImpulseStrength.Strong,
@@ -208,6 +209,7 @@ public sealed class AlfonsoAgentTests
             Distal = 2010m,
             BaseStart = Now,
             BaseEnd = Now,
+            DistalAt = Now,
             ConfirmedAt = Now,
             BaseCandleCount = 2,
             Strength = ImpulseStrength.Gap,
@@ -230,8 +232,54 @@ public sealed class AlfonsoAgentTests
 
     // ---- fixtures -----------------------------------------------------------------------------
 
+    [Test]
+    public void OrdersAreNotRestedBeyondThreeAtrByDefault()
+    {
+        // Default set 2026-09-02. A far order costs twice: it squats the single order slot, and it
+        // loses more when it fills (inside 3 ATR avgR -0.1810, beyond -0.4366 over 127 fills).
+        // Six instruments: baseline 127 trades at -0.2394, cap 3 gives 142 at -0.1681. The count
+        // RISING as the cap tightens is what a filter cannot do, and is how the defect was found.
+        // Fails if the default is changed without a decision. 0 restores the old behaviour.
+        Assert.That(new AlfonsoStrategyOptions().MaximumPlacementDistanceAtr, Is.EqualTo(3m));
+        Assert.That(
+            new AlfonsoStrategyOptions { MaximumPlacementDistanceAtr = 0m }.MaximumPlacementDistanceAtr,
+            Is.Zero,
+            "zero must remain available as the opt-out, since every result before this default was measured under it");
+    }
+
+    [Test]
+    public void SetAndForgetEntryIsTheDefaultAndConfirmationIsOptIn()
+    {
+        // The book's premise is a resting limit at the proximal. Confirmation entry departs from it
+        // deliberately, to address fill selection (six instruments: 1,212 buy limits and 1,379 sell
+        // limits placed, but 2.89% vs 6.67% filled), so it must stay opt-in. This fails if the
+        // default is flipped without a decision.
+        Assert.That(new AlfonsoStrategyOptions().RequireReversalConfirmation, Is.False);
+    }
+
     private static AgentMarketContext Context(params AnalysisSnapshot[] snapshots) =>
         Context(snapshots, []);
+
+    [Test]
+    public async Task TrendAuditObservesNewTimeframeBarsOnceEvenWhilePositionIsOpen()
+    {
+        List<(DateTimeOffset AvailableAt, TimeSpan Interval)> observed = [];
+        AlfonsoAgent agent = new(trendSink: (_, at, _, _, analyzer) => observed.Add((at, analyzer.Interval)));
+        AgentMarketContext context = Context(
+            [Snapshot(Top, 2000m), Snapshot(Middle, 2000m), Snapshot(Lower, 2000m)],
+            [new BrokerPosition { PositionId = "open", Instrument = Instrument, Quantity = 1m,
+                Side = OrderSide.Buy, AveragePrice = 2000m }]);
+        AgentDecision first = await agent.EvaluateAsync(context);
+        AgentDecision repeated = await agent.EvaluateAsync(context);
+        Assert.Multiple(() =>
+        {
+            Assert.That(first.Reason, Does.Contain("bracket owns it"));
+            Assert.That(repeated.Action, Is.EqualTo(AgentAction.Observe));
+            Assert.That(observed.Select(item => item.Interval), Is.EquivalentTo(new[]
+                { TimeSpan.FromHours(4), TimeSpan.FromHours(1), TimeSpan.FromMinutes(15) }));
+            Assert.That(observed.All(item => item.AvailableAt == Now), Is.True);
+        });
+    }
 
     private static AgentMarketContext Context(
         AnalysisSnapshot[] snapshots, IReadOnlyList<BrokerPosition> positions) =>

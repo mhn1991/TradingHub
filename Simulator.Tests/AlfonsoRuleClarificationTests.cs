@@ -294,6 +294,7 @@ public sealed class AlfonsoRuleClarificationTests
         Distal = kind == ImbalanceKind.Demand ? 98m : 112m,
         BaseStart = Start,
         BaseEnd = Start,
+        DistalAt = Start,
         ConfirmedAt = Start,
         BaseCandleCount = 2,
         Strength = ImpulseStrength.Strong,

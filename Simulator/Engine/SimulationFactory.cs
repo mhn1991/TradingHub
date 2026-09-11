@@ -134,6 +134,7 @@ public static class SimulationFactory
                 // Keep the safe default for ordinary runs, but honor an explicit run-level
                 // minimum so a deliberately smaller bracket is not silently rejected.
                 MinimumRewardRiskRatio =
+                    minimumRewardRiskRatio == 0m ? null :
                     minimumRewardRiskRatio ?? PreTradeRiskOptions.PhaseOneSafeDefaults.MinimumRewardRiskRatio,
                 MaximumOpenPositions = 1,
                 MaximumLossPercentageOfBalance = null,

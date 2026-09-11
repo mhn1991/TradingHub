@@ -17,7 +17,8 @@ public static class TrendlineBuilder
         IReadOnlyList<decimal> highs,
         IReadOnlyList<decimal> lows,
         IReadOnlyList<DateTimeOffset> times,
-        int currentIndex)
+        int currentIndex,
+        bool rejectContradicting = true)
     {
         if (valleys.Count < 2)
             return null;
@@ -34,7 +35,7 @@ public static class TrendlineBuilder
         if (!ExtendedBeyond(highs, first.Index, second.Index, currentIndex, higher: true))
             return null;
 
-        return Fit(first, second, lows, times, TrendlineDirection.Bullish);
+        return Fit(first, second, lows, times, TrendlineDirection.Bullish, rejectContradicting);
     }
 
     /// <summary>
@@ -47,7 +48,8 @@ public static class TrendlineBuilder
         IReadOnlyList<decimal> highs,
         IReadOnlyList<decimal> lows,
         IReadOnlyList<DateTimeOffset> times,
-        int currentIndex)
+        int currentIndex,
+        bool rejectContradicting = true)
     {
         if (peaks.Count < 2)
             return null;
@@ -61,7 +63,60 @@ public static class TrendlineBuilder
         if (!ExtendedBeyond(lows, first.Index, second.Index, currentIndex, higher: false))
             return null;
 
-        return Fit(first, second, highs, times, TrendlineDirection.Bearish);
+        return Fit(first, second, highs, times, TrendlineDirection.Bearish, rejectContradicting);
+    }
+
+    /// <summary>
+    /// The aggressive line module 3 permits once a timeframe is over-extended: "In over-extension
+    /// with three or more consecutive CPs, the trendlines can be drawn more aggressively connecting
+    /// the last three CPs."
+    /// <para>
+    /// This is the one place continuation patterns may anchor a line. Everywhere else module 3
+    /// forbids it - "Continuation Patterns (CPs) will not be used to connect trendlines" - because a
+    /// CP is not the origin of an impulse; in over-extension there is nothing else to connect, since
+    /// a market running without correction prints no new peaks or valleys to draw from.
+    /// </para>
+    /// <para>
+    /// Two conditions the ordinary builders impose are dropped deliberately. The three anchors must
+    /// run monotonically the way the line does, which is what makes them a line rather than three
+    /// unrelated pauses; but the "price has extended beyond the pair" test is not applied, because
+    /// over-extension is that condition - a market with three consecutive continuation patterns has
+    /// by definition kept going. The line is then fitted to the outer two anchors and pulled back off
+    /// any candle it would cut, exactly as elsewhere.
+    /// </para>
+    /// </summary>
+    public static Trendline? OverExtended(
+        IReadOnlyList<SwingPoint> continuations,
+        IReadOnlyList<decimal> constraint,
+        IReadOnlyList<DateTimeOffset> times,
+        int currentIndex,
+        TrendlineDirection direction,
+        int anchors = 3,
+        bool rejectContradicting = true)
+    {
+        ArgumentNullException.ThrowIfNull(continuations);
+
+        if (anchors < 2 || continuations.Count < anchors)
+            return null;
+
+        bool bullish = direction == TrendlineDirection.Bullish;
+
+        for (int back = anchors; back > 1; back--)
+        {
+            SwingPoint earlier = continuations[^back];
+            SwingPoint later = continuations[^(back - 1)];
+            bool ordered = bullish ? later.Price > earlier.Price : later.Price < earlier.Price;
+            if (!ordered)
+                return null;
+        }
+
+        SwingPoint first = continuations[^anchors];
+        SwingPoint last = continuations[^1];
+
+        if (last.Index >= currentIndex)
+            return null;
+
+        return Fit(first, last, constraint, times, direction, rejectContradicting);
     }
 
     /// <summary>
@@ -103,7 +158,8 @@ public static class TrendlineBuilder
         SwingPoint second,
         IReadOnlyList<decimal> constraint,
         IReadOnlyList<DateTimeOffset> times,
-        TrendlineDirection direction)
+        TrendlineDirection direction,
+        bool rejectContradicting)
     {
         if (second.Index <= first.Index || second.Index >= constraint.Count)
             return null;
@@ -122,6 +178,17 @@ public static class TrendlineBuilder
             slope = candidate;
             anchorIndex = index;
         }
+
+        // The anchors are checked to rise (bullish) or fall (bearish) before we get here, but the
+        // fit above pulls the slope back to whatever clears every intervening bar - and that goes
+        // NEGATIVE on a bullish line as soon as one bar dips below the first anchor. The result was a
+        // descending "bullish trendline" on 39% of all live lines (3.65). It is not merely cosmetic:
+        // IsBrokenBy tests a full candle BELOW a bullish line, so a line sloping away from price
+        // becomes progressively harder to break, and a broken line is one of only two exits from a
+        // latched trend (3.64). Module 3 draws a bullish trendline under RISING valleys; a line that
+        // descends is not one, so none is drawable here.
+        if (rejectContradicting && (bullish ? slope < 0m : slope > 0m))
+            return null;
 
         return new Trendline
         {

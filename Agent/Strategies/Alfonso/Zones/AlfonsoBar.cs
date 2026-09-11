@@ -15,6 +15,19 @@ public readonly record struct AlfonsoBar(
     decimal Low,
     decimal Close)
 {
+    /// <summary>
+    /// Body-to-range ratio at which a candle is an extended range candle. Module 1: "Extended Range
+    /// Candles (ERC). Wide candlestick bodies covering around 80% or higher of its candle range."
+    /// <para>
+    /// The single source for this number. Both the zone layer
+    /// (<see cref="ImbalanceOptions.ExtendedRangeBodyRatio"/>) and the trend layer
+    /// (<c>AlfonsoTrendOptions.ExtendedRangeBodyRatio</c>) default from it, so the two cannot drift
+    /// apart and start disagreeing about what an ERC is - they each held their own 0.80 literal
+    /// before, which is one book constant written down twice.
+    /// </para>
+    /// </summary>
+    public const decimal ExtendedRangeBodyRatio = 0.80m;
+
     /// <summary>High minus low. Zero for a completely flat bar, which several ratios guard against.</summary>
     public decimal Range => High - Low;
 

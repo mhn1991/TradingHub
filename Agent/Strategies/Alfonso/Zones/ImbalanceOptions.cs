@@ -21,9 +21,11 @@ public sealed record ImbalanceOptions
 
     /// <summary>
     /// Minimum body-to-range ratio for an extended range candle. Module 1 defines an ERC as "wide
-    /// candlestick bodies covering about 80% of its candle range".
+    /// candlestick bodies covering about 80% of its candle range". Defaulted from
+    /// <see cref="AlfonsoBar.ExtendedRangeBodyRatio"/> so the zone and trend layers share one
+    /// definition; still settable, because the two layers may legitimately be tuned apart.
     /// </summary>
-    public decimal ExtendedRangeBodyRatio { get; init; } = 0.80m;
+    public decimal ExtendedRangeBodyRatio { get; init; } = AlfonsoBar.ExtendedRangeBodyRatio;
 
     /// <summary>
     /// Largest base the rules admit. Module 7: "We want to see a maximum of 4-6 candlesticks at the
@@ -182,8 +184,67 @@ public sealed record ImbalanceOptions
     /// </summary>
     public bool SwingBreakIsAnAccomplishment { get; init; } = true;
 
+    /// <summary>
+    /// Whether a base with no readable approach is treated as a continuation pattern rather than a
+    /// swing. Module 2: "When you are in doubt, consider them as a CP."
+    /// <para>
+    /// Default false, which is the behaviour every result before 2026-09-01 was measured under.
+    /// Turning it on is faithful to the book's sentence but it is not a small change: it feeds
+    /// swing detection, which feeds trendlines, which feeds trend establishment. Measured on six
+    /// instruments it cut trade count 127 -> 40 and took pooled avgR from -0.239 to -0.474, so it
+    /// stays off until there is evidence for it.
+    /// </para>
+    /// </summary>
+    public bool TreatAmbiguousBaseAsContinuation { get; init; } = false;
+
+    /// <summary>
+    /// Whether the drop/rally base spans both extended range candles rather than only the turning
+    /// one. Module 2 states the alternative base outright: "the basing structure of a valley may be
+    /// formed by non 50% candlesticks and be made of only a bearish ERC and a bullish ERC
+    /// (drop/rally)" - the structure IS the pair. Module 4 then binds the geometry to it: "The
+    /// distal line of an imbalance must always include the lowest low in the basing structure when
+    /// drawing a demand level and the highest high when drawing a supply level."
+    /// <para>
+    /// Reading the base as one candle leaves the opposing ERC's extreme outside the zone, and the
+    /// omission has a direction: a bearish ERC closes within 20% of its range of its low by
+    /// definition, so its low usually sits below the following bullish ERC's low. The distal then
+    /// sits too tight and a wick still inside the book's base eliminates the zone. Measured over
+    /// ~75,000 H4 bars (see 3.53 and <c>tools/alfonso_droprally_distal.py</c>): 384 drop/rally
+    /// bases, 48% of them with a different distal, median omission 0.14 zone widths.
+    /// </para>
+    /// <para>
+    /// Default true because the book states it rather than offering it. Set false to restore the
+    /// single-candle reading every result before 2026-09-05 was measured under.
+    /// </para>
+    /// </summary>
+    public bool DropRallyBaseSpansBothCandles { get; init; } = true;
+
     /// <summary>Peaks and valleys retained for the swing-break test.</summary>
     public int SwingMemory { get; init; } = 16;
+
+    /// <summary>
+    /// Where inside the zone the entry is planned. Module 10 offers both on the same worked example:
+    /// "Take the full imbalance based on your entry timeframe ... We would plan the entry at weekly
+    /// demand proximal line at $46.25" or "Use half the width of the original imbalance. The entry
+    /// would be around $45.15", and module 11 repeats the pair for an IPO with no history behind it -
+    /// "Buy the whole imbalance or half of it."
+    /// <para>
+    /// Protection does not move with it: the stop stays beyond the distal line by
+    /// <see cref="StopPaddingFraction"/>, so a half entry is a smaller risk and a nearer target, at
+    /// the cost of the fills where price turns in the first half of the zone.
+    /// </para>
+    /// </summary>
+    public ZoneEntryPlacement EntryPlacement { get; init; } = ZoneEntryPlacement.Proximal;
+
+    /// <summary>
+    /// Points at which <see cref="ZoneScorer"/> calls a zone strong. Not a course figure - module 7
+    /// names the qualifiers and the two extremes but never totals them - so it is a convention, and
+    /// it gates nothing unless a minimum grade is configured.
+    /// </summary>
+    public int StrongGradePoints { get; init; } = 8;
+
+    /// <summary>Points at which a zone is graded medium rather than weak. Also a convention.</summary>
+    public int MediumGradePoints { get; init; } = 5;
 
     public void Validate()
     {
@@ -224,5 +285,16 @@ public sealed record ImbalanceOptions
             throw new InvalidOperationException("MaximumTests must be at least 1.");
         if (MaximumTrackedZones < 1)
             throw new InvalidOperationException("MaximumTrackedZones must be at least 1.");
+        if (MediumGradePoints < 1 || MediumGradePoints > ZoneScorer.MaximumPoints)
+        {
+            throw new InvalidOperationException(
+                $"MediumGradePoints must be within [1, {ZoneScorer.MaximumPoints}].");
+        }
+
+        if (StrongGradePoints < MediumGradePoints || StrongGradePoints > ZoneScorer.MaximumPoints)
+        {
+            throw new InvalidOperationException(
+                $"StrongGradePoints must be within [MediumGradePoints, {ZoneScorer.MaximumPoints}].");
+        }
     }
 }
